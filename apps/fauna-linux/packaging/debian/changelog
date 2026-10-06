@@ -1,0 +1,5 @@
+fauna-desktop (0.1.0) unstable; urgency=medium
+
+  * Initial Debian packaging.
+
+ -- Fauna Social <dev@fauna.social>  Sun, 12 Jul 2026 15:36:18 +0200

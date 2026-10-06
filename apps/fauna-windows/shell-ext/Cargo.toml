@@ -1,0 +1,43 @@
+[package]
+name = "fauna-shell-ext"
+description = "Fauna Windows Shell Extension — Explorer overlay icons"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+# Output is `fauna_shell.dll` (the name the installer + goal docs register), not the
+# default `fauna_shell_ext.dll` derived from the package name.
+name = "fauna_shell"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fauna-ipc.workspace = true
+# `caltime::civil_from_days` for the version submenu's date stamp — the ratified
+# home for portable Gregorian date math (`ui/events.md` § Where logic lives).
+# `default-features = false` keeps redb/tokio/hickory out of a DLL that Explorer
+# loads into its own process; the pure date math needs none of them.
+fauna-core = { path = "../../../libs/fauna-core", default-features = false }
+# `file_context_menu.*` / `common.app_name` catalog lookups + the shared
+# month-name table (`ui/events.md` § Where logic lives) — dependency-free
+# leaf, so it costs this DLL nothing beyond itself.
+fauna-i18n = { path = "../../../libs/fauna-i18n" }
+
+[target.'cfg(windows)'.dependencies]
+# windows-core is a direct dependency so the `#[implement]` macro's generated
+# `windows_core::` paths resolve (the `windows` umbrella crate does not re-export
+# that extern-crate name).
+windows-core = "0.61"
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_System_Registry",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+] }

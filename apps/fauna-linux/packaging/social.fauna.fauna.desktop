@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Fauna
+Comment=Decentralized social communication
+Exec=fauna-desktop %u
+Icon=fauna
+Terminal=false
+Type=Application
+Categories=Network;InstantMessaging;Chat;
+Keywords=messaging;social;email;chat;sync;encrypted;
+StartupNotify=true
+StartupWMClass=fauna-desktop
+MimeType=x-scheme-handler/fauna;

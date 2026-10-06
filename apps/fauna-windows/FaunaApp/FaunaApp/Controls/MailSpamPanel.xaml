@@ -1,0 +1,217 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FaunaApp.Controls.MailSpamPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Controls"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Loaded="Panel_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- User-facing mail-spam page (docs/goal/behavior/mail-spam.md § Reset /
+         § Cold start Path 2 / § Undo): where a person manages their own per-account
+         spam classifier — reset the per-user Bayesian model, opt in/out of the
+         deployment-baseline contribution, and review + undo individual training
+         events. Dumb renderer of the shared fauna_client_mail_settings::MailSpamMachine
+         (exposed over UniFFI by libs/fauna-ffi/src/mail_admin.rs build_mail_spam_machine)
+         — no business logic here (priority #2). Lifts the linux reference
+         (apps/fauna-linux/src/settings/mail_spam.rs) and mirrors MailAliasesPanel:
+         embedded as a section in SettingsPage, sharing that page's single page-heading
+         + error-message (the machine error routes up via ErrorChanged). The reset
+         two-click confirm is an inline relabel (not a ContentDialog) so every ID lives
+         in one tree.
+
+         UI precedes backend, surfaced never faked (mail-spam.md § Implementation status
+         today): the per-user Bayesian feedback loop is unbuilt, so on a real nest every
+         action surfaces the seam's honest `unimplemented` rejection via error-message
+         and the training-history list stays empty (no fabricated rows). -->
+    <StackPanel Spacing="12">
+
+        <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                   Text="{loc:Localize Key=mail_spam/title}" />
+        <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                   Text="{loc:Localize Key=mail_spam/description}" />
+
+        <ProgressRing x:Name="LoadingRing"
+                      IsActive="False" Visibility="Collapsed"
+                      HorizontalAlignment="Left" />
+
+        <!-- mail-spam-reset-model-button — destructive; two-click inline confirm. -->
+        <StackPanel Spacing="2">
+            <Button x:Name="ResetButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSpamResetModelButton}"
+                    Content="{loc:Localize Key=mail_spam/reset_button}"
+                    Click="Reset_Click" />
+            <TextBlock Opacity="0.7" FontSize="12" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=mail_spam/reset_subtitle}" />
+        </StackPanel>
+
+        <!-- mail-spam-contribute-baseline-toggle — opt in/out of the deployment
+             baseline (default off, user-controls-their-data). Bidirectional; the
+             realization/render echo is guarded by _syncing in the code-behind. -->
+        <StackPanel Spacing="2">
+            <ToggleSwitch x:Name="ContributeToggle"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSpamContributeBaselineToggle}"
+                          Header="{loc:Localize Key=mail_spam/contribute_baseline_label}"
+                          Toggled="ContributeToggle_Toggled" />
+            <TextBlock Opacity="0.7" FontSize="12" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=mail_spam/contribute_baseline_subtitle}" />
+        </StackPanel>
+
+        <!-- mail-spam-share-reports-toggle — opt in/out of distributed, k-anonymized
+             report sharing (report-sharing.md § Client wire). Default off
+             (user-controls-their-data). Sibling of the baseline toggle; the
+             realization/render echo is guarded by _rsSyncing in the code-behind. -->
+        <StackPanel Spacing="2">
+            <ToggleSwitch x:Name="ShareReportsToggle"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSpamShareReportsToggle}"
+                          Header="{loc:Localize Key=mail_spam/share_reports_label}"
+                          Toggled="ShareReportsToggle_Toggled" />
+            <TextBlock Opacity="0.7" FontSize="12" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=mail_spam/share_reports_subtitle}" />
+        </StackPanel>
+
+        <!-- mail-spam-threshold-override-input — per-account spam-folder threshold
+             override (mail-policy-config.md § Tier 3). Empty follows the admin
+             default; "0" is a real setting, never collapsed into empty. Commits on
+             Enter AND on blur (FoldersPage's capInput shape) — no separate save
+             button, matching tui/linux/android/web's shape. Not a MailSpamMachine
+             action either — a plain write over INestRpcClient, the report-share
+             toggle's own direct-RPC pattern. -->
+        <StackPanel Spacing="2">
+            <TextBox x:Name="ThresholdOverrideInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSpamThresholdOverrideInput}"
+                     Header="{loc:Localize Key=mail_spam/threshold_override_label}"
+                     HorizontalAlignment="Left" Width="200"
+                     LostFocus="ThresholdOverrideInput_LostFocus"
+                     KeyDown="ThresholdOverrideInput_KeyDown" />
+            <TextBlock Opacity="0.7" FontSize="12" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=mail_spam/threshold_override_subtitle}" />
+        </StackPanel>
+
+        <!-- ── "What this nest publishes" transparency list (report-share-published-list) ──
+             report-sharing.md § Client wire + transparency surface: pure read, no
+             action — the ≥k aggregates this nest exports to peers, rebuilt from
+             fauna.moderation.report_share.status on every load/toggle. Same
+             non-collapsing Border + non-virtualizing panel shape as the training
+             history list below (reference_winui_flaui_datatemplate_name). -->
+        <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                   Text="{loc:Localize Key=mail_spam/published_title}" />
+        <TextBlock Opacity="0.7" FontSize="12" TextWrapping="Wrap"
+                   Text="{loc:Localize Key=mail_spam/published_description}" />
+        <Border x:Name="PublishedBorder"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.ReportSharePublishedList}"
+                AutomationProperties.Name="Published reports"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1" CornerRadius="6" Padding="12">
+            <StackPanel Spacing="4">
+                <TextBlock x:Name="PublishedEmpty" Opacity="0.5" TextWrapping="Wrap"
+                           Visibility="Collapsed"
+                           Text="{loc:Localize Key=mail_spam/published_empty}" />
+                <ItemsControl x:Name="PublishedList">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Vertical" Spacing="8" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ReportSharePublishedRow">
+                            <!-- Row container needs AutomationProperties.Name or
+                                 FlaUI counts 0 (reference_winui_flaui_datatemplate_name). -->
+                            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.ReportSharePublishedListItem}"
+                                    AutomationProperties.Name="{x:Bind ContentHash}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1" CornerRadius="6"
+                                    Padding="12" Margin="0,4">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.ReportSharePublishedListItemHash}"
+                                               Text="{x:Bind ContentHash}"
+                                               IsTextSelectionEnabled="True" />
+                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.ReportSharePublishedListItemFactor}"
+                                               Text="{x:Bind Factor}"
+                                               Opacity="0.7" FontSize="12" />
+                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.ReportSharePublishedListItemCount}"
+                                               Text="{x:Bind Count}"
+                                               Opacity="0.7" FontSize="12" />
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </Border>
+
+        <!-- ── Training-history list (mail-spam-training-history-list) ──
+             A Border (not a bare ItemsControl) carries the test id with a non-empty
+             Name: an empty ItemsControl collapses to zero size → FlaUI IsOffscreen.
+             The empty-state caption keeps a non-zero rectangle even with no rows. The
+             inner ItemsControl uses a non-virtualizing StackPanel panel so FlaUI
+             realizes every row for count-all (reference_winui_flaui_datatemplate_name). -->
+        <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                   Text="{loc:Localize Key=mail_spam/history_title}" />
+        <Border x:Name="ListBorder"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSpamTrainingHistoryList}"
+                AutomationProperties.Name="Training history"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1" CornerRadius="6" Padding="12">
+            <StackPanel Spacing="4">
+                <TextBlock x:Name="ListEmpty" Opacity="0.5" TextWrapping="Wrap"
+                           Visibility="Collapsed"
+                           Text="{loc:Localize Key=mail_spam/empty}" />
+                <ItemsControl x:Name="HistoryList">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Vertical" Spacing="8" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:MailSpamTrainingRow">
+                            <!-- Row container needs AutomationProperties.Name or
+                                 FlaUI counts 0 (reference_winui_flaui_datatemplate_name). -->
+                            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSpamTrainingHistoryListItem}"
+                                    AutomationProperties.Name="{x:Bind Message}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1" CornerRadius="6"
+                                    Padding="12" Margin="0,4">
+                                <Grid ColumnSpacing="8" RowSpacing="2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" Spacing="2">
+                                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSpamTrainingHistoryListItemMessage}"
+                                                   Text="{x:Bind Message}"
+                                                   Style="{StaticResource BodyStrongTextBlockStyle}"
+                                                   IsTextSelectionEnabled="True" />
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSpamTrainingHistoryListItemLabel}"
+                                                       Text="{x:Bind LabelBadge}"
+                                                       Opacity="0.7" FontSize="12" />
+                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSpamTrainingHistoryListItemSource}"
+                                                       Text="{x:Bind SourceBadge}"
+                                                       Opacity="0.7" FontSize="12" />
+                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSpamTrainingHistoryListItemCreatedAt}"
+                                                       Text="{x:Bind CreatedAt}"
+                                                       Opacity="0.7" FontSize="12" />
+                                        </StackPanel>
+                                    </StackPanel>
+                                    <!-- Undo: reversible-by-retrain → single-click dispatch, no confirm. -->
+                                    <Button Grid.Column="1"
+                                            AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSpamTrainingHistoryListItemUndoButton}"
+                                            Content="{x:Bind UndoLabel}"
+                                            Tag="{x:Bind HistoryIdHex}"
+                                            VerticalAlignment="Center"
+                                            Click="Undo_Click" />
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </Border>
+    </StackPanel>
+</UserControl>

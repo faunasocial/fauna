@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The *Zap signers* section of the standalone Nostr page (monetization.md §
+  Zap receipts — the trust model; nostr.md § Layout & flow item 7) — the
+  NIP-57 trust root a payee designates. Rendered for ANY linked account,
+  unlike Connected apps one page over (which needs a custodial key on this
+  box to sign WITH) — designating who may speak for your money is orthogonal
+  to where the key lives.
+
+  ⚠ THIS FILE IS THE EXCISION UNIT, and that is why it is a file at all. `zaps`
+  is a SUBSET member of `payments` and rides the SAME store-safe axis (one C#
+  `PAYMENTS` define for the whole family) — XAML has no preprocessor, so an
+  `#if PAYMENTS` cannot reach an AutomationId literal: the XAML compiler emits
+  every one into the generated .g.cs and the binary XBF, both of which ship
+  inside FaunaApp.dll. Removing the ITEM is the only construct that removes
+  the markup, so FaunaApp.csproj drops `Views\Payments\**` from Page and
+  Compile when `/p:FaunaStoreSafe=true` (dynamic-features.md § Platform-family
+  surface excision), same directory as the Payments plane one page over.
+
+  Consequences, both load-bearing:
+    · NOTHING may reference this type from markup. NostrPage hosts it through a
+      ContentControl its `#if PAYMENTS` code-behind fills — a
+      `<payments:NostrZapSignersSection/>` in NostrPage.xaml would make the
+      store-safe XAML compile fail on a type that is no longer there.
+    · A zap-signer render placed ANYWHERE ELSE compiles clean in both flavors,
+      paints nothing in the excised one, and still ships every id it would have
+      painted — the mutant `just windows-store-safe-check` is graded against.
+
+  Reference: apple `NostrSettingsView.zapSignersSection` (the primary
+  UniFFI-consumer leg); tui `nostr.rs::zap_signers_elements` (the lead app).
+-->
+<UserControl
+    x:Class="FaunaApp.Views.Payments.NostrZapSignersSection"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <StackPanel Spacing="8">
+        <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                   Text="{loc:Localize Key=nostr/zap_signers/title}" />
+        <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                   Text="{loc:Localize Key=nostr/zap_signers/description}" />
+
+        <Grid ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBox x:Name="ZapSignerPubkeyInput" Grid.Column="0"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.NostrZapSignerPubkeyInput}"
+                     PlaceholderText="{loc:Localize Key=nostr/zap_signers/pubkey_placeholder}" />
+            <TextBox x:Name="ZapSignerLabelInput" Grid.Column="1"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.NostrZapSignerLabelInput}"
+                     PlaceholderText="{loc:Localize Key=nostr/zap_signers/label_placeholder}" />
+            <Button x:Name="AddZapSignerButton" Grid.Column="2"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.NostrZapSignerAddBtn}"
+                    Content="{loc:Localize Key=nostr/zap_signers/add}"
+                    Click="AddZapSigner_Click" />
+        </Grid>
+        <!-- The Dim-3 courtesy why-line — hidden until a restricted verdict
+             actually resolves (never disabled eagerly before the fetch). -->
+        <TextBlock x:Name="ZapSignerGateReasonText" Opacity="0.7" TextWrapping="Wrap"
+                   Visibility="Collapsed" />
+
+        <!-- A Border (not a bare ItemsControl) carries a non-empty Name: an
+             empty ItemsControl collapses to zero size -> FlaUI IsOffscreen. -->
+        <Border AutomationProperties.Name="Zap signers"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1" CornerRadius="6" Padding="12">
+            <StackPanel Spacing="4">
+                <!-- An empty roster is a STATED state (nobody is designated, so
+                     nobody is believed) — the ratified out-of-the-box default,
+                     never a blank list. -->
+                <TextBlock x:Name="ZapSignersEmpty" Opacity="0.5" TextWrapping="Wrap"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.NostrZapSignerEmpty}"
+                           Visibility="Collapsed"
+                           Text="{loc:Localize Key=nostr/zap_signers/none}" />
+                <ItemsControl x:Name="ZapSignersList">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Vertical" Spacing="8" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ZapSignerRow">
+                            <Grid AutomationProperties.AutomationId="{x:Bind ids:Ids.NostrZapSignerItem}"
+                                  AutomationProperties.Name="{x:Bind DisplayText}"
+                                  ColumnSpacing="8" Padding="0,4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="{x:Bind DisplayText}"
+                                           VerticalAlignment="Center"
+                                           IsTextSelectionEnabled="True" />
+                                <!-- Deliberately ungated — removal is
+                                     de-escalation, never blocked by the add
+                                     gate above. -->
+                                <Button Grid.Column="1"
+                                        AutomationProperties.AutomationId="{x:Bind ids:Ids.NostrZapSignerRemove}"
+                                        AutomationProperties.Name="{x:Bind DisplayText}"
+                                        Tag="{x:Bind SignerPubkey}"
+                                        Content="{loc:Localize Key=nostr/zap_signers/remove}"
+                                        Click="RemoveZapSigner_Click" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </Border>
+    </StackPanel>
+</UserControl>

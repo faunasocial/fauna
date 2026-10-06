@@ -1,0 +1,24 @@
+# Workspace rustfmt config. Intentionally minimal — formatting style is whatever
+# the pinned toolchain's rustfmt defaults are (see rust-toolchain.toml), so the
+# only job here is to keep `cargo fmt`/`cargo fmt --check` off files that aren't
+# hand-maintained:
+#
+#   - Generated *.rs files. Their generators (i18n/generator/generate.py,
+#     scripts/providers-generate.py, scripts/ui-ids-generate.py) emit a fixed
+#     template style and do NOT run
+#     rustfmt; `just check-generated` diffs the committed file against a fresh
+#     regen, so reformatting them here would make that check fail.
+#   - Vendored third-party code, left in upstream style so re-vendoring /
+#     rebasing the patch stays manageable:
+#       libs/uniffi-bindgen-cs — a patched fork of NordSecurity/uniffi-bindgen-cs;
+#       libs/ksni — a patched fork of iovxw/ksni adding ProvideXdgActivationToken;
+#
+# `ignore` is a nightly-rustfmt option, which is fine — the pinned toolchain is
+# nightly.
+ignore = [
+    "libs/fauna-i18n/src/strings.rs",
+    "libs/fauna-provisioning/src/providers_generated.rs",
+    "libs/fauna-ui-ids/src/lib.rs",
+    "libs/uniffi-bindgen-cs",
+    "libs/ksni",
+]

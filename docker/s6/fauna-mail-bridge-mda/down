@@ -1,0 +1,7 @@
+# Down by default. The MDA (IMAP + CalDAV + CardDAV + WebDAV) is off until the
+# admin enables email and/or CalDAV and/or CardDAV and/or WebDAV in their Fauna
+# client: nest writes /data/{imap,caldav,carddav,webdav}-enabled and sends an "up"
+# command on /run/fauna-supervisor.sock, which the supervisor maps to `s6-svc -u`.
+# The MDA is up iff ANY flag is present (caldav-server.md / webdav-server.md
+# § Independent enablement); it binds each protocol's listener per its own flag.
+# Per mail-bridge-lifecycle.md § Default-off on first claim.

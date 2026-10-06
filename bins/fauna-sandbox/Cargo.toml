@@ -1,0 +1,23 @@
+[package]
+name = "fauna-sandbox"
+description = "Apply Landlock + seccomp sandbox, then exec a sidecar binary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+landlock = "0.4"
+seccompiler = "0.5"
+nix = { version = "0.31", features = ["process", "signal"] }
+libc = "0.2"
+# Raise CAP_NET_BIND_SERVICE into the ambient set for the port-binding bridge
+# profiles, so it survives the no_new_privs the sandbox sets (which otherwise
+# blocks the binary's file-capability at execve). See main.rs.
+caps = "0.5"
+
+[dev-dependencies]
+tempfile.workspace = true

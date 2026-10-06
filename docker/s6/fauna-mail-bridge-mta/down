@@ -1,0 +1,4 @@
+# Down by default. The mail bridge is off until the admin enables mail in
+# their Fauna app: nest writes /data/imap-enabled and sends an "up" command
+# on /run/fauna-supervisor.sock, which the supervisor maps to `s6-svc -u`.
+# Per docs/goal/behavior/mail-bridge-lifecycle.md § Default-off on first claim.

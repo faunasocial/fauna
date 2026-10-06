@@ -1,0 +1,34 @@
+{
+  "extends": "./.svelte-kit/tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "sourceMap": true,
+    "strict": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true
+  },
+  "exclude": [
+    "node_modules/**",
+    "src/service-worker.js",
+    "src/service-worker/**/*.js",
+    "src/service-worker.ts",
+    "src/service-worker/**/*.ts",
+    "src/service-worker.d.ts",
+    "src/service-worker/**/*.d.ts",
+    "src/**/*.test.ts",
+    // On hold: imports static/fauna_wasm_content_index.js, a WASM chunk the
+    // justfile intentionally does NOT build (tantivy can't run in-browser).
+    // Only the skipped .test.ts imports the wrapper. Drop this exclude when
+    // libs/fauna-wasm-content-index is un-held and the build emits the .js/.d.ts.
+    "src/lib/wasm-content-index.ts",
+    // Build tooling evaluated by Deno (node-compat `process`), not part of the
+    // browser app bundle svelte-check validates against the SvelteKit tsconfig.
+    "vite.config.ts",
+    "vite.share-viewer.config.ts"
+  ]
+}

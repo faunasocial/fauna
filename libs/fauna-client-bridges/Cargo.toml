@@ -1,0 +1,61 @@
+[package]
+name = "fauna-client-bridges"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# fauna-protocol carries the typed `fauna.bridges.*` wire types + the
+# `RpcRequester` seam this crate is generic over. `default-features = false`
+# drops the native-only `p2p` (fauna-wireguard → tokio net → mio) feature so
+# this crate compiles to wasm32; native workspace builds re-enable `p2p` via
+# Cargo feature unification (fauna-client pulls it). The path form is required
+# to override `default-features` — Cargo refuses the override on a
+# `workspace = true` entry whose workspace definition doesn't disable defaults.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# fauna-core for the canonical `localized::LocalizedText` the client-facing
+# label maps return (e.g. `nostr_key_source_label`). `default-features = false`
+# keeps it wasm-clean; its js-sys time backend rides fauna-protocol's `js`
+# forward below (Cargo feature unification — same as fauna-client-mail-settings).
+fauna-core = { path = "../fauna-core", default-features = false }
+# `link_block::LinkBlock::text`'s localized generic (`NO_LINK_METHOD`) — both
+# native drivers (tui, linux) already pass the exact same
+# `fauna_i18n::strings::bridges::NO_LINK_METHOD`, so resolving here instead of
+# per-app needed no new capability, only a dependency edge.
+fauna-i18n = { path = "../fauna-i18n" }
+
+# App-credential minting (`atproto_credential.rs`): OS-CSPRNG generation +
+# the client-computed PHC Argon2id verifier. Both wasm-safe (argon2 is pure
+# Rust; rand's wasm backend rides the getrandom forward below) — the web
+# app mints credentials too.
+rand = { workspace = true }
+argon2 = { workspace = true }
+# `settings::relay_list_setting` decodes a bridge setting's JSON-string
+# payload. Pure Rust, wasm-safe.
+serde_json = { workspace = true }
+# `nostr_settings::BridgeToggleOption` derives Serialize/Deserialize: the web
+# door hands the whole catalog across as JSON (`crate::rpc::to_js` in
+# fauna-wasm), the same way every other shared option catalog crosses. Pure
+# Rust, wasm-safe; serde was already here as a dev-dependency for the
+# `RpcRequester` mock's bounds, which is why the type compiled under `cargo
+# test` before this line existed.
+serde = { workspace = true }
+
+# wasm: forward fauna-protocol's `js` feature (fauna-core's js-sys time
+# backend, Timestamp::now()) so the transitive wasm build resolves. Off on
+# native — js-sys is wasm-only. Same path/default-features as above; Cargo
+# merges the two entries (features are additive).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+# `rand::thread_rng()` needs getrandom's wasm backend (enabled workspace-wide
+# by fauna-wasm via the `wasm_js` cfg) — same forward as
+# fauna-client-mail-settings.
+getrandom = { workspace = true }
+
+[dev-dependencies]
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# Names the serde bounds the `RpcRequester::request` method requires, for the
+# construction smoke test's mock impl. No `derive` needed (trait paths only).
+serde = { workspace = true }

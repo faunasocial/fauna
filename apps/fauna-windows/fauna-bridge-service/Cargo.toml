@@ -1,0 +1,24 @@
+[package]
+name = "fauna-bridge-service"
+description = "FaunaBridge Windows Service — supervises the Go mail/CalDAV bridge (MDA)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fauna-bridge-svc"
+path = "src/main.rs"
+
+[dependencies]
+fauna-ipc.workspace = true
+fauna-mda-supervisor.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# The SCM registration ceremony (`fauna_ipc::scm_service`) is the only Windows API
+# this crate touches; it serves no pipe of its own.
+windows-service = { workspace = true }

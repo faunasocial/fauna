@@ -1,0 +1,214 @@
+name: Release (macOS)
+
+# The macOS download -- the .dmg, and the terminal app's fauna-tui archives --
+# is built HERE -- from this repository's tag, on a GitHub-hosted runner -- and
+# attested to it, so anyone can check that a published .dmg is the output of
+# this source and this workflow:
+#
+#   gh attestation verify Fauna-<version>.dmg --repo faunasocial/fauna
+#
+# Two jobs on purpose. `build` compiles and assembles the bundle with NO
+# credentials in scope; `sign` runs in the `release-macos` Environment (required
+# reviewer + `v*` tags only), so the Developer ID certificate and the notary key
+# are exposed only to a run a maintainer approved, on an ephemeral runner, never
+# to a pull request or a fork. Design + the verification recipe:
+# docs/goal/architecture/installers/macos.md § Build Pipeline → The `.dmg`
+# release pipeline; credential custody: docs/goal/architecture/release-integrity.md
+# § Implementation status today.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-macos-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Fauna.app (no credentials)
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
+        with:
+          rustflags: ""
+          cache: false
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+      # The same recipe the CI `macos` job runs: host darwin FFI slice, SwiftPM
+      # FaunaMacOS product, sync agent, bundle assembly, ad-hoc signature.
+      - name: Build Fauna.app (release)
+        run: just mac-app release
+      - name: Package the unsigned bundle
+        run: |
+          codesign --verify --deep --strict build/Release/Fauna.app
+          ditto -c -k --keepParent build/Release/Fauna.app Fauna.app.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: Fauna.app-unsigned
+          path: Fauna.app.zip
+          if-no-files-found: error
+      # The terminal app's macOS archives (installers/tui.md § The ratified
+      # channel): fauna-tui + fauna-sync-agent + install.sh per darwin target,
+      # staged here with NO credentials and signed + notarized by the `sign`
+      # job below — the user's ruling that an ad-hoc-signed archive never
+      # ships. Built here rather than in release.yml because this is the only
+      # workflow whose sign job holds the Developer ID certificate.
+      - name: Build fauna-tui + fauna-sync-agent (both darwin targets)
+        run: |
+          rustup target add x86_64-apple-darwin
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --locked -p fauna-tui -p fauna-sync-agent --release --target "$target"
+          done
+          bash apps/fauna-tui/packaging/assemble-archive.sh --no-tar \
+            --bin-dir target/aarch64-apple-darwin/release --out tui-unsigned --suffix aarch64-darwin
+          bash apps/fauna-tui/packaging/assemble-archive.sh --no-tar \
+            --bin-dir target/x86_64-apple-darwin/release --out tui-unsigned --suffix x86_64-darwin
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: fauna-tui-unsigned
+          path: tui-unsigned/
+          if-no-files-found: error
+
+  sign:
+    name: Sign, notarize, attest, publish
+    needs: build
+    runs-on: macos-15
+    timeout-minutes: 60
+    environment: release-macos
+    permissions:
+      contents: write        # upload the release assets
+      id-token: write        # the Sigstore keyless identity behind the attestation
+      attestations: write
+    env:
+      FAUNA_SIGN_IDENTITY: ${{ secrets.FAUNA_SIGN_IDENTITY }}
+      FAUNA_TEAM_ID: ${{ secrets.FAUNA_TEAM_ID }}
+      FAUNA_NOTARY_KEY_ID: ${{ secrets.FAUNA_NOTARY_KEY_ID }}
+      FAUNA_NOTARY_ISSUER: ${{ secrets.FAUNA_NOTARY_ISSUER }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: Fauna.app-unsigned
+      - name: Restore the bundle
+        run: |
+          mkdir -p build/Release
+          ditto -x -k Fauna.app.zip build/Release
+          test -d build/Release/Fauna.app
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: fauna-tui-unsigned
+          path: tui-unsigned
+
+      # A throwaway keychain holding only the Developer ID Application
+      # certificate, unlocked for this job and deleted at the end. Plain
+      # `security` calls rather than a third-party action: the whole point of
+      # this job is that nothing but the runner image and this file touches the
+      # key material.
+      - name: Import the Developer ID certificate into a throwaway keychain
+        env:
+          CERT_P12_BASE64: ${{ secrets.FAUNA_SIGN_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.FAUNA_SIGN_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+          printf '%s' "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      - name: Write the App Store Connect API key
+        env:
+          NOTARY_KEY_P8: ${{ secrets.FAUNA_NOTARY_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$NOTARY_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/AuthKey.p8"
+          echo "FAUNA_NOTARY_KEY_FILE=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
+
+      # Signs with the hardened runtime + entitlements, builds the .dmg, signs
+      # it, notarizes (App Store Connect API key), staples the .dmg AND the
+      # bundle, and zips the stapled bundle as the Sparkle payload.
+      - name: Sign, notarize and staple
+        run: just mac-dmg-package
+
+      # The terminal app's archives: Developer ID + hardened runtime on both
+      # binaries (the agent with its own entitlements, as the .pkg signs it),
+      # notarized, then tarred — an ad-hoc-signed archive never ships
+      # (installers/tui.md § Decisions). Same recipe for both targets.
+      - name: Sign and notarize the fauna-tui archives
+        run: |
+          just mac-tui-archive aarch64-darwin tui-unsigned/fauna-tui-aarch64-darwin
+          just mac-tui-archive x86_64-darwin tui-unsigned/fauna-tui-x86_64-darwin
+
+      - name: Delete the throwaway keychain and key
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/release.keychain-db" || true
+          rm -f "$RUNNER_TEMP/AuthKey.p8"
+
+      # Build provenance: a signed, transparency-logged statement binding each
+      # artifact's digest to this repository, this commit and this workflow.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be  # v2.4.0
+        with:
+          subject-path: |
+            build/Fauna-*.dmg
+            build/Fauna-*.app.zip
+            build/fauna-tui-*-darwin.tar.gz
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: Fauna-macos
+          path: |
+            build/Fauna-*.dmg
+            build/Fauna-*.dmg.sha256
+            build/Fauna-*.app.zip
+            build/fauna-tui-*-darwin.tar.gz
+            build/fauna-tui-*-darwin.tar.gz.sha256
+          if-no-files-found: error
+
+      - name: Publish the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
+        with:
+          files: |
+            build/Fauna-*.dmg
+            build/Fauna-*.dmg.sha256
+            build/Fauna-*.app.zip
+            build/fauna-tui-*-darwin.tar.gz
+            build/fauna-tui-*-darwin.tar.gz.sha256
+          generate_release_notes: true
+          body: |
+            ## Verify the macOS download
+
+            The `.dmg` was built by this repository's `Release (macOS)` workflow
+            from this tag on a GitHub-hosted runner, and its provenance is
+            recorded in the Sigstore transparency log. To check that the file you
+            downloaded is that exact output, install the GitHub CLI and run:
+
+            ```bash
+            gh attestation verify Fauna-<version>.dmg --repo faunasocial/fauna
+            ```
+
+            The `.dmg` is also Developer-ID-signed and notarized by Apple, which is
+            what macOS itself checks on first open.
+
+            The terminal app's `fauna-tui-<arch>-darwin.tar.gz` archives are built,
+            attested, Developer-ID-signed and notarized the same way. Unpack one and
+            run its `install.sh`, or `gh attestation verify` it first.

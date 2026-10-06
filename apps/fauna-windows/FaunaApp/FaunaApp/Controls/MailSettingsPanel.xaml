@@ -1,0 +1,386 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FaunaApp.Controls.MailSettingsPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Controls"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Loaded="Panel_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- User-facing mail-settings page (docs/goal/ui/mail-settings.md): manage
+         third-party-MUA access — enable/disable mail, see/revoke credentials,
+         rotate the MSEK, read the MUA connection details. Dumb renderer of the
+         shared fauna_client_mail_settings::MailSettingsMachine (over UniFFI by
+         libs/fauna-ffi/src/mail_admin.rs); no business logic here (priority #2).
+         Lifts the linux reference (apps/fauna-linux/src/settings/mail.rs) and
+         mirrors the sibling NestsPanel: embedded as a section in
+         SettingsPage, sharing that page's single page-heading + error-message
+         (the machine error routes up via ErrorChanged). Forms are inline reveals
+         (not ContentDialogs) so every ID lives in one tree for FlaUI, matching
+         the uniform e2e action + the linux reveal idiom. -->
+    <StackPanel Spacing="12">
+
+        <!-- ── Top group: heading + enable toggle + status (always visible) ── -->
+        <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                   Text="{loc:Localize Key=settings/mail/section_title}" />
+        <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                   Text="{loc:Localize Key=settings/mail/section_description}" />
+
+        <ToggleSwitch x:Name="EnabledToggle"
+                      AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsEnabledToggle}"
+                      Header="{loc:Localize Key=settings/mail/enable_title}"
+                      OnContent="{loc:Localize Key=settings/mail/enable_subtitle}"
+                      OffContent="{loc:Localize Key=settings/mail/enable_subtitle}"
+                      Toggled="EnabledToggle_Toggled" />
+
+        <!-- ── Disable-mail confirm (inline destructive overlay; present only while
+             open, per mail-settings.md § Disable mail). The enabled-toggle off-path
+             snaps the toggle back ON and opens this; confirm dispatches DisableMail
+             (bulk-revoke every credential + clear the MSEK), cancel is a no-op. Windows
+             uses the panel's inline-form idiom (like RotateKeysForm / AddCredentialForm),
+             not a ContentDialog — matching MailAliasesPanel's inline-reveal confirms so
+             the IDs stay in the visual tree only while open. -->
+        <Border x:Name="DisableConfirmForm"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsDisableConfirm}"
+                AutomationProperties.Name="mail-settings-disable-confirm"
+                Visibility="Collapsed"
+                Background="{ThemeResource SystemFillColorCautionBackgroundBrush}"
+                CornerRadius="4" Padding="12">
+            <StackPanel Spacing="8">
+                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                           Text="{loc:Localize Key=settings/mail/disable_title}" />
+                <TextBlock TextWrapping="Wrap"
+                           Text="{loc:Localize Key=settings/mail/disable_warning}" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="DisableConfirmButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsDisableConfirmButton}"
+                            Content="{loc:Localize Key=settings/mail/disable_confirm}"
+                            Click="DisableConfirm_Click" />
+                    <Button x:Name="DisableCancelButton"
+                            Content="{loc:Localize Key=settings/mail/cancel}"
+                            Click="DisableCancel_Click" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <TextBlock x:Name="StatusIndicator"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsStatusIndicator}"
+                   Opacity="0.7" />
+
+        <ProgressRing x:Name="LoadingRing"
+                      IsActive="False" Visibility="Collapsed"
+                      HorizontalAlignment="Left" />
+
+        <!-- ── Pending-rotation banner (visible only when pending_rotation set) ── -->
+        <Border x:Name="PendingRotationBanner"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsPendingRotationBanner}"
+                AutomationProperties.Name="mail-settings-pending-rotation-banner"
+                Visibility="Collapsed"
+                Background="{ThemeResource SystemFillColorCautionBackgroundBrush}"
+                CornerRadius="4" Padding="12">
+            <StackPanel Spacing="8">
+                <TextBlock TextWrapping="Wrap"
+                           Text="{loc:Localize Key=settings/mail/banner_title}" />
+                <Button x:Name="ResumeButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsPendingRotationResumeButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Content="{loc:Localize Key=settings/mail/resume}"
+                        Click="Resume_Click" />
+            </StackPanel>
+        </Border>
+
+        <!-- ── Credentials moved (connected-apps.md; mail-settings.md § Where the
+             credential rows render) ── The mail app passwords are rows of the
+             Connected apps roster, where each is copied, revealed and revoked.
+             This page keeps Add password, Rotate keys and the keys explainer, plus
+             this one pointer line (no id — tui and the other apps paint the same
+             sentence as plain text). -->
+        <TextBlock x:Name="CredentialsMovedText"
+                   Opacity="0.7" TextWrapping="Wrap" Visibility="Collapsed"
+                   Text="{loc:Localize Key=mail_settings/credentials_on_connected_apps}" />
+
+        <!-- ── Manage buttons (visible when enabled) ── -->
+        <StackPanel x:Name="ManageGroup" Orientation="Horizontal" Spacing="8" Visibility="Collapsed">
+            <Button x:Name="AddCredentialButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsAddCredentialButton}"
+                    Style="{StaticResource AccentButtonStyle}"
+                    Content="{loc:Localize Key=settings/mail/add_credential}"
+                    Click="AddCredential_Click" />
+            <Button x:Name="RotateKeysButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsRotateKeysButton}"
+                    Content="{loc:Localize Key=settings/mail/rotate_keys}"
+                    Click="RotateKeys_Click" />
+        </StackPanel>
+
+        <!-- mail-settings-keys-info — (i) explainer beside the rotate-keys button: what
+             the encryption keys protect + when to rotate (suspected compromise) vs revoke
+             a single retired credential, and that already-received mail stays readable
+             (ui.yaml mail-settings-keys-info, type text; copy mail_settings/keys_info).
+             Visible when mail is enabled, like the manage group it sits beside. -->
+        <TextBlock x:Name="KeysInfoText"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsKeysInfo}"
+                   Opacity="0.7" FontSize="12" TextWrapping="Wrap"
+                   Visibility="Collapsed"
+                   Text="{loc:Localize Key=mail_settings/keys_info}" />
+
+        <!-- ── Add-credential inline form (mail-add-credential; collapsed) ── -->
+        <StackPanel x:Name="AddCredentialForm" Spacing="8" Visibility="Collapsed">
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=settings/mail/add_title}" />
+
+            <!-- Input section (hidden once an OAUTHBEARER token is revealed). -->
+            <StackPanel x:Name="AddCredentialInputBox" Spacing="8">
+                <TextBox x:Name="NameInput"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAddCredentialNameInput}"
+                         PlaceholderText="{loc:Localize Key=settings/mail/name_placeholder}" />
+
+                <!-- mail-add-credential-type-selector — single toggle: unchecked =
+                     OAUTHBEARER (recommended default), checked = PLAIN (reveals the
+                     password fields). The binary-checkbox form of the catalog's
+                     pick-one intent, matching the linux reference. -->
+                <ToggleButton x:Name="TypeSelector"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAddCredentialTypeSelector}"
+                              Content="{loc:Localize Key=settings/mail/type_selector}"
+                              Checked="TypeSelector_Toggled" Unchecked="TypeSelector_Toggled" />
+
+                <!-- PLAIN-only fields. Auto-generate is ON by default: shared Rust
+                     mints a strong password into the (read-only) password input,
+                     shown-once for the user to copy (mail-credentials.md § Auto-
+                     generated bridge password). Turning it off enables manual entry
+                     and, on an ENCRYPTED nest, reveals the weak-password warning. -->
+                <StackPanel x:Name="PlainBox" Spacing="4" Visibility="Collapsed">
+                    <ToggleSwitch x:Name="AutogenerateToggle"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAddCredentialAutogenerateToggle}"
+                                  Header="{loc:Localize Key=settings/mail/autogenerate}"
+                                  Toggled="AutogenerateToggle_Toggled" />
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <PasswordBox x:Name="PasswordInput"
+                                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAddCredentialPasswordInput}"
+                                     PlaceholderText="{loc:Localize Key=settings/mail/password_placeholder}"
+                                     Width="240"
+                                     PasswordChanged="PasswordInput_Changed" />
+                        <ToggleButton x:Name="PasswordShowToggle"
+                                      AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAddCredentialPasswordShowToggle}"
+                                      Content="{loc:Localize Key=settings/mail/show}"
+                                      Checked="PasswordShowToggle_Toggled" Unchecked="PasswordShowToggle_Toggled" />
+                    </StackPanel>
+                    <TextBlock x:Name="PasswordStrength"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAddCredentialPasswordStrengthMeter}"
+                               Opacity="0.7" FontSize="12" />
+                    <TextBlock x:Name="WeakPasswordWarning"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAddCredentialWeakPasswordWarning}"
+                               Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                               TextWrapping="Wrap" FontSize="12" Visibility="Collapsed"
+                               Text="{loc:Localize Key=settings/mail/weak_password_warning}" />
+                </StackPanel>
+
+                <Button x:Name="SubmitButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAddCredentialSubmitButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Content="{loc:Localize Key=settings/mail/submit_enable}"
+                        Click="Submit_Click" />
+            </StackPanel>
+
+            <!-- OAUTHBEARER one-time token reveal (shown after a successful submit). -->
+            <StackPanel x:Name="TokenBox" Spacing="4" Visibility="Collapsed">
+                <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=settings/mail/token_warning}" />
+                <TextBlock x:Name="TokenDisplay"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAddCredentialTokenDisplay}"
+                           IsTextSelectionEnabled="True" TextWrapping="Wrap"
+                           FontFamily="Consolas" />
+                <Button x:Name="TokenCopyButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAddCredentialTokenCopyButton}"
+                        Content="{loc:Localize Key=settings/mail/copy_token}"
+                        Click="TokenCopy_Click" />
+            </StackPanel>
+
+            <Button x:Name="CancelButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAddCredentialCancelButton}"
+                    Content="{loc:Localize Key=settings/mail/cancel}"
+                    Click="Cancel_Click" />
+        </StackPanel>
+
+        <!-- ── Rotate-keys inline form (mail-rotate-keys-confirm; collapsed) ── -->
+        <StackPanel x:Name="RotateKeysForm" Spacing="8" Visibility="Collapsed">
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=settings/mail/rotate_title}" />
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailRotateKeysWarningText}"
+                       TextWrapping="Wrap"
+                       Text="{loc:Localize Key=settings/mail/rotate_warning}" />
+            <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=settings/mail/rotate_exclude_caption}" />
+
+            <!-- mail-rotate-keys-exclude-list — one checkbox per credential, rebuilt
+                 when the form opens. The container carries the ID; per-credential
+                 checkboxes have no separate ui.yaml ID. -->
+            <StackPanel x:Name="RotateExcludeList"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailRotateKeysExcludeList}"
+                        AutomationProperties.Name="Exclude credentials"
+                        Spacing="2" />
+
+            <TextBlock x:Name="RotateProgress"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.MailRotateKeysProgressIndicator}"
+                       Opacity="0.7" FontSize="12" />
+
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button x:Name="RotateConfirmButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailRotateKeysConfirmButton}"
+                        Content="{loc:Localize Key=settings/mail/rotate_confirm}"
+                        Click="RotateConfirm_Click" />
+                <Button x:Name="RotateCancelButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailRotateKeysCancelButton}"
+                        Content="{loc:Localize Key=settings/mail/cancel}"
+                        Click="RotateCancel_Click" />
+            </StackPanel>
+        </StackPanel>
+
+        <!-- ── MUA setup instructions (read-only; visible when enabled) ── -->
+        <!-- AutomationProperties.Name is required: a bare layout StackPanel carrying
+             only an AutomationId is pruned from the UIA tree, so the e2e's
+             wait_for("mail-settings-mua-instructions") (mua_instructions_visible)
+             times out even when the block is Visible (the prune trap — same as
+             SettingsPage's quota-section). -->
+        <StackPanel x:Name="MuaGroup"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsMuaInstructions}"
+                    AutomationProperties.Name="Mail setup instructions"
+                    Spacing="4" Visibility="Collapsed">
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=settings/mail/mua_title}" />
+            <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=settings/mail/mua_description}" />
+
+            <!-- Email-protocol rows (IMAP/SMTP host+port) — the *email* protocol,
+                 gated on `enabled` (mail-settings.md § CalDAV-only mailbox). Per-row
+                 visibility (the whole sub-grid collapses when email is off) mirrors
+                 the linux per-row gating. x:Name-only layout container (no
+                 AutomationId/Name), like PlainBox/TokenBox — the leaf rows carry the
+                 queryable IDs. -->
+            <Grid x:Name="MuaEmailRows" ColumnSpacing="12" RowSpacing="2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="140" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" Grid.Column="0" Opacity="0.7"
+                           Text="{loc:Localize Key=settings/mail/mua_imap_host}" />
+                <TextBlock x:Name="MuaImapHost" Grid.Row="0" Grid.Column="1"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsMuaImapHost}"
+                           IsTextSelectionEnabled="True" />
+                <TextBlock Grid.Row="1" Grid.Column="0" Opacity="0.7"
+                           Text="{loc:Localize Key=settings/mail/mua_imap_port}" />
+                <TextBlock x:Name="MuaImapPort" Grid.Row="1" Grid.Column="1"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsMuaImapPort}"
+                           IsTextSelectionEnabled="True" />
+                <TextBlock Grid.Row="2" Grid.Column="0" Opacity="0.7"
+                           Text="{loc:Localize Key=settings/mail/mua_smtp_host}" />
+                <TextBlock x:Name="MuaSmtpHost" Grid.Row="2" Grid.Column="1"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsMuaSmtpHost}"
+                           IsTextSelectionEnabled="True" />
+                <TextBlock Grid.Row="3" Grid.Column="0" Opacity="0.7"
+                           Text="{loc:Localize Key=settings/mail/mua_smtp_port}" />
+                <TextBlock x:Name="MuaSmtpPort" Grid.Row="3" Grid.Column="1"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsMuaSmtpPort}"
+                           IsTextSelectionEnabled="True" />
+            </Grid>
+
+            <!-- Calendar-protocol rows (CalDAV host+port) — the *calendar* protocol,
+                 gated on `caldav_enabled`. CalDAV is served at mail.<domain>:443 via
+                 SNI passthrough, independent of email (caldav-server.md § Network
+                 exposure); so a CalDAV-only mailbox shows its calendar-server URL even
+                 with email off. -->
+            <Grid x:Name="MuaCaldavRows" ColumnSpacing="12" RowSpacing="2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="140" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" Grid.Column="0" Opacity="0.7"
+                           Text="{loc:Localize Key=settings/mail/mua_caldav_host}" />
+                <TextBlock x:Name="MuaCaldavHost" Grid.Row="0" Grid.Column="1"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsMuaCaldavHost}"
+                           IsTextSelectionEnabled="True" />
+                <TextBlock Grid.Row="1" Grid.Column="0" Opacity="0.7"
+                           Text="{loc:Localize Key=settings/mail/mua_caldav_port}" />
+                <TextBlock x:Name="MuaCaldavPort" Grid.Row="1" Grid.Column="1"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsMuaCaldavPort}"
+                           IsTextSelectionEnabled="True" />
+            </Grid>
+
+            <!-- Files-protocol row (WebDAV collection-root URL) — the *files* protocol,
+                 gated on the per-actor serves_webdav_set (NOT the deployment-wide
+                 webdav_enabled toggle — mail-settings.md § WebDAV files). A single full
+                 URL row, not host+port (no SRV autodiscovery for WebDAV). -->
+            <Grid x:Name="MuaWebdavRows" ColumnSpacing="12" RowSpacing="2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="140" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" Grid.Column="0" Opacity="0.7"
+                           Text="{loc:Localize Key=settings/mail/mua_webdav_url}" />
+                <TextBlock x:Name="MuaWebdavUrl" Grid.Row="0" Grid.Column="1"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsMuaWebdavUrl}"
+                           IsTextSelectionEnabled="True" />
+            </Grid>
+
+            <!-- Shared rows (username-format + auth-mechanism) — one credential AUTHs
+                 IMAP+SMTP+CalDAV+WebDAV, so these show whenever the block does (mailbox
+                 provisioned), regardless of which protocols are on. -->
+            <Grid ColumnSpacing="12" RowSpacing="2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="140" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" Grid.Column="0" Opacity="0.7"
+                           Text="{loc:Localize Key=settings/mail/mua_username}" />
+                <TextBlock x:Name="MuaUsername" Grid.Row="0" Grid.Column="1"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsMuaUsernameFormat}"
+                           IsTextSelectionEnabled="True" />
+                <TextBlock Grid.Row="1" Grid.Column="0" Opacity="0.7"
+                           Text="{loc:Localize Key=settings/mail/mua_auth}" />
+                <TextBlock x:Name="MuaAuth" Grid.Row="1" Grid.Column="1"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsMuaAuthMechanism}"
+                           IsTextSelectionEnabled="True" />
+            </Grid>
+        </StackPanel>
+
+        <!-- ── Local IMAP/CalDAV-serving toggle (visible when enabled) ──
+             Per-user "serve my mail & calendar over IMAP/CalDAV on this nest" switch
+             over the shared MailSettingsMachine (mail-settings.md § Local IMAP/CalDAV-
+             serving toggle; deployment-home-with-public-relay.md § MUA reach). Default
+             on; a dumb render of snap.serving_enabled. A user flip dispatches
+             SetServingEnabled — non-optimistic: the toggle reflects the nest-confirmed
+             value after the dispatch re-renders. The on/off is carried for the e2e
+             driver via AutomationProperties.HelpText = "on"/"off" (windows
+             get_attr(id,"state") reads HelpText verbatim — the recipient-resolve-status
+             idiom + the linux `state` attr). Lifts apps/fauna-linux/src/settings/mail.rs
+             (serve_here_group / serve_here_toggle). -->
+        <StackPanel x:Name="ServeHereGroup" Spacing="2" Visibility="Collapsed">
+            <ToggleSwitch x:Name="ServeHereToggle"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsServeHereToggle}"
+                          Header="{loc:Localize Key=mail_settings/serve_here_label}"
+                          Toggled="ServeHereToggle_Toggled" />
+            <TextBlock Opacity="0.7" FontSize="12" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=mail_settings/serve_here_subtitle}" />
+        </StackPanel>
+    </StackPanel>
+</UserControl>

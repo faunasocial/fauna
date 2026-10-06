@@ -1,0 +1,41 @@
+[package]
+name = "fauna-wasm-launch"
+description = "WASM bindings for Fauna's LaunchMachine (app-launch state machine + bearer-token refresh)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Forwards to fauna-launch-machine/test-helpers and exposes the
+# test-only setters on the wasm surface for E2E. Also forwards
+# `fauna-launch-machine/e2e-agent`, the gate on the launch clock's e2e offset:
+# `wasm-pack` builds release, so `debug_assertions` never opens it here, and
+# the localStorage clock seed + `launchClock*ForTest` getters need it.
+test-helpers = ["fauna-launch-machine/test-helpers", "fauna-launch-machine/e2e-agent"]
+
+# wasm32-scoped on purpose: this crate builds only for wasm32, and a plain
+# [dependencies] table would leak its wasm-only feature activations (js,
+# web-localstorage, wasm_js, …) into every HOST build's resolution under
+# resolver.feature-unification = "workspace". Add new deps here, never in a
+# plain [dependencies] table.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-launch-machine = { path = "../fauna-launch-machine", default-features = false }
+# The multi-account registry + web's localStorage SecretStore: the launch
+# machine routes on RegistryLaunchPersistence over the SAME store the
+# switcher's WasmAccountRegistry (fauna-wasm chunk) drives - per-actor slots
+# (the registry and per-actor secrets).
+fauna-client-accounts = { path = "../fauna-client-accounts", features = ["web-localstorage"] }
+# Installed at module init (`#[wasm_bindgen(start)]` in src/lib.rs) — each wasm
+# chunk is its own runtime, so this must be installed per-chunk. See the crate
+# doc comment.
+fauna-wasm-panic-hook = { path = "../fauna-wasm-panic-hook" }
+wasm-bindgen.workspace = true
+wasm-bindgen-futures = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+js-sys.workspace = true
+getrandom = { workspace = true, features = ["wasm_js"] }

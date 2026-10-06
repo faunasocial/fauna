@@ -1,0 +1,183 @@
+; libs/fauna-protocol/schemas/wrapped_blob.cddl
+;
+; Wrapped-blob ecosystem (design tracked internally).
+;
+; Top-level blob shapes (carried as opaque bstr payloads in the WS-RPC
+; replies/requests below; structured interpretation lives in fauna-mls).
+
+WrappedBlob = WrappedMsekBlob
+            / MlsSnapshotBlob
+            / WrappedSubmissionTokenBlob
+            / TlsCertBlob
+
+WrappedMsekBlob = {
+  "v":     1,
+  "kind":  "wrapped-msek",
+  "ix":    [actor_id: bstr .size 32, credential_id: tstr],
+  "kdf":   KdfParams,
+  "salt":  bstr .size 16,
+  "nonce": bstr .size 12,
+  "ct":    bstr,
+}
+
+MlsSnapshotBlob = {
+  "v":     1,
+  "kind":  "mls-snapshot",
+  "ix":    [actor_id: bstr .size 32],
+  "nonce": bstr .size 12,
+  "ct":    bstr,
+}
+
+WrappedSubmissionTokenBlob = {
+  "v":     1,
+  "kind":  "submission-token",
+  "ix":    [actor_id: bstr .size 32, credential_id: tstr],
+  "kdf":   KdfParams,
+  "salt":  bstr .size 16,
+  "nonce": bstr .size 12,
+  "ct":    bstr,
+}
+
+TlsCertBlob = {
+  "v":    1,
+  "kind": "tls-cert",
+  "ix":   [bridge_role: tstr, bridge_id: tstr, domain: tstr],
+  "hpke": HpkeWire,
+}
+
+HpkeWire = {
+  "ks":   KemSuite,
+  "enc":  bstr .size 32,
+  "ct":   bstr,
+}
+
+KemSuite = {
+  "kem":  0x0020,                     ; DHKEM(X25519, HKDF-SHA-256)
+  "kdf":  0x0001,                     ; HKDF-SHA-256
+  "aead": 0x0003,                     ; ChaCha20-Poly1305
+}
+
+KdfParams = Argon2idParams / HkdfSha256Params
+
+Argon2idParams = {
+  "alg": "argon2id",
+  "ver": 0x13,
+  "m":   uint,
+  "t":   uint,
+  "p":   uint,
+}
+
+HkdfSha256Params = {
+  "alg": "hkdf-sha256",
+}
+
+; ---------------------------------------------------------------------------
+; WS-RPC payloads (kinds registered in src/kind.rs::register_bridge_kinds).
+; ---------------------------------------------------------------------------
+
+; Fetch operations
+
+FetchWrappedMlsBlobRequest = {
+  "actor_id":      bstr .size 32,
+  "credential_id": tstr,
+}
+FetchWrappedMlsBlobReply = {
+  "blob": WrappedMsekBlob / null,     ; null = not found
+}
+
+FetchMlsSnapshotBlobRequest = {
+  "actor_id": bstr .size 32,
+}
+FetchMlsSnapshotBlobReply = {
+  "blob": MlsSnapshotBlob / null,
+}
+
+FetchWrappedSubmissionTokenRequest = {
+  "actor_id":      bstr .size 32,
+  "credential_id": tstr,
+}
+FetchWrappedSubmissionTokenReply = {
+  "blob": WrappedSubmissionTokenBlob / null,
+}
+
+FetchTlsCertBlobRequest = {
+  "bridge_role": tstr,                ; "mta" / "mda"
+  "bridge_id":   tstr,
+  "domain":      tstr,
+}
+FetchTlsCertBlobReply = {
+  "blob": TlsCertBlob / null,
+}
+
+FetchBridgePubkeyRequest = {
+  "bridge_role": tstr,
+  "bridge_id":   tstr,
+}
+FetchBridgePubkeyReply = {
+  "ed25519_pubkey": bstr .size 32,
+  "x25519_pubkey":  bstr .size 32,
+}
+
+; Provision operations
+
+ProvisionWrappedMlsBlobRequest = {
+  "blob": WrappedMsekBlob,            ; ix carries actor_id, credential_id
+  "credential_id": tstr,             ; nest keys (actor_id, credential_id) — per-credential
+}
+ProvisionWrappedMlsBlobReply = {
+  "ok": true,
+}
+
+ProvisionMlsSnapshotBlobRequest = {
+  "blob": MlsSnapshotBlob,            ; replaces existing snapshot atomically
+}
+ProvisionMlsSnapshotBlobReply = { "ok": true }
+
+ProvisionWrappedSubmissionTokenRequest = {
+  "blob": WrappedSubmissionTokenBlob,
+  "credential_id": tstr,             ; nest keys (actor_id, credential_id) — per-credential
+}
+ProvisionWrappedSubmissionTokenReply = { "ok": true }
+
+ProvisionTlsCertBlobRequest = {
+  "blob": TlsCertBlob,
+}
+ProvisionTlsCertBlobReply = { "ok": true }
+
+; Revoke operations
+
+RevokeWrappedMlsBlobRequest = {
+  "actor_id":      bstr .size 32,
+  "credential_id": tstr,
+}
+RevokeWrappedMlsBlobReply = { "ok": true }
+
+RevokeWrappedSubmissionTokenRequest = {
+  "actor_id":      bstr .size 32,
+  "credential_id": tstr,
+}
+RevokeWrappedSubmissionTokenReply = { "ok": true }
+
+; Bridge enrollment
+
+RegisterServiceUserRequest = {
+  "ed25519_pubkey": bstr .size 32,
+  "x25519_pubkey":  bstr .size 32,
+  "role":           tstr,             ; "mta" / "mda"
+  "bridge_id":      tstr,
+}
+RegisterServiceUserReply = {
+  "enrollment_request_id": tstr,      ; admin approves out-of-band
+}
+
+; Audit event reporting
+
+ReportAuthEventRequest = {
+  "actor_id":      bstr .size 32,
+  "credential_id": tstr,
+  "result":        "ok" / "fail",
+  "source_ip":     tstr,              ; IPv4 or IPv6 textual
+  "occurred_at":   uint,              ; unix seconds; bridge-side clock
+  "reason":        tstr / null,       ; on fail
+}
+ReportAuthEventReply = { "ok": true }

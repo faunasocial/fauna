@@ -1,0 +1,28 @@
+; fauna.segments.list — request/reply
+;
+; Request: enumerate the source nest's live segments for the given
+; actor+kind. Reply contains live_segments only — tombstoned segments
+; awaiting retention GC stay local on the source nest.
+
+SegmentsListRequest = {
+  kind: tstr,        ; "mail" | "conv" | "cal" | "post"
+  actor_id: tstr,    ; 64-hex (32 bytes); must equal auth Bearer's actor
+  * tstr => any,     ; forward-compat extra
+}
+
+SegmentsListReply = {
+  segments: [* SegmentRef],
+  * tstr => any,
+}
+
+SegmentRef = {
+  segment_id: uint .size 4,
+  blake3_hex: tstr,                 ; 64-hex = blake3 of framed segment file
+  bucket: tstr,                     ; "YYYY-MM"
+  record_count: uint .size 4,
+  tombstone_count: uint .size 4,    ; tombstoned *records* in this live segment
+  size_bytes: uint .size 8,
+  created_at_secs: uint .size 8,
+  is_open: bool,
+  * tstr => any,
+}

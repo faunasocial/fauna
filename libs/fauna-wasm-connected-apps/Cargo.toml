@@ -1,0 +1,43 @@
+[package]
+name = "fauna-wasm-connected-apps"
+description = "WASM bindings for the Fauna connected-apps page: the page-level ConnectedAppsMachine (the roster of everything acting for the user from outside the apps, the Requests tray, Connect an app, per-client blocks)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+test-helpers = []
+
+# wasm32-scoped on purpose: this crate builds only for wasm32, and a plain
+# [dependencies] table would leak its wasm-only feature activations (js,
+# wasm_js, …) into every HOST build's resolution under
+# resolver.feature-unification = "workspace". Add new deps here, never in a
+# plain [dependencies] table.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `js` so fauna-core's wasm build gets a getrandom backend (mirrors
+# fauna-wasm-labeler-catalog); feature unification needs *some* crate to
+# request it.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+# `rpc-glue` for the wasm `build_connected_apps_machine` (over `WsRpcClient`).
+fauna-client-connected-apps = { path = "../fauna-client-connected-apps", default-features = false, features = ["rpc-glue"] }
+# The browser WS-RPC transport the machine's gestures ride; the page lends the
+# SPA core chunk's socket as a `SharedRpcPort`.
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm" }
+# Installed at module init (`#[wasm_bindgen(start)]` in src/lib.rs) — each wasm
+# chunk is its own runtime, so this must be installed per-chunk.
+fauna-wasm-panic-hook = { path = "../fauna-wasm-panic-hook" }
+wasm-bindgen.workspace = true
+wasm-bindgen-futures = "0.4"
+serde_json.workspace = true
+getrandom = { workspace = true, features = ["wasm_js"] }
+# 0.2 alias: fauna-core's crypto stack transitively pulls getrandom 0.2, which
+# needs its `js` feature to compile for wasm (same shape as the sibling chunks).
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+js-sys.workspace = true
+
+[dev-dependencies]
+wasm-bindgen-test.workspace = true

@@ -1,0 +1,79 @@
+[package]
+name = "fauna-client-backup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Escape hatch to build the e2e test-agent/automation surface (the
+# native_store clock-offset seam) into a --release profile (debug_assertions
+# off). Never default-on. A consumer's own e2e-agent feature forwards this one
+# (testing.md convention 15).
+e2e-agent = []
+# Gates `row_text`'s resolved-`String` helpers, which need
+# `fauna-core`'s native-only relative-time resolver
+# (`fauna_core::format::*_text`). Never default-on, so the crate's default
+# build stays wasm-clean; native consumers (tui, linux) turn it on.
+local-clock = ["fauna-core/local-clock"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("e2e-agent", "local-clock"))'] }
+
+[dependencies]
+# fauna-protocol carries the typed `fauna.backup.*` wire types + the
+# `RpcRequester` seam this crate is generic over. `default-features = false`
+# keeps the crate wasm32-clean (drops native-only features); native workspace
+# builds re-enable them via Cargo feature unification. The path form is
+# required to override `default-features` — Cargo refuses the override on a
+# `workspace = true` entry whose workspace definition doesn't disable
+# defaults. Same pattern as fauna-client-snapshots / fauna-client-bridges.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# `BackupDestination` (the pinned client-local destination list the trust rows
+# iterate) + the shared `format::backup_destination_label` fallback, so no
+# client re-derives a destination's display label (priority #4).
+# `default-features = false` keeps the crate wasm32-clean, same as
+# fauna-client-pair; native builds re-enable via Cargo feature unification.
+fauna-core = { path = "../fauna-core", default-features = false }
+# Object-safe seams (`BackupDestinationSeam` / `BackupDestinationConnector`) —
+# one connection per destination is chosen at runtime, so the trust-row read
+# cannot be monomorphized at its call site. `?Send` arm on wasm, matching
+# fauna-client-pair's `LinkedNestsNest`.
+async-trait = "0.1"
+# The audit's client-local state (`AuditStateSnapshot`) is persisted by each
+# app — a file natively, `localStorage` on web — so the record + verdict
+# types carry serde derives. The store seam itself is format-agnostic; only the
+# shapes are shared.
+serde = { workspace = true }
+# The inclusion arm decodes each custody row's hex `manifest_hash` into the
+# 32-byte digest `ContentHash::from_digest_raw` takes. Pure, no-std-friendly,
+# wasm-clean — the same crate the upload side encodes with
+# (`libs/fauna-sync-engine/src/segment_backup.rs`).
+hex = { workspace = true }
+# `row_text`'s `local-clock` helpers resolve against the app's own string
+# table. Dependency-free leaf (see that crate's module docs), so this adds no
+# transitive weight even though only the gated helpers use it.
+fauna-i18n = { path = "../fauna-i18n" }
+
+# native_store's FileAuditStateStore encodes/decodes AuditStateSnapshot as JSON
+# on disk — a real (non-test) dependency now that the store lives here rather
+# than per-shell. Native-only in practice (native_store is
+# cfg(not(target_arch = "wasm32"))), but wasm-clean regardless, so no target
+# split is needed.
+serde_json = { workspace = true }
+
+# wasm: forward fauna-protocol's `js` feature (fauna-core's js-sys time
+# backend) so the transitive wasm build resolves. Off on native.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The inclusion tests implement `fauna_core::file_download::BlobFetcher` over an
+# in-memory blob store, so a "missing record" is a real failure of the
+# production download walk rather than a flag the test sets. That trait's
+# methods return `anyhow::Result`.
+anyhow = { workspace = true }
+# The shared `block_on` single-poll test executor, so this crate's four
+# hand-rolled copies stop reimplementing it (one owner for the `RpcRequester`
+# seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }

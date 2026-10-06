@@ -1,0 +1,55 @@
+[package]
+name = "fauna-client-delegation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# fauna-protocol carries the typed `fauna.delegation.*` wire types + the
+# `RpcRequester` seam this crate is generic over. `default-features = false`
+# drops the native-only `p2p` feature so this crate compiles to wasm32; native
+# workspace builds re-enable `p2p` via Cargo feature unification. The path form
+# is required to override `default-features` (mirrors fauna-client-spam).
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# The pure lease-decision logic + participant model (ParticipantRef/Class,
+# `decide`, the heartbeat/stale constants) live in fauna-core; a client's lease
+# loop composes `decide` with this crate's transport calls.
+fauna-core = { path = "../fauna-core", default-features = false }
+# The `fauna.state.delegation` plane kind is where the user's pins live
+# (client-authoritative, account-plane synced), so the Task-delegation surface
+# (`view.rs`) reads and writes them through the shared account-store seams.
+# Wasm-clean (it backs the SPA's own account seams), so the crate stays wasm-clean.
+fauna-client-config = { path = "../fauna-client-config" }
+
+# ── The `driver` feature: the native async lease-loop (`LeaseCoordinator::run`) ──
+# A tokio timer + push-wake loop that drives the pure per-cycle `step`. Native
+# only — the three desktops run it (macos/windows lift it via FFI); off by
+# default so the crate stays wasm-clean for the web SPA (which observes leases
+# but runs no heavy task kind). The pure `step` + participant model are always
+# available, feature-gate-free.
+tokio = { workspace = true, optional = true, features = ["time", "sync", "macros"] }
+tokio-util = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+# wasm: forward the `js` feature (fauna-core's js-sys time backend) so the
+# transitive wasm build resolves. Off on native. Cargo merges the two entries.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+
+[features]
+default = []
+driver = ["dep:tokio", "dep:tokio-util", "dep:tracing"]
+
+[dev-dependencies]
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# Names the serde bounds the `RpcRequester::request` method requires, for the
+# wire-contract tests' `RecordingRequester` mock impl (mirrors fauna-client-spam).
+serde = { workspace = true }
+# `rt`/`test-util` beyond the `driver` feature's own `time`/`sync`/`macros`, so
+# the `#[cfg(feature = "driver")]` LeaseCoordinator::run() loop tests can spawn
+# a real (paused-clock) runtime — coordinator.rs's `mod run_loop_tests`.
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
+tokio-util = { workspace = true }

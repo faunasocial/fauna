@@ -1,0 +1,14 @@
+; Spec Y wire error type. See § 1.1.
+
+LocalizedText = {
+  "key": tstr,
+  "args": { *tstr => tstr },
+  * tstr => any,
+}
+
+RpcError = {
+  "code": tstr,
+  "message": LocalizedText,
+  ? "details": any,
+  * tstr => any,
+}

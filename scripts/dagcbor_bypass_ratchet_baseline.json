@@ -1,0 +1,9 @@
+{
+  "libs/fauna-archive/src/model.rs": 1,
+  "libs/fauna-archive/tests/facebook_golden.rs": 2,
+  "libs/fauna-archive/tests/model_roundtrip.rs": 1,
+  "libs/fauna-bridge-atproto/src/permission_set.rs": 1,
+  "libs/fauna-bridge-atproto/src/record_refs.rs": 2,
+  "libs/fauna-bridge-atproto/src/reverse_translate.rs": 2,
+  "libs/fauna-carv2/src/v1.rs": 1
+}

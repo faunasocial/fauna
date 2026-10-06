@@ -1,0 +1,39 @@
+[package]
+name = "fauna-wasm-share"
+description = "WASM bindings for the private share link viewer page: the shared open + decrypt + verify of a fragment-keyed link (fauna-client-share::viewer)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Only the panic witness's `panicForTestOnly` (wasm-panic-witness); the viewer
+# itself has no test seam.
+test-helpers = []
+
+# wasm32-scoped on purpose: this crate builds only for wasm32, and a plain
+# [dependencies] table would leak its wasm-only feature activations (js,
+# wasm_js, …) into every HOST build's resolution under
+# resolver.feature-unification = "workspace". Add new deps here, never in a
+# plain [dependencies] table.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Its own chunk, never a module of `fauna-wasm` (build-system.md § WASM
+# chunking convention): the viewer page loads this and nothing else, so a
+# person opening a link downloads the decrypt, not the app's runtime.
+fauna-client-share = { path = "../fauna-client-share" }
+# `js` so fauna-core's wasm build gets a getrandom backend (mirrors the other
+# chunks); the viewer only opens and verifies, but feature unification needs
+# *some* crate to request it.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+# Installed at module init (`#[wasm_bindgen(start)]` in src/lib.rs) — each wasm
+# chunk is its own runtime, so this must be installed per-chunk.
+fauna-wasm-panic-hook = { path = "../fauna-wasm-panic-hook" }
+wasm-bindgen.workspace = true
+js-sys.workspace = true
+getrandom = { workspace = true, features = ["wasm_js"] }
+# 0.2 alias: fauna-core's crypto stack transitively pulls getrandom 0.2, which
+# needs its `js` feature to compile for wasm. Same shape as the other chunks.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }

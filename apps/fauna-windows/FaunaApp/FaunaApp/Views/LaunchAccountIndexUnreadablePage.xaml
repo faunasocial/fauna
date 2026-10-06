@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.LaunchAccountIndexUnreadablePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ids="using:FaunaApp.UiIds">
+    <Grid Padding="48" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="500">
+        <StackPanel Spacing="16" HorizontalAlignment="Center">
+            <!-- The saved account index is present and this build cannot use
+                 it (version-compatibility.md § 5 item 9). Terminal and
+                 non-retryable: no retry reparses a blob, and there is no
+                 "use a different nest" fallthrough — the nest is not the
+                 problem. -->
+            <TextBlock x:Name="MessageText"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountIndexRefusalWarning}"
+                       Style="{StaticResource SubtitleTextBlockStyle}"
+                       TextWrapping="Wrap"
+                       TextAlignment="Center" />
+            <!-- Malformed verdict only — collapsed on NewerBuild, where the
+                 accounts are intact and a start-over would destroy exactly
+                 what an update restores. -->
+            <Button x:Name="ResetButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountIndexResetButton}"
+                    HorizontalAlignment="Center"
+                    Visibility="Collapsed"
+                    Click="OnResetClick" />
+            <!-- Reachable only after ResetButton reveals it — the residual
+                 must be stated before the confirm can run. -->
+            <Button x:Name="ResetConfirmButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountIndexResetConfirmButton}"
+                    HorizontalAlignment="Center"
+                    Style="{StaticResource AccentButtonStyle}"
+                    Visibility="Collapsed"
+                    Click="OnResetConfirmClick" />
+        </StackPanel>
+    </Grid>
+</Page>

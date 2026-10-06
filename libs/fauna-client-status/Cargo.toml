@@ -1,0 +1,48 @@
+[package]
+name = "fauna-client-status"
+description = "The shared Status-page snapshot — the node, sync, MLS and build legs every app renders"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Embeds the sync-agent pipe's `SyncStatusInfo` projection as the snapshot's
+# sync leg (`From<&SyncStatusInfo> for SyncLeg`). Off by default because
+# `fauna-ipc` is the local agent seam only the desktop apps drive — web, iOS
+# and android have no local agent and carry `sync: None`.
+agent = ["dep:fauna-ipc"]
+# The finished-text half of the projection that needs the OS clock: the
+# `status-sync-last` relative time (`fauna_core::format::relative_time_text`)
+# and the one-call `render`. Native Rust apps turn it on; a wasm caller renders
+# the sync leg itself (it has none today) and takes the clock-free text fns.
+local-clock = ["fauna-core/local-clock"]
+
+[dependencies]
+# `RpcRequester` + the `fauna.nest.info` wire types the node leg reads.
+# `default-features = false` keeps it wasm32-clean, matching
+# `fauna-client-features`.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# The shared formatters the text projection resolves through (`byte_size`,
+# `relative_time_text`) and `LocalizedText`. `default-features = false` keeps
+# it wasm-clean; `local-clock` rides the feature above.
+fauna-core = { path = "../fauna-core", default-features = false }
+# The sync-agent pipe's projection types, behind `agent` (see the feature).
+fauna-ipc = { path = "../fauna-ipc", optional = true }
+# The snapshot legs derive serde so a wasm/FFI face can carry them verbatim.
+serde = { workspace = true }
+
+# wasm: forward fauna-protocol's `js` feature so the transitive wasm build
+# resolves. Off on native (same shape as fauna-client-features).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# test drives (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# Dev-only: the generated `en.yaml` lookup, so `every_emitted_key_resolves`
+# proves this crate's i18n keys exist — a typo'd key is invisible at compile
+# time and renders as the raw key on all 7 apps.
+fauna-i18n = { path = "../fauna-i18n" }
+# The `local-clock` tests need the clock; the `agent` test needs the pipe type.
+fauna-client-status = { path = ".", features = ["agent", "local-clock"] }

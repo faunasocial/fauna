@@ -1,0 +1,52 @@
+[package]
+name = "fauna-client-admin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# fauna-protocol carries the typed `fauna.admin.*` wire types + the
+# `RpcRequester` seam this crate is generic over. `default-features = false`
+# keeps it wasm32-clean (the admin payloads pull no native-only deps), matching
+# `fauna-client-bridges`. The path form is required to override
+# `default-features` — Cargo refuses the override on a `workspace = true` entry
+# whose workspace definition doesn't disable defaults.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+
+# fauna-core: `LocalizedText`, for `RegistrationModeOption.label`
+# (`registration_mode_options`). `default-features = false` drops the
+# native-only `network` feature so the crate stays wasm-safe; mirrors how
+# fauna-client-feed declares it for the same reason (`RuleTypeOption.label`).
+fauna-core = { path = "../fauna-core", default-features = false }
+
+# fauna-log: the owned `LogEntry` / `LogLevel` the admin Logs surfaces render.
+# `log_entry_from_wire` converts `fauna.admin.logs`' wire rows into them here,
+# once, instead of in each app's shell (priority #2 — linux had a private copy).
+# The direction is cycle-free: fauna-log depends only on fauna-core. No default
+# features to disable (`uniffi` is opt-in, and only the fauna-ffi build wants
+# it), and fauna-log is wasm-clean, so the web face inherits this unchanged.
+fauna-log = { path = "../fauna-log" }
+
+# `AdminUserRowControls` derives `Serialize` so the web wasm face
+# (`adminUserRowControls`) can hand the shared row decision across the boundary
+# without a duplicate mirror struct. No build cost — fauna-protocol already
+# pulls serde transitively; this only names it. Stays wasm32-clean.
+serde = { workspace = true }
+
+# `hex`: the roster fold renders an actor id as the canonical short hex when no
+# handle resolved (`seed_rotation_confirm_view` → `account_display_label`, which
+# takes the hex form). Pure-Rust, no default features that touch the platform,
+# so the wasm face inherits it unchanged.
+hex = { workspace = true }
+
+# wasm: forward fauna-protocol's/fauna-core's `js` feature (fauna-core's
+# js-sys time backend) so the transitive wasm build resolves. Off on native.
+# Same path/default-features as above; Cargo merges the two entries (additive).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }

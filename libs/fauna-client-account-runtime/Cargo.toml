@@ -1,0 +1,108 @@
+[package]
+name = "fauna-client-account-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ⚠️ NATIVE-ONLY BY CONSTRUCTION, and — like `fauna-client-custody` — that is
+# the whole reason this crate exists. The W3 (account-data-plane.md § Workstreams) account-store *lifecycle* lives in
+# `fauna-sync-engine` (feature `account-runtime`), which knows nothing about a
+# nest connection; the *assembly* an app performs around it needs BOTH that
+# crate and `fauna-client` (the store principal's device-handshake bearer, the
+# pinned-nest escrow trust) plus `fauna-client-sync` (the co-located agent's
+# control channel). Those three are independent siblings, so no existing
+# crate can host the assembly without inventing an edge between them.
+#
+# Hence this crate: it sits ABOVE all three, is consumed only by app shells
+# (fauna-tui and fauna-linux today; the `fauna-ffi` seat for windows/macOS/iOS
+# next), and nothing depends back on it (leaf — no cycle possible).
+#
+# Do NOT add a wasm target table: web hosts the account runtime through the
+# wasm-capable homes of the plane (`fauna-account-plane`) and the seam glue
+# (`fauna-account-seams`, moved out of here 2026-09-29 and re-exported below
+# at its old paths), never by widening this native assembly
+# (`account-client-lifecycle.md` § The client-side lifecycle → *The trigger
+# fired*, ruling (4)).
+
+[features]
+# e2e-only: exposes `device_set_state_json` (a debug/test-only read of raw
+# `fauna.state.device-set` plane content) in a RELEASE-profile e2e build —
+# the convention-15 rule (a) escape hatch. Spelled `e2e-agent`, not
+# `test-helpers`, matching this crate's own `fauna-sync-engine` /
+# `fauna-client-backup` dependencies below, so a consumer forwards ONE
+# feature name through the whole chain (rule (b): never name `test-helpers`
+# on a dep line). `debug_assertions` alone already covers every ordinary
+# debug e2e build (`tui-debug` / `linux-debug` pass no features).
+e2e-agent = ["fauna-account-plane/e2e-agent"]
+
+[dependencies]
+# The lifecycle this crate assembles: `AccountRuntimeParams`, `MembershipSource`,
+# `AccountStoreRuntime::start`, the T10 writer-key resolve and the shared
+# `StoreRoot::platform()` root every app and the agent open.
+fauna-sync-engine = { path = "../fauna-sync-engine", features = [
+    "account-runtime",
+] }
+# `NestClient` (the requester the runtime pumps over),
+# `ws_device_handshake_bearer` (W5.4b — the store principal's own bearer) and
+# the re-exported `trust::trusted_escrow_holders` (R14 (account-data-plane.md § The ratified decisions) — what this machine
+# PINNED for its nest, never what the nest says about itself).
+fauna-client = { path = "../fauna-client" }
+# The road's reach (`native_owed_nest_deliverer`): the anonymous connection a
+# succession statement is submitted over, and the shared delivery body.
+fauna-anon-client = { path = "../fauna-anon-client" }
+fauna-client-core = { path = "../fauna-client-core" }
+# `ActorKeypair` (the seed-holding principal) + `hex32::decode` (the actor id
+# the device handshake signs as).
+fauna-core = { path = "../fauna-core" }
+# The account-plane conversations seams (`conversation_seams`, `group_reception`,
+# `read_positions`, `contact_overlays`), re-exported at their old paths: the
+# joins between `fauna-conversations` and the account plane live in their own
+# wasm-capable crate since 2026-09-29, because web registers the same seams and
+# this crate is native-only by construction.
+fauna-account-seams = { workspace = true }
+# The `P2pParticipation` door (`p2p_participation`): a seam the devices
+# machine declares and cannot implement itself (it stays wasm-clean, so it may
+# not name `fauna-sync-engine`). Its sibling `FleetRemoval` door moved to
+# `fauna-account-seams` on 2026-09-30, because web serves it too (through the
+# account port), and is re-exported from here at its old path.
+fauna-devices-machine = { path = "../fauna-devices-machine" }
+# The participation door's desktop arm (`p2p_participation::EngineHolderNudge`
+# for `agent::SyncAgentProvisioner`): the app's control channel asks the
+# co-located agent — the usual engine holder — for the pass that reads the row.
+fauna-client-sync = { path = "../fauna-client-sync" }
+# The shared e2e reader `account_driver::e2e_readers::device_set_state` that
+# `device_set_state_json` wraps — in the wasm-capable plane crate so web's
+# dispatcher answers the same command over the same code. The driver is
+# already in the graph through the engine's `account-runtime`.
+fauna-account-plane = { workspace = true, features = ["account-driver"] }
+# `PushEvent` — the nest push stream the runtime's nudge listens on.
+fauna-protocol = { path = "../fauna-protocol" }
+# The deployment-seed host seam (`deployment_seeds`): the custody leg, the plane
+# rotation drive and the recovery projections (`fauna-client-config`), and the
+# bound-id resolver the leg keys on (`fauna-client-pair::resolve_this_nest_id`).
+fauna-client-config = { path = "../fauna-client-config" }
+fauna-client-pair = { path = "../fauna-client-pair" }
+async-trait = "0.1"
+
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+# The `account_pump_cycles` e2e state value (`state_json`) — the shared JSON
+# every hosting app's agent leg reads, so two apps cannot publish two shapes of
+# one cross-app contract. Not cfg-gated: it is a pure value builder, and what
+# convention 15 compiles out of a release artifact is the automation *server*.
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# The convergence proof drives real `ConversationsManager`s over the seams
+# this crate re-exports (`tests/read_positions_convergence.rs`).
+fauna-conversations = { path = "../fauna-conversations", default-features = false }
+# The two-device read-state proof (`tests/read_positions_convergence.rs`):
+# two real account runtimes of one account converging over the in-memory peer
+# leg (`fauna_transport::testing`), their stores staged the door-less way
+# (`fauna-account-store`, the T10 slot in `fauna-credential-store`).
+fauna-transport = { workspace = true, features = ["test-helpers"] }
+fauna-account-store = { workspace = true }
+fauna-credential-store = { workspace = true }
+serde = { workspace = true }

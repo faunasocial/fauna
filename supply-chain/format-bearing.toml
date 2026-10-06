@@ -1,0 +1,113 @@
+# Packages whose version decides an at-rest or wire format
+# (docs/goal/architecture/dependency-bump-report.md § The whole-effects analysis →
+# *Format-bearing*). A bump of any of them is also a compatibility question under
+# docs/goal/architecture/version-compatibility.md: the dependency bump report marks the
+# row `format-bearing` and FLAGs it, so the owner decides it with that question in view.
+#
+# One entry per package (`name`) or family (`prefix`: a crate-name prefix, or a Gradle `group:` prefix), each with one line of why in
+# our own words. Add an entry in the commit that makes a new package carry a format.
+
+[[package]]
+ecosystem = "cargo"
+name = "tantivy"
+why = "the index engine: its version decides the on-disk index segment format fauna-index keeps on every nest and app"
+
+[[package]]
+ecosystem = "cargo"
+name = "serde"
+why = "the serialization framework every wire and at-rest type derives through; a change in its derive output moves encodings"
+
+[[package]]
+ecosystem = "cargo"
+name = "serde_json"
+why = "the JSON codec of stored settings, provider records and JSON wire forms"
+
+[[package]]
+ecosystem = "cargo"
+name = "serde_ipld_dagcbor"
+why = "the DAG-CBOR codec under fauna-cbor: the client-nest-nest wire format and the sealed records at rest"
+
+[[package]]
+ecosystem = "cargo"
+name = "cbor4ii"
+why = "the CBOR encoder/decoder serde_ipld_dagcbor is built on, so it decides the same bytes"
+
+[[package]]
+ecosystem = "cargo"
+name = "ipld-core"
+why = "the IPLD data model and CID links of the DAG-CBOR records and CAR archives"
+
+[[package]]
+ecosystem = "cargo"
+name = "cid"
+why = "content identifiers inside every DAG-CBOR record, CAR archive and atproto repository we store and send"
+
+[[package]]
+ecosystem = "cargo"
+name = "multihash"
+why = "the hash encoding inside every CID"
+
+[[package]]
+ecosystem = "cargo"
+name = "rusqlite"
+why = "the SQLite binding of the nest, app and sync stores (nest.db and the client stores)"
+
+[[package]]
+ecosystem = "cargo"
+name = "libsqlite3-sys"
+why = "the bundled SQLite library itself: its version decides what the database files on disk may contain"
+
+[[package]]
+ecosystem = "cargo"
+name = "redb"
+why = "the embedded key-value store fauna-core keeps at rest; its file format is versioned by the crate"
+
+[[package]]
+ecosystem = "cargo"
+prefix = "openmls"
+why = "the MLS stack: its version decides group state at rest and the MLS messages on the wire"
+
+[[package]]
+ecosystem = "cargo"
+name = "tls_codec"
+why = "the TLS-presentation codec every MLS message and key package is encoded with"
+
+[[package]]
+ecosystem = "cargo"
+prefix = "libcrux-"
+why = "the cryptography under openmls and the post-quantum KEM: its outputs are sealed at rest and exchanged on the wire"
+
+[[package]]
+ecosystem = "go"
+name = "github.com/fxamacker/cbor/v2"
+why = "the mail bridge's DAG-CBOR codec: the WS-RPC envelopes it exchanges with the nest byte for byte, and the sealed CalDAV/CardDAV metadata"
+
+[[package]]
+ecosystem = "go"
+name = "github.com/ipld/go-ipld-prime"
+why = "the IPLD data model and codecs the atproto bridge's repository stack requires, so it can decide the bytes of the DAG-CBOR blocks it stores and serves"
+
+[[package]]
+ecosystem = "go"
+name = "github.com/ipfs/go-cid"
+why = "content identifiers inside every atproto record, commit and CAR the bridge stores and serves"
+
+[[package]]
+ecosystem = "go"
+name = "github.com/multiformats/go-multihash"
+why = "the hash encoding inside every CID the bridge mints"
+
+[[package]]
+ecosystem = "go"
+name = "github.com/bluesky-social/indigo"
+why = "the atproto repository and MST code the bridge's PDS builds commits with: its version decides the repository bytes it stores and serves"
+
+[[package]]
+ecosystem = "go"
+name = "modernc.org/sqlite"
+why = "the SQLite implementation of the atproto bridge's repository store: its version decides what the database file on disk may contain"
+
+[[package]]
+ecosystem = "gradle"
+prefix = "androidx.room:"
+why = "Room, the Android app's on-device database layer (FaunaDatabase, its DAOs and entities, with exported schema history): its version decides the SQLite schema handling and migrations of the database file on every phone"

@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 1d8c0f37854ddcbceb6cf91ada18de186660d7c6027f197523a5e61476261f9d # shrinks to seats = 4, batched = false, steps = [Deliver { seat: 2, n: 2 }, Deliver { seat: 0, n: 3 }, Reupload { seat: 2 }]
+cc e02a07facad2320af856e532691bc775379f4f5dc8588f03a207012b5b8fbecd # shrinks to seats = 3, batched = false, steps = [Reupload { seat: 0 }, Reseal { seat: 0 }, Deliver { seat: 2, n: 1 }, Reupload { seat: 0 }, Deliver { seat: 0, n: 2 }, Deliver { seat: 2, n: 3 }, Deliver { seat: 2, n: 2 }, Deliver { seat: 2, n: 2 }, Reupload { seat: 2 }]
+cc 9d9aa1ad5325d1d41b7edd0cfdc159061cf48adfa99961b0194d089d35165fed # shrinks to seats = 2, batched = false, steps = [Deliver { seat: 0, n: 1 }, Reupload { seat: 0 }, Deliver { seat: 0, n: 1 }]
+cc 570ff1b7e284433888dfda23f98350003f1ac10a57422545e7c368677c030a68 # shrinks to batched = false, append = true, steps = [Deliver { seat: 1, n: 1 }, Reupload { seat: 1 }, Deliver { seat: 0, n: 1 }, Deliver { seat: 0, n: 1 }, Deliver { seat: 0, n: 1 }]
+cc 160d62b9860424f2b7d39aa98354b60943dd624c380768299b4cde2046b5db9f # shrinks to seats = 4, batched = false, append = false, steps = [Deliver { seat: 3, n: 1 }, Reupload { seat: 3 }]

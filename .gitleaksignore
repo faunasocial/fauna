@@ -1,0 +1,76 @@
+# .gitleaksignore -- the reviewed findings of THIS repository's first commit.
+#
+# The public CI secret scanner reads history, not just the working tree
+# (`gitleaks git`), so it re-reads the initial commit on every pull request.
+# That commit predates the per-line `gitleaks:allow` markers the fixtures now
+# carry, and a marker added in a later commit cannot reach back into an earlier
+# one -- so those already-reviewed test fixtures would report as findings on
+# every future run, forever.
+#
+# Each line below is one such finding, pinned to that first commit by its
+# gitleaks fingerprint (`<commit>:<file>:<rule>:<line>`). Pinning to a commit
+# rather than to a path is deliberate: the entry can only ever excuse the exact
+# historical line it names. A new finding -- in a new commit, a new file, or
+# even the same file at a different line -- is not covered by any entry here
+# and still fails the build.
+#
+# Every file named below carries its review, with the reason the value is not a
+# secret, alongside its per-line marker in the current tree. They are unit-test
+# and end-to-end fixtures: placeholder PEM bodies, public did:key vectors, RFC
+# example tokens, and passwords the tests mint for throwaway accounts.
+#
+# Generated, not hand-edited. Do not add entries by hand: a suppression that
+# has not been reviewed is exactly what this file must never grow.
+
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:apps/fauna-android/app/src/test/java/com/fauna/app/ui/screen/settings/MailSettingsContentTest.kt:generic-api-key:119
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:apps/fauna-android/app/src/test/java/com/fauna/app/ui/util/OfflineGateTest.kt:generic-api-key:3053
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:bins/fauna-nest/src/acme.rs:private-key:739
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:bins/fauna-nest/src/push.rs:private-key:139
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:bins/fauna-nest/src/storage/mod.rs:private-key:1456
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:bins/fauna-nest/tests/conformance_atproto_integration_level.rs:generic-api-key:53
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:bins/fauna-nest/tests/storage_sealed_trait.rs:private-key:113
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:bins/fauna-push-relay/src/push_sender.rs:private-key:289
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:docs/goal/architecture/installers/macos.md:generic-api-key:609
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:docs/goal/behavior/bluesky-oauth-provider.md:generic-api-key:61
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:libs/fauna-atproto-settings-machine/src/contest.rs:generic-api-key:196
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:libs/fauna-atproto-settings-machine/src/contest.rs:generic-api-key:214
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:libs/fauna-atproto-settings-machine/src/machine.rs:generic-api-key:6021
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:libs/fauna-client-alert-sweep/src/lib.rs:generic-api-key:1284
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:libs/fauna-client-bluesky/src/genesis_verify.rs:generic-api-key:524
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:libs/fauna-client-bluesky/src/tombstone.rs:generic-api-key:591
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:libs/fauna-client-dns/src/acme_pure.rs:generic-api-key:1310
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:libs/fauna-core/src/identity_qr.rs:generic-api-key:131
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:libs/fauna-core/src/identity_qr.rs:generic-api-key:140
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:libs/fauna-core/src/identity_qr.rs:generic-api-key:160
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:libs/fauna-core/src/identity_qr.rs:generic-api-key:199
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:libs/fauna-mail/src/lists/headers.rs:generic-api-key:145
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:libs/fauna-protocol/src/atproto.rs:generic-api-key:642
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:libs/fauna-protocol/src/atproto.rs:generic-api-key:643
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:libs/fauna-protocol/src/share.rs:generic-api-key:130
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:libs/fauna-protocol/src/web.rs:generic-api-key:550
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:libs/fauna-provisioning/src/dkim.rs:private-key:241
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/helpers/webdav_roundtrip.py:generic-api-key:39
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/helpers/windows_caldav_nest.py:generic-api-key:75
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/api/test_push_api.py:generic-api-key:74
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/api/test_push_api.py:generic-api-key:84
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/api/test_push_api.py:generic-api-key:123
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/api/test_push_api.py:generic-api-key:139
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/live/test_private_relay_hetzner.py:generic-api-key:154
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/platform/docker/test_mail_family_gate_docker.py:generic-api-key:502
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/platform/docker/test_mail_rate_limit_burst.py:generic-api-key:164
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py:generic-api-key:122
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/platform/sync/test_text_merge.py:generic-api-key:379
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/platform/sync/test_text_merge.py:generic-api-key:622
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/test_alert_sweep_directory_feeders_e2e.py:generic-api-key:82
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/test_atproto_external_write.py:generic-api-key:92
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/test_atproto_firehose_post.py:generic-api-key:74
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/test_atproto_identity_mint.py:generic-api-key:38
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/test_atproto_pds_auth.py:generic-api-key:53
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/test_atproto_pds_consent.py:generic-api-key:86
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/test_atproto_pds_proxy.py:generic-api-key:40
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/test_bluesky_custody_alarm.py:generic-api-key:84
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/test_handle_first_back_buttons.py:generic-api-key:35
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/test_identity_succession_mail_auth.py:generic-api-key:66
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/test_mail_multi_credential_auth.py:generic-api-key:80
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/test_plc_acceptance_parity.py:generic-api-key:39
+4017a82ac604a59e0c10ad7022a0b4c7e701253b:tests/e2e-unified/tests/test_plc_acceptance_parity.py:generic-api-key:40

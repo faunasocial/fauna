@@ -1,0 +1,608 @@
+[package]
+name = "fauna-mail"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Default keeps everything on so existing native consumers (fauna-ffi, nest)
+# don't have to opt in. WASM consumers (fauna-wasm-content-index) set
+# `default-features = false, features = ["tokenizer"]` so they pull only the
+# pure-Unicode tokenizer + parser surface and avoid hickory-resolver/tokio
+# (which don't compile to wasm32-unknown-unknown — mio dep).
+default = ["tokenizer", "parser", "auth", "spam", "kind-registry", "post-text", "outbound", "icalendar", "aliases", "scan", "srs", "lists", "forward-loop", "forward-config", "filter", "greylist", "deliverability", "warmup", "health", "received-header", "sender-auth", "dmarc-policy", "dns-records", "routing", "report-hash", "dedup-key", "msgid", "body-ref"]
+# Forwards to `fauna-core/uniffi` because the mail-auth verdict types this
+# crate exports over UniFFI are DEFINED there (`fauna_core::mail_auth`, row
+# 163) — a re-export carries no derives of its own, so without the forward the
+# FFI face would compile and the bindings would silently lack the types. The
+# `?` keeps it conditional on fauna-core actually being enabled (it is optional
+# here); `auth` pulls it in whenever these types are reachable.
+uniffi = ["dep:uniffi", "fauna-core?/uniffi", "dep:fauna-uniffi-async"]
+# The positional tokenizer core (`PositionalToken` + `tokenize_positional`)
+# lives in the mail-independent `fauna-text-model` crate and is re-exported at
+# the original `fauna_mail::tokenizer::` paths; the uniffi set-form `tokenize`
+# + `CanonicalTokenSet` stay here.
+tokenizer = ["dep:fauna-text-model"]
+# Canonical report-hash for distributed report sharing
+# (docs/goal/behavior/report-sharing.md § Content identity). PURE
+# (unicode-normalization + blake3, both WASM-safe); computed at the Go MTA
+# perimeter over the UniFFI binding — in `default` so `fauna-ffi`'s pull
+# exposes it to libs/fauna-mail-go, and named explicitly in fauna-ffi's
+# feature list since the mail-bridge build is `--no-default-features`.
+report-hash = ["dep:blake3"]
+# Canonical per-actor mail dedup key (docs/goal/behavior/mailbox-migration.md
+# § Dedup). PURE (sha2 only, WASM-safe); computed wherever the plaintext lives —
+# the Go MDA at IMAP APPEND and the Go MTA at the perimeter pre-seal, both over
+# the UniFFI binding, plus the user's client for `import_message`. In `default`
+# so `fauna-ffi`'s pull exposes it to libs/fauna-mail-go, and named explicitly
+# in fauna-ffi's feature list since the mail-bridge build is
+# `--no-default-features` (same reasoning as `report-hash` above).
+dedup-key = ["dep:sha2", "parser"]
+# The self-describing Message-ID mint + provenance verify (family-safety.md
+# § The mail gate). PURE (sha2 only, WASM-safe): `mint_local` takes caller
+# randomness so the wasm compose path brings its own getrandom. `msgid-mint`
+# adds the RNG-carrying local-part mint for native callers (the Go submission
+# stamp over UniFFI) — never enabled on a wasm build.
+msgid = ["dep:sha2"]
+msgid-mint = ["msgid", "dep:getrandom"]
+# Splitting a sealed mail body across the bulk-byte plane and joining it back
+# (docs/goal/behavior/smtp-server.md § Message size limits). PURE (blake3 only,
+# WASM-safe). The chunk boundaries and the store key must be identical in all
+# three places the reference legs touch — the Go MTA stages, nest rejoins, the
+# Go MDA re-fetches — so all three read this one implementation over UniFFI.
+# In `default`, and named explicitly in fauna-ffi's and nest's feature lists
+# since both build fauna-mail `--no-default-features`.
+body-ref = ["dep:blake3"]
+# The staged envelope for the PLAINTEXT legs (client import, the outbound
+# queue pair): seal under a one-shot key before staging, so plaintext never
+# enters the open-download chunk store (smtp-server.md § Message size limits,
+# the staged-envelope rule). Builds on body-ref's split/join. Wasm-compatible
+# in the real web build graph (pure-Rust ChaCha20Poly1305; OsRng resolves
+# through the getrandom js backend fauna-wasm already enables — the same
+# pattern fauna-core's crypto OsRng uses). A STANDALONE wasm32 check of this
+# crate alone fails on getrandom's missing js feature; that is the known
+# standalone-check artifact, not a web-build break.
+staged-envelope = ["body-ref", "dep:chacha20poly1305"]
+# Client-side *resolution* of a body reference served on the first-party feed
+# (docs/goal/behavior/smtp-server.md § Message size limits — "the client
+# resolver ... ships FIRST"): fetch the referenced chunks over the open
+# content-addressed download route and rejoin them to the exact stored outer
+# envelope, which the receive path then opens as if it had arrived inline.
+# Opt-in, NOT in `default`, for the same reason as `imap-client` below — nest
+# resolves a reference from its *own* local blob store
+# (`mail_body_plane::resolve_body_ref`) and the Go bridges never read the
+# first-party feed, so only the client receive paths enable it:
+# `fauna-client-conversations` (native, all six native apps) and `fauna-wasm`
+# (web). Keeping it out of `default` is what stops nest's and fauna-ffi's
+# `--no-default-features` builds from growing a fauna-core edge they never call.
+# WASM-safe: `BlobFetcher` lives in fauna-core's ungated `file_download` module
+# and this crate's fauna-core dep is `default-features = false` (see the dep
+# table), so enabling this never pulls the `network` set into the web build.
+body-ref-resolve = ["body-ref", "dep:fauna-core", "dep:anyhow"]
+# The mailbox-export serializers (docs/goal/behavior/mail-export.md § Format
+# choices): mbox / Maildir++ / EML zip, plus the deterministic zip container and
+# the zstd wrapper of § Container shape. WASM-safe — and it has to be, because
+# § Export pipeline puts the conversion on the CLIENT unconditionally (the nest
+# holds no unwrap key; nest-side conversion is that section's recorded REJECTED
+# alternative), so the web app runs this identical code.
+#
+# Opt-in, NOT in `default`, for the same reason as `imap-client` below: it is
+# the export twin of that import surface, and neither nest nor the Go bridges
+# ever serialize an export — only the user's own app does, so only the client
+# exposure crates enable it. `zip` is pulled default-features = false (Stored
+# entries only). The `fauna-core` edge is `caltime`, whose `civil_from_days`
+# doc comment already asks every hand-rolled copy in the workspace to delegate
+# there instead — so the mbox `From ` ctime and the EML manifest's RFC 3339
+# stamp both go through it rather than becoming a fourth copy.
+mail-export = [
+    "dep:zip",
+    "dep:zstd",
+    "dep:blake3",
+    "dep:serde_json",
+    "dep:fauna-core",
+    # The per-session seal of § Blob shape on disk. Same pure-Rust AEAD the
+    # staged envelope uses (XChaCha20-Poly1305 here, for the 24-byte nonce
+    # the pinned frame layout carries), so it is WASM-safe on the same terms:
+    # the web build resolves OsRng through the getrandom js backend
+    # fauna-wasm already enables.
+    "dep:chacha20poly1305",
+]
+# The typed WS-RPC call layer over the ten `fauna.bridges.*export*` kinds
+# (`export::client`) — the export twin of `imap-client`'s `send` module, and
+# split out for the same reason `imap-client` is split from `parser`: only the
+# user's own app calls those kinds, and pulling `fauna-protocol` into every
+# `mail-export` consumer (the serializers alone need nothing of it) would cost
+# the wasm content-index build a dependency it has no use for.
+mail-export-client = ["mail-export", "dep:fauna-protocol"]
+# The shared source-side IMAP client (docs/goal/behavior/mailbox-migration.md
+# § Client-driven streaming model): protocol state machine, per-source-server
+# throttle, batch packing, dedup-key call, and cursor resume — generic over an
+# AFIT `ImapTransport` byte seam so the platform shell owns the socket and the
+# TLS. WASM-safe: `imap-proto` is a pure nom parser, and the seam keeps tokio /
+# rustls out of this crate entirely (native and web each impl the trait in
+# their own shell). Opt-in, NOT in `default`: neither nest nor the Go bridges
+# import from a foreign mailbox — only the user's client does, so only the
+# client exposure crates (`fauna-ffi`, `fauna-wasm`) enable it.
+imap-client = [
+    "parser",
+    "dedup-key",
+    "dep:imap-proto",
+    "dep:nom",
+    "dep:base64",
+    "dep:fauna-protocol",
+    "dep:fauna-core",
+]
+# The NATIVE half of the `imap-client` transport seam (`imap_client::native`):
+# a `tokio::net::TcpStream` + `tokio-rustls` impl of `ImapTransport` (both TLS
+# modes — implicit and STARTTLS) plus the tokio `ImapClock`, exactly as
+# mailbox-migration.md § Where the IMAP client runs pins the native row.
+#
+# Sibling of `outbound-net` (and split out for the identical reason): NOT
+# WASM-safe — tokio net + rustls don't cross-compile to wasm32 — so it is
+# opt-in and never in `default`. The wasm consumer enables `imap-client` alone
+# and the pure protocol core stays browser-clean; the native apps
+# (apple/android/windows via `fauna-ffi`, plus linux/cli calling it directly)
+# enable this, so all five share ONE transport impl instead of five shells
+# (priority #2). The web shell — sans-io `rustls` over the blind byte relay —
+# is the other impl of the same seam and lives in the web crate.
+imap-client-native = [
+    "imap-client",
+    "dep:tokio",
+    "dep:tokio-rustls",
+    "dep:rustls",
+    "dep:fauna-tls-bootstrap",
+]
+# Real-TLS server test fixtures (`imap_client::test_fixtures`): mints a
+# self-signed cert and builds the `rustls` `TlsAcceptor` that terminates it,
+# for standing up a fake IMAP-over-TLS source server in an integration test.
+# A SEPARATE feature from `test-helpers` above on purpose — that one is
+# narrowly, deliberately scoped to the e2e trust-seed gate alone (its own doc
+# comment says never reuse it) and is merge-gate-protected
+# (`test_mail_import_tls_seam_gating.py`). This one exists so an EXTERNAL
+# crate's own integration test — `bins/fauna-nest/tests/
+# conformance_mail_import_client.rs` — can share the fixture instead of
+# hand-rolling its own copy (found duplicated three ways: here, that nest
+# test, and `tests/imap_client_trust_seed.rs`, by the dev-fleet
+# near-duplicate-function scanner's cross-crate pass).
+tls-test-fixtures = ["imap-client-native", "dep:rcgen"]
+# Convention 15's opt-in for a RELEASE-profile e2e build. This crate's only
+# test-only surface is the source-IMAP trust seed
+# (`imap_client::native::E2E_EXTRA_CA_ENV` + `NativeImapConnector::e2e_extra_root`),
+# whose gate is `any(test, debug_assertions, feature = "test-helpers")` — a debug
+# build reaches it through `debug_assertions`, so this feature exists only so a
+# release-profile e2e flavor can too. Empty on purpose: it turns on no dep and no
+# other feature, it only flips this crate's own `cfg`.
+#
+# ⚠ NEVER name this on a `[dependencies]` line (rule (b)) — cargo would turn it
+# on unconditionally for every artifact that crate builds. Consumers forward it
+# from their own `e2e-agent`/`test-helpers` feature; `test_mail_import_tls_seam_gating.py`
+# fails the merge if a shipping dep line ever names it.
+test-helpers = []
+# Submission recipient partitioning (`routing::{partition_recipients,
+# merge_recipients}`): split a `fauna.email.send` recipient list into in-domain
+# locals vs. out-of-domain remotes. Pure std, no deps — WASM-safe; lifted from
+# the retired `fauna-bridge-smtp` (its permanent home, priority #2). In `default`
+# so the nest send handler gets it without opting in.
+routing = []
+# Server-side email filter-rule evaluation (docs/goal/behavior/smtp-server.md
+# § Email filter rules + docs/goal/behavior/mail-forwarding.md § perimeter eval,
+# T3.3). PURE first-match-wins evaluator over `(envelope, headers, spam-score)` —
+# runs at the Go MTA perimeter pre-seal (LBC-1/-3: an in-nest evaluator over
+# sealed ciphertext is the wrong shape), so the network/parse I/O is Go-side and
+# this stays std-only/WASM-safe, mirroring the scan + spam gate split. In
+# `default` so `fauna-ffi`'s default pull exposes it to libs/fauna-mail-go. The
+# spam-score condition is a milli-int (`combined_spam_score_milli`); no wire float.
+filter = []
+# Published `_dmarc.<domain>` TXT body assembler (docs/goal/behavior/
+# dmarc-reporting.md § Record shape): deployment-wide defaults + per-domain
+# override overlay → RFC 7489 §6.3 body. PURE (serde_json for the override-JSON
+# parse only — WASM-safe, no tokio/dns) so the nest DNS surface AND the WASM
+# onboarding provisioner (libs/fauna-provisioning) assemble the identical body.
+# In `default` so nest gets it; provisioning opts in with default-features=false.
+dmarc-policy = ["dep:serde_json", "dep:fauna-protocol"]
+# Perimeter content-scan logic (ClamAV reply parse + rspamd response parse/scale
+# + delivery-action decision) per docs/goal/behavior/mail-content-scanning.md +
+# docs/goal/architecture/content-scoring.md. PURE functions only — the network
+# I/O (dial clamd / POST rspamd) is Go-side in the mail bridge, mirroring the
+# spam-gate split. In `default` so `fauna-ffi`'s default-features pull exposes
+# the fns to the Go binding (libs/fauna-mail-go). Needs serde_json for the
+# rspamd /checkv2 JSON. No tokio/reqwest — never crosses the dag-cbor wire as a
+# float (rspamd scores are milli-ints).
+# `dep:fauna-core` is here for the scan RESULT types, which live once in
+# `fauna_core::mail_scan` and are re-exported by `scan`. Same shape as `auth` below: fauna-core is pulled
+# `default-features = false` by this crate, so this adds no network set, and
+# `scan` stays buildable standalone — `--no-default-features --features scan`
+# checks clean, which matters because `scan` sits in the FFI surface that builds
+# `--no-default-features`.
+#
+# ⚠ Do NOT read that as "a standalone wasm32 check of this feature passes" — it
+# does not, and it did not before this edge existed either. Any feature pulling
+# fauna-core fails a standalone `--target wasm32-unknown-unknown` check on
+# getrandom's js flag (measured 2026-08-18 against `post-text`, which has had the
+# edge for far longer). The real wasm consumer forwards `js` down the chain; a
+# bare per-crate wasm32 check is not the signal it looks like.
+scan = ["dep:serde_json", "dep:fauna-core"]
+# SRS (Sender Rewriting Scheme) envelope encode/decode for mail forwarding
+# (docs/goal/behavior/mail-forwarding.md § SRS). Pure HMAC-SHA-256 + a tiny
+# fixed-width base32 helper — no tokio/dns/parser, so it is WASM-safe: a client
+# SPA can enable `["srs"]` to validate/parse a forward envelope with the same
+# code the nest forward-dispatch path uses (priority #2). Light enough to keep
+# in `default` (like `aliases`) so nest gets it without opting in.
+srs = ["dep:hmac", "dep:sha2"]
+# Shared mailing-list helpers (docs/goal/behavior/mail-mass-mailing.md): the
+# RFC 8058 one-click-unsubscribe token derivation (HMAC-SHA-256 + base64url)
+# and the RFC 2369 + RFC 8058 list-header builder. Pure — no tokio/dns/parser,
+# WASM-safe (sibling of `srs`/`aliases`) — so the nest list-mode submission
+# path derives/verifies tokens + stamps headers over the one impl (priority #2).
+# Light enough to keep in `default` (like `srs`/`aliases`) so the crate's own
+# `cargo test -p fauna-mail` exercises it and it can't silently rot before a
+# consumer lands. hmac+sha2 already via `srs`, base64 via `outbound`; `dep:fauna-core`
+# (default-features = false, same WASM-safe minimal set `post-text`/`icalendar`
+# already pull in) is for the shared `fauna_core::secret::constant_time_eq`
+# token compare — every current consumer of `lists` (this crate's own
+# `default`, and nest's explicit feature list) already enables `post-text`
+# too, so this is not a new edge in practice, only in the feature graph.
+# nest lists features explicitly (not `default`), so the list-mode submission
+# track adds `"lists"` to nest's `fauna-mail` features when it consumes the
+# token/header helpers.
+lists = ["dep:hmac", "dep:sha2", "dep:base64", "dep:fauna-core"]
+# Forward-loop detection helpers (docs/goal/behavior/mail-forwarding.md § Loop
+# detection): the `Received:` hop ceiling + the `X-Fauna-Forwarded-By` header
+# build/parse/self-detection. Pure std, no deps — WASM-safe; shared so nest
+# (suppress decision) and clients (rule preview) agree on the header format.
+# Inbound `Received:` trace-header builder (docs/goal/behavior/smtp-server.md
+# § Architectural rules): the canonical folded `Received:` field + the CR/LF/
+# non-printable sanitizer that defeats header-injection forgery. Pure formatting
+# (chrono for the RFC 5322 §3.3 date; the clock + queue-id randomness are the
+# Go-side I/O half) — shared so the Go MTA bridge prepends the one impl the
+# retired terminator used (priority #2), sibling of `outbound::received_strip`.
+# In `default` so `fauna-ffi`'s default pull exposes it to libs/fauna-mail-go.
+received-header = ["dep:chrono"]
+forward-loop = []
+# The authenticated-sender delivery stamp (`sender_auth` — pure std, WASM-safe):
+# the builder the nest and, over UniFFI, the Go MTA doors stamp with, and the
+# reader every Fauna app runs on an unsealed INBOX record (caldav-server.md
+# § Who may mutate an existing event over the inbound rail → *The mail rail*).
+# In `default` so `fauna-ffi`'s default pull exposes the builder to libs/fauna-mail-go.
+sender-auth = []
+# Forwarding configuration validators (docs/goal/behavior/mail-forwarding.md):
+# the forward-per-hour cap, plus the re-export of the RFC-5321 forward-target
+# check (`validate_forward_target`), which lives in `fauna-protocol::email` so
+# the shared rule-editor encoder can call it. WASM-safe (`fauna-protocol` is
+# pulled `default-features = false`); the nest set-RPC and the app fields
+# validate with the same code (priority #2).
+forward-config = ["dep:fauna-protocol"]
+# Pure per-account alias validators + (later) the RCPT-TO pattern matcher
+# (docs/goal/behavior/mail-aliases.md). No tokio/dns/parser deps, so it is
+# WASM-safe — a client SPA can enable `["tokenizer", "aliases"]` to pre-
+# validate alias patterns in the add-sheet without pulling the heavy
+# auth/spam stack. The nest handlers (default features) consume it for
+# create-time validation; the resolver slice (A2.2) extends this module
+# with the fixed-order matcher.
+# `dep:fauna-core` is here for the resolution-order DEFAULT VALUES, which
+# live once in `fauna_core::mail_aliases` and are re-exported by `aliases`
+# . Same
+# shape as `auth`/`scan` above: fauna-core is pulled `default-features =
+# false` by this crate, so this adds no network set and stays WASM-safe.
+aliases = ["dep:fauna-core"]
+greylist = []
+# Pure deliverability-diagnostic primitives (docs/goal/behavior/
+# mail-deliverability.md § Symptom diagnostics + § Blocklist self-check): the SPF
+# lint (RFC 7208 §4.6.4 lookup-count), DMARC policy-mode parse, MTA-STS/TLSRPT/
+# DKIM record presence + DKIM pubkey match, and the DNSBL query-name builder +
+# listed-result interpreter. PURE std only — no tokio/dns/reqwest — the async I/O
+# (DNS lookups, the gmail STARTTLS probe) is the nest-side orchestrator's job over
+# its `RecordResolver`/`StarttlsProber` seams; these are the shared check logic
+# (priority #2) so a future client/Go-bridge consumer can reuse the identical
+# verdicts. In nest's explicit feature list (nest doesn't pull `default`).
+deliverability = ["dns-records"]
+# Pure fresh-IP outbound warm-up schedule (docs/goal/behavior/mail-
+# deliverability.md § Fresh-IP warm-up → § The ramp): the day→max-mails cap
+# curve (`warmup::max_for_day`). PURE std only — no clock/DB/I/O — so it is
+# WASM-safe; the day-counter state + submission-time enforcement + queue-tomorrow
+# deferral are nest-side. Sibling of `deliverability` (priority #2): a future
+# client warmup-status preview or the Go MTA bridge reuses the identical curve.
+# In nest's explicit feature list (nest doesn't pull `default`).
+warmup = []
+# Pure mail-health fold for the admin readout (docs/goal/behavior/mail-
+# deliverability.md § The mail health readout): the worst-wins state over nest
+# facts, the seven check rows, the stall predicate, the DNSBL de-listing URLs.
+# PURE std (+ the warm-up curve's constants) — WASM-safe; the nest gathers the
+# inputs and calls it (`fauna.bridges.mail_health`). In nest's explicit list.
+health = ["warmup"]
+parser = ["dep:mail-parser"]
+# `dep:fauna-core` is here for the verdict TYPES, which live once in
+# `fauna_core::mail_auth` and are re-exported by `auth`. fauna-core is
+# pulled `default-features = false` by this crate, so this adds no network set
+# and stays WASM-safe; `auth` itself is native-only anyway (tokio +
+# hickory-resolver).
+auth = ["dep:mail-auth", "dep:hickory-resolver", "dep:tokio", "dep:fauna-core"]
+# The pure, WASM-safe per-user spam classifier: the n-gram Naive-Bayes scorer +
+# the confidence-weighting formula + the deterministic version-tagged serde_json
+# codec (`spam/classifier.rs`, `SpamModel::{score,train_*,to_bytes,from_bytes}` +
+# `weighted_bayesian_milli`), plus the auth-free disposition primitives
+# (`SpamDisposition`, `SpamPolicy`, `combined_spam_score_milli`). The pure model
+# core (`SpamModel` + n-gram extraction) lives in the mail-independent
+# `fauna-text-model` crate (via `tokenizer`) and is re-exported at the original
+# paths. Pulls ONLY `tokenizer` (→ fauna-text-model, itself WASM-safe) +
+# `serde_json` — NO auth/tokio/hickory — so the classifier compiles
+# to wasm32 (the web app's on-device scoring) and the UniFFI app/MDA-Go
+# surface, realizing "one shared scorer, every position" (`mail-spam.md`
+# § Scoring placement). serde_json over a sorted-key `BTreeMap` is deterministic
+# and forward-compatible (unknown fields ignored); no CBOR/postcard codec exists
+# in the workspace. The auth-pulling disposition seam (`decide_spam_disposition`,
+# which consumes `crate::auth::{AuthVerdicts, DmarcPolicy, DmarcVerdict}`) stays
+# under `spam` below.
+spam-classifier = ["tokenizer", "dep:serde_json"]
+# Full spam surface = the WASM-safe `spam-classifier` PLUS the auth-dependent
+# disposition decision (`decide_spam_disposition`). `auth` already pulls
+# mail-auth/hickory/tokio (native-only), so `spam` is native-only by construction;
+# nest + the Go MTA enable it for the perimeter disposition decision.
+spam = ["spam-classifier", "auth"]
+kind-registry = ["dep:fauna-protocol"]
+post-text = ["dep:fauna-core"]
+# iCalendar parsing + RRULE expansion for the CalDAV MDA in
+# bins/fauna-bridges/. NOT WASM-safe — the WASM consumer
+# (fauna-wasm-content-index) sets `default-features = false,
+# features = ["tokenizer"]` and never pulls these crates.
+# Also pulls fauna-core so the UniFFI `generate_ical` writer export
+# (icalendar.rs) can call the single-sourced `fauna_core::ical::generate_ical`.
+icalendar = ["dep:icalendar", "dep:rrule", "dep:chrono", "dep:fauna-core"]
+# Server-side `calendar-auto-schedule` gateway — the mailbox-less leg's sealed
+# WS-RPC delivery builder (`scheduling.rs`, `mailfauna.BuildSchedulingDelivery`)
+# per docs/goal/behavior/caldav-server.md § Server-side auto-schedule. Pulls
+# `fauna-mls` (default-features = false → the in-memory MLS engine, no rusqlite)
+# so the Go MDA seals the one-off scheduling welcome+message ITSELF (end-to-end
+# encrypted from the nest) with an ephemeral identity. NOT WASM (the gateway is
+# native/MDA-only); no wasm consumer enables it. Opt-in — the Go-binding build
+# (`fauna-ffi`) enables it so it reaches `libs/fauna-mail-go`.
+caldav-schedule = ["icalendar", "dep:fauna-mls"]
+# Outbound delivery policy: retry schedule, permanent-failure classifier,
+# RFC 3464 DSN builder, NDR rate-limit, backscatter suppression, MX +
+# Happy Eyeballs, TLSRPT aggregator, DKIM signing (Phase D). Implements
+# docs/goal/behavior/smtp-server.md § Outbound delivery. `mail-auth` +
+# `rustls-pki-types` arrive for the DKIM signing primitive; they were
+# already in the dep graph via the `auth` / `spam` features but were not
+# enabled by `outbound` alone.
+outbound = ["dep:rand", "dep:async-trait", "dep:tokio", "dep:anyhow", "dep:serde_json", "dep:flate2", "dep:base64", "dep:mail-auth", "dep:rustls-pki-types", "dep:sha2", "dep:x509-parser", "dep:fauna-core", "dep:rsa", "dep:rustls-webpki"]
+# Live MTA-STS policy fetcher (`outbound::mta_sts::LiveMtaStsFetcher`): the
+# native-only DNS (`hickory-resolver`) + HTTPS (`reqwest`) implementation of
+# the `MtaStsFetcher` trait, lifted from the retired `fauna-bridge-smtp`
+# so the production outbound path (Go bridge → nest) can do MTA-STS without
+# coupling to that retired crate. NOT WASM/FFI-safe — pulls `reqwest` +
+# `hickory-resolver` which don't cross-compile to wasm32 and must not enter
+# the client FFI surface. Opt-in only (never in `default`): the wasm consumer
+# sets `default-features = false`, and the FFI client build (`fauna-ffi`)
+# only needs the pure `mta_sts::mx_patterns_match` matcher, which is always
+# available in the base `mta_sts` module.
+# Adds `hickory-resolver/dnssec-ring` (over the base `outbound-net` DNS/HTTPS
+# deps) for the DANE/TLSA resolver (`outbound::dane::lookup_tlsa`): RFC 7672
+# §2.2.1 mandates DNSSEC validation (`ResolverOpts.validate = true` +
+# `Proof::Secure` filtering) for DANE to be trustworthy. Scoped to this
+# feature so `auth`/`spam` (which also pull hickory-resolver) don't drag in
+# `ring` via DNSSEC.
+outbound-net = ["outbound", "dep:reqwest", "dep:hickory-resolver", "hickory-resolver/dnssec-ring", "dep:tracing"]
+# The pure mail segment-record codec (`segments::{envelope,floor,paths}`) — the
+# canonical-dag-cbor `MailRecordEnvelope`/`MailFloorMetadata` framing + bucket
+# helper — with NO `fauna-segment-store`/`blake3` (those back the nest-only
+# `SegmentManager` coordination in `segments::{ops,placement}`, gated by
+# `nest-segments`). Pulls only `fauna-cbor`, so it is WASM-safe: a client can
+# decode the OUTER `sealed_envelope` the `fauna.email.inbox.fetch` feed ships
+# without the nest stack. Mirrors `fauna_mls::segments` (the conv rail's
+# client-reachable codec, which likewise has no `fauna-segment-store` dep).
+# `nest-segments` implies it so nest gets the full surface unchanged.
+segments-codec = ["dep:fauna-cbor"]
+nest-segments = ["segments-codec", "dep:fauna-segment-store", "dep:blake3", "dep:fauna-core"]
+# Client-side inbound-mail decrypt (`segments::receive::open_inbound_record`):
+# decode the OUTER segment-record envelope → unseal `.encrypted_body` (the INNER
+# `fauna_mls::wrapped_blob::MailRecordEnvelope` HPKE seal) under the recipient's
+# MSEK-derived x25519 secret → plaintext RFC 5322. ONE shared decrypt impl for
+# every receive-capable client (priority #2), symmetric to the outbound seal.
+# Adds `fauna-mls` (default-features = false → just `wrapped_blob`, no rusqlite;
+# WASM-safe). Opt-in only — the wasm content-index consumer never enables it.
+segments-receive = ["segments-codec", "dep:fauna-mls"]
+# Multi-domain mail-hosting helpers per docs/goal/behavior/mail-multidomain.md:
+# the outbound DKIM d= selection (`outbound::dkim::select_signing_domain`), the
+# MTA-STS policy-file assembler + version-hash (`outbound::mta_sts::
+# assemble_policy_body` / `compute_policy_version_hash`), and the per-domain
+# DNS-record body builders (`dns::per_domain::build_*_record`). Implies
+# `outbound` because the d=-selection + MTA-STS-hash helpers reuse the existing
+# `SigningAlg`/`sign()` + `MtaStsMode`/`MtaStsPolicy` types rather than
+# re-declaring them. The *pure* per-domain + host DNS-record builders live under
+# `dns-records` (below) so the WASM onboarding provisioner can share them without
+# the tokio/reqwest stack; `multidomain` implies it for the full nest surface.
+# `role-overrides` (below) carries the pure per-domain role-address map parser,
+# which `multidomain` implies so the nest writer + resolver get it unchanged.
+multidomain = ["dns-records", "outbound", "role-overrides", "domain-rename", "dep:sha2", "dep:hex"]
+# Pure primary-domain-rename state vocabulary (`domain_rename::RenameState` +
+# grace-window bounds + Let's Encrypt SAN cap + `tls_posture_rank`) per
+# docs/goal/behavior/mail-primary-domain-rename.md. serde only — no
+# tokio/dns/outbound — so it is WASM-safe: the `admin-dns` rename *client
+# view-model* (libs/fauna-client-mail-settings) interprets the same `state`
+# strings the nest storage/RPC layer writes, so both agree on one vocabulary
+# (priority #2). Split out of `multidomain` (which pulls the tokio/outbound
+# stack) so the client can opt in with `default-features = false` without
+# dragging in non-WASM deps — exactly mirroring `role-overrides` below.
+domain-rename = []
+# Pure per-domain role-address override map parse/merge/resolve
+# (`aliases::role_overrides::RoleAddressOverrides`) per docs/goal/behavior/
+# mail-multidomain.md § Per-domain role-address routing. serde_json + hex only —
+# no tokio/dns/outbound — so it is WASM-safe: the `admin-dns` role-address
+# *client picker* (libs/fauna-client-mail-settings) reads the same map the nest
+# writer (`fauna.bridges.set_role_address`) and RCPT-time resolver use, so all
+# three agree on one encoding (priority #2). Split out of `multidomain` (which
+# pulls the tokio/outbound stack) so the client can opt in with
+# `default-features = false` without dragging in non-WASM deps.
+role-overrides = ["dep:serde_json", "dep:hex", "dep:fauna-protocol"]
+# Pure per-domain + nest-host DNS-record body builders (`dns::per_domain` +
+# `dns::host` + `dns::verify` comparators) per docs/goal/behavior/
+# mail-multidomain.md § Per-domain DNS records + dns-management.md § Records
+# covered. PURE std only — no tokio/dns/reqwest — so the WASM onboarding
+# provisioner (libs/fauna-provisioning) builds the identical matrix the nest's
+# `fauna.dns.list_records` renders (dns-management.md § byte-for-byte). The
+# `multidomain`-only extras (`build_dkim_txt_record` w/ `SigningAlg`,
+# `build_mta_sts_txt_record` w/ the version hash, the full `build_domain_dns_records`
+# aggregator — all reusing `multidomain`-gated `outbound` helpers) are
+# `#[cfg(feature = "multidomain")]`-gated inside `per_domain.rs`. In `default` so
+# nest + fauna-ffi get the pure builders without opting in.
+dns-records = []
+
+[dependencies]
+unicode-normalization = { workspace = true }
+unicode-segmentation = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_bytes = "0.11"
+thiserror = { workspace = true }
+mail-parser = { workspace = true, optional = true }
+imap-proto = { workspace = true, optional = true }
+nom = { workspace = true, optional = true }
+mail-auth = { workspace = true, optional = true }
+hickory-resolver = { workspace = true, optional = true }
+# `default-features = false` drops fauna-core's `network` default set (redb +
+# tokio + tokio-stream + hickory-resolver), none of which cross-compile to
+# wasm32. Every fauna-core module this crate touches — `ical`, `data`,
+# `identity`, `transport`, `scoring`, and `file_download` (the `BlobFetcher`
+# seam `body-ref-resolve` reaches for) — is deliberately kept *outside* that
+# gate by fauna-core itself, whose `scoring` comment names this exact hazard:
+# pure logic must be reachable "not only when some workspace sibling happens to
+# enable `network` via feature unification". Without this, `body-ref-resolve`
+# would drag the whole network set into the web build the moment `fauna-wasm`
+# enabled it. Native consumers are unaffected: nest and the client crates depend
+# on fauna-core directly with its defaults, and cargo unions features across the
+# graph, so `network` is still on wherever it was.
+# A direct path dep (not `workspace = true`) is required to set
+# default-features = false — same pattern as fauna-protocol below.
+fauna-core = { path = "../fauna-core", optional = true, default-features = false }
+# `default-features = false` drops fauna-protocol's `p2p` default, which pulls
+# `fauna-wireguard` → tokio `net` → `mio`, none of which cross-compile to
+# wasm32. The `imap-client` feature is the first fauna-mail surface to need
+# fauna-protocol *in the browser* (for `ImportMessageItem`), and with defaults
+# on it cannot build there at all. Native consumers are unaffected: nest and
+# the client crates depend on fauna-protocol directly with its defaults, and
+# cargo unions features across the graph, so `p2p` is still on wherever it was.
+# A direct path dep (not `workspace = true`) is required to set
+# default-features = false — same pattern as the fauna-mls dep below.
+fauna-protocol = { path = "../fauna-protocol", optional = true, default-features = false }
+# The pure n-gram NB model core + positional tokenizer (WASM-safe, uniffi-free),
+# re-exported at this crate's historical `tokenizer::`/`spam::classifier::`
+# paths. Enabled by the `tokenizer` feature (and thus `spam-classifier`/`spam`).
+fauna-text-model = { workspace = true, optional = true }
+fauna-segment-store = { workspace = true, optional = true }
+fauna-cbor = { workspace = true, optional = true }
+# `segments-receive` only: the inner HPKE unseal (`wrapped_blob`). default-features
+# = false drops fauna-mls's `native` (rusqlite) so the codec stays WASM-safe. A
+# direct path dep (not `workspace = true`) is required to set default-features =
+# false — same pattern fauna-mls uses for its own fauna-core dep.
+fauna-mls = { path = "../fauna-mls", optional = true, default-features = false }
+blake3 = { workspace = true, optional = true }
+chacha20poly1305 = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+async-trait = { version = "0.1", optional = true }
+anyhow = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+# `mail-export` only: the export archive's two layers. `zip` is taken
+# `default-features = false` — the container's entries are all `Stored`
+# (`mail-export.md` § Container shape), so the crate's deflate/bzip2/aes
+# features would only add unreachable code to a wasm bundle the web app ships.
+zip = { workspace = true, optional = true, default-features = false }
+zstd = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, optional = true }
+rustls-webpki = { workspace = true, optional = true }
+# `imap-client-native` only (never wasm): the source-side TLS stack.
+rustls = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+# (no `webpki-roots`: the bundled root store comes from `fauna-tls-bootstrap`
+# below, which owns the shared rustls preamble — 2026-08-30.)
+# `tls-test-fixtures` only: mints the self-signed cert the real-TLS test rigs
+# terminate. A REGULAR (non-dev) optional dep — unlike the dev-dependencies
+# below, it must be reachable from an external crate's own integration test
+# (`bins/fauna-nest/tests/conformance_mail_import_client.rs`), and dev-deps
+# are invisible outside this crate's own test/bench/example targets.
+rcgen = { version = "0.14", optional = true }
+# Process-default rustls CryptoProvider install — shared with
+# `fauna-ws-substrate`'s WS dial rather than hand-rolling the same `Once`
+# guard here (found duplicated by the dev-fleet near-duplicate-function
+# scanner's cross-crate pass).
+fauna-tls-bootstrap = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+x509-parser = { workspace = true, optional = true }
+# `outbound` only: the RFC 8301 RSA DKIM modulus-size floor at the sign site
+# (`dkim::sign`'s `RsaSha256` arm). `pem` on top of the workspace default
+# (`sha2`) so the crate's own tests can mint a PKCS#8 PEM test key the same
+# way `fauna-provisioning::dkim::generate_rsa_2048` does.
+rsa = { workspace = true, features = ["pem"], optional = true }
+tracing = { workspace = true, optional = true }
+icalendar = { workspace = true, optional = true }
+rrule = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+uniffi = { workspace = true, optional = true, features = ["tokio"] }
+# `#[fauna_uniffi_async::export]` runs each async export on a tokio runtime
+# worker, off the foreign executor's small poll stack
+# (`docs/goal/architecture/apps/native-async-execution.md` § The rule).
+fauna-uniffi-async = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+# `body-ref`'s resolve tests stand up a fake `BlobFetcher`. Only *implementing*
+# the trait needs the macro (calling it does not), and only the test does that
+# here — so this is a dev-dep rather than part of the `body-ref-resolve` feature.
+async-trait = "0.1"
+hex = { workspace = true }
+# Cross-surface contract test (writer ⇄ MDA parser): the canonical shared
+# iCalendar *writer* is `fauna_core::ical::generate_ical` (WASM-safe; see
+# caldav-server.md § Where logic lives). This dev-dep lets the crate-backed
+# parser here assert it accepts that writer's output.
+# `test-helpers` additionally exposes `authoritative_dns::spawn_responder`, the
+# shared in-process DNS responder `tests/auth_tests.rs` points `verify_inbound_with`
+# at, so the auth pipeline's test never reaches a real resolver (convention 14).
+fauna-core = { workspace = true, features = ["test-helpers"] }
+
+# `transport_limits::DEFAULT_MAX_MESSAGE_BYTES` duplicates
+# `fauna_protocol::SpamPolicyThresholds::default().max_message_bytes` on
+# purpose (that module is unconditional/no-feature-gate, so it cannot take a
+# prod dep without pulling fauna-protocol into every build including wasm32);
+# this dev-dep lets a unit test pin the two values against drift instead.
+fauna-protocol = { workspace = true }
+
+# `imap_client::send`'s tests exercise `MailImportClient` over the shared
+# mock `RpcRequester` doubles, rather than hand-rolling another one (priority
+# #2 — same doubles every other `RpcRequester`-seam crate's tests use).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+
+# `outbound::dane`'s DANE-TA tests need a REAL CA→leaf signature to have
+# anything to validate: the attacker case is "self-signed leaf plus a
+# verbatim copy of the genuine anchor", which is indistinguishable from the
+# honest case unless the honest chain is genuinely signed. A dev-dep rather
+# than joining `tls-test-fixtures` (which mints self-signed certs for the
+# IMAP transport's TLS server) because no external crate needs these.
+rcgen = { version = "0.14" }
+
+# `tests/imap_client_native.rs` imports the opt-in `imap-client(-native)` gated
+# modules, plus `tls-test-fixtures`'s shared `TestCert`/`mint_cert`/
+# `tls_acceptor`; without this declaration a plain `cargo test -p fauna-mail`
+# (default features) tries to compile the target anyway and fails E0432 — the
+# target must be skipped, not built, when the features are off.
+[[test]]
+name = "imap_client_native"
+required-features = ["imap-client-native", "tls-test-fixtures"]
+
+# `tests/imap_client_trust_seed.rs` — the e2e source-trust seed's own target,
+# and therefore its own PROCESS: it sets `FAUNA_E2E_IMAP_EXTRA_CA_PEM`, which
+# `NativeImapConnector::new` reads from the process environment, so sharing a
+# binary with `imap_client_native.rs` would silently defeat that file's
+# "an unverifiable source cert is refused" assertion. Also uses
+# `tls-test-fixtures`'s shared `TestCert`/`mint_cert`/`tls_acceptor`.
+[[test]]
+name = "imap_client_trust_seed"
+required-features = ["imap-client-native", "tls-test-fixtures"]

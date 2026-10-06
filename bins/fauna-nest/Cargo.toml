@@ -1,0 +1,757 @@
+[package]
+name = "fauna-nest"
+description = "The nest server for Fauna — open-source software for social communication"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+# The one derivation of `FAUNA_BUILD_COMMIT` (`src/build_identity.rs` reads it;
+# the apps' Status pages stamp theirs the same way — `ui/status.md` § State &
+# data shape, the build leg).
+fauna-build-commit = { path = "../../libs/fauna-build-commit" }
+
+[features]
+# The excised flavor is a COMPLEMENT feature, never a command-line list
+# (`dynamic-features.md` § The cargo feature spine): the store-safe build is
+# `--no-default-features --features store-safe`, and a new NON-member surface is
+# added to `store-safe` once and is in `default` by construction. `store-safe` is
+# empty today because every other nest feature (the three bridges, test-hooks)
+# is already opt-in rather than default — but it exists so the next
+# session to add a default-on nest surface has the one place to put it, instead
+# of silently having it excised by a `--no-default-features` store-safe build.
+default = ["store-safe", "payments", "zaps", "p2p-share"]
+store-safe = []
+# `payments` — the first gated-feature-registry member (`dynamic-features.md`
+# § Charter members). Default-ON here because a binary crate is a **flavor root**
+# (§ The cargo feature spine: default-on at the roots, opt-in in the deep crates):
+# a plain build ships the money plane, and excision is what a FLAVOR asks for.
+# Forwarded from this feature rather than named on the `fauna-protocol` dep line —
+# rule (b) — because a dep line survives `--no-default-features` and would make
+# the escape hatch a silent no-op.
+payments = ["fauna-protocol/payments", "dep:fauna-payments"]
+# `zaps` — a SUBSET member of `payments` (`dynamic-features.md` § Charter members;
+# the Damus precedent: a store may demand the zap button go while other payment
+# surfaces stay). Excising `payments` excises `zaps` by construction; excising
+# `zaps` alone keeps provider-rail payments.
+#
+# It deliberately does NOT imply `nostr`, and `nostr` does not imply it. The zap
+# surfaces live inside the already-`nostr`-gated `src/nostr/` subtree, so the
+# reachable surface is `nostr AND zaps` **structurally, by placement** — no cargo
+# edge and no `cfg(all(...))` needed. A `zaps = ["nostr"]` edge would be worse
+# than redundant: `zaps` is default-ON, so it would silently pull the nostr bridge
+# into the default nest binary, which is the same class of accident as a
+# default-features change reaching a consumer that opted out.
+#
+# It forwards `fauna-protocol/zaps` (landed by W1.5 (account-data-plane.md § Workstreams), the client-side leg) as well
+# as requiring `payments`, so excising it takes the nest's own zap surfaces AND
+# the zap wire types/kind strings with it. Without the forward the handlers would
+# go while `fauna.nostr.zap_signers.*` stayed in the binary — measured: that is
+# exactly what the first run of `nest-store-safe-check` found.
+zaps = ["payments", "fauna-protocol/zaps"]
+# `p2p-share` — the cross-user share plane's registry member. Default-ON because
+# a binary crate is a **flavor root** (`dynamic-features.md` § The cargo feature
+# spine): a plain build ships the plane, and excision is what a FLAVOR asks for.
+#
+# The nest's own half of this plane is the wormability walk's two obligations
+# (`p2p.md` § Cross-user shared-set transfer → *Wormability walk — the share
+# leg*): rule 7's capability token — advertised iff this feature is compiled, so
+# an excised nest omits it and no client binds a share listener against this box
+# — and rule 8's fan-out chokepoint at the share roster write, the structural
+# counterparty bound that holds against a non-conforming client.
+#
+# It forwards `fauna-protocol/p2p-share` rather than naming the feature on the
+# dep line — rule (b) of the spine — because a dep line survives
+# `--no-default-features` and would make the escape hatch a silent no-op, which
+# is exactly what the first store-safe `libfauna_ffi.so` measured.
+p2p-share = ["fauna-protocol/p2p-share"]
+# The ATProto bridge SURFACE — the XRPC/DM/media consume-side. The crate itself
+# is an unconditional dep (see its line in `[dependencies]`, and why); this
+# feature turns on its heavy `client` half, which is what the bridge handlers,
+# the DM poller and the session store need. It no longer *brings in* the crate,
+# so the authorization server's decision modules are in every flavor.
+bluesky = ["fauna-bridge-atproto/client"]
+nostr = ["fauna-bridge-nostr"]
+activitypub = ["fauna-bridge-activitypub"]
+# E2E test-harness routes (`/api/v1/test/*`), never compiled into the
+# production nest binary. The mail-bridge e2e tests need a real nest but
+# nothing from the legacy in-nest SMTP path (removed at the I6 cutover),
+# so `--features test-hooks` alone must build clean.
+# fauna-mls/test-helpers: the raw-inject hook mints
+# SealedRecordBytes::carried_at_rest_unchecked to simulate a pre-Phase-3
+# legacy record through the production ingest path (S6.12b).
+# fauna-bridge-atproto/test-helpers: `build_oauth_client_with_origin_override`,
+# which the `FAUNA_TEST_ATPROTO_FAR_END` seam (`state.rs`) routes a running
+# nest's consume-side Bluesky OAuth client through to the e2e fake far end.
+test-hooks = ["fauna-mls/test-helpers", "fauna-bridge-atproto/test-helpers"]
+# `src/test_support.rs` — in-process test-NEST CONSTRUCTION lent to another
+# crate's tests (`fauna-sync-agent`'s `tier3-nest` harnesses). Deliberately NOT
+# `test-hooks`: that one makes the *running nest* serve the `/api/v1/test/*`
+# automation routes, a runtime surface on the product, and reusing it here would
+# drag 21 route modules plus `fauna-mls/test-helpers` into a harness that wants
+# neither. `test-helpers` is the fleet-wide spelling for "this crate lends its
+# construction helpers to another crate's tests" (63 sites in `libs/`).
+#
+# Never default, and never named on a consumer's dependency line — a consumer
+# forwards it from its own test feature (e2e-automation-surface-gating.md § rule
+# (b)); `fauna-sync-agent`'s `tier3-nest` does. The module's own visibility gate
+# carries the `debug_assertions` arm (rule (a)), so this feature is only needed
+# for a release-profile test build.
+test-helpers = []
+
+[dependencies]
+# `sqlite-schema-meta`: the shared `schema_meta` single-row SQL
+# `db/migrations.rs` delegates to for the two-number at-rest schema-version
+# scheme — not an excisable flavor (nest's SQLite cache DB is unconditional),
+# so named on the dep line rather than forwarded through a nest feature.
+fauna-core = { workspace = true, features = ["sqlite-schema-meta"] }
+fauna-labeler.workspace = true
+# The region content plane's frame strings (`region.{blocked,collapsed}_notice`)
+# — the nest-as-publisher placeholder uses the SAME words every app renders,
+# so the public web page and the in-app placeholder cannot drift apart.
+fauna-i18n = { path = "../../libs/fauna-i18n" }
+# The `text-model` labeler's pure scorer — the one the subscriber's client runs,
+# run here only as a community room's capability-holder
+# (`docs/goal/architecture/content-scoring.md` § The placement matrix).
+fauna-text-model.workspace = true
+fauna-cbor.workspace = true
+fauna-proxy-protocol.workspace = true
+fauna-conn-limit.workspace = true
+fauna-index.workspace = true
+fauna-mail = { workspace = true, features = ["tokenizer", "post-text", "nest-segments", "outbound", "outbound-net", "multidomain", "routing", "deliverability", "warmup", "health", "lists", "spam", "body-ref", "staged-envelope", "received-header", "sender-auth", "icalendar", "parser", "dedup-key"] }
+fauna-calendar = { workspace = true, features = ["nest-segments"] }
+fauna-contacts = { workspace = true, features = ["nest-segments"] }
+# Neither `payments` nor `zaps` is named here: both are forwarded from this
+# crate's own features (see [features]), per `dynamic-features.md` § The cargo
+# feature spine rule (b). A dep line survives `--no-default-features`, so naming
+# them here would leave every `fauna.payments.*` / `fauna.nostr.zap_signers.*`
+# kind string in a store-safe nest build while both flavors still compiled green
+# — the exact failure W1 measured on `fauna-ffi`.
+#
+# This supersedes the interim dep-line naming W1.5 added: that commit called it
+# "the MINIMUM that keeps this binary compiling" and named row 62 — this change —
+# as the owner of the real nest-side carve.
+fauna-protocol = { workspace = true, features = ["tls-spki"] }
+# The per-set `folders.retention_policy` column's canonical serialization — the
+# 2-field `RetentionPolicy { max_snapshots, max_age_days }` this crate's wizard
+# writes (`backup-restore.md` § 8 RULING, consequence (ii)). The nest's auto-prune
+# parses INTO the shared type rather than declaring a nest-local twin, so the
+# shape has one owner and cannot drift from the writer. Light: `default = []`,
+# `fauna-core` with default-features off.
+fauna-folders-machine = { path = "../../libs/fauna-folders-machine" }
+# Payment-provider adapter seam (monetization.md § Pillar 3): webhook
+# signature verification + the PaymentEntitlement narrow waist. `optional` is
+# load-bearing, not tidiness: an `optional = true` dep is the only kind cargo can
+# actually leave out — a plain dep line under a gated `mod` still compiles the
+# crate into the artifact, so the module gate would hide the API but not the code.
+fauna-payments = { workspace = true, optional = true }
+# The cross-platform serving-port reconcile policy the desktop serve loop
+# (`desktop_serve`) drives — shared with the Windows `fauna-nest-service` SCM
+# shell + the macOS `fauna-nest-daemon` LaunchDaemon (priority #2).
+fauna-nest-supervisor.workspace = true
+# The nest↔supervisor flag-file name contract. The nest is the writer; the two
+# std-only supervisor shells are the readers, and they cannot depend on this
+# crate — hence a zero-dependency leaf crate owning the names for all three.
+fauna-deployment-flags.workspace = true
+# Shared log capture: the nest installs `fauna_log::RingLayer` alongside its fmt
+# subscriber so the in-memory ring backs the admin Logs view (`fauna.admin.logs`,
+# observability.md § Surfaces). Same crate the apps use (priority #2).
+fauna-log = { path = "../../libs/fauna-log" }
+# The shared native WS substrate (adapter + keepalive + reconnect supervisor),
+# parameterised over the auth handshake. Lifted out of `fauna-client` in slice 2;
+# the federation channel is its second consumer (Spec Y2 slice 4 §5). The nest
+# does NOT prod-depend on `fauna-client` (dev-dep only), so this shared crate —
+# not `fauna-client` — is the home both channel ends consume.
+fauna-ws-substrate.workspace = true
+# The shared rustls preamble — `webpki_root_store` for the mail-deliverability
+# STARTTLS probe. Taken directly rather than through `fauna-ws-substrate`, which
+# is a full WS-transport stack and was only ever a pass-through for it.
+fauna-tls-bootstrap.workspace = true
+# The lean one-shot sidecar dialer (connect + `fauna.sidecar.hello` handshake) the
+# `fauna-iroh-relay` binary dials with — one audited copy of the dial+handshake
+# glue, which `sidecar_channel`'s own tests drive against the nest listener.
+fauna-sidecar-client.workspace = true
+# `send_reply_bounded` — the bounded Reply send the federation and sidecar
+# channel listeners share with `PeerChannel`. Also a dev-dep for
+# `conformance_account_runtime.rs`; fauna-peer-channel does not depend on
+# fauna-nest, so no cycle.
+fauna-peer-channel.workspace = true
+# The anonymous discovery WS-RPC client. The federation channel pool resolves a
+# peer's `nest_id` from its base URL via the `fauna.nest.info`
+# kind over a short-lived anonymous connection (Spec Y2 slice 4 §4.D / §6 —
+# `dial()` requires the expected peer `nest_id` up front). Promoted from dev-dep
+# to prod-dep here; all of fauna-anon-client's transitive deps (tokio-tungstenite,
+# rustls, fauna-core/protocol/provisioning, ed25519-dalek) are already nest
+# prod-deps, so this adds no new transitive weight. No cycle: fauna-anon-client
+# does not depend on fauna-nest.
+fauna-anon-client = { path = "../../libs/fauna-anon-client" }
+fauna-segment-store.workspace = true
+# The cross-location segment-backup coordinator and its `SegmentSource` seam. The
+# 2026-07-23 redesign moved segment backup of the nest-originated message kinds
+# nest-side (design tracked internally; the owner doc is
+# `docs/goal/architecture/message-segment-store.md` § Cross-location backup
+# protocol), so the nest hosts `BackupCoordinator` in-process and supplies the
+# local source arm (`segments::backup_source`) — a production dep, not a test
+# one. Promoted
+# from dev-dep here; every heavy leaf of its tree (notify, fauna-media/image,
+# fastcdc, walkdir, zstd, reqwest) is already a nest prod-dep, so the added weight
+# is the workspace client crates the coordinator's destination arm needs anyway.
+# No cycle: fauna-sync-engine does not depend on fauna-nest.
+fauna-sync-engine = { path = "../../libs/fauna-sync-engine" }
+# The destination arm of that coordinator (`segment_backup`): it points a
+# `SyncEngine` byte plane at each destination nest under a federation-minted
+# bulk-write token, which means naming `fauna_client::AuthClient` (the
+# `bearer_only` constructor — the nest holds the owner's PUBLIC actor id and no
+# secret) and `fauna_nest_http::BearerSource`. Both were dev-deps until slice 3's
+# source side; neither depends on fauna-nest, so no cycle, and both were already
+# in the build graph through fauna-sync-engine — this only makes the use direct.
+fauna-client = { path = "../../libs/fauna-client" }
+fauna-nest-http = { path = "../../libs/fauna-nest-http" }
+# The custody-hosting pump's per-owner custodied stores (the custodian-nest
+# runtime, stage b): the pump opens a keyless `AccountStore` per hosted owner
+# and drives the shared custody pull core over it. Was a dev-dep (the class-2
+# conformance suites); already in the build graph through fauna-sync-engine —
+# this only makes the store/backend/types modules reachable from prod code.
+fauna-account-store.workspace = true
+# The CARv2 record cap the segment write path must refuse to exceed — a record over
+# it is refused on READ, so writing one stores mail that can never be read back
+# (`segments::mail::append_record`; smtp-server.md § Message size limits).
+fauna-carv2.workspace = true
+fauna-update.workspace = true
+fauna-mls.workspace = true
+# The nest-hosted WASM plugin sandbox (`third-party.md` § Execution forms →
+# WASM components): the runner (`plugin_runner`) drives it, the install leg
+# compiles a fetched module with it.
+fauna-plugin-host.workspace = true
+# The web-serve component's capability-holder registry (web paywall, Pillar 2):
+# the shared transient/authoritative grant-refresh contract over a direct
+# `capability_grants` fetch (`web_content::holder`).
+fauna-capability-holder.workspace = true
+fauna-provisioning = { path = "../../libs/fauna-provisioning", features = ["atproto-seal", "oauth-issuer"]}
+fauna-media = { workspace = true, features = ["process_media", "c2pa-detect"] }
+arc-swap.workspace = true
+# The OS interface table behind `acme::attached_interface_addresses` — the IP
+# bridge cert's derived enable needs to know which global-unicast addresses are
+# attached to this box itself (`tls-certificates.md` § B-IP). Same workspace pin
+# `fauna-peer-sync` already reads its LAN candidates through.
+if-addrs = { workspace = true }
+notify.workspace = true
+# UNCONDITIONAL, and `default-features = false` — the same edge `fauna-ffi`
+# already takes (`libs/fauna-ffi/Cargo.toml`). The crate's always-on core is the
+# authorization server's decision layer (`dpop`, `client_assertion`, `oauth_par`,
+# `oauth_metadata`, `permission_set`, `fetch_guard`), and
+# `behavior/authorization-server.md` § Goal rules the issuer is up whenever the
+# nest is up, "independent of every optional bridge" — so the modules it decides
+# with may not sit behind an optional-bridge feature. The heavy consume-side
+# (atrium, the XRPC client, the DM poller) stays behind `client`, which the
+# `bluesky` feature below turns on; a store-safe build gains only the pure core,
+# whose whole dep set (fauna-core minus `network`, hex, base64, the dag-cbor
+# decoder) the nest already carries.
+#
+# Path dep rather than `workspace = true`: the workspace entry carries the
+# crate's default features, and cargo refuses `default-features = false` on an
+# inheriting member. Same reason `fauna-ffi` and this manifest's own
+# `[dev-dependencies]` line spell the path out.
+fauna-bridge-atproto = { path = "../../libs/fauna-bridge-atproto", default-features = false }
+fauna-bridge-nostr = { workspace = true, optional = true }
+fauna-bridge-activitypub = { workspace = true, optional = true }
+x25519-dalek.workspace = true
+rand.workspace = true
+lru.workspace = true
+dashmap.workspace = true
+async-trait = "0.1"
+# Public-recursive DNS self-verification (`fauna.dns.verify_records` +
+# web_content domain check) — see src/dns_verifier.rs. Default features pull the
+# tokio runtime; no DNSSEC needed for the verify surface.
+hickory-resolver = { workspace = true }
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+blake3.workspace = true
+# Sealing the nest's own opaque pagination cursors under a deployment-key subkey
+# (`cursor_seal`) — nest-minted, nest-consumed, so it stays out of fauna-core.
+chacha20poly1305.workspace = true
+ed25519-dalek.workspace = true
+axum = { workspace = true, features = ["multipart"] }
+hyper-util.workspace = true
+tower-http.workspace = true
+tower-layer.workspace = true
+tower-service.workspace = true
+rusqlite.workspace = true
+uuid.workspace = true
+futures-util.workspace = true
+thiserror.workspace = true
+argon2.workspace = true
+getrandom.workspace = true
+mail-parser.workspace = true
+instant-acme.workspace = true
+fauna-acme-http01 = { path = "../../libs/fauna-acme-http01" }
+rustls.workspace = true
+tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
+aws-sdk-s3 = { workspace = true, default-features = false, features = ["rt-tokio", "sigv4a"] }
+# The nest supplies the SDK's HTTP client itself rather than taking either of
+# `aws-sdk-s3`'s TLS features — rationale in the workspace manifest.
+aws-smithy-http-client.workspace = true
+toml.workspace = true
+clap.workspace = true
+# RFC 3339 parsing for the domain-expiry watch's RDAP `expiration` event
+# (`domain_expiry.rs`). Already in the nest's artifact transitively via
+# `fauna-mail`/`fauna-bridge-atproto`, so this line adds visibility, not code.
+chrono.workspace = true
+reqwest = { workspace = true, features = ["http2"] }
+url.workspace = true
+urlencoding.workspace = true
+# OpenGraph/`<meta>` extraction for the D4 link-preview resolver
+# (`src/link_preview/parse.rs`). `scraper` pulls its own `html5ever` (a second
+# copy beside htmd's) — accepted: this parses attacker-controlled third-party
+# HTML, where a full browser-grade tree-builder is correct and a hand-rolled
+# tokenizer scan is exactly where subtle bugs land. `scraper` is mainstream +
+# audited, so the supply-chain cost is small next to that correctness win.
+scraper = "0.27"
+governor.workspace = true
+base64.workspace = true
+zip.workspace = true
+zstd.workspace = true
+tar.workspace = true
+sha2.workspace = true
+# The DPoP nonce is a MAC over its window rather than a stored random token
+# (`oauth_as_state`), so the authorization server needs HMAC directly. Already
+# in the nest's artifact transitively via `fauna-payments` (a default feature),
+# so this line adds visibility, not code — the `chrono` pattern above.
+hmac.workspace = true
+p256.workspace = true
+p384.workspace = true
+hkdf.workspace = true
+aes-gcm.workspace = true
+bytes.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+handlebars = "6"
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+mime_guess = "2"
+rcgen = "0.13"
+x509-parser = "0.16"
+serde_bytes = "0.11"
+zeroize.workspace = true
+
+# statvfs for the blob-store free-space disk guard (DiskBlobStore::available_bytes).
+# Unix-only: rustix::fs (and statvfs) is `#[cfg(not(windows))]`, and the guard
+# protects the Linux deploy target — a Windows nest only runs in the tier_3 e2e
+# suite and fails-open. The non-Unix branch needs no rustix.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
+[dev-dependencies]
+# `fauna_nest::test_support` — this crate lending its own integration tests the
+# in-process test-nest builders it also lends `fauna-sync-agent`. The module's
+# gate carries a `debug_assertions` arm, so a plain `cargo test -p fauna-nest`
+# would compile without this line; the self dev-dependency is what keeps a
+# **release-profile** test run (`cargo test --release`) compiling, since
+# `debug_assertions` is off there and `cfg(test)` is *not* set on the
+# crate-under-test when an integration test links it. Established shape — 13
+# `libs/` crates do exactly this (`fauna-onboarding-machine`,
+# `fauna-client-mail-settings`, `fauna-client-dns`, …); the production lib and
+# binary builds stay feature-clean.
+fauna-nest = { path = ".", features = ["test-helpers"] }
+# `fauna_protocol::test_transport::{MpscTransport, make_pair}` — the shared
+# in-memory dispatcher test double this crate's own test modules once
+# hand-rolled independently (`sidecar_channel`,
+# `federation_channel`). Same re-declaration pattern as the entries below:
+# reaches a test build without ever reaching the shipped binary.
+fauna-protocol = { workspace = true, features = ["test-helpers"] }
+fauna-acme-http01 = { path = "../../libs/fauna-acme-http01", features = ["test-helpers"] }
+# `nip17::wrap_dm_with_rumor_recipient` — the adversarial gift-wrap constructor
+# the inbound bridge-DM gate's pins need, so a test can forge the rumor `p` tag
+# a hostile sender picks. The re-declaration is how the feature reaches a test
+# build without ever reaching the shipped binary (the fauna-acme-http01 pattern
+# above); it is inert unless the `nostr` feature also brings the crate in.
+fauna-bridge-nostr = { path = "../../libs/fauna-bridge-nostr", features = ["test-helpers"] }
+# `test_support`'s dag-cbor + CID fixture helpers (the same pairing
+# fauna-bridge-atproto's own record_refs/reverse_translate fixtures use).
+# default-features = false keeps the heavy `client` feature (atrium-api,
+# reqwest, tokio, dashmap, …) out of every fauna-nest test build that doesn't
+# separately request it via `--features bluesky`.
+fauna-bridge-atproto = { path = "../../libs/fauna-bridge-atproto", default-features = false, features = ["test-helpers"] }
+tokio = { workspace = true, features = ["test-util"] }
+tokio-tungstenite.workspace = true
+# `conformance_account_state_walk` drives two REAL account-store replicas
+# against the nest's own class-2 feed handlers, which is the only place the
+# W2.4 client walk and the W2.3 nest side meet in one process. (The store
+# crate itself moved to [dependencies] with the custody-hosting pump.)
+# The F2 round-trip tests build `app.bsky.feed.post` records through the same
+# dag-cbor encoder the Go bridge uses (indigo's `JSONRecordToDagCBOR`), so the
+# fixtures exercise the real byte shape rather than a Rust struct literal.
+serde_ipld_dagcbor.workspace = true
+# The F2.4 media fixtures additionally carry dag-json CID links (`{"/": …}`),
+# which must land as tag-42 links — same pairing fauna-bridge-atproto's own
+# fixtures use.
+ipld-core = { version = "0.4", features = ["serde"] }
+# `auth-ceremony`: onboarding_ws_rpc_roundtrip.rs drives the nest-binding read
+# (`nest_trust::read_login_binding`) against the real nest_handshake handler.
+fauna-client-core = { path = "../../libs/fauna-client-core", features = ["auth-ceremony"] }
+# conformance_path_sealing.rs drives the SHARED snapshot read client
+# (`SnapshotsClient` — the one every app's snapshot browse routes through) over
+# an in-process requester bound to the real handlers, so the sealed-first render
+# is proven against the actual `fauna.filesync.snapshot.{get,diff}` replies
+# rather than a hand-built reply literal. Dev-dep only; the crate does not
+# depend on fauna-nest, so no cycle.
+fauna-client-snapshots = { path = "../../libs/fauna-client-snapshots" }
+# (fauna-anon-client is now a prod-dep — see above — so its test consumers
+# `anonymous_client_roundtrip.rs` / `onboarding_ws_rpc_roundtrip.rs` use it from
+# there; no separate dev-dep entry needed.)
+# onboarding_ws_rpc_roundtrip.rs drives the shared `WsRpcNestApi` (the onboarding
+# machine's WS-RPC nest surface) over the native anonymous connector against an
+# in-process nest. Dev-dep only; fauna-onboarding-machine does not depend on
+# fauna-nest, so no cycle.
+fauna-onboarding-machine = { path = "../../libs/fauna-onboarding-machine", features = ["test-observer"] }
+# launch_machine_auth_roundtrip.rs drives `LaunchMachine` (its production
+# `WsAuthConnector`) through the silent-challenge + handshake-refresh flow over
+# the real anonymous WS-RPC connection against an in-process nest. test-helpers
+# gives InMemoryPersistence. Dev-dep only; fauna-launch-machine does not depend
+# on fauna-nest, so no cycle.
+fauna-launch-machine = { path = "../../libs/fauna-launch-machine", features = ["test-helpers"] }
+# conformance_actor_by_handle_client.rs connects an AUTHENTICATED `NestClient`
+# over a real socket to an in-process nest and drives the conversations
+# address-resolution adapter (`FaunaMlsBackend::resolve_address` →
+# `NestConversationsRpc` → `fauna.actor.by_handle` + `keypackage.count`)
+# end-to-end — the first real-wire test of the conversations client surface
+# (tier_1's MockNest can't catch the cross-binary request/reply mapping). These
+# four are client/shared crates that do not depend on fauna-nest, so no cycle.
+# (`fauna-client` itself is now a prod dep — see the segment-backup destination
+# arm note in [dependencies]; a [dependencies] entry is visible to tests too.)
+# fauna-client-config is a dev-dep only; it does not depend on fauna-nest, so
+# no cycle. `test-helpers`
+# brings the succession-ledger double (`FakeSuccessionLedgerStore`) the grant
+# conformance tests record their client-side grant log through, and the
+# mail-custody double (`FakeMailStore`, `fauna.state.mail`) the mail-keyed ones seed.
+fauna-client-config = { path = "../../libs/fauna-client-config", features = ["test-helpers"] }
+# fauna-core/test-helpers unlocks `data::fixture_tier_period_keys()` for the
+# cross-device config-merge conformance test above — the shared
+# `TierPeriodKeys` test-fixture builder, round 92 lift (mirrors
+# fauna-client-dns's own dev-dep re-declaration of fauna-core/test-helpers).
+# The [dependencies] entry above stays production-clean; this feature reaches
+# test builds only.
+fauna-core = { path = "../../libs/fauna-core", features = ["test-helpers"] }
+# Test-only feature widening of the prod dep above: the account store seams
+# (`preference-store`) and the W3 lifecycle runtime (`conformance_account_runtime.rs`
+# proves V1/V3 over the real handlers;
+# `account-runtime` implies `preference-store`). Dev-features unify into test builds only; the
+# production binary keeps the prod entry's default features.
+# `test-helpers` unlocks `fauna_sync_engine::test_support::{MockNest, BlobStore}` —
+# the shared wiremock byte-plane double `conformance_shared_folders.rs` had
+# hand-copied (a ninth copy of the same eight-way mirror inside that crate).
+# A **dev**-dependency line, which is what keeps rule (b) satisfied: the
+# production binary's own dependency entry above stays feature-clean, so no
+# release artifact ever carries the double (e2e-automation-surface-gating.md
+# § convention 15). Same shape as the `fauna-protocol`/`fauna-transport`
+# entries below.
+fauna-sync-engine = { path = "../../libs/fauna-sync-engine", features = [
+    "preference-store",
+    "account-runtime",
+    "test-helpers",
+] }
+# conformance_account_plane_bind.rs runs the production linked-nest connector
+# (`native_linked_nest_connector`: a real `NestClient` dialled on the account
+# store thread) against a box served over loopback TLS, to read how deep in
+# that thread's stack the login dial runs. Dev-dep only; the assembly crate
+# does not depend on fauna-nest, so no cycle.
+fauna-client-account-runtime = { path = "../../libs/fauna-client-account-runtime" }
+# conformance_account_runtime.rs mints each replica's writer key through the
+# real T10 slot type on a file backend (never the OS keyring — testing.md
+# § point 10). Dev-dep only; no cycle.
+fauna-credential-store.workspace = true
+# V12 (W5.7 — the peer-leg assembly seam) proves the elected runtime binds the
+# same-account peer listener and that a dialing sibling admits + walks it: the
+# seam double comes from fauna-transport's `testing` module, the dial side
+# rides the real `PeerChannel` (prod-dep above) + admission client. Dev-dep
+# only; fauna-peer-sync does not depend on fauna-nest, so no cycle.
+fauna-transport = { workspace = true, features = ["test-helpers"] }
+fauna-peer-sync.workspace = true
+# conformance_backup_generation_client.rs drives the shared generation-recovery
+# projection (`fauna_client_backup::generations` + the production
+# `impl_backup_nest_seam!` expansion) against a real destination nest, proving
+# the client leg of `message-segment-store.md` § Custody grace window (T) —
+# including that a recovery aimed at the source nest finds nothing, which is the
+# quiet failure the whole plane exists to prevent. Dev-dep only;
+# fauna-client-backup does not depend on fauna-nest, so no cycle.
+fauna-client-backup = { path = "../../libs/fauna-client-backup" }
+# ws_challenge_bearer_roundtrip.rs names the `BearerSource` trait to drive
+# `WsChallengeBearer` directly. (`fauna-nest-http` is now a prod dep too — see
+# the segment-backup destination arm note in [dependencies].)
+fauna-client-conversations = { path = "../../libs/fauna-client-conversations" }
+# conformance_shared_folders.rs wires the REAL gated plane (MlsStateSync over
+# the fauna.mls.{get,put} handlers + FaunaCommitGate) for the tier_3
+# gated-removal twin. Dev-dep only; no cycle.
+fauna-client-mls-sync = { path = "../../libs/fauna-client-mls-sync" }
+# `test-helpers`: `conformance_profile.rs`'s member-path harvest seeds the
+# in-memory `backend::MemoryPeerAnchorStore` (the anchor store is client-side).
+fauna-conversations = { path = "../../libs/fauna-conversations", features = ["test-helpers"] }
+# conformance_index_rail_publisher.rs drives the REAL `IndexRailPublisher` +
+# `MailIndexBuilder` over a real `NestClient` against the in-process nest's blob
+# route and `fauna.index.{record,list}` handlers — the cross-binary proof that
+# the client's publish order and the nest's refusals agree (`content-index.md`
+# § Ingest triggers, v1). Dev-dep only; fauna-client-index does not depend on
+# fauna-nest, so no cycle.
+fauna-client-index = { path = "../../libs/fauna-client-index" }
+# The same file drives the Search page's LOCAL ARM over that rail — the real
+# `MailLocalSearch` behind `fauna_client_search`'s `LocalSearchIndex` seam, which
+# is what actually serves backend 2 to the page (`ui/search.md` § State & data
+# shape). Dev-dep only, same no-cycle reasoning as above.
+fauna-client-search = { path = "../../libs/fauna-client-search" }
+# conformance_caldav_client.rs drives the real `fauna-client-caldav` crate
+# (CalDavClient + seal/unseal + the native read path) against the in-process nest
+# `fauna.bridges.*` CalDAV handlers — the cross-binary proof that the crate and
+# nest agree on the encrypted `bridge_caldav_*` store (events.md Decision B,
+# Step 3b). Dev-dep only; fauna-client-caldav does not depend on fauna-nest, so
+# no cycle.
+fauna-client-caldav = { path = "../../libs/fauna-client-caldav" }
+# conformance_index_rail_publisher.rs's contacts section seals its address-book
+# fixtures with the real `fauna-client-carddav` writer path (`seal_card_body` /
+# `seal_addressbook_metadata` / `uid_hash`) so the cards the walk reads back are
+# byte-shaped exactly like the MDA's — the arm's producer is a walk over this
+# crate's own read path (`content-index.md` § Ingest triggers, v1, the contacts
+# ruling). Dev-dep only; fauna-client-carddav does not depend on fauna-nest, so
+# no cycle.
+fauna-client-carddav = { path = "../../libs/fauna-client-carddav" }
+# conformance_index_rail_publisher.rs's posts section creates and deletes its
+# fixture posts over the real `fauna-client-posts` wire surface — the same
+# `posts_create` every app's composer submits through, so the walk enumerates
+# and the resolver re-reads exactly what production wrote (`content-index.md`
+# § Ingest triggers, v1, the posts ruling). Dev-dep only; no cycle.
+fauna-client-posts = { path = "../../libs/fauna-client-posts" }
+# conformance_profile.rs drives the real `fauna-client-profile` builders
+# (`build_edited_profile{,_with_images}`) against the in-process nest
+# `fauna.profile.*` handlers — the cross-binary proof that the client's signed
+# read-modify-write and the nest's ingest/verify/store agree, including the
+# avatar/banner refs. Dev-dep only; fauna-client-profile does not depend on
+# fauna-nest, so no cycle.
+fauna-client-profile = { path = "../../libs/fauna-client-profile" }
+# conformance_profile.rs drives the real peer-anchor harvest
+# (`fauna_client_recovery::harvest::harvest_peer_anchor`) against the in-process
+# nest — the member-path anchor's only cross-binary proof
+# (`identity-succession.md` § The succession statement → *the peer-profile
+# harvest*). Its unit pins all serve the profile from a stub; this is the one
+# place the real `fauna.profile.get` handler answers it. Dev-dep only; fauna-client-recovery does not depend on fauna-nest,
+# so no cycle.
+fauna-client-recovery = { path = "../../libs/fauna-client-recovery", features = ["conversations-witness"] }
+# conformance_locked_succession_ceremony.rs hands the shared stolen-identity
+# composition (`fauna_client_recovery::ceremony::succeed_stolen_identity`) the
+# account registry it persists the successor seed into, over the crate's
+# in-memory `SecretStore`. Dev-dep only; fauna-client-accounts does not depend
+# on fauna-nest, so no cycle.
+fauna-client-accounts = { path = "../../libs/fauna-client-accounts", features = ["test-helpers"] }
+# conformance_sync_client.rs drives the real `fauna-client-sync` adapter
+# (the engine/daemon control-plane path) against the in-process nest
+# `fauna.sync.*` handlers — the cross-binary proof the adapter and nest agree
+# on register / changes.{record,list}. Dev-dep only; no cycle.
+fauna-client-sync = { path = "../../libs/fauna-client-sync" }
+# conformance_shared_folders.rs (piece 7, Slice 3) drives the real owner-side
+# `FoldersAuthor` rotate-on-removal orchestration (`bind_set` / `remove_member`)
+# over the real `Arc<MlsEngine>` `FolderGroupCrypto` adapter — the `mls` feature.
+# It is NOT a prod-dep of fauna-nest (verified `cargo tree -e no-dev`), so the
+# `mls` feature stays isolated to the test build; no cycle (fauna-client-folders
+# does not depend on fauna-nest).
+fauna-client-folders = { path = "../../libs/fauna-client-folders", features = ["mls"] }
+# `conformance_public_follow_client.rs` (folders re-model phase 4 slice 4f-iv)
+# drives the production followed-folders list source
+# (`StoreFollowedFoldersSource`, behind `rpc-glue`) against two in-process
+# nests. That source is built over a concrete `NestClient`, so it is the one
+# piece of the follow's client half no unit test can stand up — which is exactly
+# why it needs a conformance seat rather than a stub. Test-only, like the
+# siblings above; `fauna-devices-machine` does not depend on fauna-nest, so no
+# cycle (verified `cargo tree -e no-dev`).
+fauna-devices-machine = { path = "../../libs/fauna-devices-machine", features = ["rpc-glue"] }
+# The recipient's durable-inbox surface: `conformance_shared_folders.rs`'s
+# decline pin peeks the staged share (`list_folder_pending_shares`) to learn the
+# `inbox_id` it declines, then drives the shared
+# `fauna_client_folders::decline_folder_share` recipe against the real router.
+# Test-only, like the sibling above; protocol+core only, so it adds no cycle.
+fauna-client-inbox = { path = "../../libs/fauna-client-inbox" }
+wiremock = "0.6"
+# conformance_cross_nest_pairing_client.rs drives the real `fauna-client-pair`
+# `LinkedNestsMachine` (its native `LinkBoth` both-ends seam — `fauna.nest.info`
+# id-discovery + a second authenticated `NestClient`) against TWO in-process
+# nests, asserting both nests' `nest_pairings` gain the reciprocal row. Dev-dep
+# only; fauna-client-pair does not depend on fauna-nest, so no cycle.
+fauna-client-pair = { path = "../../libs/fauna-client-pair" }
+# The trust-machine builder takes the period-key store seam; the trust/reconcile
+# conformance tests hand it an in-memory one (`MemoryPeriodKeyStore`). Dev-dep
+# only, wasm-clean, no cycle (it does not depend on fauna-nest).
+fauna-client-subscriptions = { path = "../../libs/fauna-client-subscriptions", features = ["test-helpers"] }
+# conformance_cross_nest_relay_provision_client.rs drives the real client
+# mail-enable (`build_mail_settings_machine` → `EnableMail`) + the linked-nests
+# mail-relay auto-trigger (`build_linked_nests_machine_with_mail_relay` →
+# `LinkBoth`) against TWO in-process nests, asserting a both-ends link
+# auto-provisions the home box's mailbox with the public box's MSEK. `rpc-glue`
+# for the native seam constructors. Dev-dep only; fauna-client-mail-settings does
+# not depend on fauna-nest, so no cycle.
+fauna-client-mail-settings = { path = "../../libs/fauna-client-mail-settings", features = ["rpc-glue"] }
+# conformance_content_sealing_epochs_client.rs drives the real client-side
+# bounded-mail-grant mint/renew (`mint_bounded_mail_grant` /
+# `bounded_mail_renewal_keys`, B2) against an in-process nest's real
+# `fauna.capabilities.{mint,renew}` — the B5 tier_3 proof that a windowed
+# grant's reach is cryptographically capped at its held epoch set. Dev-dep
+# only; fauna-client-capabilities does not depend on fauna-nest, so no cycle.
+fauna-client-capabilities = { path = "../../libs/fauna-client-capabilities" }
+# conformance_file_provider_client.rs drives the REAL app-dead Apple File
+# Provider host (`FfiFileProviderHost::app_dead` — a plain async Rust type over
+# the shared `fauna_sync_engine::provider_face`) against an in-process nest: the
+# owner writes a `BackupKey`-sealed file through the production `SyncEngine`, and
+# the app-dead host — handed only the owner `BackupKey` + a bearer, no seed —
+# reads it back (populate → enumerate → hydrate → decrypt). This is the interim
+# FFI-seam read-path proof while the appex-driven tier_3 is signing-gated
+# (`file-sync.md` § Apple File Provider binding → Headless-first testing).
+# `default-features = false` + `file-provider-host` trims to exactly the
+# `file_provider_host` module (which implies `sync-engine-host` ->
+# `fauna-sync-engine/engine-lifecycle`, already in the nest dev-dep closure) —
+# no wasm/mail/render/etc. `file_provider_host` moved off the default-on
+# `sync-engine-host` gate onto its own default-OFF feature 2026-07-19
+# (windows/android built it for no reason — build-system.md § UniFFI cdylib
+# rebuild cost (win) → Monolith-split verdict), so `sync-engine-host` alone no
+# longer reaches this module; name the feature that actually gates it. fauna-ffi
+# depends on fauna-nest-*http* only (not fauna-nest), so no cycle; it is NOT a
+# prod-dep of the nest, so this stays isolated to the test build.
+fauna-ffi = { path = "../../libs/fauna-ffi", default-features = false, features = ["file-provider-host"] }
+# `test-helpers` exposes the MLS-2 attacker-simulation seam
+# `forge_key_package_bytes_for_test` so `conformance_conversations_keypackage.rs`
+# can prove the `keypackage.upload` handler rejects a forged-identity KeyPackage
+# at the wire boundary (resolver-2 keeps the feature out of the production binary).
+fauna-mls = { path = "../../libs/fauna-mls", features = ["test-helpers"] }
+# The in-repo hello plugin (`fixture::hello_plugin`) for `tests/plugin_runner.rs`.
+fauna-plugin-host = { path = "../../libs/fauna-plugin-host", features = ["test-helpers"] }
+# `imap-client-native` gives `conformance_mail_import_client.rs` the REAL
+# shared-Rust source-side IMAP client (`ImapSession` + the tokio/rustls
+# transport) to drive against a real IMAP source server, so the tier_3 import
+# proof composes the actual client the shipping apps use rather than a stand-in.
+# `tls-test-fixtures` gives it fauna-mail's shared `TestCert`/`mint_cert`/
+# `tls_acceptor` for standing up that source server's TLS, instead of a local
+# copy — nest's own `rcgen = "0.13"` prod-dep (below) pins a different major
+# version (field renamed `key_pair`→`signing_key`), which the shared fixture's
+# `TestCert { cert_pem, key_pem }` return shape abstracts away entirely.
+# Same shape as the `fauna-mls` line above: `fauna-mail` is already a prod-dep
+# (without this feature), and resolver-2 does NOT unify dev-dep features into
+# non-test builds — so the nest *binary* still gets no imap-proto, no rustls
+# IMAP client, and no foreign-mailbox code. The nest imports from no mailbox.
+#
+# `body-ref-resolve` gives `mail_body_ref_round_trip.rs` the REAL shared client
+# resolver (`resolve_referenced_mail_body` — the same call the native + web
+# receive paths make) to drive against this nest's real serve + real open
+# download route, instead of the test hand-rolling the fetch/rejoin a client
+# would do. Same dev-dep-only reasoning as above: the nest binary resolves a
+# reference from its *own* blob store (`mail_body_plane::resolve_body_ref`) and
+# never fetches one over HTTP.
+# `mail-export` is a DEV feature here on purpose: only the user's own app
+# serializes an export (`mail-export.md` § Export pipeline puts conversion on
+# the client unconditionally), so the nest never enables it in production.
+# `conformance_mail_export_client.rs` plays the client, and it plays it
+# through the production functions rather than a test-local re-derivation —
+# which is the only way its composition claim is not circular.
+fauna-mail = { workspace = true, features = ["imap-client-native", "tls-test-fixtures", "body-ref-resolve", "mail-export"] }
+mail-parser.workspace = true
+# `mail_dkim_oracle.rs` verifies the nest's hand-out signature with the
+# verifier half, against the record the nest publishes. Already in the nest's
+# artifact through `fauna-mail`'s `outbound` feature; this line adds visibility.
+mail-auth.workspace = true
+serde_json.workspace = true
+ed25519-dalek.workspace = true
+reqwest = { workspace = true, features = ["http2", "multipart"] }
+tempfile = "3"
+ring = "0.17"
+# `ServiceExt::oneshot` drives the real `build_router` in the MTA-STS serving
+# conformance test (no TCP, full Host-header control). tower 0.5 is already in
+# the tree via tower-http; this only enables the `util` feature.
+tower = { version = "0.5", features = ["util"] }
+# web_content::cert tests craft near-expiry self-signed certs (rcgen's
+# `not_after`) to exercise the 30-day renewal threshold. Unifies with the `time`
+# x509-parser / rcgen already pull in.
+time = "0.3"
+nostr-sdk = "0.45.4"
+nostr-nips = { package = "nostr", version = "0.45.5", features = ["nip04", "nip44", "nip59", "os-rng"] }
+nostr-connect = "0.45.2"
+
+# conformance_account_plane_bind.rs reads an account store thread's stack
+# high-water under the linked nest's login dial: it drops the thread's unused
+# stack pages (`madvise`) before the dial and reads which came back afterwards
+# (`/proc/self/pagemap`), so the reading is the dial's own. Linux only — the
+# page table read has no portable form.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"
+
+# The S8 D5 at-rest byte-scan proof calls the test-hooks-gated D4 scrub
+# (`CacheDb::scrub_plaintext_where_sealed`), so its target only builds with
+# that feature — the crate's first explicit [[test]] block (every other test
+# file stays auto-discovered). Run:
+# `cargo test -p fauna-nest --test conformance_at_rest_byte_scan --features test-hooks`.
+[[test]]
+name = "conformance_at_rest_byte_scan"
+required-features = ["test-hooks"]
+
+# The AP discovery surface through the full `build_router` — merged only under
+# the feature, so without it every path falls to the landing page by design.
+# Run: `cargo test -p fauna-nest --test ap_serving_router --features activitypub`.
+[[test]]
+name = "ap_serving_router"
+required-features = ["activitypub"]
+
+# The B5 windowed-holder proof needs the same feature for the opposite reason,
+# and that difference is why it went unguarded for five weeks: its dependency on
+# `test-hooks` is at RUNTIME, not compile time. It POSTs to
+# `/api/v1/test/content/inject_epoch_sealed_mail`, a route
+# `content_seal_epoch_test_hook::routes()` only merges under the feature, so
+# without it the target compiles and RUNS — the request falls through to the
+# static fallback, comes back 200 with a non-JSON body, and the test dies on an
+# opaque `reqwest::Error { kind: Decode }` three lines later. Its sibling above
+# fails to *compile* without the feature, which is what forced someone to
+# declare it; nothing forces a runtime dependency, so `cargo test -p fauna-nest`
+# has been reporting this target red since 2026-07-18 while
+# `cargo check -p fauna-nest --tests` stayed green. Guarded here so the target is
+# skipped rather than misleadingly red, and run for real by the
+# `nest-testhooks-check` gate.
+[[test]]
+name = "conformance_content_sealing_epochs_client"
+required-features = ["test-hooks"]
+
+# The four `desktop_serve` loop proofs below have the SAME runtime dependency the
+# target above has, arriving from the other direction: each sets
+# `FAUNA_INSECURE_DISABLE_TLS=1` and then dials the loop it spawns over `http://`.
+# That escape became `test-hooks`-gated when the plain-HTTP arm was compiled out of
+# the two shipped desktop shells (`fauna-nest-service`, `fauna-nest-daemon`) — so
+# without the feature these targets still COMPILE, but the loop they start serves
+# HTTPS from the self-signed floor and every `http://` request dies on a protocol
+# error rather than on the assertion under test.
+#
+# Declaring the dependency makes cargo SKIP them instead (silently, exit 0, the
+# same trapdoor documented above) and `nest-test-hooks` runs them for real. Adding
+# a target here without adding it to that recipe is how coverage disappears: the
+# recipe is the feature's only real runner.
+[[test]]
+name = "desktop_serve_loop"
+required-features = ["test-hooks"]
+
+[[test]]
+name = "desktop_serve_loopback"
+required-features = ["test-hooks"]
+
+[[test]]
+name = "desktop_serve_port_change_loopback"
+required-features = ["test-hooks"]
+
+[[test]]
+name = "index_survives_nest_restart"
+required-features = ["test-hooks"]
+
+# Same whole-boot harness (`run_serve_loop` over plain HTTP), same gate.
+[[test]]
+name = "owed_web_render_drained_at_boot"
+required-features = ["test-hooks"]
+
+# `fauna.protocol.echo` is served only by a `test-hooks` build (`src/lib.rs`'s
+# `protocol_test` gate), so its WebSocket round-trip proof needs the feature.
+[[test]]
+name = "echo_round_trip"
+required-features = ["test-hooks"]

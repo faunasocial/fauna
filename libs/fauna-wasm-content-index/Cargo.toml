@@ -1,0 +1,56 @@
+[package]
+name = "fauna-wasm-content-index"
+description = "WASM bindings for fauna-index (per-user content search)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Gates panicForTestOnly (src/lib.rs) — the headless witness that the panic
+# hook installed at module init actually names this chunk. Never enabled by
+# a production build.
+test-helpers = []
+
+# wasm32-scoped on purpose: this crate builds only for wasm32, and a plain
+# [dependencies] table would leak its wasm-only feature activations (js,
+# wasm_js, …) into every HOST build's resolution under
+# resolver.feature-unification = "workspace". Add new deps here, never in a
+# plain [dependencies] table.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-index = { workspace = true }
+# ⚠ UN-PARKING THIS CHUNK? Pin fauna-core first. This crate is ON HOLD and not
+# built (justfile `wasm-content-index`), so nothing below is compile-checked
+# today. fauna-core arrives here only transitively — fauna-index →
+# fauna-segment-store → `fauna-core = { workspace = true }` — and so resolves to
+# the WORKSPACE DEFAULT: measured `FEATURES=default,network`, i.e. no `js`, plus
+# the whole `network` set (redb, tokio, hickory-resolver) dragged into a browser
+# chunk. Without `js`, every `fauna_core::data::Timestamp::now*()` compiles to
+# the `not(all(wasm32, feature = "js"))` arm — a bare `SystemTime::now()`, which
+# PANICS on wasm32-unknown-unknown (the hazard `fauna-mail`'s imap_client modules
+# document). Harmless while parked: the only such call reachable from here
+# (fauna-segment-store `store.rs::append`) sits on a filesystem path the browser
+# never takes. The fix is the line all 8 live wasm chunks already carry:
+#   fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+# Installed at module init (`#[wasm_bindgen(start)]` in src/lib.rs) — each wasm
+# chunk is its own runtime, so this must be installed per-chunk. See the crate
+# doc comment.
+fauna-wasm-panic-hook = { path = "../fauna-wasm-panic-hook" }
+wasm-bindgen.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde-wasm-bindgen = "0.6"
+js-sys.workspace = true
+getrandom = { workspace = true, features = ["wasm_js"] }
+# 0.2 alias: tantivy / chacha20poly1305 transitively use getrandom 0.2 which
+# needs the `js` feature on wasm32. Mirrors libs/fauna-wasm/Cargo.toml.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+# tantivy → uuid (v4); on wasm32-unknown-unknown uuid won't compile without an
+# explicit RNG-source feature. `js` is a no-op on non-wasm targets.
+uuid = { workspace = true, features = ["js"] }
+
+[dev-dependencies]
+wasm-bindgen-test.workspace = true

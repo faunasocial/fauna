@@ -1,0 +1,340 @@
+# ratified-breaks — the user-ratified in-place wire breaks the two
+# additive-evolution gates accept (`scripts/check-cddl-evolution.py`, cheap
+# tier, and `tools/check-additive-evolution`, CHECK tier). Both gates block
+# every removed / renamed / retyped / optional→required field by default
+# (`docs/goal/architecture/version-compatibility.md` I4); an entry here is
+# the ONLY way past them, and it exists because a ratified in-place break
+# (§ Dimension 2's write-offs) must not red the async merge-gate check on
+# every pass until the last-green tip moves — which it cannot while red.
+#
+# One entry per line, whitespace-separated:
+#   <gate> <key> <transition> <ratified-on> <ratification>
+#   gate = `cddl` (key: `Type` or `Type.field` in libs/fauna-protocol/schemas)
+#        | `rust` (key: `module::Struct.field`, the tool's module-qualified
+#          struct key plus the WIRE field name; or, for an enum the tool
+#          holds against tools/check-additive-evolution/enum_ledger.txt,
+#          `<crate>::<module>::<Enum>::<Variant>` — the ledger's key plus
+#          the variant's WIRE name, no `.`, transition `removed` only)
+#   transition = `removed` | `optional→required` | `retyped→<Type>` (a bare
+#          cddl `Type` is only ever `removed`; `<Type>` is the gate's own
+#          whitespace-free rendering of the NEW type)
+# An entry excuses ONLY the finding of its own transition on its own key:
+# an `optional→required` entry excuses the tightening and never a later
+# removal or retype of the field (once the tightening is in the base there
+# is nothing left for it to excuse); a `Type removed` entry excuses the
+# type's removal and no field edit of a same-named type; a `retyped→<Type>`
+# entry excuses a retype TO `<Type>` and no other, so a later retype away
+# from it is a fresh finding. A line whose gate token is neither `cddl` nor `rust` fails BOTH
+# gates (exit 2); a line naming a real token but otherwise malformed (too
+# few fields, an unratifiable transition, a bare type tightened) fails only
+# that token's OWN gate (exit 2) — the sibling gate skips a line it doesn't
+# own without validating it.
+# `#` starts a comment. Entries are permanent: a removed name never comes
+# back — both gates refuse a head that revives a `removed` key, and each
+# gate independently refuses a head whose own-gate entries drop one the
+# merge base carried, catching a deletion even without a revival — so
+# nothing ever needs to leave this list. Who writes a line is owned by
+# version-compatibility.md § Dimension 2, the fourth exception's "Who writes a
+# ledger line" rule (user-ruled 2026-09-30): a sweep-class remnant line — the
+# entry cites the sweep, every current writer verified to always send the
+# value — is transcribed in the commit carrying the removal; any other break
+# (a live kind retired by a cutover, a retype, any break from the 2026-10
+# baseline on) is a maintainer ruling. Grammar owner:
+# docs/goal/architecture/transport.md § Schema and forward-compat discipline.
+
+# ── The compat-remnant sweep (2026-09-24, the fourth ratified write-off) ──
+rust auth::CertBinding.sig                          removed 2026-09-24 (the untagged half; tagged_sig is the only signature)
+rust auth::CertBinding.tagged_sig                   optional→required 2026-09-24 (the only signature)
+rust auth::HandshakeReply.expires_in                optional→required 2026-09-24 (the expires_at fallback retired; expires_in is the lifetime)
+rust auth::VerifyReply.expires_in                   optional→required 2026-09-24 (the expires_at fallback retired; expires_in is the lifetime)
+rust auth::VerifyReply.storage_mode_pending         removed 2026-09-24 (the storage-mode transition contract)
+rust auth::NestHandshakeReply.nat_mode_v2           removed 2026-09-24 (NAT-mode V2 is the only form)
+rust nat_mode::NatModeRequest.nest_id               optional→required 2026-09-24 (nest-bound commit)
+rust discovery::SetupStatusReply.mode               removed 2026-09-24 (the storage-mode transition contract)
+rust bridge_routing::FetchConfigReply.storage_mode  removed 2026-09-24 (the storage-mode transition contract)
+cddl EventRsvpPayload                               removed 2026-09-24 (dead-registered kind, user-population ruling)
+# program 2 — the ordinary wire-payload remnants
+rust account::AccountLockoutRequest.duration_secs   removed 2026-09-24 (unsigned, ignored since 2026-08-24)
+rust sessions::LockoutRequest.duration_secs         removed 2026-09-24 (ignored since 2026-08-24)
+rust nostr::NostrDmConversation.last_message        removed 2026-09-24 (always-empty plaintext ballast since S8.9)
+rust nostr::NostrDmMessage.content                  removed 2026-09-24 (always-empty plaintext ballast since S8.9)
+rust discovery::SetupStatusReply.require_registration removed 2026-09-24 (always `true`; registration_mode is the posture)
+rust discovery::RegistrationInfo.open               removed 2026-09-24 (legacy boolean projection of registration_mode)
+rust discovery::RegistrationInfo.invite_required    removed 2026-09-24 (legacy boolean projection of registration_mode)
+rust bridge_routing::IngestInboundMailRequest.dsn_recipient removed 2026-09-24 (the DSN address hint; dsn_original_msgid authorizes)
+rust filesync::SnapshotCheckReply.errors            removed 2026-09-24 (structured_errors is the finding list)
+rust media::MediaListRequest.cursor_version         optional→required 2026-09-24 (v2 is the only order; absent ⇒ v1 retired)
+rust media::MediaListReply.cursor_version           optional→required 2026-09-24 (the echo of the applied order)
+rust mls_replica::PutMlsReplicaRequest.base         optional→required 2026-09-24 (the base-less blind LWW put retired)
+rust config::PutUserConfigRequest.base              optional→required 2026-09-24 (the base-less blind LWW put retired)
+rust subscriptions::TierCreateRequest.encrypted_upload optional→required 2026-09-24 (the envelope-less create retired; a tier is born with its KeyBlob)
+# the borderline items ruled 2026-09-24 (version-compatibility.md § Dimension 2, the fourth exception's rulings)
+rust folders::LeaseReleaseRequest.device_id       optional→required 2026-09-24 (the holder-blind clear retired; a release names its device)
+# program 4 tranche B2 — the historical chunk-plane pair audit (its kind `fauna.sync.chunk_pairs.list` left the wire with it)
+rust admin::AdminStatsReply.chunk_seal_pairs        removed 2026-09-24 (the retired pair audit's dashboard count)
+rust admin::AdminStatsReply.chunk_seal_pairs_pinned removed 2026-09-24 (the retired pair audit's pinned split)
+rust admin::AdminGcReply.chunk_seal_pairs           removed 2026-09-24 (the retired pair audit's per-run count)
+rust admin::AdminGcReply.chunk_seal_pairs_pinned    removed 2026-09-24 (the retired pair audit's per-run pinned split)
+# program 4 sub-tranche 3's "pre-expand nest" accept arms outside the path-label seams (2026-09-25)
+rust filesync::SnapshotDiffReply.folder             optional→required 2026-09-24 (the nest always names the set; a set gone mid-diff is not_found)
+rust folders::SyncConflict.path_hash               optional→required 2026-09-24 (stamped at every insert, NOT NULL at rest; the row's address)
+# program 4 tranche C6 — the tamper-evidence chains' pre-record `0`/unrecorded verdict and unframed v1 preimage arm
+rust admin::AdminAuditIntegrityReply.entries_v1     removed 2026-09-24 (the retired v1 preimage arm's census count)
+rust admin::AdminAuditEntry.entry_hash_version      optional→required 2026-09-24 (every writer stamps v2; the absent ⇒ unrecorded default retired)
+# the typed feed rules — the JSON-string `rules_json` replaced in place by `rules: Vec<FilterRule>` (ui/feed.md § Where logic lives)
+rust feed::FeedCreateRequest.rules_json              removed 2026-09-24 (typed rules)
+rust feed::FeedGetReply.rules_json                   removed 2026-09-24 (typed rules)
+rust feed::FeedUpdateRequest.rules_json              removed 2026-09-24 (typed rules)
+# the at-rest shapes (fourth exception, universal scope: no pre-sweep stored shape exists) — the
+# sync daemon's config (fauna-sync-engine) and fauna-core's FFI/at-rest strict types; none is
+# client↔nest wire.
+rust config::SyncConfig.encryption_key              removed 2026-09-24 (legacy config stub)
+rust config::SyncConfig.encryption                  removed 2026-09-24 (legacy config stub)
+rust config::SyncConfig.rescan_interval_secs        removed 2026-09-24 (legacy config stub)
+rust config::SyncConfig.websocket                   removed 2026-09-24 (legacy config stub)
+rust config::SyncConfig.wireguard                   removed 2026-09-24 (legacy config stub)
+rust data::BackupDestination.unattested_from_predecessor removed 2026-09-24 (pre-sweep downgrade mirror)
+rust data::UserConfig.deployment_seed               removed 2026-09-24 (the single-seed downgrade mirror of deployment_seeds)
+rust data::FoldersConfig.pending_reseals            removed 2026-09-24 (the write-only reseal sentinel)
+rust data::UserConfig.group_readmissions            removed 2026-09-24 (superseded by the per-writer roster cell)
+rust folder_keys::FolderEngineKeys.folder_id        optional→required 2026-09-24 (the name-keyed folder binding retired)
+# program 4 tranche C5 — the mail stored_at legacy-row arm (every row carries stored_at)
+rust bridge_routing::IndexSegment.stored_at         optional→required 2026-09-24 (the legacy-row arm retired)
+rust email::InboxMessage.stored_at                  optional→required 2026-09-24 (the legacy-row arm retired)
+# the folders mode contraction (2026-09-28; folders.md § Implementation status today — the
+# design pass's rulings (1)–(2) under this same fourth write-off)
+rust backup::DestinationItem.mode                   removed 2026-09-24 (a folder has no type; folders mode contraction)
+rust backup::DestinationRegisterRequest.mode        removed 2026-09-24 (a folder has no type; folders mode contraction)
+rust folders::FolderCreateReply.mode                removed 2026-09-24 (a folder has no type; folders mode contraction)
+rust folders::FolderCreateRequest.mode              removed 2026-09-24 (a folder has no type; folders mode contraction)
+rust folders::FolderSummary.mode                    removed 2026-09-24 (a folder has no type; folders mode contraction)
+rust folders::FolderUpdateRequest.mode              removed 2026-09-24 (a folder has no type; folders mode contraction)
+rust config::SyncConfig.mode                        removed 2026-09-24 (runtime state only; folders mode contraction)
+rust data::BackupDestination.mode_hint              removed 2026-09-24 (the destination mode hint; folders mode contraction)
+# the folders role contraction (2026-09-29; folders.md § Implementation status today — the
+# design pass's ruling (3) under this same fourth write-off; version-compatibility.md's v38 note)
+rust folders::FolderMember.role                     removed 2026-09-24 (a place is its flags; folders role contraction)
+rust folders::FolderMember.flags                    optional→required 2026-09-24 (a place is its flags; folders role contraction)
+rust folders::PlacesSetReply.role                   removed 2026-09-24 (a place is its flags; folders role contraction)
+rust folders::PlaceRow.renders_flags                removed 2026-09-24 (no unreadable seat once flags are required; folders role contraction)
+rust sync::DeviceFolderRole.role                    removed 2026-09-24 (a place is its flags; folders role contraction)
+rust sync::SyncStatusReply.source_device_id         removed 2026-09-24 (the single-source concept retired; folders role contraction)
+rust admin::AdminFolderMember.role                  removed 2026-09-24 (a place is its flags; folders role contraction)
+rust admin::AdminFolderAddMemberRequest.role        removed 2026-09-24 (a place is its flags; folders role contraction)
+rust admin::AdminFolderCreateRequest.source_device_id removed 2026-09-24 (the single-source concept retired; folders role contraction)
+rust admin::AdminFolderGetReply.source_device_id    removed 2026-09-24 (the single-source concept retired; folders role contraction)
+# fauna.sync.device.adopt removed in place (ratified by the user 2026-09-29; the
+# one-credential ruling, sync-agent-credentials.md § Credential model, the RULED
+# 2026-09-28 block, decisions 4-5; version-compatibility.md § Dimension 2, the
+# 2026-09-27 cutover direction). No entry: neither gate names a key — the
+# DeviceAdopt* structs went whole (the rust gate flags field drift in a surviving
+# struct, never a struct's removal) and no CDDL schema named the kind.
+# the ATProto-naming leg (ratified by the user 2026-09-27; version-compatibility.md § Dimension 1, *The ATProto-naming leg*). The
+# persisted identity-custody key reads the old spelling through a serde alias; the
+# StaleSurfaces flag is client-derived, neither at rest nor on the wire.
+rust data::UserConfig.bluesky                       removed 2026-09-27 (renamed atproto_identity, alias-read; ATProto-naming leg)
+rust push_events::StaleSurfaces.bluesky             removed 2026-09-27 (renamed atproto; client-derived, never on the wire)
+# the credential secrets' byte-string re-cut (ratified by the user 2026-09-30 under the
+# 2026-09-24 baseline reset; version-compatibility.md § Dimension 2, the fourth exception) —
+# an integer array became a CBOR byte string, with no read-fallback: no sealed row existed.
+rust data::AtprotoAppCredential.secret              retyped→SecretByteBuf 2026-09-24 (the fauna.state.atproto byte-string rule)
+rust data::MailCredential.secret                    retyped→SecretByteBuf 2026-09-24 (the fauna.state.mail byte-string rule)
+# the early audit's wire-field contractions (A2–A16, A19, A20 of the frozen record; approved by the
+# user 2026-09-30, every item — compat-remnant-sweep.md § Still queued, and what stays; each is a
+# sweep-class remnant whose every current writer always sends the value, so the lines are this
+# removal's own transcription under version-compatibility.md § Dimension 2's "Who writes a ledger line")
+rust files::FileVersionInfo.author_actor_id          optional→required 2026-10-01 (every version row has a recorder; compat-remnant early audit A2)
+rust oauth_issuer::ForceRotateSessionSecretReply.grants_ended optional→required 2026-10-01 (the rotation always counts; early audit A3)
+rust discovery::SetupStatusReply.node_mode          optional→required 2026-10-01 (always resolved; early audit A4)
+rust discovery::SetupStatusReply.web_app_origin     optional→required 2026-10-01 (always reported; early audit A5)
+rust discovery::ModerationInfo.client_scanning_enabled removed 2026-10-01 (hard-coded false, read by no one; early audit A6)
+rust sync::SyncStatusReply.destinations             removed 2026-10-01 (always empty since the destinations rail went; early audit A7)
+rust admin::AdminFolderGetReply.destinations        removed 2026-10-01 (always empty since the destinations rail went; early audit A7)
+rust tls::CertStatusReply.desired_sans              optional→required 2026-10-01 (always reported; early audit A8)
+rust tls::PublishCertReply.installed                optional→required 2026-10-01 (always reported; early audit A9)
+rust pair::PairListReply.forward_queue              optional→required 2026-10-01 (always reported; early audit A10)
+rust segments::SegmentsListReply.next_segment_id    optional→required 2026-10-01 (the saved counter, always reported; early audit A11)
+rust segments::SegmentRef.meta_blake3_hex           optional→required 2026-10-01 (an absent hash switched the sidecar check off; early audit A12)
+rust subscription::types::GatedInfo.seal_id         optional→required 2026-10-01 (every gated post carries its seal id; early audit A13)
+rust subscription::types::KeyBlob.key_commitment    optional→required 2026-10-01 (an absent witness selected the weaker freshness rule; early audit A14)
+rust bridge_routing::IngestInboundMailRequest.envelope_key optional→required 2026-10-01 (no absent-agrees rule; early audit A15)
+rust bridge_routing::AppendMessageRequest.envelope_key optional→required 2026-10-01 (no absent-agrees rule; early audit A15)
+rust bridge_routing::ImportMessageItem.envelope_key optional→required 2026-10-01 (no absent-agrees rule; early audit A15)
+rust bridge_routing::IngestInboundMailRequest.dedup_key optional→required 2026-10-01 (user-ruled 2026-09-30 with A1–A20: the pair is required end to end; the nest's in-domain delivery mints it too)
+rust bridge_routing::AppendMessageRequest.dedup_key optional→required 2026-10-01 (user-ruled 2026-09-30 with A1–A20: the pair is required end to end)
+rust bridge_routing::PutSpamPolicyRequest.baseline_standing_publish optional→required 2026-10-01 (every PUT states it; early audit A16)
+rust backup::CustodyMaterializeReply.inboxed        removed 2026-10-01 (the journal-less inbox filing went; early audit A19)
+rust admin::AdminInviteCode.created_by              removed 2026-10-01 (always None, the legacy admin rowid; early audit A20)
+# the rescan cadence (early audit A1; approved with the batch above): a downgrade mirror every
+# app stamped with the constant and no seat read. The kind `fauna.folders.schedule.set` went
+# whole with it (its two structs carry no surviving key).
+rust folders::FolderSummary.rescan_interval_secs     removed 2026-10-01 (the cadence is a constant; early audit A1)
+rust folders::FolderCreateRequest.rescan_interval_secs removed 2026-10-01 (the cadence is a constant; early audit A1)
+rust folders::FolderCreateReply.rescan_interval_secs removed 2026-10-01 (the cadence is a constant; early audit A1)
+rust folders::ContentKeyGetReply.rescan_interval_secs removed 2026-10-01 (the cross-nest cadence carrier; early audit A1)
+rust inbox::WelcomeInbox.rescan_interval_secs       removed 2026-10-01 (the cross-nest cadence carrier; early audit A1)
+rust push_events::WelcomePayload.rescan_interval_secs removed 2026-10-01 (the cross-nest cadence carrier; early audit A1)
+rust data::ForeignFolder.rescan_interval_secs       removed 2026-10-01 (the member's stored copy of the carrier; early audit A1)
+rust folder_keys::FolderEngineKeys.rescan_interval_secs removed 2026-10-01 (the pushed engine-key blob's copy; early audit A1)
+rust share::ShareRecord.filename                    removed 2026-10-01 (the plaintext name the row no longer rests; early audit A17)
+rust share::ShareRecord.filename_sealed             optional→required 2026-10-01 (every registration is sealed; early audit A17)
+rust share::ShareCreateRequest.filename_sealed      optional→required 2026-10-01 (the only minter always seals; a sealless registration is refused; early audit A17)
+# the 2026-10-01 removal of dead and reserved shapes (the 2026-10-01 cutover survey's
+# A27, which the user accepted with the survey answer — compat-remnant-sweep.md § Still queued). Gate-silent
+# removals, named here so no later reader hunts for them: the eleven `fauna.spaces.*` kinds and the
+# `fauna.spaces.updated` push (whole structs, registered with no handler), the public
+# `/api/v1/algorithm/*` routes with `ScanReportRequest.{signature,scan_timestamp}` (nest-local HTTP
+# types), the sync agent's `ListFolders` / `CreateFolder` / `GetFolderFiles` IPC verbs (local IPC) and
+# the dormant client `TrainingSource::{ColdStartBaseline, Other}`. `fauna.protocol.echo` stays a
+# registered kind, served only by a `test-hooks` nest. The second pass removed the algorithm-service
+# mesh (core-client-kind-catalog.md § Algorithm & Reputation), equally gate-silent: the whole
+# `fauna_protocol::algorithm` module — the seven `fauna.algorithm.*` kinds and their payloads
+# (`ClassifyRequest`/`ClassifyReply`, `ReputationRequest`/`ReputationReply`, `TrustContextRequest`/
+# `TrustContextReply`, `ManifestRequest`/`ManifestReply`, `DbReputationRequest`/`DbReputationReply`,
+# `ReportRequest`/`ReportReply`, `PruneReportsRequest`/`PruneReportsReply` and the `Wire*` mirrors;
+# whole structs on a version-locked internal channel) — with `fauna_core::algorithm_service` and
+# `fauna_core::classifier`. `SidecarHello`/`SidecarHelloReply` moved, unchanged, to
+# `fauna_protocol::sidecar`; `SenderReputationSummary` to `fauna_core::reputation`.
+rust moderation::ScanObligation.notify_config        removed 2026-10-01 (the superseded callback shape, no producer or consumer; 2026-10-01 survey A27)
+rust admin::AdminServiceFlags.algorithm              removed 2026-10-02 (the flag gated only the removed algorithm sidecar; 2026-10-01 survey A27)
+# one CBOR byte string for every variable-length raw-byte field (accepted by the user
+# 2026-10-01 with the baseline survey's finding A2 — compat-remnant-sweep.md, the survey
+# paragraph; serialization.md § Canonical IPLD dag-cbor, "Variable-length byte fields";
+# version-compatibility.md § Dimension 2, the fourth exception). Every Vec<u8>,
+# Option<Vec<u8>> and Vec<Vec<u8>> on the wire, in a signed payload, in a plane value or at
+# rest moved from an integer array to a byte string in place, with no read-fallback. No
+# entry: the fields keep their Rust type and gain a serde `with =` codec, which neither gate
+# can see (the rust gate keys on the normalized type token; no CDDL schema spelled them as
+# arrays) — the encoder's debug guard is the change's witness, as for the 2026-09-29
+# fixed-width flip.
+# Cid as an IPLD tag-42 link (ruled by the user 2026-10-01, "tag 42" — dag-cbor everywhere;
+# serialization.md § Canonical IPLD dag-cbor, the raw-byte shape decision; version-compatibility.md
+# § Dimension 2, the fourth exception). Every fauna_cbor::Cid field — and every ContentHash field,
+# its raw-codec alias — moved from a 36-byte byte string to tag 42 over 0x00 + the 36 bytes, in
+# place, with no read-fallback. No entry: the fields keep their Rust type and only Cid's own serde
+# impl changed, which neither gate can see (the rust gate keys on the type token; no CDDL schema
+# spells a CID) — libs/fauna-cbor/tests/cid_roundtrip.rs, which refuses the byte-string spelling,
+# is the change's witness.
+# the `__config` blob rail's retirement — closure step (6) of config-dissolution.md
+# § The `__config` dissolution schedule → *The closure order* (2026-10-02). The user's
+# ruling 2026-09-27 (compat-remnant-sweep.md, the borderline items, item 8) put the
+# `fauna.config.*` wire removals inside this fourth ratification. Gate-silent, named
+# here so no later reader hunts for them: the two kinds `fauna.config.get` /
+# `fauna.config.put` and their payloads (`GetUserConfigRequest`/`GetUserConfigReply`,
+# `PutUserConfigRequest`/`PutUserConfigReply` — whole structs, which the rust gate never
+# flags), the `ConfigBase` precondition enum (whole, its ledger line removed with it),
+# the `fauna.config.conflict` / `fauna.config.unavailable` codes, and the untagged
+# `fauna.sync.changed` push for the `__config` set. No CDDL schema named any of them.
+# the survey's dead columns (compat-remnant-sweep.md § Still queued, the dead and reserved
+# shapes; nest schema 110). `mail_domains.dkim_key_blob_id` was NULL on every row — the
+# `wrapped_blobs` indirection it pointed into was never built, and the DKIM store is
+# `bridge_dkim_blobs(domain, selector)` — so its wire projection carried nothing; no app read it.
+rust bridge_routing::MailDomainRow.dkim_key_blob_id removed 2026-10-02 (always None, the column it projected was never written; 2026-10-01 survey A27)
+# the create-time path pair (2026-10-01 survey A25, folder names sealed at rest).
+# A set's include/exclude paths are content and seal under the folders.id the create
+# mints, so a create could only ever carry them in plaintext; no writer ever sent them.
+rust folders::FolderCreateRequest.include_paths     removed 2026-10-02 (paths are content, no create carrier; never sent; 2026-10-01 survey A25)
+rust folders::FolderCreateRequest.exclude_paths     removed 2026-10-02 (paths are content, no create carrier; never sent; 2026-10-01 survey A25)
+rust folders::FolderCreateReply.include_paths       removed 2026-10-02 (the echo of the retired request pair; 2026-10-01 survey A25)
+rust folders::FolderCreateReply.exclude_paths       removed 2026-10-02 (the echo of the retired request pair; 2026-10-01 survey A25)
+# one wire spelling per RuleTier (ruled by the user 2026-10-02, "self" — dynamic-features.md
+# § The registry; before the 2026-10 baseline, so no serde alias and no transition). The self tier's serde
+# spelling moved from `self_imposed` to `self`, the string RuleTier::as_str already put in a
+# gate refusal's details.tier and every app's row keys; the tier is stored as an integer,
+# so nothing at rest moves. Pinned by fauna-core's a_tier_encodes_as_its_as_str_spelling.
+rust fauna-core::feature_gate::RuleTier::self_imposed  removed 2026-10-02 (renamed `self` to match as_str; user ruling 2026-10-02)
+# the mail-spam model and training history sealed at rest (2026-10-01 survey A24, ruled by
+# the user 2026-10-01; compat-remnant-sweep.md; nest schema 111). The nest lost every
+# server-side model writer, so their kinds leave whole — gate-silent, named here: the kinds
+# `fauna.bridges.train_spam_classifier` (the plaintext relay; `TrainSpamClassifierRequest` /
+# `TrainSpamClassifierReply`), `fauna.bridges.undo_spam_training` (the server undo;
+# `UndoSpamTrainingRequest` / `UndoSpamTrainingReply`) and `fauna.moderation.model_sync` (the
+# plaintext model upload; `ModerationModelSyncRequest` / `ModerationModelSyncReply`), and the
+# typed error code `fauna.bridges.spam_model_sealed`, which lost every producer. No surviving
+# struct lost a field; no CDDL schema named any of them.
+# the two spam preferences that seal orphaned (ruled by the user 2026-10-02 — mail-spam.md
+# § Implicit signals are forbidden, "A block is not a spam verdict"; compat-remnant-sweep.md;
+# nest schema 120). `auto_train` gated the removed block-contact auto-train and `share_model`
+# gated the removed plaintext model upload; neither has a consumer, so both leave the
+# `fauna.spam.{get,set}_preferences` payloads in place, with the `SHARE_MODEL_VALUES`
+# presentation contract. `contribute_baseline` is untouched. No CDDL schema named the kinds.
+rust spam::SpamPreferences.auto_train                removed 2026-10-03 (gated the removed block-contact auto-train; user ruling 2026-10-02)
+rust spam::SpamPreferences.share_model               removed 2026-10-03 (gated the removed plaintext model upload; user ruling 2026-10-02)
+rust spam::SpamSetPreferencesRequest.auto_train      removed 2026-10-03 (gated the removed block-contact auto-train; user ruling 2026-10-02)
+rust spam::SpamSetPreferencesRequest.share_model     removed 2026-10-03 (gated the removed plaintext model upload; user ruling 2026-10-02)
+# the 2026-10-01 survey's wire naming leg (ratified by the user 2026-10-01 with the survey
+# answer — the old discovery namespace "too", recorded in compat-remnant-sweep.md § Still
+# queued, the survey paragraph; version-compatibility.md § Dimension 2, the fourth exception). The two
+# anonymous discovery kinds and their rejection code left the old `node` namespace in place,
+# no alias: `fauna.nest.info`, `fauna.nest.resolve`, `fauna.nest.invalid_domain`. No entry:
+# the payload structs were renamed whole (`discovery::NestInfoRequest`/`NestInfoReply`/
+# `NestResolveRequest`/`NestResolveReply` — the rust gate never flags a struct's removal,
+# and every field survives unchanged under the new name) and no CDDL schema named the kinds.
+# the ratified retypes nobody had queued (accepted by the user 2026-10-01 with the baseline
+# survey's finding A26 — compat-remnant-sweep.md, the survey paragraph; version-compatibility.md
+# § Dimension 2, the fourth exception). Each replaces an untyped shape in place, no read-fallback:
+# the muted-keywords list becomes (keyword, weight) entries (content-moderation-and-ranking.md
+# § Composition); the notification type becomes the shared NotifType, its wire string unchanged
+# (notifications.md § The notification type); the admin-mail row's two JSON-text override fields
+# become the typed shapes, the column keeping its ratified JSON object (mail-multidomain.md
+# § Wire shape + storage).
+rust data::ModerationConfig.muted_keywords          retyped→Vec<MutedKeyword> 2026-10-01 (the per-keyword weight ruling of 2026-07-10, built; 2026-10-01 survey A26)
+rust notifications::NotifItem.notif_type            retyped→NotifType 2026-10-01 (same wire string, read as the shared enum with a carrying unknown arm; 2026-10-01 survey A26)
+rust push_events::NotificationPayload.notif_type    retyped→NotifType 2026-10-01 (same wire string, read as the shared enum with a carrying unknown arm; 2026-10-01 survey A26)
+rust bridge_routing::MailDomainRow.role_address_overrides_json removed 2026-10-01 (replaced by the typed role_address_overrides; 2026-10-01 survey A26)
+rust bridge_routing::MailDomainRow.dmarc_overrides_json        removed 2026-10-01 (replaced by the typed dmarc_overrides; 2026-10-01 survey A26)
+rust config::SyncConfig.device_seed                removed 2026-09-30 (the deprecated, ignored device_seed option left with the compat-remnant sweep batch A; ratified by the user 2026-10-03)
+rust data::PendingRotation.credentials_remaining removed 2026-09-30 (obsolete after fauna.state.mail phase B; ratified by the user 2026-10-03)
+# the Admin-class alias write (ruled 2026-10-03 — mail-aliases.md § Cross-actor isolation: an
+# admin neither sees nor edits a member's aliases; compat-remnant-sweep.md; version-compatibility.md
+# § Dimension 2, the fourth exception). The kind `fauna.bridges.put_account_alias` leaves whole
+# with `PutAccountAliasRequest` / `PutAccountAliasReply` — gate-silent, named here: no app or
+# client crate ever called it, no surviving struct lost a field, and no CDDL schema named it.
+# the mail quarantine tier, retired by ruling 2026-10-03 (mail-policy-config.md § Implementation
+# status today; version-compatibility.md § Dimension 2, the fourth exception). Two score tiers,
+# Junk and reject, and no hold: the threshold leaves the spam-policy shapes, removed and not
+# accepted-and-ignored. The ingest disposition's third value is renamed in place to what it does,
+# no alias: `SpamDisposition::Quarantine` ("quarantine") is `PolicyJunk` ("policy_junk") — filed
+# to the recipient's Junk by a rule (a DMARC p=quarantine failure, a ClamAV junk action, an
+# unlisted-recipient penalty over the reject tier). No entry for it: the rust gate tracks struct
+# fields, and the variant set is pinned by `spam_disposition_round_trips_each_variant`.
+rust bridge_routing::SpamPolicyThresholds.max_score_before_quarantine removed 2026-10-03 (the retired quarantine score tier; ruled 2026-10-03)
+rust bridge_routing::PutSpamPolicyRequest.max_score_before_quarantine removed 2026-10-03 (the retired quarantine score tier; ruled 2026-10-03)
+# the MTA-sealed DKIM delivery path, retired 2026-10-04 (mail-bridge-lifecycle.md § DKIM
+# provisioning (automatic) → *Custody moves to the nest*; version-compatibility.md § Dimension 2,
+# the fourth exception — the retirement is on the user-approved 2026-10-03 list of removals drained
+# before the 2026-10 baseline). The nest holds every DKIM key and signs at the outbound
+# hand-out, so no kind carries the key: `fauna.bridges.fetch_dkim_blob` and
+# `fauna.bridges.provision_dkim_blob` leave whole with their request/reply structs (gate-silent on
+# the rust side), the `DkimBlob` wrapped-blob shape leaves the CDDL schema, and the outbound unit's
+# delivery-time-signing flag — written by the nest, read by nothing — leaves the reply. The
+# `ProvisionWrappedSubmissionTokenReply.blob` line excuses a parse artifact, not a wire change: that
+# reply is a one-line `{ "ok": true }` and the cddl gate reads the NEXT type's fields into it, which
+# was `ProvisionDkimBlobRequest` and is now `ProvisionTlsCertBlobRequest`.
+cddl DkimBlob                                       removed 2026-10-04 (the MTA-sealed DKIM delivery path; user-approved removal list 2026-10-03)
+cddl FetchDkimBlobRequest                           removed 2026-10-04 (the MTA-sealed DKIM delivery path; user-approved removal list 2026-10-03)
+cddl FetchDkimBlobReply                             removed 2026-10-04 (the MTA-sealed DKIM delivery path; user-approved removal list 2026-10-03)
+cddl ProvisionDkimBlobRequest                       removed 2026-10-04 (the MTA-sealed DKIM delivery path; user-approved removal list 2026-10-03)
+cddl ProvisionDkimBlobReply                         removed 2026-10-04 (the MTA-sealed DKIM delivery path; user-approved removal list 2026-10-03)
+cddl ProvisionWrappedSubmissionTokenReply.blob      retyped→TlsCertBlob 2026-10-04 (gate parse artifact of the removal above; the reply's wire shape is unchanged)
+rust bridge_routing::OutboundUnit.needs_dkim_signing removed 2026-10-04 (no reader: the nest signs at the hand-out; user-approved removal list 2026-10-03)
+#
+# The MTA-STS policy mode leaves the two local-domain requests (user ruling 2026-10-04, given in the
+# moment: removed in place, no accepted-and-ignored key, under the fourth exception — no installation
+# or data predates the baseline). The nest stores every new domain `testing` and advances
+# it to `enforce` by itself, so no sender names a mode; the reply rows keep `mta_sts_mode`.
+rust bridge_routing::AddLocalDomainRequest.mta_sts_mode removed 2026-10-04 (the nest advances the mode itself; user ruling 2026-10-04)
+rust bridge_routing::UpdateLocalDomainConfigRequest.mta_sts_mode removed 2026-10-04 (the nest advances the mode itself; user ruling 2026-10-04)
+#
+# The compat-remnant final audit's removals (user ruling 2026-10-04, recorded in
+# compat-remnant-sweep.md's 2026-10-04 paragraph: no client and no nest runs anywhere, nothing is
+# kept for backwards compatibility, and every wire-field change of this phase is ratified). Each
+# line is a sweep-class remnant: every current writer was verified to always send the value.
+rust custody_ceremony::CustodyOffer.accepts_nest_custodian removed 2026-10-04 (a finished rollout flag: the one offer builder always set it; user ruling 2026-10-04)
+rust folders::ContentKeyPutRequest.current_version optional→required 2026-10-04 (both owner writers always stamp the floor; user ruling 2026-10-04)
+rust bridge_routing::ProvisionRecipientMlsPubkeyRequest.mlkem_ek optional→required 2026-10-04 (every app publishes both halves of the recipient seal key; user ruling 2026-10-04)
+rust bridge_routing::EpochSealKey.mlkem_ek optional→required 2026-10-04 (the one schedule publisher always sends the per-epoch ek; user ruling 2026-10-04)
+rust bridge_routing::FetchRecipientMlsPubkeyReply.pubkey removed 2026-10-04 (both halves of the recipient seal key travel as one value, `key`; user ruling 2026-10-04)
+rust bridge_routing::FetchRecipientMlsPubkeyReply.mlkem_ek removed 2026-10-04 (both halves of the recipient seal key travel as one value, `key`; user ruling 2026-10-04)
+rust bridges_ui::BridgeStatus.supports_follow_requests optional→required 2026-10-04 (the nest states the flag for every bridge it lists; user ruling 2026-10-04)
+cddl BridgeStatus.supports_follow_requests optional→required 2026-10-04 (the nest states the flag for every bridge it lists; user ruling 2026-10-04)

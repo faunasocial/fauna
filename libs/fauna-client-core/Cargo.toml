@@ -1,0 +1,47 @@
+[package]
+name = "fauna-client-core"
+description = "Platform-agnostic client operations for Fauna apps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+js = ["fauna-core/js", "fauna-protocol/js"]
+# `nest_trust::run_pinned_silent_challenge` — the pinned (web-model) flavour of
+# the shared challenge/verify ceremony. Off by default so consumers that only
+# need the pin/compare helpers don't pull the ceremony's signing surface.
+auth-ceremony = ["fauna-protocol/auth-ceremony"]
+
+[dependencies]
+fauna-core = { path = "../fauna-core", default-features = false }
+# `fauna_protocol::auth::CertBinding` wire type for the shared nest-identity
+# trust core (`nest_trust.rs`). default-features = false: the channel-binding /
+# pin-compare logic only needs the plain `CertBinding` struct, not the native
+# `p2p` (fauna-wireguard) default — keeps `fauna-client-core` wasm-buildable.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+fauna-cbor.workspace = true
+# `recovery_pending` — the pending-replacement alert's projection, posted by
+# both of its readers (the session-start sweep and the account runtime's
+# secondary leg) through the shared registry. Wasm-clean; its only dep is
+# fauna-core's `localized`.
+fauna-client-alerts = { path = "../fauna-client-alerts" }
+ed25519-dalek.workspace = true
+hex.workspace = true
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+# Async executor for the rotation-acceptance tests (`nest_trust::rotation_tests`
+# drive the async `try_rotation_repin` over a mock requester).
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `nest_trust::LocalStoragePinStore` — the browser (localStorage) backend of
+# the shared `NestIdentityPinStore`, living beside the pin/compare logic it
+# backs so every wasm consumer (the SPA's challenge_verify path in fauna-wasm,
+# the launch machine's silent-challenge connector) shares ONE store over ONE
+# localStorage key.
+web-sys = { version = "0.3", features = ["Window", "Storage"] }

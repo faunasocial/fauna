@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.LaunchNeedsUpdatePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ids="using:FaunaApp.UiIds">
+    <Grid Padding="48" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="500">
+        <StackPanel Spacing="16" HorizontalAlignment="Center">
+            <!-- NON-retry "update required" surface: the localized outdated-nest
+                 message renders in the canonical `error-message` element (matching
+                 web/linux/android). NO retry button — retrying the same outdated
+                 nest is futile. version-compatibility.md Dim 4. -->
+            <TextBlock x:Name="MessageText"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+                       Style="{StaticResource SubtitleTextBlockStyle}"
+                       TextWrapping="Wrap"
+                       TextAlignment="Center" />
+            <Button x:Name="FallthroughButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.LaunchFallthroughButton}"
+                    HorizontalAlignment="Center"
+                    Click="OnFallthroughClick" />
+        </StackPanel>
+    </Grid>
+</Page>

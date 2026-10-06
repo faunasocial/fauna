@@ -1,0 +1,137 @@
+// The nest-hosted WASM plugin contract — the exact set of capability imports
+// the host links and the exports a plugin must provide
+// (`docs/goal/architecture/third-party.md` § Execution forms → *WASM
+// components*; the sandbox profile is `security.md` § Co-resident process
+// trust boundary → *Hosted third-party code*).
+//
+// Capability-based by construction: a plugin reaches NOTHING that is not an
+// interface below — no WASI, no clock but `clock`, no randomness, no file, no
+// socket. Every import is served by the host on the plugin's behalf, under the
+// principal row the install minted: the nest API is the principal dispatch
+// chokepoint (the ceiling, then the scopes), outbound HTTP is refused before
+// any dial for a host the plugin's document did not declare, and the holder
+// key never enters the sandbox — the host performs the open.
+package fauna:plugin@0.1.0;
+
+interface types {
+    /// A WS-RPC refusal or fault, as the nest answers it.
+    record rpc-error {
+        code: string,
+        message: string,
+    }
+}
+
+/// The nest API — one WS-RPC call as this principal.
+interface nest-api {
+    use types.{rpc-error};
+
+    /// Call `kind` with a DAG-CBOR `payload`, as this principal, for the
+    /// bound account `account` (its 32-byte actor id), or for the install row
+    /// itself when `none`. Dispatched through the principal chokepoint: a kind
+    /// outside the ThirdParty ceiling or outside the binding's scopes refuses
+    /// with the kind's `permission_denied` code.
+    call: func(account: option<list<u8>>, kind: string, payload: list<u8>) -> result<list<u8>, rpc-error>;
+
+    /// The accounts currently bound to this plugin by their own consent, each
+    /// a 32-byte actor id.
+    bindings: func() -> list<list<u8>>;
+}
+
+/// The plugin's own state scope — a key/value store the nest keeps per
+/// principal and deletes with the row.
+interface state {
+    get: func(key: string) -> option<list<u8>>;
+    put: func(key: string, value: list<u8>);
+    delete: func(key: string);
+}
+
+/// The principal's holder key, exposed as OPERATIONS only: the private half
+/// lives in the sandbox's state scope on the host side and is never lowered
+/// into plugin memory (`third-party.md` § The principal model, rule 2).
+interface holder {
+    /// The X25519 public key (32 bytes) — what the principal row holds and
+    /// what every grant to this plugin is wrapped to.
+    public-key: func() -> list<u8>;
+
+    /// Open one wrapped scope key (`WrappedScopeKey`, canonical DAG-CBOR)
+    /// that `owner` (32-byte actor id) sealed to this plugin's key. The host
+    /// performs the HPKE open; the plugin receives the minimal content key
+    /// inside the seal and never the holder secret.
+    open-grant: func(owner: list<u8>, wrapped: list<u8>) -> result<list<u8>, string>;
+}
+
+/// Outbound HTTP to the hosts the plugin's document declared — and to no other.
+interface http {
+    record request {
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    record response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    /// Refused before any dial when the URL's host is not declared.
+    fetch: func(req: request) -> result<response, string>;
+}
+
+interface clock {
+    /// Milliseconds since the Unix epoch, as the host sees it.
+    now-millis: func() -> u64;
+}
+
+interface log {
+    enum level { debug, info, warn, error }
+    /// A line in the nest's log, attributed to the principal.
+    log: func(level: level, message: string);
+}
+
+/// The runner contract's start/stop.
+interface lifecycle {
+    /// Called once per instance, after instantiation. An `err` stops the
+    /// plugin and is shown to the admin.
+    start: func() -> result<_, string>;
+    /// Called before the instance is dropped (an update, an uninstall, a
+    /// nest shutdown). Best-effort: a fault here is logged, never retried.
+    stop: func();
+}
+
+/// Nest-terminated ingress: a request for a path the plugin's document
+/// declared, proxied in plaintext with the nest-signed identity assertion.
+interface ingress {
+    record request {
+        method: string,
+        path: string,
+        query: option<string>,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+        /// The identity assertion: the actor the nest authenticated on this
+        /// request (32 bytes), or none for an anonymous request. Asserted by
+        /// the nest, never read from a header the far end could forge.
+        actor: option<list<u8>>,
+    }
+
+    record response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    handle: func(req: request) -> response;
+}
+
+world plugin {
+    import nest-api;
+    import state;
+    import holder;
+    import http;
+    import clock;
+    import log;
+
+    export lifecycle;
+    export ingress;
+}

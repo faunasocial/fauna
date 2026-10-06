@@ -1,0 +1,32 @@
+# Vendored, locally-patched fork of ksni 0.2.2 (Unlicense / public domain).
+# Upstream: https://github.com/iovxw/ksni — pinned at the published 0.2.2 tree.
+# Local patch: implement the freedesktop StatusNotifierItem `ProvideXdgActivationToken`
+# method so a GNOME/Wayland tray host can hand us an xdg-activation token before
+# `Activate`/menu activation. Upstream ksni (incl. 0.3.x) does not implement it, so
+# the token GNOME mints from the real tray click is dropped and mutter denies the
+# window raise (focus-stealing prevention) — see libs/ksni/PATCH.md and
+# apps/fauna-linux/src/tray.rs. Pulled in via a path dependency from apps/fauna-linux
+# only (not a workspace member; left in upstream style — rustfmt-ignored).
+[package]
+name = "ksni"
+version = "0.2.2"
+authors = ["iovxw <iovxw@outlook.com>"]
+edition = "2021"
+rust-version = "1.58"
+description = """
+A Rust implementation of the KDE/freedesktop StatusNotifierItem specification
+"""
+repository = "https://github.com/iovxw/ksni"
+keywords = ["systray", "linux", "gui"]
+categories = ["api-bindings"]
+license = "Unlicense"
+
+[dependencies]
+dbus = { version = "0.9" }
+dbus-tree = { version = "0.9" }
+thiserror = "1.0"
+
+# No [build-dependencies]: upstream's build.rs ran dbus-codegen 0.9 (which pulls
+# clap 2, ansi_term and atty — RUSTSEC-2021-0139/-2021-0145/-2024-0375) to turn
+# dbus_interfaces/*.xml into Rust; its output is committed as
+# src/dbus_interfaces.rs instead. See PATCH.md § Generated D-Bus code.

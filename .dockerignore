@@ -1,0 +1,18 @@
+target/
+.git/
+.claude/
+docs/
+tests/
+todo/
+apps/fauna-ios/
+apps/fauna-android/
+apps/fauna-apple/
+# NB: apps/fauna-linux and apps/fauna-windows are deliberately NOT ignored — they
+# are Rust workspace members (fauna-linux + the six apps/fauna-windows/* crates)
+# whose presence the nest-image build now needs so the committed Cargo.lock stays
+# canonical for `cargo build --locked` (release-integrity.md S6). The Dockerfile
+# rust-native/rust-wasm stages COPY these trees so cargo can resolve the FULL
+# workspace; nothing in the nest build graph depends on them, so their source is
+# resolved but never compiled and never reaches the runtime image. (ios/android/
+# apple stay ignored — Swift/Kotlin, not cargo members.) See the Dockerfile
+# comment at the strip's former site for the full rationale.

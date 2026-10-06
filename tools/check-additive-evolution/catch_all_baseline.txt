@@ -1,0 +1,242 @@
+# Committed grandfather baseline for tools/check-additive-evolution's rule-4
+# catch-all check (transport.md § Schema and forward-compat discipline).
+#
+# Struct keys here are exempt from needing the `#[serde(flatten)] extra`
+# catch-all. Four categories, NOT two — this list is regenerated mechanically
+# (below) and so absorbs anything violating the rule at generation time
+# regardless of category, which is exactly the silent-grandfather failure
+# mode a verify-back
+# warned about; each entry outside the first two categories needs its OWN
+# doc comment on the struct explaining which of the other two applies, or
+# it is an open gap, not a documented exemption:
+#   1. The 2026-06-15 sweep's pre-existing exclusions. **EMPTY as of
+#      2026-09-11** — this category was the un-justified residue the
+#      verify-back found, and it has been fully discharged: the last of it
+#      (`error::RpcError`, `error::LocalizedText`, `folders::PlaceFlags`, and
+#      `bridges_ui::{AddFollowRequest, BridgeFollow, LinkRequest,
+#      SetSettingsRequest}`) now carries the catch-all in code rather than an
+#      exemption here. Every
+#      remaining entry is category 2, 3 or 4 and carries its justification;
+#      a NEW entry under category 1 is therefore not a thing that can exist —
+#      re-opening it would mean grandfathering a fresh violation, which the
+#      regenerator refuses to do anyway.
+#   2. bridge_routing's version-locked, in-image (bridge-decoded) structs.
+#      NOT the module's app-callable admin-mail kinds — the 2026-08-27
+#      who-decodes ruling (transport.md:2225) pulled those under the
+#      catch-all rule, and they already carry it in code, so they never
+#      appear here.
+#   3. The tagged-union `Unknown` fallback itself (rule 3) — not a growable
+#      payload struct, so rule 4's protection is inapplicable by definition.
+#   4. Whole-struct canonical-signed cryptographic statements, where the
+#      signature covers the full serde encoding (e.g. `nest_rotation::*`,
+#      `merge_policy::LwwStamp`) — a flatten field would change signed bytes;
+#      evolution goes through a new domain-separation tag instead.
+#
+# Regenerate with `cargo run -p check-additive-evolution -- --update-catch-all-baseline`
+# — it only ever SHRINKS this file (a struct drops out once it carries the
+# catch-all or stops deriving Deserialize); it REFUSES to add an entry, so a
+# genuinely new violation must be fixed, not silently grandfathered in.
+bridge_routing::AbortPrimaryDomainRenameReply
+bridge_routing::AbortPrimaryDomainRenameRequest
+bridge_routing::AddListMemberReply
+bridge_routing::AddListMemberRequest
+bridge_routing::AddLocalDomainReply
+bridge_routing::AddLocalDomainRequest
+bridge_routing::AddressbookEntry
+bridge_routing::AliasControls
+bridge_routing::AliasHitRow
+bridge_routing::AliasRow
+bridge_routing::AppendMessageReply
+bridge_routing::AppendMessageRequest
+bridge_routing::BatchImportListMembersReply
+bridge_routing::BatchImportListMembersRequest
+bridge_routing::BlocklistSelfCheckHistoryRow
+bridge_routing::BlocklistSelfCheckRunReply
+bridge_routing::BlocklistSelfCheckRunRequest
+bridge_routing::BlocklistServerResult
+bridge_routing::BridgeConfigChangedPush
+bridge_routing::BridgeImportCompletePush
+bridge_routing::BridgeImportErrorPush
+bridge_routing::BridgeImportProgressPush
+bridge_routing::BridgeMailboxStatePush
+bridge_routing::BridgeSpamModelResetPush
+bridge_routing::BridgeSpamModelUpdatedPush
+bridge_routing::CalendarEntry
+bridge_routing::CardEntry
+bridge_routing::CheckGreylistReply
+bridge_routing::CheckGreylistRequest
+bridge_routing::CheckSubmissionQuotaRequest
+bridge_routing::CompletePrimaryDomainRenameReply
+bridge_routing::CompletePrimaryDomainRenameRequest
+bridge_routing::CopyMessagesReply
+bridge_routing::CopyMessagesRequest
+bridge_routing::CopyPair
+bridge_routing::CreateAccountAliasReply
+bridge_routing::CreateAccountAliasRequest
+bridge_routing::CreateAccountListReply
+bridge_routing::CreateAccountListRequest
+bridge_routing::CreateForwarderReply
+bridge_routing::CreateForwarderRequest
+bridge_routing::CreateMailboxRequest
+bridge_routing::DeleteAccountAliasReply
+bridge_routing::DeleteAccountAliasRequest
+bridge_routing::DeleteAccountListReply
+bridge_routing::DeleteAccountListRequest
+bridge_routing::DeleteAddressbookRequest
+bridge_routing::DeleteCardRequest
+bridge_routing::DeleteEventRequest
+bridge_routing::DeleteForwarderReply
+bridge_routing::DeleteForwarderRequest
+bridge_routing::DeleteMailboxRequest
+bridge_routing::DiagnosticCheckResult
+bridge_routing::DiagnosticRunHistoryRow
+bridge_routing::EnableAccountAliasReply
+bridge_routing::EnableAccountAliasRequest
+bridge_routing::EpochSealKey
+bridge_routing::EventEntry
+bridge_routing::ExpungeReply
+bridge_routing::ExpungeRequest
+bridge_routing::ExpungedCardEntry
+bridge_routing::ExpungedEntry
+bridge_routing::ExtendPrimaryDomainRenameGraceReply
+bridge_routing::ExtendPrimaryDomainRenameGraceRequest
+bridge_routing::FailImportSessionRequest
+bridge_routing::FetchConfigRequest
+bridge_routing::FetchIndexSegmentsSinceReply
+bridge_routing::FetchIndexSegmentsSinceRequest
+bridge_routing::FetchMessageCiphertextRequest
+bridge_routing::FetchMessageMetadataReply
+bridge_routing::FetchMessageMetadataRequest
+bridge_routing::FetchRecipientFiltersReply
+bridge_routing::FetchRecipientIndexKeyReply
+bridge_routing::FetchRecipientIndexKeyRequest
+bridge_routing::FetchRecipientMlsPubkeyReply
+bridge_routing::FetchRecipientMlsPubkeyRequest
+bridge_routing::ForceRotateDkimReply
+bridge_routing::ForceRotateDkimRequest
+bridge_routing::GenerateDisposableAliasReply
+bridge_routing::GenerateDisposableAliasRequest
+bridge_routing::GetForwardAllToReply
+bridge_routing::GetPrimaryDomainRenameStatusReply
+bridge_routing::GetQuotaReply
+bridge_routing::GetQuotaRequest
+bridge_routing::GetSpamThresholdOverrideReply
+bridge_routing::ImportAccountAliasesReply
+bridge_routing::ImportAccountAliasesRequest
+bridge_routing::ImportAliasOutcome
+bridge_routing::ImportMailboxCursor
+bridge_routing::ImportMessageBatchReply
+bridge_routing::ImportMessageBatchRequest
+bridge_routing::ImportMessageItem
+bridge_routing::ImportMessageReply
+bridge_routing::ImportMessageRequest
+bridge_routing::ImportSessionActionReply
+bridge_routing::ImportSessionActionRequest
+bridge_routing::ImportSessionInfo
+bridge_routing::IndexSegment
+bridge_routing::IngestInboundMailReply
+bridge_routing::IngestInboundMailRequest
+bridge_routing::ListAccountAliasHitsReply
+bridge_routing::ListAccountAliasHitsRequest
+bridge_routing::ListAccountAliasesReply
+bridge_routing::ListAccountListsReply
+bridge_routing::ListAddressbooksReply
+bridge_routing::ListAddressbooksRequest
+bridge_routing::ListBlocklistSelfCheckHistoryReply
+bridge_routing::ListBlocklistSelfCheckHistoryRequest
+bridge_routing::ListCalendarsReply
+bridge_routing::ListCalendarsRequest
+bridge_routing::ListDeliverabilityDiagnosticRunsReply
+bridge_routing::ListDeliverabilityDiagnosticRunsRequest
+bridge_routing::ListForwardersReply
+bridge_routing::ListImportSessionsReply
+bridge_routing::ListListMembersReply
+bridge_routing::ListListMembersRequest
+bridge_routing::ListListSendHistoryReply
+bridge_routing::ListListSendHistoryRequest
+bridge_routing::ListLocalDomainsReply
+bridge_routing::ListMailboxesReply
+bridge_routing::ListMailboxesRequest
+bridge_routing::ListMessagesReply
+bridge_routing::ListMessagesRequest
+bridge_routing::ListPrimaryDomainRenamesReply
+bridge_routing::ListSendHistoryRow
+bridge_routing::MailBodyRef
+bridge_routing::MailDomainRenameRow
+bridge_routing::MailDomainRow
+bridge_routing::MailListMemberRow
+bridge_routing::MailListRow
+bridge_routing::MailboxEntry
+bridge_routing::MessageMeta
+bridge_routing::MoveMessagesReply
+bridge_routing::MoveMessagesRequest
+bridge_routing::OutboundWarmupStatusReply
+bridge_routing::ProvisionAddressbookRequest
+bridge_routing::ProvisionCalendarRequest
+bridge_routing::ProvisionSelfSignedCertReply
+bridge_routing::ProvisionSelfSignedCertRequest
+bridge_routing::PutCardCiphertextRequest
+bridge_routing::PutEventCiphertextRequest
+bridge_routing::QResyncHint
+bridge_routing::QueryCardsRequest
+bridge_routing::QueryEventsRequest
+bridge_routing::RemoveLocalDomainReply
+bridge_routing::RemoveLocalDomainRequest
+bridge_routing::RenameMailboxRequest
+bridge_routing::ReportRejectedScanReply
+bridge_routing::ReportRejectedScanRequest
+bridge_routing::ReportSessionCloseReply
+bridge_routing::ReportSessionCloseRequest
+bridge_routing::ResolveRecipientRequest
+bridge_routing::RestoreLocalDomainReply
+bridge_routing::RestoreLocalDomainRequest
+bridge_routing::RestoreRealTlsCertReply
+bridge_routing::ResubscribeListMemberReply
+bridge_routing::ResubscribeListMemberRequest
+bridge_routing::RevokeAccountAliasReply
+bridge_routing::RevokeAccountAliasRequest
+bridge_routing::RotateListUnsubscribeSecretReply
+bridge_routing::RunDeliverabilityDiagnosticsReply
+bridge_routing::SealedBridgeInfo
+bridge_routing::SearchMessagesReply
+bridge_routing::SearchMessagesRequest
+bridge_routing::SelectMailboxRequest
+bridge_routing::SendListMessageReply
+bridge_routing::SendListMessageRequest
+bridge_routing::SetCatchAllActorReply
+bridge_routing::SetCatchAllActorRequest
+bridge_routing::SetDkimRotationDaysReply
+bridge_routing::SetDkimRotationDaysRequest
+bridge_routing::SetForwardAllToRequest
+bridge_routing::SetRoleAddressReply
+bridge_routing::SetRoleAddressRequest
+bridge_routing::SetSpamThresholdOverrideRequest
+bridge_routing::StagedBodyRef
+bridge_routing::StampedHeader
+bridge_routing::StartImportSessionReply
+bridge_routing::StartImportSessionRequest
+bridge_routing::StartPrimaryDomainRenameReply
+bridge_routing::StartPrimaryDomainRenameRequest
+bridge_routing::StoreFlagsReply
+bridge_routing::StoreFlagsRequest
+bridge_routing::StoreFlagsResultEntry
+bridge_routing::SubscribeMailboxRequest
+bridge_routing::SubscribeMailboxStateRequest
+bridge_routing::SyncAddressbookSinceRequest
+bridge_routing::SyncCalendarSinceRequest
+bridge_routing::TrainSpamClassifierRequest
+bridge_routing::UnsubscribeListMemberReply
+bridge_routing::UnsubscribeListMemberRequest
+bridge_routing::UnsubscribeMailboxRequest
+bridge_routing::UpdateAccountAliasReply
+bridge_routing::UpdateAccountAliasRequest
+bridge_routing::UpdateAccountListReply
+bridge_routing::UpdateAccountListRequest
+bridge_routing::UpdateLocalDomainConfigReply
+bridge_routing::UpdateLocalDomainConfigRequest
+bridge_routing::ValidateRecipientRequest
+bridge_routing::WhoamiReply
+merge_policy::LwwStamp
+nest_rotation::NestRotation
+nest_rotation::SignedNestRotation
+unknown::Unknown

@@ -1,0 +1,76 @@
+[package]
+name = "fauna-credential-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Opt-in tests that talk to the live macOS login Keychain (they create and
+# delete real items under a per-run probe namespace). Off by default because
+# an unlocked GUI-session keychain is absent on CI runners and SSH sessions —
+# the same shape as fauna-linux's `live-secret-service`.
+live-keychain = ["allow-live-keyring"]
+# Escape hatch keeping the FAUNA_E2E_CREDENTIAL_DIR /
+# FAUNA_E2E_FORCE_HEADLESS_STORE store redirects (`cred_file_dir`,
+# `force_headless_store`) in a --release e2e build — a debug build reaches them
+# via each fn's own `debug_assertions` arm. Never default-on; consumers forward
+# it from their own e2e feature (linux/tui/sync-agent `e2e-agent`), never on a
+# dep line (e2e-conventions.md convention 15 rule (b)). Without the forward a
+# release-profile e2e run silently falls back to the OS keyring and writes the
+# run's credentials into the dev box's real store.
+e2e-agent = []
+# Test builds never reach the live OS keyring (`live_keyring_allowed`): a
+# unit-test binary talking to the developer's desktop gnome-keyring-daemon has
+# crashed it, re-locking the login keyring for every process on the box.
+# Enabled from [dev-dependencies] ONLY — resolver 2 keeps it out of every plain
+# build, and workspace feature unification carries it into every test build of
+# the workspace, so the direct dependents declaring it cover the transitive ones
+# too. Never on a [dependencies] line: in a shipped build it would silently
+# disable the keyring.
+no-live-keyring = []
+# The explicit way back for the opt-in live suites (`live-keychain` here,
+# `fauna-linux/live-secret-service`), which exist to talk to a real keyring.
+allow-live-keyring = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("e2e-agent", "live-keychain", "no-live-keyring", "allow-live-keyring"))'] }
+
+[dependencies]
+anyhow = { workspace = true }
+chacha20poly1305 = { workspace = true }
+fauna-client-accounts = { workspace = true }
+fauna-core = { workspace = true }
+rand = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+
+# The freedesktop Secret Service arm (linux). libsecret is async-only, hence
+# tokio.
+#
+# Named POSITIVELY (`target_os = "linux"`), never as "not macOS and not
+# Windows". The exclusion form silently claimed every phone target speaks D-Bus,
+# so once fauna-client-sync grew a dependency on this crate the iOS/watchOS/
+# Android slices began pulling secret-service -> zbus and `just apple-ffi`
+# stopped compiling. Targets with no arm of their own land on `no_keyring`
+# (src/no_keyring.rs), which explains the whole shape.
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
+tokio = { workspace = true }
+
+# The Windows Credential Manager arm (module `win_credman`) — the native store
+# `apps/tui.md` § Credential storage owed; landed 2026-07-19 with the
+# sync-agent A2 track.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security_Credentials",
+] }
+
+# The macOS login-Keychain arm (module `mac_keychain`). Versions track the
+# workspace lockfile (already present transitively).
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+security-framework = "3"
+security-framework-sys = "2"

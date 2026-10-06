@@ -1,0 +1,45 @@
+{
+  "ArcVerdict": {
+    "Fail": "fail",
+    "None": "none",
+    "Pass": "pass",
+    "PermError": "perm_error",
+    "TempError": "temp_error"
+  },
+  "ClamavVerdict": {
+    "BypassedOversize": "bypassed_oversize",
+    "Clean": "clean",
+    "Error": "error",
+    "Infected": "infected",
+    "NotScanned": "not_scanned"
+  },
+  "DkimVerdict": {
+    "Fail": "fail",
+    "Neutral": "neutral",
+    "None": "none",
+    "Pass": "pass",
+    "PermError": "perm_error",
+    "TempError": "temp_error"
+  },
+  "DmarcPolicy": {
+    "None": "none",
+    "Quarantine": "quarantine",
+    "Reject": "reject"
+  },
+  "DmarcVerdict": {
+    "Fail": "fail",
+    "None": "none",
+    "Pass": "pass",
+    "PermError": "perm_error",
+    "TempError": "temp_error"
+  },
+  "SpfVerdict": {
+    "Fail": "fail",
+    "Neutral": "neutral",
+    "None": "none",
+    "Pass": "pass",
+    "PermError": "perm_error",
+    "SoftFail": "soft_fail",
+    "TempError": "temp_error"
+  }
+}

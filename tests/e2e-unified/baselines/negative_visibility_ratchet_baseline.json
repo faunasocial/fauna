@@ -1,0 +1,4 @@
+{
+  "_comment": "Down-only ratchet for e2e-conventions.md convention 6's negative-visibility rider. Regenerate with scripts/check_negative_visibility_ratchet.py --update-baseline.",
+  "files": {}
+}

@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  Optional user-data removal on uninstall.
+
+  By default the uninstaller preserves %ProgramData%\Fauna\. Passing
+  REMOVE_USER_DATA=1 to the uninstall additionally deletes it:
+
+      msiexec /x {ProductCode} REMOVE_USER_DATA=1
+
+  Mechanism (the standard util:RemoveFolderEx pattern — the directory is not a
+  fixed Directory-table entry, so its path must come from a durable source):
+
+    1. The DataCleanup component (referenced by BOTH the Sync and Nest features
+       in Package.wxs, so it installs whenever either is selected — Sync is now
+       optional, so the Nest ref covers a headless nest-only install) writes the
+       data-dir path into the registry at install time:
+       HKLM\SOFTWARE\Fauna\Install\DataDir = [FaunaDataFolder].
+    2. On uninstall, the FAUNA_PROGRAMDATA_DIR property's RegistrySearch (during
+       AppSearch, before CostInitialize) reads that value back.
+    3. util:RemoveFolderEx removes the resolved tree — gated by the inline
+       Condition so it only fires when REMOVE_USER_DATA=1.
+
+  Per-user data (%LocalAppData%\Fauna\) is intentionally NOT removed here: this
+  is a perMachine MSI running as SYSTEM, which cannot reach an arbitrary signed-in
+  user's profile, and per the product invariant "user always controls their data"
+  delete affordances live in the user's client. The desktop app owns clearing its
+  own per-user data. See docs/goal/architecture/installers/windows.md § Uninstall.
+-->
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Fragment>
+
+    <!--
+      The registry write MUST happen at install time so the path is durably
+      available at uninstall. Referenced by both the Sync and Nest features
+      (Package.wxs) so it is present whenever either machine-data producer is
+      installed. The util:RemoveFolderEx is itself Conditioned on REMOVE_USER_DATA;
+      the registry write is unconditional within the component.
+    -->
+    <ComponentGroup Id="DataCleanup" Directory="INSTALLFOLDER">
+      <Component Id="DataDirRegistry" Guid="4a7b8c00-0030-4d3a-b5c6-d7e8f9a0b1c2">
+        <RegistryValue Root="HKLM"
+                       Key="SOFTWARE\Fauna\Install"
+                       Name="DataDir"
+                       Type="string"
+                       Value="[FaunaDataFolder]"
+                       KeyPath="yes" />
+
+        <!-- Remove %ProgramData%\Fauna\ on uninstall, only when the user opted in. -->
+        <util:RemoveFolderEx On="uninstall"
+                             Property="FAUNA_PROGRAMDATA_DIR"
+                             Condition="REMOVE_USER_DATA=&quot;1&quot;" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- Reads the install-time DataDir value back (set before CostInitialize). -->
+    <Property Id="FAUNA_PROGRAMDATA_DIR">
+      <RegistrySearch Id="FindProgramData"
+                      Root="HKLM"
+                      Key="SOFTWARE\Fauna\Install"
+                      Name="DataDir"
+                      Type="directory" />
+    </Property>
+
+    <!-- ── GUI "also delete my data" on uninstall ──────────────────────────────
+      By default a GUI uninstall preserves %ProgramData%\Fauna (the no-data-loss
+      default). This dialog, shown ONLY on the Remove path, lets the user opt into
+      the same cleanup the CLI `REMOVE_USER_DATA=1` triggers — it merely SETS that
+      property from the checkbox; the removal mechanism (DataCleanup +
+      util:RemoveFolderEx above) is unchanged. Per-user %LocalAppData%\Fauna stays
+      the client's affordance, never this perMachine MSI. The CLI path keeps
+      working unchanged for headless/scripted uninstalls. -->
+    <UI>
+      <Dialog Id="RemoveDataDlg" Width="370" Height="270" Title="[ProductName] Setup" NoMinimize="yes">
+        <Control Id="Title" Type="Text" X="15" Y="15" Width="340" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="{\WixUI_Font_Title}Remove Fauna" />
+        <Control Id="Description" Type="Text" X="25" Y="45" Width="320" Height="40" Transparent="yes" NoPrefix="yes"
+                 Text="Fauna will be uninstalled. By default your data in %ProgramData%\Fauna (the nest database, identity, and stored content) is kept, so reinstalling keeps working." />
+        <Control Id="RemoveDataCheckBox" Type="CheckBox" X="25" Y="105" Width="320" Height="18"
+                 Property="REMOVE_USER_DATA" CheckBoxValue="1"
+                 Text="Also permanently delete all Fauna data (this cannot be undone)" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back">
+          <Publish Event="NewDialog" Value="MaintenanceTypeDlg" />
+        </Control>
+        <Control Id="Uninstall" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Uninstall">
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <!-- Route the Remove path through RemoveDataDlg before the final confirm.
+           A higher Order than the WixUI library default makes this NewDialog win
+           for Remove; Change / Repair / Install paths are unaffected. -->
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="RemoveDataDlg" Order="10" Condition="WixUI_InstallMode = &quot;Remove&quot;" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="RemoveDataDlg" Order="10" Condition="WixUI_InstallMode = &quot;Remove&quot;" />
+    </UI>
+
+  </Fragment>
+
+</Wix>

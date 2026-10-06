@@ -1,0 +1,417 @@
+[package]
+name = "fauna-wasm"
+description = "WASM bindings for Fauna crypto and encoding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `payments` is default-ON here for the same reason as in fauna-ffi: this is a
+# flavor ROOT (`wasm-pack build libs/fauna-wasm` is the artifact boundary), so
+# `--no-default-features` is a real switch rather than something 17 unifying
+# consumers can undo (`dynamic-features.md` § The cargo feature spine; the
+# depth argument is written out in fauna-protocol's manifest).
+#
+# The web SPA has no app store, so it needs no escape hatch of its own — it
+# carries the same feature anyway because a registry feature that is excisable
+# on six surfaces and welded on the seventh is exactly the per-app divergence
+# priority #1 forbids, and because the web build is the cheapest place to keep
+# the excised flavor honest in the merge-gate tier.
+default = ["store-safe", "payments", "zaps"]
+# The complement: every wasm surface that is NOT a gated-feature-registry
+# member, so the excised flavor is spelled `--no-default-features --features
+# store-safe` at ALL THREE flavor roots (fauna-ffi / fauna-wasm / fauna-nest)
+# rather than two-one. It is legitimately EMPTY today — this crate's `default`
+# happens to contain nothing but registry members, so `--no-default-features`
+# alone would resolve identically right now.
+#
+# It exists anyway, for the reason the ffi manifest's own comment gives: the
+# split is what stops the hatch rotting. The day a non-registry default feature
+# is added here (a `qr-render`-shaped surface, say), the bare
+# `--no-default-features` spelling would silently drop it from the store-safe
+# web build — a product regression with no failing build anywhere, since both
+# flavors still compile. With the complement, a new surface is added to
+# `store-safe` once and is in `default` by construction. One empty line now
+# buys that; retrofitting it after the first such regression does not.
+store-safe = []
+# The e2e injection seams, and the wasm exports that expose them to the
+# Playwright bridge. OFF by default so a production `just wasm` / `just web`
+# build — which is a RELEASE build, so `debug_assertions` is no lever here —
+# carries none of them; `just web-test`'s `wasm-core-test` flavor turns it on.
+#
+# Per testing.md § convention 15 rule (b): a consumer NEVER names `test-helpers`
+# on a dependency line (that turns it on unconditionally for every artifact it
+# builds); it forwards it from its own opt-in feature, which is this. And per the
+# same rule, the wasm exports below are keyed on THIS FEATURE ALONE, never on the
+# profile, so the generated JS/.d.ts face stays a pure function of the feature set.
+#
+# `fauna-client-backup/e2e-agent` is the audit's clock-offset seam
+# (`audit_clock::set_clock_offset_secs`, which the `backup_audit_run_now` agent
+# command drives). Forwarded, never named on the dep line — same rule (b).
+# The money plane's web half: the `paymentsProvidersSet/List/Remove` +
+# `paymentsClaimsRedeem` wasm exports over fauna-client-payments. Forwarded
+# from this crate's OWN feature (rule (b)) so `--no-default-features` genuinely
+# drops both the JS exports and the `fauna.payments.*` kind strings.
+#
+# `fauna-feed/payments` adds the tip surface's one gated member,
+# `FeedManager::resolve_post_tips` (the sole caller of `fauna.tips.list`; tips
+# are a named buy-side gate surface — dynamic-features.md § Charter members).
+# `PostSummary.tips` itself is ungated and inert, so the snapshot's JS shape is
+# the same in both flavors.
+payments = [
+    "dep:fauna-client-payments",
+    "fauna-protocol/payments",
+    "fauna-feed/payments",
+]
+# The `zaps` registry feature's web half: the `nostrZapSignersList/Add/Remove`
+# + `nostrZapTotal` exports. A SUBSET MEMBER — it requires `payments`, so a
+# `--features store-safe`-equivalent web build drops it with the money plane,
+# while the Damus flavor (payments on, zaps off) keeps provider-rail payments.
+# The relation is declared once in fauna-protocol's manifest, not per crate.
+# Both halves forwarded from this crate's OWN feature (rule (b)) so
+# `--no-default-features` drops the JS exports AND the kind strings.
+zaps = ["payments", "fauna-protocol/zaps", "fauna-client-nostr/zaps"]
+test-helpers = [
+  "fauna-conversations/test-helpers",
+  "fauna-feed/test-helpers",
+  "fauna-client-backup/e2e-agent",
+  # The Nests trust facet's render clock (`trustSetClockOffsetForTest`, the
+  # `trust_facet_advance_clock` command's mechanism) — forwarded, rule (b).
+  "fauna-client-capabilities/e2e-agent",
+  # The region plane's registry-seed entry point (`seeded_registry`), which
+  # src/region.rs feeds from browser storage — convention 15, forwarded.
+  "fauna-client-region/e2e-agent",
+  # The shared `device_set_state` plane reader
+  # (`account_driver::e2e_readers`), behind `accountDeviceSetState` — the
+  # `device_set_state` command every runtime-hosting app answers. Forwarded,
+  # rule (b).
+  "fauna-account-plane/e2e-agent",
+  "fauna-client-dns/test-helpers",
+  "fauna-client-alert-sweep/test-helpers",
+  # The loud-surface e2e seams (`fauna_e2e_agent::{RECONNECT_BACKOFF,
+  # CONNECTION_REPORTS_KEY, PAINTED_ERRORS_KEY, ALERT_SWEEP_WAKE}`): the
+  # transport's pace override and report counter, the shared counters, and the
+  # sweep loop's wake.
+  "fauna-rpc-wasm/test-helpers",
+  "dep:fauna-e2e-contract",
+  "dep:tokio",
+]
+
+# wasm32-scoped on purpose: this crate builds only for wasm32, and a plain
+# [dependencies] table would leak its wasm-only feature activations (js,
+# blob-fetch-wasm, wasm_js, …) into every HOST build's resolution under
+# resolver.feature-unification = "workspace". Add new deps here, never in a
+# plain [dependencies] table.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js", "qr_render", "blob-fetch-wasm"] }
+fauna-client-core = { path = "../fauna-client-core", features = ["js"] }
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"] }
+# Client-side inbound-mail decrypt (`open_inbound_record`) for the conversations
+# SMTP receive rail (`src/conversations.rs`). default-features = false +
+# `segments-receive` pulls only the WASM-safe codec + `wrapped_blob` HPKE unseal
+# (no hickory/tokio); priority #2 — the one shared decrypt every app reuses.
+# `spam-classifier` adds the pure per-user spam scorer (`fauna_mail::spam` — the
+# n-gram Naive-Bayes scorer + confidence-weighting formula, tokenizer+serde_json
+# only, no auth/tokio) so the SPA runs the SAME on-device INBOX scoring the Go
+# MDA does (`src/spam.rs`; content-scoring.md § The shared-scorer shape — "one
+# shared-Rust scorer compiles to nest/MDA/clients"; priority #2).
+fauna-mail = { path = "../fauna-mail", default-features = false, features = ["segments-receive", "spam-classifier", "body-ref-resolve"] }
+# The e2e snapshot test-surface (mock rail backends + `inject_inbound_for_test` /
+# `create_mls_group` / `clear_for_test`) is forwarded from THIS crate's own
+# `test-helpers` feature above — deliberately NOT named here. Naming it on this
+# dep line is what put those seams into every production bundle until 2026-07-30
+# (testing.md § convention 15 rule (b)). See the "e2e test-helper surface"
+# section in `src/conversations.rs`.
+fauna-conversations = { workspace = true, features = ["wasm"] }
+# The SMTP rail's `OutboundMailSink` seam is `#[async_trait]`; the receive-only
+# no-op sink in `src/conversations.rs` impls it.
+async-trait = "0.1"
+# The feed-snapshot injection seam (`FeedManager::set_feed_snapshot_for_test` +
+# `test_support`), exposed as `WasmFeedManager::injectPostsForTest`, is forwarded
+# from this crate's own `test-helpers` above — deliberately NOT named here, same
+# rule-(b) reason as `fauna-conversations`. See the "e2e test-helper surface"
+# section in `src/feed.rs`.
+fauna-feed = { workspace = true }
+fauna-media = { workspace = true }
+serde-wasm-bindgen = "0.6"
+# The error type of the shared `fauna_core::file_download::BlobFetcher` seam that
+# `src/snapshot_download.rs` binds to the browser fetch.
+anyhow.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures = "0.4"
+# The witness dialer's 15 s round-trip bound (`src/succession_witness.rs`).
+# `tokio::time` does not exist on wasm32, so the browser races the walk
+# against a `TimeoutFuture` — the same pair `fauna-rpc-wasm`'s own
+# per-request deadline uses, and no new crate in the tree.
+gloo-timers = { version = "0.4", features = ["futures"] }
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+blake3.workspace = true
+# Decode the conversations inject-seam `attachments` payload's base64 bytes
+# (`src/conversations.rs::test_attachments_from_js`), mirroring linux's
+# `handle_conversations_inject_inbound`.
+base64.workspace = true
+getrandom = { workspace = true, features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+js-sys.workspace = true
+
+# WS-RPC façade (Phase 4 of the WS-RPC adoption migration; tracked internally).
+# Wasm-only: `src/rpc.rs` is `#[cfg(target_arch = "wasm32")]` and is the sole
+# consumer, so these stay out of the native workspace build entirely.
+#   - fauna-rpc-wasm: the browser transport (WsRpcClient impl of RpcRequester);
+#     itself `#![cfg(wasm32)]`, an empty rlib on native.
+#   - fauna-client-{bridges,email,feed,posts,contacts,notifications,account}: the
+#     shared typed wrappers, generic over RpcRequester — written once, consumed by
+#     native + wasm (priority #2).
+#   - fauna-protocol: RpcRequester/CborValue/Echo + email wire enums; mirrors
+#     fauna-rpc-wasm's `default-features = false, features = ["js"]` shape.
+# (This block merged into the single wasm32 table above when [dependencies] was
+# retagged — TOML forbids a duplicate table header.)
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm" }
+# `test-helpers` only: the shared e2e counters (the pure, wasm-safe half of
+# `fauna-e2e-agent`) and the sweep loop's wake (`Notify`; `sync` only — no
+# rt/net, which would pull mio). Both already in the tree via fauna-rpc-wasm.
+fauna-e2e-contract = { path = "../fauna-e2e-contract", optional = true }
+tokio = { version = "1", default-features = false, features = ["sync"], optional = true }
+# The cross-page critical-alerts registry (critical-alerts.md) this chunk hosts
+# for the session-start sweep (`src/critical_alerts.rs`). Wasm-clean by
+# construction (only dep is fauna-core's `localized`).
+fauna-client-alerts = { path = "../fauna-client-alerts" }
+# The session-start sweep orchestrator itself (`WsRpcClient::runCriticalAlertSweep`,
+# `src/rpc.rs`) — wasm-clean by construction (TRACK 4: "web — the real one", this crate is the core chunk the goal doc
+# calls out).
+fauna-client-alert-sweep = { path = "../fauna-client-alert-sweep" }
+# `port::serve` — the ATProto identity seam's core-chunk half, answered from
+# `account_port::dispatch` for the ATProto settings chunk's forwarder.
+fauna-client-atproto = { path = "../fauna-client-atproto" }
+# `depth_level_options` (the depth rungs the core bundle paints). `rpc-glue`
+# only (no `uniffi`); mirrors fauna-wasm-atproto-settings's own dependency line.
+# `account-port`: `account_port`'s dispatch answers the ATProto chunk's
+# credential forwarder through the seam's `serve` (account-client-lifecycle.md
+# § The account port).
+fauna-atproto-settings-machine = { path = "../fauna-atproto-settings-machine", default-features = false, features = ["rpc-glue", "account-port"] }
+# Durable inbox-apply drain (layer 2): the shared `drain`/`InboxApply` the web
+# receive loop (`drainInbox`) drives. WASM-clean (only deps `fauna-protocol`).
+fauna-client-inbox = { path = "../fauna-client-inbox" }
+fauna-client-admin = { path = "../fauna-client-admin" }
+# `AdminHostingClient` + the `admin_hosting_rows`/`ReceiptState` view-model fold
+# — the `admin-custody-hosting` registry. WASM-clean by its own
+# discipline (its `uniffi`/`p2p-share` features stay off, the same bargain
+# `fauna-client-pair` documents); the boundary rows cross to JS via serde
+# instead of the UniFFI scaffolding `libs/fauna-ffi` turns on.
+fauna-client-capabilities = { path = "../fauna-client-capabilities" }
+fauna-client-family = { path = "../fauna-client-family" }
+# The gated-feature plane's transparency read + the shared row shape the SPA
+# renders (`featuresStatus`), so web says what the native apps say.
+fauna-client-features = { path = "../fauna-client-features" }
+# The region content plane's app side (src/region.rs, `WasmRegionPlane`).
+fauna-client-region = { path = "../fauna-client-region" }
+fauna-client-bridges = { path = "../fauna-client-bridges" }
+fauna-client-email = { path = "../fauna-client-email" }
+fauna-client-feed = { path = "../fauna-client-feed" }
+fauna-client-posts = { path = "../fauna-client-posts" }
+fauna-client-contacts = { path = "../fauna-client-contacts" }
+fauna-client-notifications = { path = "../fauna-client-notifications" }
+fauna-client-nostr = { path = "../fauna-client-nostr" }
+fauna-client-account = { path = "../fauna-client-account" }
+# Multi-account registry (Stage 1 web). The shared account list + active pointer
+# (priority #2); `src/accounts.rs` provides only the
+# thin `LocalStorageSecretStore` glue over `web_sys::Storage`. Wasm-only: web
+# consumes `AccountRegistry` directly (its Svelte bootstrap is the launch-machine
+# equivalent), not `RegistryLaunchPersistence` — see long-term-store.md § Multi-account.
+fauna-client-accounts = { path = "../fauna-client-accounts", features = ["web-localstorage"] }
+# The account runtime this tab hosts (`src/account_runtime.rs`): the driver
+# and its web host (`account-driver` — `fauna_account_plane::web_host`), the
+# conversations seams it registers at the store-ready edge, and the store
+# root it names the IndexedDB database under
+# (account-client-lifecycle.md § The client-side lifecycle → The trigger
+# fired, ruling (4)).
+fauna-account-plane = { workspace = true, features = ["account-driver"] }
+fauna-account-seams = { workspace = true }
+fauna-account-store = { workspace = true }
+# The one wait primitive: the budget a sign-out's store erase runs under
+# (`src/account_scope.rs`).
+fauna-sleep = { workspace = true }
+# The account port's core half (`src/account_port.rs`): the fault's JS form,
+# and each seam's `serve` from the crate that declares the seam — the fleet
+# seam's in `fauna-devices-machine`'s `port` module, the custody-ceremony and
+# followed-folders seams' in `fauna-client-config`'s `custody_port` and
+# `follows_port` (its `account-port` feature, turned on at this crate's
+# `fauna-client-config` entry below)
+# (account-client-lifecycle.md § The client-side lifecycle → The account port).
+fauna-account-port = { workspace = true }
+fauna-devices-machine = { path = "../fauna-devices-machine", features = ["account-port"] }
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+# Admin mail/DNS state machines (`src/mail_admin.rs`) — the shared machines the
+# web admin pages drive. `rpc-glue` pulls each machine's wasm `WsRpcClient` seam.
+# Both are wasm-clean by design (no native transport on wasm); priority #2.
+fauna-client-dns = { path = "../fauna-client-dns" }
+fauna-client-mail-settings = { path = "../fauna-client-mail-settings", features = ["rpc-glue"] }
+# User-settings Linked-nests machine (`src/pairing.rs`) — fauna.pair.* over the
+# browser WS-RPC client. Wasm-clean by design.
+fauna-client-pair = { path = "../fauna-client-pair" }
+# The client-side backup audit loop (`src/backup_audit.rs` + `src/rpc.rs`) — the
+# one `run_audit_pass` call web's Backups page renders, plus the
+# `AuditStateSnapshot`/`AuditStateStore` shapes its `localStorage` store
+# implements. Wasm-clean by design (`backups.md` § Audit-alert surface).
+fauna-client-backup = { path = "../fauna-client-backup" }
+# Web-content authoring (`src/rpc.rs` fauna.web.* methods + `src/lib.rs`
+# webSubdomainView/webApexUrl projections) — the thin `WebClient<R>` + the pure
+# subdomain/apex view projections, driven by the user web-settings + admin-web
+# pages. Wasm-clean by design (fauna-core::web + fauna-protocol only); priority
+# #2, shared with the linux lead + the native FFI wrapper. See web-content-hosting.md.
+fauna-client-web = { path = "../fauna-client-web" }
+# Backups page (`src/rpc.rs`) — `fauna.filesync.snapshot.*` folder CRUD +
+# `fauna.sync.backup_status`, the WS-RPC twins of `/api/v1/snapshots/*` +
+# `/api/v1/sync/backup-status`. Wasm-clean shared adapters; priority #2.
+#
+fauna-client-snapshots = { path = "../fauna-client-snapshots" }
+fauna-client-sync = { path = "../fauna-client-sync" }
+# Conversations seam: the wasm `WsConversationsRpc` (over the browser WsRpcClient)
+# the web SPA registers on its `FaunaMlsBackend` — the Track E web unblock. The
+# manager async surface is driven through `fauna-conversations` directly (above);
+# the backend-construction + UI binding is the web-area follow-on
+# (per-app glue). See lib.rs re-export.
+fauna-client-conversations = { path = "../fauna-client-conversations" }
+# Owner-side shared-folder content-key orchestration: the thin `FoldersClient<R>`
+# + the `mls`-gated `FoldersAuthor<R, Arc<MlsEngine>>` (share_set / remove_member /
+# resume_pending_removals over the real `FolderGroupCrypto` adapter on
+# `Arc<MlsEngine>`), driven by `WasmConversationsManager`'s folder author methods
+# (it holds both the WS-RPC transport + the conversations rail's `MlsEngine`). The
+# `mls` feature flips on the adapter + the `share_set` flow; its transitive deps
+# (fauna-mls js, fauna-client-conversations) are already in this graph. The web twin
+# of fauna-ffi's `folders-author` feature (priority #2; folders.md § Sharing).
+#
+fauna-client-folders = { path = "../fauna-client-folders", features = ["mls", "mail-settings"] }
+# Draft-persistence v2 (`DraftsSync<R>` over `DraftsClient<R>` — seal under the
+# owner's `BackupKey` + `fauna.drafts.{get,put}`): the web leg's
+# `WasmConversationsManager.restoreDrafts` / `saveDrafts` round-trip the
+# conversations-rail draft set through the `__drafts` reserved folder
+# (`file-sync.md` § Drafts Sync; conversations.md § Persistence) via the shared
+# `DraftsSync` wrapper (launch gate + last-saved baseline), same as the linux leg.
+# Consumes the shared seal+transport — never re-implemented per client (priority #2).
+# Wasm-clean (only deps `fauna-core` + `fauna-protocol`).
+fauna-client-drafts = { path = "../fauna-client-drafts" }
+# Cross-device MLS group-state sync (`devices.md` § Cross-device MLS group-state
+# sync): the web leg's `WasmConversationsManager.restoreMlsState` / `saveMlsState`
+# round-trip the openMLS `provider` snapshot + per-channel `history/<ch>` slices
+# through the `__mls` reserved folder (`fauna.mls.{get,put}`, `BackupKey`-sealed)
+# via the shared `MlsStateSync` wrapper + the `FaunaCommitGate`/`MlsSyncCursor`
+# device-owned-epoch plane. Same wrapper the linux leg uses (priority #2); its
+# per-target table self-enables `fauna-mls/js` on wasm. The `WsMlsReplicaTransport`
+# adapter lives in `fauna-client-conversations` (already in this graph).
+fauna-client-mls-sync = { path = "../fauna-client-mls-sync" }
+# Shared CalDAV client (`CalDavClient<R: RpcRequester>`) — the web Events page's
+# WS-RPC seam over the *encrypted* `fauna.bridges.*` calendar store (events.md
+# Decision B store flip), lifting the proven linux lead. The crate's seal/unseal +
+# writer + the WASM-safe `decode_event_entry_flat` (the "web parse story") are
+# linked here; the native-only `fauna_mail::parse_icalendar` read path is gated off
+# wasm.
+fauna-client-caldav = { path = "../fauna-client-caldav" }
+# The read/consumption CardDAV crate — the web Address Book segment's
+# `carddav_list_addressbooks` / `carddav_query_cards_decoded` exports unseal + parse
+# vCards over the same `bridge_carddav_*` store the MDA serves. Fully WASM-safe (the
+# vCard reader is hand-rolled RFC 6350 — no native-only slice, unlike caldav's iCal).
+fauna-client-carddav = { path = "../fauna-client-carddav" }
+# The shared account-store seams and helpers. Its `account-port` feature carries the `serve` halves of the
+# custody-ceremony and followed-folders seams and of the mail seam (`mail_port`,
+# the labeler catalog chunk's per-labeler grant mint).
+fauna-client-config = { path = "../fauna-client-config", features = ["account-port"] }
+# `TrainedTopics<R>` — the SHARED trained-topic lifecycle (registry ↔ model-plane
+# sequencing: the advisory example-count read, the create cap, and the delete's
+# registry-removal-then-`model.delete` pairing) behind the four `trainedTopics*`
+# faces. The web SPA binds to the same logic linux calls natively and the natives
+# reach through UniFFI — no per-app re-derivation (priority #2, topic-factors.md
+# § Authoring surface).
+fauna-client-personalization = { path = "../fauna-client-personalization" }
+# `TaskDelegationView<R>` — the Settings → Task delegation sub-page's shared async
+# surface (pins from `fauna.state.delegation` + the live `fauna.delegation.observe`
+# lease). Default features only: the tokio lease loop sits behind the crate's
+# native-only `driver` feature, which web never wants — a browser tab renders the
+# surface but never runs a heavy task kind (participants.md § The assignment picker).
+fauna-client-delegation = { path = "../fauna-client-delegation" }
+# Subscriptions author management (`SubscriptionsClient<R>` thin kinds +
+# `SubscriptionsAuthor<R>` encrypted-mode mint+upload orchestration) — the web
+# profile Tiers-tab SELF surface (subscriptions Slice A, monetization.md § Pillar
+# 1). `SubscriptionsAuthor` composes the `EncryptedKeyBlobUpload` envelope
+# Rust-side (custody → mint_key_blob → upload → retry), so the SPA dispatches one
+# high-level call per action and never touches the crypto (priority #2). Lifts the
+# linux lead (apps/fauna-linux/src/views/profile).
+fauna-client-subscriptions = { path = "../fauna-client-subscriptions" }
+# (No fauna-payments dep since 2026-08-10 — the sats→msat conversion moved to
+# its wire twin, `fauna_protocol::subscriptions::TierAskingPrice::from_sats`.)
+# Payment-provider config + claim redemption (fauna.payments.*) — the web
+# twins of the linux Pillar-3 client legs (paymentsProvidersSet/List/Remove,
+# paymentsClaimsRedeem in rpc.rs; monetization.md § Pillars 2+3 client UX).
+# OPTIONAL: reached only through this crate's own `payments` feature.
+fauna-client-payments = { path = "../fauna-client-payments", optional = true }
+# Profile detail read + own-write (`ProfileClient<R>`) + the text-only edit-form
+# read-modify-write (`build_edited_profile` / `decode_profile_display`) — the
+# `fauna.profile.{get,set}` WS-RPC seam for the SELF profile edit form. The
+# sign/decode/read-modify-write lives once in the shared crate (priority #2),
+# mirroring the `#[uniffi::export]` surface in libs/fauna-ffi/src/profile.rs.
+# Lifts the linux lead (apps/fauna-linux/src/views/profile/edit.rs).
+fauna-client-profile = { path = "../fauna-client-profile" }
+# The RecoveryKey's Settings home (`RecoveryClient<R>`) — read/create/replace/
+# lost, the `fauna.recovery.*` WS-RPC seam behind the Settings/Account
+# Recovery kit section (`settings.md` § Recovery kit). Wasm-clean by design —
+# its own Cargo.toml already forwards the `js` time/rand backend for wasm32,
+# the same shape `fauna-client-pair`/`fauna-client-capabilities` use — this
+# crate just never had a wasm consumer wired up until now. Mirrors the
+# tui/linux native call (`fauna_client_recovery::{kit_status,create_kit,
+# request_seed_alone_replacement}` in-process; no separate FFI hop on web
+# either — priority #2).
+# `aftermath`: the ordered post-succession pass `runSuccessionAftermath` starts
+# at every actor settle — one statement of the leg order, shared with tui
+# (`succession.rs::run_aftermath_web` supplies only what a browser can answer).
+# `conversations-witness`: the member side — `ChainWitness` over the shared
+# `ThreadParticipantAnchors`, the shared `harvest` pass, and
+# `witness::state_json`. web supplies only its own dialer and the clock
+# its JS receive pump already owns (`src/succession_witness.rs`); it was
+# the last app registering no witness at all (2026-09-09).
+fauna-client-recovery = { path = "../fauna-client-recovery", features = ["aftermath", "conversations-witness"] }
+# User spam-classifier preferences (`SpamClient<R>`) — the Settings → Privacy
+# page's WS-RPC seam over `fauna.spam.{get,set}_preferences`, the twin of
+# `GET|PUT /api/v1/spam/preferences`. Wasm-clean (fauna-protocol only); mirrors
+# the linux native binding.
+fauna-client-spam = { path = "../fauna-client-spam" }
+# User-facing moderation (`ModerationClient<R>`) — the WS-RPC seam over the
+# `fauna.moderation.*` kinds (`train`, `legal_takedown`, the queue reader, …).
+# Wasm-clean (fauna-protocol only).
+#
+fauna-client-moderation = { path = "../fauna-client-moderation" }
+# Push subscription management (`PushClient<R>`) — the Settings push-toggle's
+# WS-RPC seam over `fauna.push.{vapid_key,subscribe,unsubscribe}`, the twin of
+# the three `/api/v1/push/*` routes. Wasm-clean (fauna-protocol only); the
+# browser `serviceWorker`/`PushManager` work stays in `$lib/push.ts`.
+#
+fauna-client-push = { path = "../fauna-client-push" }
+# Full-text search (`SearchClient<R>`) — the search page's WS-RPC seam over
+# `fauna.search.query`, the twin of `GET /api/v1/search`. Wasm-clean
+# (fauna-protocol only); mirrors the linux native binding.
+#
+fauna-client-search = { path = "../fauna-client-search" }
+# Shared log ring (`src/logs.rs`) — the web twin of the native `fauna-log`
+# subscriber install + snapshot reads behind the Settings → Logs page. Web is
+# ring-only (no filesystem): `RingLayer` + the browser console, no rolling file
+# (observability.md § Persistence & privacy — Web). `tracing-subscriber` builds
+# the registry; `web-sys/console` routes events to the browser console.
+fauna-log = { path = "../fauna-log" }
+# The panic hook itself (console mirror + chunk-naming + previous-hook
+# chaining) — shared by every wasm chunk; see the crate doc comment.
+fauna-wasm-panic-hook = { path = "../fauna-wasm-panic-hook" }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# `Window` + `Storage`: the localStorage-backed nest-identity TOFU pin store
+# (`LocalStoragePinStore`, the browser twin of native `DiskPinStore`) for the
+# channel-binding pin (security.md § Transport trust).
+web-sys = { version = "0.3", features = ["console", "Window", "Storage"] }
+
+[dev-dependencies]
+wasm-bindgen-test.workspace = true

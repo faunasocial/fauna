@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  Fauna Nest Service — personal nest server.
+
+  Registers FaunaNest as a Windows service running under a virtual
+  service account (NT SERVICE\FaunaNest).  Auto-start on boot.
+  Failure actions: restart with a flat 5 s delay for all three
+  attempts; failure count resets after 24 h.
+
+  Also adds a Windows Firewall inbound allow rule (TCP :443, scoped to
+  fauna-nest-svc.exe) so the network-reachable nest answers from off-box —
+  requires the WixToolset.Firewall.wixext extension (`-ext
+  WixToolset.Firewall.wixext` at build time).
+-->
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
+     xmlns:firewall="http://wixtoolset.org/schemas/v4/wxs/firewall">
+
+  <Fragment>
+    <ComponentGroup Id="NestService" Directory="INSTALLFOLDER">
+
+      <!-- fauna-nest-svc.exe -->
+      <Component Id="FaunaNestSvcExe" Guid="4a7b8c00-0041-4d3a-b5c6-d7e8f9a0b1c2">
+        <File Id="FaunaNestSvcExe"
+              Source="$(var.NestBin)"
+              KeyPath="yes"
+              Name="fauna-nest-svc.exe" />
+
+        <!-- Inbound firewall allow rule so another machine (or the same one over a
+             non-loopback IP) can reach the nest. The installed nest binds
+             0.0.0.0:443 and serves HTTPS from its self-signed floor cert, so a
+             remote client typing `test@<ip>` resolves to https://<ip> (port hidden,
+             exactly as a public-domain nest is reached on :443) and trusts it via
+             TOFU + channel-binding — see docs/goal/architecture/installers/windows.md
+             § Implementation status today → Network-reachable nest, and security.md
+             § Transport trust. Scoped to THIS exe + TCP 443 so nothing else is opened.
+             Rides the FaunaNestSvcExe component, so the rule installs only when the
+             Nest feature is selected and is removed with it on uninstall. -->
+        <!-- Inbound is the default direction (the extension has no Direction attribute;
+             an outbound rule would set Outbound="yes"). -->
+        <firewall:FirewallException
+          Id="FaunaNestInbound443"
+          Name="Fauna Nest (HTTPS)"
+          Description="Allow inbound HTTPS connections to the Fauna nest server."
+          Protocol="tcp"
+          Port="443"
+          Program="[#FaunaNestSvcExe]"
+          Scope="any"
+          IgnoreFailure="no" />
+
+        <ServiceInstall
+          Id="InstallFaunaNest"
+          Name="FaunaNest"
+          DisplayName="Fauna Nest Service"
+          Description="Runs a personal Fauna nest server on this machine."
+          Type="ownProcess"
+          Start="auto"
+          Account="NT SERVICE\FaunaNest"
+          ErrorControl="normal"
+          Arguments="--service" />
+
+        <ServiceControl
+          Id="ControlFaunaNest"
+          Name="FaunaNest"
+          Stop="both"
+          Remove="uninstall"
+          Start="install"
+          Wait="yes" />
+
+        <!-- Failure actions: restart with a flat 5 s delay (all 3 attempts), reset after 24 h -->
+        <util:ServiceConfig
+          ServiceName="FaunaNest"
+          FirstFailureActionType="restart"
+          SecondFailureActionType="restart"
+          ThirdFailureActionType="restart"
+          RestartServiceDelayInSeconds="5"
+          ResetPeriodInDays="1" />
+      </Component>
+
+    </ComponentGroup>
+  </Fragment>
+
+</Wix>

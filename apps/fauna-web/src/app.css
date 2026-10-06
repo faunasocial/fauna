@@ -1,0 +1,51 @@
+:root {
+  --bg: #0d1117;
+  --bg-surface: #161b22;
+  --bg-hover: #1c2333;
+  --text: #e6edf3;
+  --text-muted: #8b949e;
+  --accent: #58a6ff;
+  --accent-hover: #79b8ff;
+  --border: #30363d;
+  --danger: #f85149;
+  --success: #3fb950;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+/* Attachment & media-preview image size caps.
+   Restores cross-app uniformity: Windows (DmMessageBubble.xaml MaxHeight=200)
+   and Android (ConversationDetailScreen.kt height 200.dp) cap inline attachment
+   images; web was the lone uncapped client (drift). Applied to the <C2paImage>
+   internal <img> in BOTH render branches — the bare-image branch puts the class
+   on the <img>; the C2PA-badge branch puts it on the .c2pa-wrap wrapper, so we
+   also target its child <img>. Defined here (global, not component-scoped) so
+   svelte-check does not flag it as an unused selector — the reason the original
+   per-page scoped rules were removed in the web-03 sweep. */
+.attachment-img,
+.c2pa-wrap.attachment-img > img {
+  max-height: 200px;
+  max-width: 100%;
+  width: auto;
+}
+.preview,
+.c2pa-wrap.preview > img {
+  max-width: 200px;
+  max-height: 200px;
+}

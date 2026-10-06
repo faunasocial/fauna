@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      The private share link viewer (share-links.md § The private-file
+      extension). Its own CSP, stricter than the app's: the page holds a key in
+      its address bar, so it may reach nothing but its own origin (rule 1) and
+      shows a file only through object URLs (rule 2). frame-ancestors rides the
+      nest's headers (a meta CSP cannot carry it).
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; img-src blob:; media-src blob:; base-uri 'none'; form-action 'none'; object-src 'none'"
+    />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="robots" content="noindex" />
+    <!-- What an unfurler that never runs the page gets: nothing about the file. -->
+    <title>%SHARE_VIEWER_TITLE%</title>
+    <meta property="og:title" content="%SHARE_VIEWER_TITLE%" />
+    <script type="module" src="../src/lib/share-viewer/main.ts"></script>
+  </head>
+  <body>
+    <main id="share-viewer" data-state="generic">
+      <h1>%SHARE_VIEWER_TITLE%</h1>
+      <p>%SHARE_VIEWER_GENERIC_BODY%</p>
+    </main>
+  </body>
+</html>

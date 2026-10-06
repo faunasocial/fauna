@@ -1,0 +1,116 @@
+[package]
+name = "fauna-launch-machine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# UniFFI scaffolding for consumers in fauna-ffi (Apple/Android) +
+# uniffi-bindgen-cs (Windows).
+uniffi = ["dep:uniffi", "fauna-provisioning/uniffi", "dep:fauna-uniffi-async"]
+# Test helpers — InMemoryPersistence, set_phase_for_test.
+test-helpers = []
+# The `dial` module's nest-dial override (see `dial.rs`). Deliberately its OWN
+# feature rather than riding `test-helpers`: `test-helpers` is enabled on
+# dep lines for scaffolding reasons and once rode an automation seam into five
+# release artifacts (`e2e-conventions.md` convention 15), so the seam that can
+# redirect a real socket gets the narrower gate the rest of the fleet's
+# automation carve-outs use (`fauna-credential-store`'s `e2e-agent`).
+# Also forwards the client clock's e2e offset (`fauna_protocol::client_clock`),
+# which `launch_clock` reads.
+e2e-agent = ["fauna-protocol/e2e-agent"]
+# CountingObserver for wiring assertion in higher-level tests.
+test-observer = []
+
+[dependencies]
+# The `declare_snapshot_observer!` macro backing `observer.rs` — same shape
+# every other `fauna-*-machine` crate's reactivity trait uses.
+fauna-core = { path = "../fauna-core", default-features = false }
+# default-features = false: avoid pulling fauna-provisioning's `native`
+# default, which forces `reqwest/rustls-tls` and breaks wasm builds. The
+# crate's own target sections below handle the per-target reqwest features.
+fauna-provisioning = { path = "../fauna-provisioning", default-features = false }
+# WS-RPC wire types for the anonymous `fauna.setup.status` silent-challenge
+# probe (`probe.rs`) + the shared `auth::run_silent_challenge` ceremony
+# (`auth-ceremony` feature). default-features = false: drop the native-only `p2p`
+# default (fauna-wireguard → mio) so the wasm build still compiles; the wasm
+# connector (fauna-rpc-wasm, below) turns on the `js` time backend via Cargo
+# feature unification. Mirrors fauna-onboarding-machine's declaration.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["auth-ceremony"] }
+# `render_text`'s localized transient-error fallback — both native drivers
+# (tui, linux) already pass the exact same `fauna_i18n::strings::onboarding::
+# launch::TRANSIENT_ERROR`, so resolving here instead of per-app needed no new
+# capability, only a dependency edge. Mirrors `fauna_client_family::row_text`.
+fauna-i18n = { path = "../fauna-i18n" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = "0.1"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# fauna.auth.{handshake,challenge,verify} all sign Ed25519. The crate signs;
+# ActorKeypair generation is in fauna-core, but signing is local so the
+# launch path doesn't pull the full identity surface.
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+
+uniffi = { workspace = true, optional = true, features = ["tokio"] }
+# `#[fauna_uniffi_async::export]` runs each async export on a tokio runtime
+# worker, off the foreign executor's small poll stack
+# (`docs/goal/architecture/apps/native-async-execution.md` § The rule).
+fauna-uniffi-async = { workspace = true, optional = true }
+fauna-sleep = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native: tokio's `time` + `rt` + `sync` for refresh scheduling and
+# the internal RwLock around state. Avoid `full` so wasm builds don't
+# pull mio via Cargo's feature unification.
+tokio = { version = "1", default-features = false, features = ["time", "rt", "sync"] }
+# Native anonymous WS-RPC connector for the pre-identity auth ceremonies
+# (fauna.auth.{handshake,challenge,verify}) + the setup-status probe. Leaf
+# crate with no fauna-nest-http dep — see fauna-anon-client's docs for why
+# pulling the connector from fauna-client here would form a Cargo cycle.
+fauna-anon-client = { path = "../fauna-anon-client" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# WASM: drop rustls (won't compile), js-sys::Date for the handshake timestamp
+# (SystemTime doesn't work on wasm32-unknown-unknown). The sleep's own
+# browser-timer dep left with the hand-written `#[cfg]` split — it lives in
+# `fauna-sleep` now.
+wasm-bindgen-futures = "0.4"
+js-sys = { workspace = true }
+# Forward fauna-core's `js` feature (its own js-sys time backend) so
+# `Timestamp::now_millis_or_zero()` resolves to the wasm arm instead of the
+# `SystemTime::now()` arm, which panics on wasm32-unknown-unknown. Mirrors
+# fauna-client-folders / fauna-client-subscriptions.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+# Fresh per-request handshake nonce (folded into the auth signature so concurrent
+# same-actor sign-ins don't collide on the nest's replay guard). The `wasm_js`
+# backend is enabled workspace-wide by `fauna-wasm`; native generates the nonce
+# in `fauna-anon-client::fresh_nonce` instead, so this is wasm-only.
+getrandom = { workspace = true }
+# Wasm anonymous WS-RPC connector for the pre-identity auth ceremonies + the
+# setup-status probe (the wasm twin of fauna-anon-client above).
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm" }
+# The shared nest-identity pin core (`nest_trust`): the pinned silent-challenge
+# ceremony (`run_pinned_silent_challenge`) + the localStorage-backed
+# `LocalStoragePinStore` the wasm connector checks against — the browser can't
+# do the native connect-time channel binding, so the pin rides the verify
+# reply's possession proof instead (security.md § Transport trust).
+# Native needs neither: its trust seam lives in fauna-anon-client.
+fauna-client-core = { path = "../fauna-client-core", default-features = false, features = [
+    "auth-ceremony",
+] }
+
+[dev-dependencies]
+# The shared `RpcRequester` doubles, rather than a per-crate copy. Dev-only,
+# so test scaffolding cannot reach a release artifact by construction.
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+tokio = { workspace = true }
+# `hint_authority_url`'s own unit test needs
+# `fauna_core::web::AUTHORITY_TERMINATOR_CASES`, which is `#[cfg(any(test,
+# feature = "test-helpers"))]` on fauna-core's own side — `cfg(test)` is
+# never set on a dependency, only on the crate under test, so the shared
+# cases need the feature turned on explicitly (mirrors `fauna-client-dns`'s
+# self dev-dependency for the same reason).
+fauna-core = { path = "../fauna-core", default-features = false, features = ["test-helpers"] }

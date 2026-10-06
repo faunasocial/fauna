@@ -1,0 +1,12 @@
+[package]
+name = "fauna-text-model"
+description = "Shared trainable binary text model: the pure Bernoulli n-gram Naive-Bayes core + the deterministic positional tokenizer (mail-independent, WASM-safe)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+unicode-normalization = { workspace = true }
+unicode-segmentation = { workspace = true }

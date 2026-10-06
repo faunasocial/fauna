@@ -1,0 +1,175 @@
+[package]
+name = "fauna-protocol"
+description = "L3 transport protocol — DAG-CBOR envelope, codec, dispatcher (Spec Y)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# The `fauna.payments.*` + `fauna.tips.*` wire planes — the money half of the
+# `payments` registry feature (`docs/goal/architecture/dynamic-features.md`
+# § The cargo feature spine).
+#
+# ⚠ **NOT in `default`, and that is the load-bearing part** — measured
+# 2026-08-10, the first time the spine was built. § The cargo feature spine
+# says registry features are "default-on in their owning shared crates"; at THIS
+# depth that is unimplementable, because cargo features are additive and
+# unified: 17 crates depend on fauna-protocol with default features on
+# (`fauna-client`, `fauna-ws-substrate`, `fauna-nest-http`, `fauna-sync-engine`,
+# … — `rg '^fauna-protocol\s*=|^fauna-protocol\.workspace' --glob Cargo.toml`),
+# so a default-on `payments` here is re-enabled by ANY of them and
+# `--no-default-features` at the flavor root excises nothing. That was not a
+# theory: the first store-safe `libfauna_ffi.so` built green and still carried
+# all six `fauna.payments.*` kind strings.
+#
+# The shape that actually holds: **default-on at the flavor ROOTS**
+# (`fauna-ffi`, `fauna-wasm`, the app binaries — the crates a build flavor is
+# built FROM, where `--no-default-features --features store-safe` is a real
+# switch), **opt-in in the deep shared crates**, forwarded only by the plane's
+# own crates and those roots. The user-visible posture is unchanged — a plain
+# build ships payments — while excision becomes structurally reachable instead
+# of one stray dep line away from silently failing. Whoever forwards it:
+# `fauna-client-payments` (it IS the plane), `fauna-ffi`/`fauna-wasm` from their
+# own `payments` feature, and `bins/fauna-nest` explicitly.
+#
+# What this does NOT gate, on purpose: `subscriptions::TierAskingPrice` and its
+# `from_sats` constructor. An excised build is *a peer without a capability,
+# never a fork of the wire* (§ Wire-compat posture) — it must keep decoding and
+# re-emitting a priced tier authored by a full client. The money plane (claim
+# mint/redeem, provider config, tips) is what disappears; a number on a tier is
+# inert metadata without it.
+payments = []
+# The `fauna.nostr.zap_signers.*` trust root + the `nostr.zaps.total` read — the
+# NIP-57 half of the money plane, and a registry feature in its own right
+# (`dynamic-features.md` § Charter members, the `zaps` row, ratified 2026-08-10).
+#
+# **A SUBSET MEMBER: `zaps` requires `payments`** (§ The cargo feature spine,
+# rule (d)). Excising `payments` excises `zaps` with it; excising `zaps` alone
+# keeps provider-rail payments — which is the finer-grained hatch the Damus
+# precedent shows a store actually demands (Apple forced the zap button off
+# posts while the rest of the app stayed). The relation is declared HERE, once,
+# as a cargo feature dependency, so no surface re-derives it.
+#
+# Same depth rule as `payments` above: NOT in `default`, because a default-on
+# feature at this depth is switched back on by any of the many consumers taking
+# this crate with default features. Default-on lives at the flavor roots.
+#
+# The carve is deliberately narrower than "the nostr module": zap types sit
+# beside NIP-46 bunker, DM and badge types in one module, and only the zap ones
+# are a registry surface.
+zaps = ["payments"]
+# The `fauna.peer.share.*` wire plane — the cross-user share leg's kind
+# family, the data plane of the `p2p-share` registry feature
+# (`dynamic-features.md` § Charter members; contract owner
+# `docs/goal/behavior/p2p.md` § Cross-user shared-set transfer). Same depth
+# rule as `payments` above: NOT in `default` — default-on lives at the flavor
+# roots; the plane's own crates and the roots forward it. The same-account
+# `fauna.peer.sync.*` family deliberately sits under NO gate (peer_sync's
+# module docs) — the separability is what makes the store-safe third column
+# ("same-account PRESENT + p2p-share ABSENT") provable.
+p2p-share = []
+# wasm: forward fauna-core's js-sys time backend (Timestamp::now()).
+# The wasm consumer (libs/fauna-rpc-wasm) enables this + getrandom/js.
+js = ["fauna-core/js"]
+# Native TLS channel-binding helper (`tls_spki::spki_sha256_of_cert_der`).
+# Pulls X.509 parsing; off for wasm (no rustls handshake to capture a cert
+# from). Enabled by the nest + the native client crates that compute the SPKI
+# fingerprint on both ends of the binding (security.md § Transport trust).
+tls-spki = ["dep:x509-parser", "dep:sha2"]
+# Generic `auth::run_silent_challenge<R: RpcRequester>` — the challenge/verify
+# Ed25519 ceremony shared by `fauna-launch-machine` (silent sign-in) and
+# `fauna-onboarding-machine` (handle-check probe), which can't depend on each
+# other (the `fauna-client → fauna-nest-http → fauna-launch-machine` cycle).
+# Off by default so the lean protocol build keeps the ceremony's *code* out,
+# mirroring `tls-spki`.
+#
+# ⚠ It no longer gates a *dependency*: `nest_rotation` (the deployment-seed
+# rotation chain every app must be able to verify — `nest/box-recovery.md`
+# § Client acceptance) signs and verifies unconditionally, so `ed25519-dalek` is
+# a plain dep below. That costs nothing: this crate depends unconditionally on
+# `fauna-core`, whose own `ed25519-dalek` is non-optional, so the crate was
+# always in the tree — the old `dep:` gate kept it out of the *direct* dep list
+# and nothing more.
+auth-ceremony = []
+# The shared in-memory `MpscTransport` + `make_pair()` dispatcher test double
+# (`test_transport`) — four crates hand-rolled the identical `Stream`/`Sink`
+# pair over a bounded mpsc channel to drive dispatcher/RPC-channel unit tests.
+# Off by default and reached only through a `[dev-dependencies]` entry, so the
+# double cannot ride a release build (same posture as `fauna-client-config`'s
+# `test-helpers`).
+test-helpers = []
+# The `client_clock` e2e offset (`FAUNA_E2E_CLOCK_OFFSET_SECS`) — the wrong-clock
+# witnesses' seam onto the one clock every app-held bearer is anchored and
+# scheduled on. A release build without it has no offset static and never reads
+# the variable (e2e convention 15); a debug build reaches it through
+# `debug_assertions`. Forwarded by `fauna-launch-machine/e2e-agent` and
+# `fauna-client/e2e-agent`, so each app's test flavor turns it on through the
+# crate it already opts in on — never enabled here directly.
+e2e-agent = []
+
+[dependencies]
+blake3 = { workspace = true }    # DAV collection/resource identity derivations (`dav_identity`), byte-identical
+                                 # to the Go MDA's `blake3.Sum256`; `features = ["pure"]` workspace-wide, so wasm-safe
+fauna-cbor = { workspace = true }    # canonical IPLD-dag-cbor; encode_canonical + decode_strict delegate here, and re-exports Value (the generic dag-cbor node)
+serde = { workspace = true, features = ["derive"] }
+bytes = "1"
+serde_bytes = "0.11"
+thiserror = { workspace = true }
+# `tls-spki` feature only — X.509 SPKI fingerprinting for the channel binding.
+x509-parser = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+# Unconditional: `nest_rotation` verifies the deployment-seed rotation chain on
+# every app (see the `auth-ceremony` note above for why this is not a new dep in
+# the tree), and `auth-ceremony`'s challenge/verify ceremony uses it too.
+ed25519-dalek = { workspace = true }
+# Unconditional since the scope module (canonical scope-id hex); not a transport
+# or crypto dep, so the lean-build posture above is unaffected.
+hex = { workspace = true }
+fauna-i18n = { path = "../fauna-i18n" }
+fauna-core = { path = "../fauna-core", default-features = false }
+# ATProto identity helpers (`atproto` module): did:key multibase encoding.
+bs58 = { workspace = true }
+# `kind_manifest`: the compact-JWS kind manifest (third-party-kinds.md § The
+# manifest) — JSON payload, base64url segments. Both already in the tree via
+# `fauna-core`; pure, wasm-clean.
+serde_json = { workspace = true }
+base64 = { workspace = true }
+futures-util = { workspace = true, features = ["sink"] }
+# `nostr_relay::relay_url_refusal`: the WHATWG host parse (IP-literal forms,
+# brackets, userinfo) behind the store-time relay SSRF refusal. Already in the
+# tree transitively; pure, wasm-clean.
+url.workspace = true
+tracing.workspace = true
+# `kind_manifest`'s `bridge.address_grammar`: compiled at manifest resolution
+# (third-party.md § The manifest → *The `bridge` block* — linear-time by
+# construction, so a third party's pattern cannot stall the nest). Already in
+# the tree (this crate's dev-dependency; normal dependency of tantivy, rrule);
+# pure, wasm-clean.
+regex = "1"
+
+# Native: the workspace tokio (features = ["full"]) — includes rt/net/etc.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["sync", "time"] }
+
+# wasm: minimal tokio — `sync` channels only (no rt/net → no mio). The
+# dispatcher is runtime-agnostic (caller drives the returned future), so no
+# `tokio::spawn`/`time` is needed here. getrandom/js is enabled by the wasm
+# consumer cdylib (libs/fauna-rpc-wasm), not here.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `sync` = the dispatcher's channels; `macros` = `tokio::select!` in the
+# driver. No `rt`/`net`/`time` → no mio, no runtime (caller drives the future).
+tokio = { version = "1", default-features = false, features = ["sync", "macros"] }
+
+[dev-dependencies]
+# `test-util` enables `start_paused`/`tokio::time::pause` for the dispatcher's
+# deadline tests; under selected-feature resolution nothing else unifies it in.
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "test-util"] }
+tracing-subscriber = { workspace = true }
+
+# Forbidden by spec § 1.9 (L3 transport-agnosticism mandate).
+# scripts/check-protocol-deps.sh asserts that none of these appear in this
+# crate's tree — run by the protocol-integration-test-check heavy gate
+# (merge-gate-check.md; before 2026-08-19 its only executor was the
+# dispatch-only ci.yml, i.e. no automatic path):
+#   tungstenite, tokio-tungstenite, axum, reqwest, hyper, hyper-util

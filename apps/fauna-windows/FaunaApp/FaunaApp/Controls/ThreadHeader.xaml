@@ -1,0 +1,235 @@
+<UserControl
+    x:Class="FaunaApp.Controls.ThreadHeader"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:ids="using:FaunaApp.UiIds">
+    <!--
+        TWO ROWS, EACH WITH ITS OWN COLUMNS — never one shared column set.
+        A Grid's columns are shared by every row, and the chips row spans all
+        of them, so a chip wider than the pane fed its excess desired width
+        into the shared `Auto` columns and starved the `*` title column: with a
+        member whose home nest has not announced yet, the chip renders that
+        member's FULL 64-hex actor id (`value-formatting.md` § Account display
+        label — the elided form is the *resolved* fallback, not this one), the
+        title column collapsed to **11 px**, the thread title wrapped into a
+        548 px-tall tower of single characters, and `thread-room-class` /
+        `thread-room-settings-button` were pushed clean out of the window —
+        UIA-present (`count=1`) and `IsOffscreen`, which is what a driver reads
+        as NOT VISIBLE. Measured on `test_conversation_room_ownership.py`'s
+        outgoing-owner seat, 2026-09-11; it is a
+        real user-facing bug, not a test artifact — a human on that seat sees a
+        vertical title and no header buttons.
+
+        Splitting the two rows into independent Grids removes the coupling at
+        the root: neither row has a column-spanning child any more, so each
+        sizes its own Autos and gives the rest to its own star column.
+
+        The ROOM CLASS STATEMENT IS ITS OWN CAPTION LINE, under the title row —
+        never an `Auto` column beside the title. A star column gets only what
+        its row's Autos leave, and the detail pane at the app's own 600-DIP
+        default window is ~266 px: with "End-to-end encrypted" (120 px) beside
+        the icon and three 38 px buttons, row 0's Autos took all of it, the
+        title column went to 0 px, and the title vanished — an empty rect,
+        which UI Automation reports as IsOffscreen, so `thread-header` read NOT
+        VISIBLE while every control beside it was on screen. Measured on
+        `test_conversation_room_roles.py`'s owner seat, 2026-09-14. Android paints the class on its own line
+        under the header row for the same narrow-width reason
+        (`ConversationDetailScreen.kt`), and this is that shape.
+    -->
+    <Grid Padding="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Row 0 — the title and the header controls. -->
+        <Grid Grid.Row="0">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+
+        <!-- thread-header id lives on the always-present label TextBlock (a realized
+             UIA peer), NOT the UserControl root / a container — a WinUI UserControl
+             root surfaces no queryable peer, so the e2e's is_visible("thread-header")
+             counted 0 (reference_winui_paneheader_not_uia_realized; same lesson as the
+             thread-member-chip-on-TextBlock note below). -->
+        <!-- NoWrap + ellipsis is the belt behind the two-Grid fix above: a
+             title too long for its column must lose its tail, never grow the
+             header vertically (the 548 px tower). The full text stays readable
+             to a driver — `get_text` reads the TextBlock's Text, not its
+             rendered glyphs. -->
+        <TextBlock Grid.Row="0" Grid.Column="0" x:Name="ThreadLabel"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.ThreadHeader}"
+                   TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                   VerticalAlignment="Center"
+                   Style="{StaticResource SubtitleTextBlockStyle}" />
+        <!-- protocol-icon: source-concept glyph as a color emoji (render-model.md § D5);
+             no Segoe MDL2 Assets symbol font — the default emoji fallback renders it. -->
+        <TextBlock Grid.Row="0" Grid.Column="1" x:Name="ProtocolIcon"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.ProtocolIcon}" />
+        <!-- The policy editor's door. COLLAPSED where the rail models no room,
+             like the class statement in row 1 — collapsed is what "absent"
+             means to the driver on WinUI, since a collapsed element carries no
+             UIA peer. Where the thread IS a room it is painted, and merely
+             GREYED when the viewer's role may not set policy — never hidden
+             (`ui/conversations.md` § Architectural rules 5; a policy-less room greys
+             it too, having no policy to edit). -->
+        <Button Grid.Row="0" Grid.Column="2" x:Name="RoomSettingsButton"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.ThreadRoomSettingsButton}"
+                Content="&#xE713;" FontFamily="Segoe MDL2 Assets"
+                Visibility="Collapsed"
+                ToolTipService.ToolTip="{loc:Localize Key=conversations/unified/thread_room_settings}"
+                Click="OnRoomSettingsClicked" />
+        <Button Grid.Row="0" Grid.Column="3" x:Name="RenameButton"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.ThreadRenameButton}"
+                Content="&#xE8AC;" FontFamily="Segoe MDL2 Assets"
+                Visibility="Collapsed"
+                ToolTipService.ToolTip="{loc:Localize Key=conversations/unified/thread_rename}"
+                Click="OnRenameClicked" />
+        <Button Grid.Row="0" Grid.Column="4" x:Name="OverflowButton"
+                Content="&#xE712;" FontFamily="Segoe MDL2 Assets" />
+        </Grid>
+
+        <!-- Row 1 — the room's class, stated on the header
+             (`conversation-rooms.md` § The three classes) as a caption line of
+             its own, full pane width, so it never takes the title's width (the
+             top comment has the measurement). COLLAPSED where the rail models no
+             room, so `thread-room-class` is genuinely absent off a room rather
+             than present-and-empty — and a collapsed element takes no layout
+             space, margin included, so a non-room header gains no gap.
+
+             No AutomationProperties.Name on the class label: it carries its
+             token in HelpText (the `class` attribute), and a static Name makes
+             a dynamic label read back wrong. -->
+        <TextBlock Grid.Row="1" x:Name="RoomClassLabel"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.ThreadRoomClass}"
+                   Visibility="Collapsed"
+                   Opacity="0.7" FontSize="12"
+                   TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                   Margin="0,4,0,0" />
+
+        <!-- Row 2 — the participant chips and the add affordance, in their own
+             Grid so their width can never reach row 0's columns. -->
+        <Grid Grid.Row="2" Margin="0,4,0,0">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+
+        <ItemsControl Grid.Column="0" x:Name="MembersList">
+            <!-- StackPanel(Horizontal): plain ItemsControl can't host a virtualizing
+                 panel like ItemsWrapGrid; items silently fail to materialize. -->
+            <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate>
+                    <StackPanel Orientation="Horizontal" />
+                </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                    <!--
+                        AutomationId lives on the outer Button — a bare
+                        StackPanel/Border has no reliable FlaUI clickable
+                        point (measured: NoClickablePointException on this
+                        exact chip) — and NOT the label TextBlock: a scoped
+                        query (scope="thread-member-chip[i]") resolves as a
+                        DESCENDANT match, and a TextBlock is a leaf that can
+                        carry no children, so the review pair below could
+                        never resolve scoped to it. AutomationProperties.Name
+                        keeps the button in the UIA content view so nested
+                        child ids stay resolvable (mirrors folder-destination-row
+                        / folder-device-activity-item's SetName idiom). The
+                        Border inside keeps the exact same pill visual as
+                        before the wrap.
+                    -->
+                    <!--
+                        `role` (owner | admin | member) rides HelpText — the
+                        bridge maps every attribute but `name`/`disabled` there
+                        — and is empty on a policy-less room and on every non-room
+                        thread, where there are no roles to mark (NOT "everyone
+                        is a member").
+
+                        IsEnabled carries the greying: a chip is the Remove
+                        control, so it goes insensitive exactly when the rail's
+                        membership is mutable but the viewer's ROLE may not
+                        remove (`RemoveEnabled`) — greyed, never hidden, and
+                        never demoted to something that reads as inert. A mail
+                        chip is NOT that case: its membership is immutable, so
+                        it stays a live-looking pill and the handler guard
+                        refuses it, which is the stance ThreadHeader.xaml.cs
+                        has always documented.
+
+                        ⚠ One consequence, stated rather than discovered later:
+                        the post-succession review pair below is INSIDE this
+                        Button (it has to be — a scoped query resolves as a
+                        descendant match), and WinUI's IsEnabled is inherited,
+                        so a greyed chip greys its Keep button too. linux, whose
+                        chip greys only the label, keeps Keep live. No test
+                        drives Keep today (`actions/conversations.py::keep_member`
+                        has no caller), and the two states barely overlap — a
+                        plain member of a governed room, with a review item
+                        open, on this seat. Un-nesting the pair to fix it would
+                        break the scoped-descendant contract the comment above
+                        records as measured, so the nesting wins and this is the
+                        price.
+                    -->
+                    <Button Background="Transparent" BorderThickness="0" Padding="0"
+                            Margin="0,0,4,0"
+                            AutomationProperties.AutomationId="thread-member-chip"
+                            AutomationProperties.Name="{Binding Display}"
+                            AutomationProperties.HelpText="{Binding RoleToken}"
+                            IsEnabled="{Binding RemoveEnabled}"
+                            Tag="{Binding Address}"
+                            Click="OnMemberChipClicked">
+                        <Border Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                                CornerRadius="10" Padding="6,2">
+                            <StackPanel Orientation="Horizontal">
+                                <!-- Capped and ellipsised: an un-announced member
+                                     renders as a full 64-hex actor id, which as a
+                                     single pill is both unreadable to a human and
+                                     wide enough to push everything beside it out of
+                                     the pane. The driver is unaffected — the chip's
+                                     id and text both come off the Button's
+                                     AutomationProperties.Name, which carries the
+                                     WHOLE Display. -->
+                                <TextBlock Text="{Binding Display}" VerticalAlignment="Center"
+                                           MaxWidth="240"
+                                           TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                                <!-- The post-succession review pair, scoped INSIDE this chip
+                                     (succession-aftermath.md § Propagation → *Removing a flagged
+                                     member*) — present only while the participant carries an open
+                                     review item. Remove is deliberately NOT re-rendered: the chip
+                                     itself already is it (mirrors tui/linux/apple/web/android). -->
+                                <TextBlock AutomationProperties.AutomationId="thread-member-unattested-mark"
+                                           Text="{loc:Localize Key=conversations/detail/member_unattested_mark}"
+                                           Visibility="{Binding ReviewVisibility}"
+                                           Opacity="0.7" FontSize="11"
+                                           Margin="4,0,0,0" VerticalAlignment="Center" />
+                                <Button AutomationProperties.AutomationId="thread-member-keep-button"
+                                        Content="{loc:Localize Key=conversations/detail/member_keep}"
+                                        Visibility="{Binding ReviewVisibility}"
+                                        Tag="{Binding PersonHex}"
+                                        Click="OnMemberKeepClicked"
+                                        Padding="6,2" FontSize="11"
+                                        Margin="2,0,0,0" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Border>
+                    </Button>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+        <Button x:Name="AddParticipantButton"
+                Grid.Column="1"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.ThreadAddParticipantButton}"
+                Content="+"
+                Visibility="Collapsed"
+                ToolTipService.ToolTip="{loc:Localize Key=conversations/unified/thread_add_participant}"
+                Click="OnAddParticipantClicked" />
+        </Grid>
+    </Grid>
+</UserControl>

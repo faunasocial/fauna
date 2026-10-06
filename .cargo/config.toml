@@ -1,0 +1,138 @@
+[build]
+jobs = 8
+
+# § feature unification (owner: build-machine-resources.md § Track C-5).
+#
+# Workspace feature unification is ON for the DEV INNER LOOP: every implicit-
+# host cargo invocation (check/test/clippy/build of nest, tui, shared crates,
+# test binaries) resolves dep features as if the whole workspace were selected,
+# so two invocations that share a dep compile it ONCE with one feature set.
+# That kills the measured C-5 miss floor — per-invocation feature resolution —
+# which capped every caching layer (seed-on-empty, kache/sccache-style argv
+# caches). Measured 2026-08-22: host divergence nest↔ffi/nest↔tui/ffi↔tui fell
+# 49/41/49 → 2/2/0 (residual: time/deranged build-dep split, out of scope).
+#
+# The union is sound ONLY where these two guards hold:
+#   1. wasm member crates declare their deps under
+#      [target.'cfg(target_arch = "wasm32")'.dependencies] — a plain table
+#      would leak js/web-localstorage/wasm_js activations into every host
+#      resolution (and the reverse union plans host-only crates as wasm32
+#      units, which does not even compile).
+#   2. Every EXPLICIT --target build, ARTIFACT/FLAVOR recipe (store-safe,
+#      installers, Docker image, FFI slices), and FEATURE-MATRIX gate runs
+#      with CARGO_RESOLVER_FEATURE_UNIFICATION=selected — the env override
+#      reverts that one invocation to per-invocation resolution. A unified
+#      store-safe build re-admits payments/zaps on shared deps (measured),
+#      and a unified feature-matrix arm is vacuous. The justfile recipes and
+#      Dockerfile carry the override; grep CARGO_RESOLVER_FEATURE_UNIFICATION
+#      for the full set. Hand-running cargo with --target and default config
+#      fails loudly (wasm) or over-builds (mobile slices) — use the recipes.
+#
+# Nightly-only config ([unstable] gate): re-verify the stanza shape at each
+# toolchain pin bump (unstable config may change at stabilization).
+[unstable]
+feature-unification = true
+min-publish-age = true
+
+[resolver]
+feature-unification = "workspace"
+
+# § minimum release age (owner: release-integrity.md § Dependency verification
+# → Minimum release age for new dependency versions; owner-ruled 2026-10-03).
+#
+# The resolver refuses any registry version published less than 7 days ago.
+# A version already in Cargo.lock is kept whatever its age, so builds and
+# `--locked` are unaffected; what changes is every NEW resolution — `cargo
+# update`, a new dependency, `--precise` — which picks the newest version that
+# is old enough, or fails naming the too-new ones. A malicious release is
+# typically pulled within hours (the 2026-08 crates.io attack: under two), so
+# it is never resolved.
+#
+# This value is a CONSTANT, not a knob: nobody edits it per machine, and the
+# per-invocation override the resolver offers is never committed anywhere
+# (test_cargo_min_publish_age_committed.py holds both). Measured on the pinned
+# Cargo 1.99 nightly, 2026-10-03: the key is honoured only behind the
+# `min-publish-age` line in [unstable] above (without it Cargo warns and
+# ignores the key), and the value must be a string of the form "N days".
+# Stable in Cargo 1.100: at that pin bump drop the [unstable] line if Cargo
+# then rejects it, and re-run the test.
+[registry]
+global-min-publish-age = "7 days"
+
+# Android NDK cross-compilation linkers.
+# These resolve to NDK clang wrappers on PATH (api26, matching minSdk in
+# apps/fauna-android/app/build.gradle.kts). Wrappers come from the NDK at
+# $ANDROID_HOME/ndk/<version>/toolchains/llvm/prebuilt/<host>/bin.
+[target.aarch64-linux-android]
+linker = "aarch64-linux-android26-clang"
+
+[target.armv7-linux-androideabi]
+linker = "armv7a-linux-androideabi26-clang"
+
+[target.x86_64-linux-android]
+linker = "x86_64-linux-android26-clang"
+
+[target.i686-linux-android]
+linker = "i686-linux-android26-clang"
+
+# Statically link the MSVC C runtime into every Windows binary we ship (the 3
+# service exes, the fauna_shell.dll shell-ext cdylib, and fauna_ffi.dll).
+# Without this they import VCRUNTIME140.dll, which is NOT an OS component — it ships
+# only with the Visual C++ Redistributable, absent on a fresh Windows VM. The
+# installer's target IS a bare VM, so a dynamic-CRT service fails to start (MSI
+# error 1920 "failed to start / verify privileges") and fauna_ffi.dll fails to load.
+# crt-static makes them self-contained (no redist, nothing to keep updated). Scoped
+# to *-pc-windows-msvc, so it only affects native Windows builds — Android/web/Linux
+# targets are untouched.
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# The Go mail-bridge (bins/fauna-bridges) is cgo and links fauna_ffi with
+# llvm-mingw (Go's cgo does NOT support MSVC cl.exe/link.exe). So the Go bridge
+# consumes a SEPARATE fauna_ffi.dll built for *-pc-windows-gnullvm, whose
+# toolchain IS llvm-mingw — the Rust cdylib then emits a GNU import lib
+# (libfauna_ffi.dll.a) that cgo links natively, sidestepping the MSVC↔MinGW
+# import-lib seam entirely. The C# app keeps its own crt-static MSVC fauna_ffi.dll
+# (above). Only Windows/CI build the gnullvm slice, so these keys are inert on other
+# machines. Only the Windows toolchain builds this gnullvm slice; the linker
+# names below are the llvm-mingw cross-linkers cgo needs to link the Rust cdylib.
+[target.aarch64-pc-windows-gnullvm]
+linker = "aarch64-w64-mingw32-clang"
+
+[target.x86_64-pc-windows-gnullvm]
+linker = "x86_64-w64-mingw32-clang"
+
+# C/C++ compilers + archiver for cc-rs (build scripts that compile bundled
+# C/C++ sources, e.g. zstd-sys, ring). cc-rs's default heuristic for the
+# armv7 triple resolves to "arm-linux-androideabi-clang" which the NDK no
+# longer ships, so leaving these unset breaks the build. Per cc-rs docs,
+# CC_<target>/CXX_<target>/AR_<target> override the heuristic; the NDK's
+# wrappers also bundle the right --target/--sysroot flags so we don't need
+# CFLAGS_*. Keys use kebab-case triples (cc-rs accepts either form, but
+# Cargo's [env] table requires quoting only when keys contain dots; hyphens
+# are fine bare).
+[env]
+CC_aarch64-linux-android = "aarch64-linux-android26-clang"
+CC_armv7-linux-androideabi = "armv7a-linux-androideabi26-clang"
+CC_x86_64-linux-android = "x86_64-linux-android26-clang"
+CC_i686-linux-android = "i686-linux-android26-clang"
+CXX_aarch64-linux-android = "aarch64-linux-android26-clang++"
+CXX_armv7-linux-androideabi = "armv7a-linux-androideabi26-clang++"
+CXX_x86_64-linux-android = "x86_64-linux-android26-clang++"
+CXX_i686-linux-android = "i686-linux-android26-clang++"
+AR_aarch64-linux-android = "llvm-ar"
+AR_armv7-linux-androideabi = "llvm-ar"
+AR_x86_64-linux-android = "llvm-ar"
+AR_i686-linux-android = "llvm-ar"
+# llvm-mingw C toolchain for the gnullvm fauna_ffi.dll's C build-scripts (ring,
+# zstd-sys, …). Same one-toolchain-many-targets llvm-mingw install serves both
+# Windows arches; inert unless a *-pc-windows-gnullvm target is built.
+CC_aarch64-pc-windows-gnullvm = "aarch64-w64-mingw32-clang"
+CC_x86_64-pc-windows-gnullvm = "x86_64-w64-mingw32-clang"
+CXX_aarch64-pc-windows-gnullvm = "aarch64-w64-mingw32-clang++"
+CXX_x86_64-pc-windows-gnullvm = "x86_64-w64-mingw32-clang++"
+AR_aarch64-pc-windows-gnullvm = "llvm-ar"
+AR_x86_64-pc-windows-gnullvm = "llvm-ar"

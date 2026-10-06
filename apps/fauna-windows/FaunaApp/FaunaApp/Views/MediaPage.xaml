@@ -1,0 +1,801 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.MediaPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:models="using:FaunaApp.Core.Models"
+    xmlns:helpers="using:FaunaApp.Helpers"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+        Media content browser — the READ plane over folders (media.md), rendered
+        ENTIRELY off the shared MediaMachine (libs/fauna-media-machine via UniFFI
+        BuildMediaMachine), NOT a per-app VM. media.md rule 2 — observer-driven
+        rendering off the cross-set fauna.media.list snapshot. Folder CREATION /
+        CONFIGURATION lives in Settings → Folders (FoldersPage).
+
+        Explorer chrome IDs (ui.yaml § media):
+          page-heading, media-view-toggle, media-sort-select, media-folder-filter,
+          file-upload, upload-button, error-message.
+
+        media-item component (per row, ui.yaml § media):
+          media-item-name, media-item-size, media-item-date,
+          media-thumbnail, media-source-status, sync-state-badge.
+
+        Default view is the cross-set all-media aggregate (media-folder-filter =
+        "__all__"); a per-set filter scopes to one set. Upload (file-upload /
+        upload-button) reads the picked path and runs the shared
+        MediaMachine::upload_selected gesture (seal → POST → record → refresh;
+        media.md § Where logic lives) — matches linux.
+    -->
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- ══ Row 0: Page heading + Explorer chrome toolbar ══ -->
+        <StackPanel Grid.Row="0" Padding="16,12" Spacing="8">
+            <!-- The heading shares its row with share-link-list-button — the page-level
+                 "Shared links" entry (share-links.md § Flows → List). It sits here, not
+                 in the upload row, because it must stay present in a followed browse
+                 scope, where that row collapses whole. -->
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="MediaTitle"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                           Style="{StaticResource SubtitleTextBlockStyle}" />
+                <Button Grid.Column="1"
+                        x:Name="ShareLinkListBtn"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkListButton}"
+                        Content="{loc:Localize Key=share_link/list_button}"
+                        Click="ShareLinkListBtn_Click" />
+            </Grid>
+
+            <!-- Explorer chrome — TWO rows so it never overflows the narrow content
+                 width (NavigationView pane ~280px leaves ~360px of content): a single
+                 7-element toolbar row pushed file-upload + upload-button OFF-SCREEN
+                 (IsOffscreen ⇒ e2e is_visible=False; 2026-06-30 slice-6 fix).
+                 Row A: view-toggle | sort | filter.  Row B: file-upload | Browse | upload-button. -->
+
+            <!-- Row A: view controls -->
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />   <!-- media-view-toggle -->
+                    <ColumnDefinition Width="120" />    <!-- media-sort-select -->
+                    <ColumnDefinition Width="150" />    <!-- media-folder-filter -->
+                    <ColumnDefinition Width="*" />      <!-- spacer -->
+                </Grid.ColumnDefinitions>
+
+                <!-- media-view-toggle: list ↔ grid -->
+                <Button Grid.Column="0"
+                        x:Name="ViewToggleBtn"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaViewToggle}"
+                        Click="ViewToggle_Click" />
+
+                <!-- media-sort-select: sort by name / size / date -->
+                <ComboBox Grid.Column="1"
+                          x:Name="SortCombo"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaSortSelect}"
+                          SelectionChanged="SortCombo_SelectionChanged"
+                          HorizontalAlignment="Stretch" />
+
+                <!-- media-folder-filter: "All media" (cross-set default) + one per set
+                     that has media. Backed by the shared MediaMachine.SetFilter
+                     (null = all-media; media.md § O-4). -->
+                <ComboBox Grid.Column="2"
+                          x:Name="FilterCombo"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaFolderFilter}"
+                          SelectionChanged="FilterCombo_SelectionChanged"
+                          HorizontalAlignment="Stretch" />
+            </Grid>
+
+            <!-- Row B: upload controls (file-upload path + Browse + upload-button).
+                 COLLAPSED WHOLE while a followed browse scope is active: a follow
+                 is structurally read-only and never enters known_folders, so it can
+                 never be an upload target (media.md § Followed public folders). The
+                 affordance must be ABSENT, not painted-but-inert — a disabled
+                 control still counts in the UIA tree, and the contract is
+                 `count(upload-button) == 0`. -->
+            <Grid x:Name="UploadRow" ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />      <!-- file-upload TextBox -->
+                    <ColumnDefinition Width="Auto" />   <!-- Browse button -->
+                    <ColumnDefinition Width="Auto" />   <!-- upload-button -->
+                    <ColumnDefinition Width="Auto" />   <!-- upload ProgressRing -->
+                </Grid.ColumnDefinitions>
+
+                <!-- file-upload: an editable path input — the user types/pastes a
+                     path, or the Browse button fills it via the native picker. NOT
+                     read-only: it is the cross-app "text-input acting as a file
+                     picker" (media.md § Layout & flow) the e2e drives via type_text
+                     (ValuePattern.SetValue), exactly like linux's editable entry. A
+                     read-only TextBox rejects SetValue, so the path never lands and
+                     upload-button early-returns (the 2026-06-30 upload-wiring fix). -->
+                <TextBox Grid.Column="0"
+                         x:Name="UploadPathBox"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.FileUpload}" />
+
+                <!-- Browse file picker (no AutomationId — not a spec element) -->
+                <Button Grid.Column="1"
+                        x:Name="BrowseBtn"
+                        Click="BrowseBtn_Click" />
+
+                <!-- upload-button: runs the shared MediaMachine::upload_selected gesture -->
+                <Button Grid.Column="2"
+                        x:Name="UploadBtn"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.UploadButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="UploadBtn_Click" />
+
+                <ProgressRing Grid.Column="3"
+                              x:Name="UploadProgress"
+                              IsActive="False"
+                              Width="20" Height="20"
+                              Visibility="Collapsed" />
+            </Grid>
+        </StackPanel>
+
+        <!-- ══ Row 1: Cross-set media browser (list view + grid view) ══ -->
+        <Grid Grid.Row="1"
+              BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+              BorderThickness="0,1,0,0">
+
+            <!-- List view (default; visible when the snapshot's view-grid is false) -->
+            <ListView x:Name="FileList" SelectionMode="None">
+                <!--
+                    Non-virtualizing panel: a count-all (FlaUI FindAll over
+                    AutomationId="media-item") on the default virtualizing
+                    ItemsStackPanel returns 0 even for on-screen rows — the proven
+                    AdminUsersPage / AdminAliasesPage countable-list pattern, and the
+                    gate test_all_media_cross_set relies on (the seeded snapshot binds
+                    fine — diag confirmed items=3 — but UIA count saw 0 until this).
+                    Bounded media subsets render fine; if a single set's listing grows
+                    photo-library-large, revisit with a UIA-item-realizing count rather
+                    than re-enabling virtualization (media.md § State: keyset pages).
+                -->
+                <ListView.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel />
+                    </ItemsPanelTemplate>
+                </ListView.ItemsPanel>
+                <ListView.ItemTemplate>
+                    <DataTemplate x:DataType="models:MediaItem">
+                        <!--
+                            media-item component (ui.yaml § media). The row root is a
+                            flat, transparent, full-width Button — the PROVEN clickable
+                            indexed-row shape (EventsPage's event-card). A bare Grid
+                            root exposes NO UIA invocation pattern, so driver.click
+                            falls back to a physical SendInput that throws "Access is
+                            denied" off-foreground (the 2026-07-10 addressbook-row bug).
+                            Clicking opens media-item-detail (media.md § User actions).
+                            AutomationProperties.Name=Path for FlaUI row counting.
+                        -->
+                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaItem}"
+                                AutomationProperties.Name="{x:Bind Path}"
+                                Tag="{x:Bind}" Click="MediaItem_Click"
+                                Background="Transparent" BorderThickness="0" Padding="0"
+                                HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                        <Grid Padding="8" ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="64" />   <!-- thumbnail -->
+                                <ColumnDefinition Width="*" />    <!-- name -->
+                                <ColumnDefinition Width="80" />   <!-- size -->
+                                <ColumnDefinition Width="140" />  <!-- date -->
+                                <ColumnDefinition Width="160" />  <!-- source status -->
+                                <ColumnDefinition Width="100" />  <!-- sync state -->
+                            </Grid.ColumnDefinitions>
+
+                            <!--
+                                media-thumbnail: fetched + decrypted through the shared
+                                MediaMachine::fetch_thumbnail (direct-by-hash + owner
+                                BackupKey decrypt; media.md § Thumbnails) via
+                                GetThumbLoader(). Per-item degrade to the placeholder, never
+                                a blank (media.md § Thumbnails): the Image stays realized
+                                (ManageVisibility=False) over a placeholder glyph an empty
+                                Source leaves showing, and its HelpText answers
+                                get_attr("state") painted/placeholder off the live Source.
+                            -->
+                            <Grid Grid.Column="0" Width="60" Height="40">
+                                <FontIcon Glyph="&#xE91B;" FontSize="20" Opacity="0.4" />
+                                <Image AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaThumbnail}"
+                                       helpers:ImageHashBind.Hash="{x:Bind ThumbnailHash, Mode=OneWay}"
+                                       helpers:ImageHashBind.Loader="{x:Bind local:MediaPage.GetThumbLoader(), Mode=OneTime}"
+                                       helpers:ImageHashBind.ManageVisibility="False"
+                                       Stretch="UniformToFill" />
+                            </Grid>
+
+                            <TextBlock Grid.Column="1"
+                                       AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaItemName}"
+                                       Text="{x:Bind Name}"
+                                       VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis" />
+
+                            <TextBlock Grid.Column="2"
+                                       AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaItemSize}"
+                                       Text="{x:Bind local:MediaPage.FormatBytes(SizeBytes)}"
+                                       VerticalAlignment="Center"
+                                       Opacity="0.6" />
+
+                            <TextBlock Grid.Column="3"
+                                       AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaItemDate}"
+                                       Text="{x:Bind local:MediaPage.FormatTimestamp(UpdatedAt)}"
+                                       VerticalAlignment="Center"
+                                       Opacity="0.6" />
+
+                            <!--
+                                media-source-status: the backing folder's source-device
+                                liveness (online/offline), from the shared snapshot's
+                                source_online bool. This is the SET's reachability; the
+                                sync-state-badge below is the FILE's own presence — two
+                                distinct signals, both on the row (media.md § Source status
+                                vs. sync state; badge owned by file-sync.md § Per-file
+                                sync-status display).
+                            -->
+                            <TextBlock Grid.Column="4"
+                                       AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaSourceStatus}"
+                                       Text="{x:Bind SourceStatus}"
+                                       VerticalAlignment="Center"
+                                       Opacity="0.6" />
+
+                            <!--
+                                sync-state-badge: THIS FILE's own presence, distinct from
+                                media-source-status above (file-sync.md § Per-file
+                                sync-status display). Windows' in-app media page is
+                                control-plane, so it always renders the single shared
+                                "Synced" label (MediaItem.SyncStateLabel).
+                            -->
+                            <TextBlock Grid.Column="5"
+                                       AutomationProperties.AutomationId="{x:Bind ids:Ids.SyncStateBadge}"
+                                       Text="{x:Bind SyncStateLabel}"
+                                       VerticalAlignment="Center"
+                                       Opacity="0.6" />
+                        </Grid>
+                        </Button>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+
+            <!-- Grid view (hidden by default; visible when the snapshot's view-grid is true) -->
+            <GridView x:Name="FileGrid"
+                      SelectionMode="None"
+                      Visibility="Collapsed">
+                <GridView.ItemTemplate>
+                    <DataTemplate x:DataType="models:MediaItem">
+                        <!-- Same clickable-row Button root as the list view: a tile is a
+                             media-item too, so it opens media-item-detail identically
+                             (priority #1 — one gesture, not a list-only affordance). -->
+                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaItem}"
+                                AutomationProperties.Name="{x:Bind Path}"
+                                Tag="{x:Bind}" Click="MediaItem_Click"
+                                Background="Transparent" BorderThickness="0" Padding="0"
+                                HorizontalContentAlignment="Stretch">
+                        <StackPanel Width="140" Margin="4">
+
+                            <!-- Same placeholder-under-Image shape as the list row. -->
+                            <Grid Width="128" Height="96">
+                                <FontIcon Glyph="&#xE91B;" FontSize="32" Opacity="0.4" />
+                                <Image AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaThumbnail}"
+                                       helpers:ImageHashBind.Hash="{x:Bind ThumbnailHash, Mode=OneWay}"
+                                       helpers:ImageHashBind.Loader="{x:Bind local:MediaPage.GetThumbLoader(), Mode=OneTime}"
+                                       helpers:ImageHashBind.ManageVisibility="False"
+                                       Stretch="UniformToFill" />
+                            </Grid>
+
+                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaItemName}"
+                                       Text="{x:Bind Name}"
+                                       TextTrimming="CharacterEllipsis"
+                                       FontSize="11" Margin="4,4,4,0" />
+
+                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaItemSize}"
+                                       Text="{x:Bind local:MediaPage.FormatBytes(SizeBytes)}"
+                                       FontSize="10" Opacity="0.6" Margin="4,0" />
+
+                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaItemDate}"
+                                       Text="{x:Bind local:MediaPage.FormatTimestamp(UpdatedAt)}"
+                                       FontSize="10" Opacity="0.6" Margin="4,0" />
+
+                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaSourceStatus}"
+                                       Text="{x:Bind SourceStatus}"
+                                       FontSize="10" Opacity="0.5" Margin="4,0" />
+
+                            <!-- sync-state-badge: see the list-view DataTemplate above for
+                                 the full rationale (file-sync.md § Per-file sync-status
+                                 display). -->
+                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.SyncStateBadge}"
+                                       Text="{x:Bind SyncStateLabel}"
+                                       FontSize="10" Opacity="0.5" Margin="4,0,4,4" />
+                        </StackPanel>
+                        </Button>
+                    </DataTemplate>
+                </GridView.ItemTemplate>
+            </GridView>
+
+            <!-- Empty state: no readable set has any media ("No media yet"), and the
+                 page has finished loading (snapshot.loaded) — see RenderPage. -->
+            <TextBlock x:Name="EmptyText"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaEmptyState}"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       Visibility="Collapsed" />
+
+            <ProgressRing x:Name="LoadProgress"
+                          IsActive="False"
+                          Visibility="Collapsed" />
+        </Grid>
+
+        <!-- Error bar (error-message per e2e convention; read via App.CurrentErrorMessage) -->
+        <controls:CopyableInfoBar x:Name="ErrorBar"
+                                  IsOpen="False" Severity="Error"
+                                  Grid.RowSpan="2" VerticalAlignment="Bottom" />
+
+        <!-- Image Lightbox Dialog -->
+        <ContentDialog
+            x:Name="ImageLightboxDialog"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.ImageLightbox}"
+            FullSizeDesired="True">
+            <ScrollViewer ZoomMode="Enabled" MinZoomFactor="0.5" MaxZoomFactor="5"
+                          HorizontalScrollBarVisibility="Auto"
+                          VerticalScrollBarVisibility="Auto">
+                <Image x:Name="LightboxImage" Stretch="Uniform" MaxHeight="800" MaxWidth="1200" />
+            </ScrollViewer>
+        </ContentDialog>
+
+        <!-- ══ media-item-detail: per-item detail surface hosting file-version-history ══
+             media.md § Element IDs (approved 2026-07-09) — opened by a media-item
+             tap/open, carries media-item-detail-name + media-item-detail-close-button.
+             An INLINE collapsed Border overlay, NOT a ContentDialog: a modal
+             ContentDialog does not surface its subtree to the FlaUI is_visible tree
+             (the AdminDnsPage rename-sheet / MailSettingsPanel disable-confirm idiom).
+             A non-empty AutomationProperties.Name keeps UIA from pruning the container
+             (reference_winui_flaui_datatemplate_name). Collapsed ⇒ uncounted. -->
+        <Border x:Name="DetailSheet"
+                Grid.RowSpan="2"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaItemDetail}"
+                AutomationProperties.Name="Media item detail"
+                Visibility="Collapsed"
+                HorizontalAlignment="Center" VerticalAlignment="Center"
+                MinWidth="420" MaxWidth="560" MaxHeight="520"
+                Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1" CornerRadius="6" Padding="16">
+            <StackPanel Spacing="12">
+                <!-- Dynamic label read by e2e get_text ⇒ AutomationId ONLY, never a
+                     static Name (reference_windows_flaui_gettext_dynamic_label_no_name). -->
+                <TextBlock x:Name="DetailName"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaItemDetailName}"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           TextTrimming="CharacterEllipsis" />
+
+                <TextBlock x:Name="VersionsTitle"
+                           Style="{StaticResource BodyStrongTextBlockStyle}" />
+
+                <!-- Recovery browse (file-versions.md § Retention (3)): ON re-lists with include_pruned so soft-pruned rows
+                     appear below with their badge + undelete button. -->
+                <ToggleSwitch x:Name="ShowPrunedToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.FileVersionShowPrunedToggle}"
+                              Header="{loc:Localize Key=media/versions_show_pruned}"
+                              OnContent="" OffContent=""
+                              Toggled="ShowPrunedToggle_Toggled" />
+
+                <!-- Per-surface loading/error line — the versions read NEVER touches the
+                     page error-message banner (MediaMachine::file_versions returns the
+                     error to the caller rather than calling set_error; linux/web both
+                     surface it inside the modal). -->
+                <TextBlock x:Name="VersionsStatus"
+                           Opacity="0.6" TextWrapping="Wrap"
+                           Visibility="Collapsed" />
+
+                <!-- file-version-list: Border-wrapped non-virtualizing ItemsControl —
+                     a count-all (FlaUI FindAll over file-version-item) on a virtualizing
+                     panel returns 0 (the proven report-share-published-list shape). -->
+                <Border x:Name="VersionsBorder"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.FileVersionList}"
+                        AutomationProperties.Name="Version history"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1" CornerRadius="6" Padding="8">
+                    <ScrollViewer MaxHeight="280" VerticalScrollBarVisibility="Auto">
+                        <ItemsControl x:Name="VersionsList">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <StackPanel Orientation="Vertical" Spacing="4" />
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="models:FileVersionRow">
+                                    <!-- Row container needs AutomationProperties.Name or
+                                         FlaUI counts 0. A Grid (star/auto/auto), never a
+                                         horizontal StackPanel: a natural-size row can push
+                                         the trailing restore Button past the sheet's
+                                         visible width ⇒ IsOffscreen ⇒ is_visible=False
+                                         (the offscreen rule). The row itself
+                                         is never clicked — only its restore Button is — so
+                                         a Grid root (no invoke pattern) is correct here. -->
+                                    <Grid AutomationProperties.AutomationId="{x:Bind ids:Ids.FileVersionItem}"
+                                          AutomationProperties.Name="{x:Bind Timestamp}"
+                                          ColumnSpacing="8" Padding="4">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <TextBlock Grid.Column="0"
+                                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.FileVersionTimestamp}"
+                                                   Text="{x:Bind Timestamp}"
+                                                   VerticalAlignment="Center" />
+
+                                        <TextBlock Grid.Column="1"
+                                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.FileVersionSize}"
+                                                   Text="{x:Bind Size}"
+                                                   VerticalAlignment="Center"
+                                                   Opacity="0.6" />
+
+                                        <TextBlock Grid.Column="2"
+                                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.FileVersionAuthor}"
+                                                   Text="{x:Bind Author}"
+                                                   VerticalAlignment="Center"
+                                                   Opacity="0.6" />
+
+                                        <!-- Present only on pruned rows (an include_pruned
+                                             listing only) — the recovery browse's badge +
+                                             undelete pair (file-versions.md § Retention (3)). -->
+                                        <TextBlock Grid.Column="3"
+                                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.FileVersionPrunedBadge}"
+                                                   Text="{loc:Localize Key=media/version_pruned_badge}"
+                                                   Visibility="{x:Bind local:MediaPage.BoolToVisibility(Pruned), Mode=OneWay}"
+                                                   VerticalAlignment="Center"
+                                                   Opacity="0.6" />
+
+                                        <Button Grid.Column="4"
+                                                AutomationProperties.AutomationId="{x:Bind ids:Ids.FileVersionUndeleteButton}"
+                                                Content="{loc:Localize Key=media/version_undelete}"
+                                                Visibility="{x:Bind local:MediaPage.BoolToVisibility(Pruned), Mode=OneWay}"
+                                                Tag="{x:Bind VersionNum}"
+                                                Click="UndeleteVersion_Click" />
+
+                                        <Button Grid.Column="5"
+                                                AutomationProperties.AutomationId="{x:Bind ids:Ids.FileVersionRestoreButton}"
+                                                Content="{loc:Localize Key=media/version_restore}"
+                                                Tag="{x:Bind VersionNum}"
+                                                Click="RestoreVersion_Click" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </Border>
+
+                <!-- Delete (start) + Close (end) — linux's detail.rs action row.
+                     media-delete-button opens the LIGHTWEIGHT single-confirm modal
+                     below (media.md § Element IDs, the media-delete-* family
+                     user-approved 2026-07-16 — deliberately NOT the backups typed-id
+                     immediate-delete ceremony: a media delete records a tombstone and
+                     historical version rows survive; file-sync.md § File Versions). -->
+                <Grid>
+                    <Button x:Name="DeleteBtn"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaDeleteButton}"
+                            Content="{loc:Localize Key=media/file_detail/delete_file}"
+                            HorizontalAlignment="Left"
+                            Click="DeleteBtn_Click" />
+                    <StackPanel Orientation="Horizontal" Spacing="8"
+                                HorizontalAlignment="Right">
+                        <!-- share-link-button (share-links.md § Flows → Create): present
+                             ONLY when the shared MediaItemSummary.share_link_eligible is
+                             true — Collapsed otherwise, so it is absent from the UIA tree,
+                             never a disabled control (§ Which files can be linked). -->
+                        <Button x:Name="ShareLinkBtn"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkButton}"
+                                Content="{loc:Localize Key=share_link/button}"
+                                Visibility="Collapsed"
+                                Click="ShareLinkBtn_Click" />
+                        <!-- media-item-detail-download-button (media.md § Element IDs,
+                             approved 2026-09-25): Collapsed until actionable — once the
+                             version rows carry a manifest, or at once in a followed
+                             scope (whose detail offers download alone). Collapsed ⇒
+                             absent from the UIA tree, never a disabled button. -->
+                        <Button x:Name="DownloadBtn"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaItemDetailDownloadButton}"
+                                Content="{loc:Localize Key=media/download}"
+                                Style="{StaticResource AccentButtonStyle}"
+                                Visibility="Collapsed"
+                                Click="DownloadBtn_Click" />
+                        <Button x:Name="DetailCloseBtn"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaItemDetailCloseButton}"
+                                Content="{loc:Localize Key=media/detail_close}"
+                                Click="DetailClose_Click" />
+                    </StackPanel>
+                </Grid>
+            </StackPanel>
+        </Border>
+
+        <!-- ══ file-version-restore-confirm-modal ══
+             A LIGHTWEIGHT confirm (file-sync.md § Restore: restore appends a new
+             version, so it is reversible — NOT the irreversible-action ceremony the
+             backups immediate-delete-* flow uses). Inline Border, same idiom as the
+             detail sheet above; sits after it so it paints on top. -->
+        <Border x:Name="RestoreConfirmSheet"
+                Grid.RowSpan="2"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.FileVersionRestoreConfirmModal}"
+                AutomationProperties.Name="Restore this version?"
+                Visibility="Collapsed"
+                HorizontalAlignment="Center" VerticalAlignment="Center"
+                MinWidth="360" MaxWidth="440"
+                Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1" CornerRadius="6" Padding="16">
+            <StackPanel Spacing="12">
+                <TextBlock x:Name="RestoreConfirmTitle"
+                           Style="{StaticResource SubtitleTextBlockStyle}" />
+                <TextBlock x:Name="RestoreConfirmBody"
+                           TextWrapping="Wrap" Opacity="0.8" />
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.FileVersionRestoreCancelButton}"
+                            Content="{loc:Localize Key=media/restore_cancel}"
+                            Click="RestoreCancel_Click" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.FileVersionRestoreConfirmButton}"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Content="{loc:Localize Key=media/restore_confirm}"
+                            Click="RestoreConfirm_Click" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <!-- ══ media-delete-confirm-modal ══
+             A LIGHTWEIGHT single confirm (media.md § Element IDs, user-approved
+             2026-07-16): a media delete records a tombstone and leaves the historical
+             version rows (file-sync.md § File Versions), so it deliberately does NOT
+             take the backups typed-id immediate-delete ceremony. Inline Border, same
+             idiom as the sheets above; sits after them so it paints on top. -->
+        <Border x:Name="DeleteConfirmSheet"
+                Grid.RowSpan="2"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaDeleteConfirmModal}"
+                AutomationProperties.Name="Delete this file?"
+                Visibility="Collapsed"
+                HorizontalAlignment="Center" VerticalAlignment="Center"
+                MinWidth="360" MaxWidth="440"
+                Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1" CornerRadius="6" Padding="16">
+            <StackPanel Spacing="12">
+                <TextBlock x:Name="DeleteConfirmTitle"
+                           Style="{StaticResource SubtitleTextBlockStyle}" />
+                <!-- Dynamic per-item body ({name}-arg string) — set in code-behind. -->
+                <TextBlock x:Name="DeleteConfirmBody"
+                           TextWrapping="Wrap" Opacity="0.8" />
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaDeleteCancelButton}"
+                            Content="{loc:Localize Key=common/cancel}"
+                            Click="DeleteCancel_Click" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaDeleteConfirmButton}"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Content="{loc:Localize Key=media/file_detail/delete_confirm_button}"
+                            Click="DeleteConfirm_Click" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <!-- ══ Share links (share-links.md § Flows; the share-link-* ids, approved
+             2026-09-25) ══
+             Three inline Border sheets, the same idiom as the ones above, each
+             RENDER-DRIVEN off the shared MediaMachine snapshot (RenderShareSurfaces):
+             a sheet is Visible exactly while its half of the snapshot is open, so it
+             never outlives, nor runs ahead of, the machine state it shows (linux's
+             share.rs is the reference). They sit last so they paint over the detail
+             sheet the create surface is opened from. -->
+
+        <!-- share-link-create-modal: the file's name, the expiry choice, Create /
+             Cancel; after registration the URL and its Copy replace the expiry and
+             Create (the reveal-after-registration rule, § Flows → Create step 4). -->
+        <Border x:Name="ShareCreateSheet"
+                Grid.RowSpan="2"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkCreateModal}"
+                AutomationProperties.Name="Share a link"
+                Visibility="Collapsed"
+                HorizontalAlignment="Center" VerticalAlignment="Center"
+                MinWidth="380" MaxWidth="480"
+                Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1" CornerRadius="6" Padding="16">
+            <StackPanel Spacing="12">
+                <TextBlock x:Name="ShareCreateTitle"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{loc:Localize Key=share_link/create_body}"
+                           TextWrapping="Wrap" Opacity="0.8" />
+
+                <Grid x:Name="ShareExpiryRow" ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="140" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="{loc:Localize Key=share_link/expiry_label}"
+                               VerticalAlignment="Center" />
+                    <!-- share-link-expiry-select: each item's UIA Name is the option
+                         VALUE (the cross-app select(id, "7d") contract); Content is
+                         the shared-Rust label. -->
+                    <ComboBox Grid.Column="1"
+                              x:Name="ShareExpiryCombo"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkExpirySelect}"
+                              HorizontalAlignment="Stretch"
+                              SelectionChanged="ShareExpiryCombo_SelectionChanged" />
+                </Grid>
+
+                <!-- share-link-url: a dynamic get_text label ⇒ AutomationId ONLY, never
+                     a static Name. Selectable so the user can copy it by hand too. -->
+                <TextBlock x:Name="ShareUrlText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkUrl}"
+                           IsTextSelectionEnabled="True"
+                           TextWrapping="Wrap"
+                           Visibility="Collapsed" />
+
+                <!-- The surface's own error line (ShareLinkFormat.OwnError) — the page
+                     error-message sits behind this sheet. Untagged: the id stays the
+                     page's. -->
+                <TextBlock x:Name="ShareCreateStatus"
+                           Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                           TextWrapping="Wrap" Visibility="Collapsed" />
+
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button x:Name="ShareCancelBtn"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkCancelButton}"
+                            Click="ShareCancelBtn_Click" />
+                    <Button x:Name="ShareCopyBtn"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkCopyButton}"
+                            Content="{loc:Localize Key=share_link/copy}"
+                            Visibility="Collapsed"
+                            Click="ShareCopyBtn_Click" />
+                    <Button x:Name="ShareCreateBtn"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkCreateButton}"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Click="ShareCreateBtn_Click" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <!-- share-link-list: the caller's links, newest first, three states off one
+             `loaded` bit (ui/README.md § List pages: loading is not empty). -->
+        <Border x:Name="ShareListSheet"
+                Grid.RowSpan="2"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkList}"
+                AutomationProperties.Name="Your shared links"
+                Visibility="Collapsed"
+                HorizontalAlignment="Center" VerticalAlignment="Center"
+                MinWidth="440" MaxWidth="600" MaxHeight="520"
+                Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1" CornerRadius="6" Padding="16">
+            <StackPanel Spacing="12">
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="{loc:Localize Key=share_link/list_title}"
+                               Style="{StaticResource SubtitleTextBlockStyle}"
+                               VerticalAlignment="Center" />
+                    <Button Grid.Column="1"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkListCloseButton}"
+                            Content="{loc:Localize Key=share_link/close}"
+                            Click="ShareListClose_Click" />
+                </Grid>
+
+                <TextBlock x:Name="ShareListLoading"
+                           Text="{loc:Localize Key=share_link/list_loading}"
+                           Opacity="0.6" />
+                <TextBlock x:Name="ShareListEmpty"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkEmptyState}"
+                           Text="{loc:Localize Key=share_link/empty}"
+                           Visibility="Collapsed" />
+
+                <!-- Non-virtualizing panel: a count-all over share-link-item on a
+                     virtualizing panel returns 0 (the file-version-list shape above). -->
+                <ScrollViewer MaxHeight="340" VerticalScrollBarVisibility="Auto">
+                    <ItemsControl x:Name="ShareLinksList">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Vertical" Spacing="4" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="models:ShareLinkRow">
+                                <!-- Row container needs AutomationProperties.Name or FlaUI
+                                     counts 0; a star/auto Grid so the trailing buttons stay
+                                     inside the sheet's width (the offscreen rule). Never
+                                     clicked itself — only its buttons are. -->
+                                <Grid AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkItem}"
+                                      AutomationProperties.Name="{x:Bind Name}"
+                                      ColumnSpacing="8" Padding="4">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock Grid.Column="0"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkItemName}"
+                                               Text="{x:Bind Name}"
+                                               TextTrimming="CharacterEllipsis"
+                                               VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkItemExpires}"
+                                               Text="{x:Bind Expires}"
+                                               Opacity="0.6" FontSize="12"
+                                               VerticalAlignment="Center" />
+                                    <!-- The label is paint-only; HelpText carries the stable
+                                         state value get_attr("state") reads. -->
+                                    <TextBlock Grid.Column="2"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkItemState}"
+                                               AutomationProperties.HelpText="{x:Bind State}"
+                                               Text="{x:Bind StateLabel}"
+                                               FontSize="12"
+                                               VerticalAlignment="Center" />
+                                    <Button Grid.Column="3"
+                                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkItemCopyButton}"
+                                            Content="{loc:Localize Key=share_link/copy}"
+                                            Visibility="{x:Bind local:MediaPage.BoolToVisibility(CanCopy)}"
+                                            Tag="{x:Bind Url}"
+                                            Click="ShareRowCopy_Click" />
+                                    <Button Grid.Column="4"
+                                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkRevokeButton}"
+                                            Content="{loc:Localize Key=share_link/revoke}"
+                                            Visibility="{x:Bind local:MediaPage.BoolToVisibility(CanRevoke)}"
+                                            Tag="{x:Bind TokenId}"
+                                            Click="ShareRowRevoke_Click" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+
+                <TextBlock x:Name="ShareListStatus"
+                           Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                           TextWrapping="Wrap" Visibility="Collapsed" />
+            </StackPanel>
+        </Border>
+
+        <!-- share-link-revoke-confirm-modal: the single confirm (the file-delete
+             confirm is the precedent; a revoke destroys nothing but the link). -->
+        <Border x:Name="ShareRevokeSheet"
+                Grid.RowSpan="2"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkRevokeConfirmModal}"
+                AutomationProperties.Name="Revoke this link?"
+                Visibility="Collapsed"
+                HorizontalAlignment="Center" VerticalAlignment="Center"
+                MinWidth="360" MaxWidth="440"
+                Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1" CornerRadius="6" Padding="16">
+            <StackPanel Spacing="12">
+                <TextBlock Text="{loc:Localize Key=share_link/revoke_confirm_title}"
+                           Style="{StaticResource SubtitleTextBlockStyle}" />
+                <TextBlock x:Name="ShareRevokeBody"
+                           TextWrapping="Wrap" Opacity="0.8" />
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkRevokeCancelButton}"
+                            Content="{loc:Localize Key=common/cancel}"
+                            Click="ShareRevokeCancel_Click" />
+                    <Button x:Name="ShareRevokeConfirmBtn"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ShareLinkRevokeConfirmButton}"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Content="{loc:Localize Key=share_link/revoke_confirm}"
+                            Click="ShareRevokeConfirm_Click" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Page>

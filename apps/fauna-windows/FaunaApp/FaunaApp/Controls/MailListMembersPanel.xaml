@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FaunaApp.Controls.MailListMembersPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Controls"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Loaded="Panel_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- User-facing mail-list-members page (docs/goal/behavior/mail-mass-mailing.md
+         § mail-list-members page): managing the members of one mailing list — the
+         subscribed/unsubscribed summary, add a member, batch-import addresses, and
+         per-member unsubscribe / resubscribe. Dumb renderer of the shared
+         fauna_client_mail_settings::MailListMembersMachine (exposed by
+         build_mail_list_members_machine) — no business logic here (priority #2). Lifts
+         apps/fauna-linux/src/settings/mail_list_members.rs and mirrors MailAliasesPanel.
+
+         In the full app this page is opened scoped to a specific list (the mail-lists
+         row's Members button); in the embedded settings seed (no inter-page routing) the
+         code-behind constructs the machine with a placeholder list id for ID-conformance,
+         like the linux lead. UI precedes backend, surfaced never faked. -->
+    <StackPanel Spacing="12">
+
+        <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                   Text="{loc:Localize Key=mail_lists/members_title}" />
+
+        <ProgressRing x:Name="LoadingRing"
+                      IsActive="False" Visibility="Collapsed"
+                      HorizontalAlignment="Left" />
+
+        <!-- mail-list-members-summary — subscribed / unsubscribed counts. -->
+        <TextBlock x:Name="SummaryText"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListMembersSummary}"
+                   Opacity="0.7" />
+
+        <StackPanel Orientation="Horizontal" Spacing="8">
+            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListMembersAddButton}"
+                    Style="{StaticResource AccentButtonStyle}"
+                    Content="{loc:Localize Key=mail_lists/add_member_button}"
+                    Click="AddMember_Click" />
+            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListMembersImportButton}"
+                    Content="{loc:Localize Key=mail_lists/import_button}"
+                    Click="Import_Click" />
+        </StackPanel>
+
+        <!-- ── Add-member sheet (collapsed) ── -->
+        <StackPanel x:Name="AddSheet" Spacing="8" Visibility="Collapsed">
+            <TextBox x:Name="AddressInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListMembersAddSheetAddressInput}"
+                     PlaceholderText="{loc:Localize Key=mail_lists/add_member_placeholder}" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListMembersAddSheetSubmitButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Content="{loc:Localize Key=mail_lists/add_member_submit}"
+                        Click="AddSubmit_Click" />
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListMembersAddSheetCancelButton}"
+                        Content="{loc:Localize Key=mail_lists/add_member_cancel}"
+                        Click="AddCancel_Click" />
+            </StackPanel>
+        </StackPanel>
+
+        <!-- ── Import sheet (collapsed) — one address per line ── -->
+        <StackPanel x:Name="ImportSheet" Spacing="8" Visibility="Collapsed">
+            <TextBox x:Name="ImportInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListMembersImportSheetInput}"
+                     PlaceholderText="{loc:Localize Key=mail_lists/import_placeholder}"
+                     AcceptsReturn="True" TextWrapping="Wrap" Height="120"
+                     ScrollViewer.VerticalScrollBarVisibility="Auto" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListMembersImportSheetSubmitButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Content="{loc:Localize Key=mail_lists/import_submit}"
+                        Click="ImportSubmit_Click" />
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListMembersImportSheetCancelButton}"
+                        Content="{loc:Localize Key=mail_lists/import_cancel}"
+                        Click="ImportCancel_Click" />
+            </StackPanel>
+        </StackPanel>
+
+        <!-- ── Members (mail-list-members-list) — Border-wrapped + non-virtualizing. ── -->
+        <Border x:Name="ListBorder"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListMembersList}"
+                AutomationProperties.Name="Members"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1" CornerRadius="6" Padding="12">
+            <StackPanel Spacing="4">
+                <!-- mail_lists/members_no_list, NOT mail_lists/empty — the Lists page's
+                     "No lists yet" read as "this list has no members" here, a
+                     present-but-wrong reason for the dead Add/Import buttons
+                     (ui/README.md § List pages: loading is not empty). -->
+                <TextBlock x:Name="ListEmpty" Opacity="0.5" TextWrapping="Wrap"
+                           Visibility="Collapsed"
+                           Text="{loc:Localize Key=mail_lists/members_no_list}" />
+                <ItemsControl x:Name="MembersList">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Vertical" Spacing="8" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:MailListMemberRow">
+                            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListMembersListItem}"
+                                    AutomationProperties.Name="{x:Bind Address}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1" CornerRadius="6"
+                                    Padding="12" Margin="0,4">
+                                <Grid ColumnSpacing="8" RowSpacing="2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" Spacing="2">
+                                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListMembersListItemAddress}"
+                                                   Text="{x:Bind Address}"
+                                                   Style="{StaticResource BodyStrongTextBlockStyle}"
+                                                   IsTextSelectionEnabled="True" />
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListMembersListItemStatus}"
+                                                       Text="{x:Bind StatusBadge}"
+                                                       Opacity="0.7" FontSize="12" />
+                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListMembersListItemSubscribedAt}"
+                                                       Text="{x:Bind SubscribedAt}"
+                                                       Opacity="0.7" FontSize="12" />
+                                        </StackPanel>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal"
+                                                Spacing="4" VerticalAlignment="Center">
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListMembersListItemUnsubscribeButton}"
+                                                Content="{x:Bind UnsubscribeLabel}"
+                                                IsEnabled="{x:Bind IsSubscribed}"
+                                                Tag="{x:Bind Address}"
+                                                Click="Unsubscribe_Click" />
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListMembersListItemResubscribeButton}"
+                                                Content="{x:Bind ResubscribeLabel}"
+                                                IsEnabled="{x:Bind CanResubscribe}"
+                                                Tag="{x:Bind Address}"
+                                                Click="Resubscribe_Click" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </Border>
+    </StackPanel>
+</UserControl>

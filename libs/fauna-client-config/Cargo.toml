@@ -1,0 +1,123 @@
+[package]
+name = "fauna-client-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Register this crate's cross-crate `uniffi::Record` types (today:
+# `MutedWordsSnapshot`, the muted-words page read) for the native FFI build.
+# Off by default — every other consumer (nest, wasm, the two Rust apps) wants
+# the plain types, and `fauna-ffi` turns it on from its own `muted-keywords`
+# feature, which the Go mail-bridge's `--no-default-features` build drops. That
+# gating is load-bearing: it keeps the checked-in Go bindings byte-identical
+# (same rationale as the `muted-keywords` gate itself). The record crosses only
+# built-in types, so no `fauna-core/uniffi` forward is needed.
+uniffi = ["dep:uniffi"]
+# The shared in-memory account-store doubles (`test_helpers`: `FakeMailStore`,
+# `FakeBackupStateStore`, `FakeSuccessionLedgerStore`, …), the one home for the
+# seam fakes' semantics so no consumer hand-rolls its own. Off by default and
+# reached only through a `[dev-dependencies]` entry, so the doubles cannot ride
+# a release build.
+test-helpers = []
+# This crate's seams' crossings of web's account port — the custody-ceremony,
+# followed-folders and mail seams (`custody_port`, `follows_port`, `mail_port`):
+# the forwarders the folders, media and labeler-catalog chunks read through and
+# the `serve`s the core chunk answers with
+# (account-client-lifecycle.md § The account port, decision (c)).
+# Pulls only the thin transport crate — no plane, no store.
+account-port = ["dep:fauna-account-port"]
+
+[dependencies]
+fauna-account-port = { workspace = true, optional = true }
+# The cross-crate `uniffi::Record` derive for `MutedWordsSnapshot` (feature
+# `uniffi` above); `fauna-ffi` owns the scaffolding. Mirrors the
+# fauna-client-mail-settings / labeler-catalog-machine pattern.
+uniffi = { workspace = true, optional = true }
+# default-features = false on fauna-core to avoid pulling the `network`
+# default (redb, tokio, hickory-resolver) into wasm builds via Cargo
+# feature unification. Mirrors the fauna-client-mail-settings +
+# onboarding-machine + launch-machine pattern. The path form (rather than
+# `workspace = true`) is required because Cargo refuses
+# `default-features = false` overrides on `workspace = true` deps when the
+# workspace entry doesn't already disable defaults.
+fauna-core = { path = "../fauna-core", default-features = false }
+# The WS-RPC transport seam (`RpcRequester`). `default-features = false` drops fauna-protocol's `p2p` default
+# (native-only wireguard → tokio net → mio) so this crate is wasm-clean and can
+# back the wasm account-store seams in fauna-client-mail-settings.
+# Path form (not `workspace = true`) is required to override defaults (mirrors
+# fauna-client-mail-settings / fauna-client-bridges); the `js` time backend is
+# forwarded on wasm below.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# The bounded wait `ResolvingLedgerStore` runs while the host's account store is
+# still assembling (tokio natively, the browser timer on wasm).
+fauna-sleep.workspace = true
+# The typed `fauna.backup.*` call surface the enroll / deregister / reconcile
+# sequences compose (kind names + payload shapes live there once, shared with
+# the FFI + wasm Backups-page status read). Wasm-clean by the same
+# default-features = false discipline this crate uses.
+fauna-client-backup = { path = "../fauna-client-backup" }
+# The one localized refusal a full backup-destination list gets
+# (`backup_store::BackupWriteError::ListFull`), shared by all 7 apps.
+fauna-i18n = { path = "../fauna-i18n" }
+serde = { workspace = true }
+serde_bytes = "0.11"
+zeroize = { workspace = true }
+thiserror = { workspace = true }
+# The shared per-kind store seam traits (`store_seam.rs`: `MailStore`,
+# `BackupStateStore`, …) are `async` with a native `Send` / wasm `?Send` split —
+# the same `async_trait` pattern the consumer crates (mail-settings, dns, pair)
+# already use for their own seams.
+async-trait = "0.1"
+# Content-hash of the loaded sealed blob = the CAS base for `save_cas` (matches
+# the nest's `blake3::hash(sealed)` content-addressing). `pure` feature keeps it
+# wasm-clean (the workspace default), so the SPA build stays unaffected.
+blake3 = { workspace = true }
+# Hex-encode the resolved deployment seed into the self-hosted recovery command
+# (`recovery::selfhosted_recovery_command`, box-recovery.md § Recovery UI step 4).
+hex.workspace = true
+# Mint the 16-byte trained-factor id (`mutate::add_trained_factor`,
+# topic-factors.md § Wire & registry). Same wasm-safe source fauna-core's
+# identity/claim-code minting uses; the wasm backend feature is unified in by
+# fauna-wasm.
+getrandom.workspace = true
+# `recoverable_box_ids_local`'s best-effort-empty failure logging (malformed
+# secret / unreplicated / unopenable local store) — wasm-clean, same as every
+# sibling client crate's use (fauna-client-pair, fauna-client-dns, …).
+tracing = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Forward fauna-protocol's `js` (fauna-core's js-sys time backend) on wasm.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+
+# tempfile backs only the native `FileLocalConfigStore` round-trip test; keep it
+# off the wasm test build (the file impl is `#[cfg(not(wasm32))]` anyway).
+[dev-dependencies]
+# `default-features = false` mirrors the lib's native fauna-core entry above.
+# `features = ["test-helpers"]` exposes `fauna_core::data::fixture_tier_period_keys`
+# — the shared `TierPeriodKeys` test-fixture builder this crate's own unit
+# tests use (round 92 lift; `bins/fauna-nest`'s cross-device config-merge
+# conformance test shares the same builder via its own dev-dependency).
+fauna-core = { path = "../fauna-core", default-features = false, features = [
+    "test-helpers",
+] }
+# Forge a "config written by a build that does not exist yet": the version-gate
+# tests hand-build the dag-cbor payload map (a retyped field, a raised
+# `min_reader_version`) and seal it through the real pipeline, so the bytes are
+# byte-identical to what a future binary would write. Test-only — the production
+# surface reaches `fauna_cbor::Value` through `fauna-core`.
+fauna-cbor.workspace = true
+# The shared `block_on` single-poll test executor — wasm-clean (see that
+# crate's own docs), so it keeps this crate's dev-deps wasm32-testable.
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# The loopback the `custody_port` and `mail_port` modules' tests wire
+# forwarder → `serve` through, and the feature that compiles the module under `cargo test`.
+fauna-account-port = { workspace = true, features = ["test-helpers"] }
+fauna-client-config = { path = ".", features = ["account-port", "test-helpers"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tempfile = "3"
+# `test-util` enables `start_paused` for the plane rotation drive's
+# publication wait (`custody_leg`): the paused clock elapses the poll loop
+# instead of the test sleeping through it.
+tokio = { workspace = true, features = ["test-util"] }

@@ -1,0 +1,27 @@
+[package]
+name = "fauna-pebble-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The CA-trusting, UA-tagged `instant_acme::HttpClient` this crate builds for
+# callers, and the pebble lifecycle helpers' return/panic types.
+instant-acme = { workspace = true }
+# Build the injected client: a `hyper_util` legacy `Client` over a
+# `hyper-rustls` connector whose `rustls` roots include pebble's throwaway CA.
+# `ring` matches the crypto provider instant-acme/tokio-rustls use across the
+# workspace. Version-matched to what instant-acme already resolves
+# transitively (hyper 1.x / hyper-rustls 0.27 / rustls 0.23) — no new copies
+# enter the tree; this pin mirrors what `fauna-acme-http01` and
+# `fauna-client-dns` each carried in their own `[dev-dependencies]` before
+# this crate existed.
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+http-body-util = "0.1"
+bytes = "1"
+# `Request`/`HeaderValue`/`header::USER_AGENT` for the UA-adding `HttpClient`
+# wrapper pebble requires (it 400s requests with no User-Agent). `1.x` matches
+# the `http` instant-acme/hyper already resolve.
+http = "1"

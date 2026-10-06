@@ -1,0 +1,46 @@
+#!/command/with-contenv /bin/bash
+# fauna-atproto-bridge — the out-of-process ATProto PDS bridge (role
+# atproto.pds; docs/goal/behavior/atproto-pds-bridge.md § Architecture). Down by
+# default; nest brings it up via the supervisor sidekick socket
+# (set_atproto_enabled → s6-svc -u) once the admin enables Bluesky in a Fauna
+# client. The flag guard re-downs the service if it is started before the
+# /data/atproto-enabled flag exists (a spurious up).
+#
+# The bridge LOADS its Ed25519 service-user keypair from
+# /data/keys/atproto/atproto.pds.key (mode 0600, in the fauna-atproto-owned 0700
+# subdir — security.md § UID isolation). The ARTIFACT (entrypoint.sh) mints it AS
+# ROOT before this service starts; a non-artifact/dev run auto-generates on first
+# load. The bridge dials nest on the loopback and discovers its role via whoami —
+# there is NO --mode flag (a product invariant: role is deployment wiring, not a
+# human-set knob). --nest-endpoint is the loopback BASE url; the bridge appends
+# /api/v1/ws/{actor_id} itself (internal/wsrpc/client.go buildWSURL). Per
+# docs/goal/behavior/mail-bridge-lifecycle.md § Cold boot.
+#
+# F1: the bridge enrolls + attests + serves the com.atproto.server.* XRPC auth
+# core on a LOOPBACK high port (127.0.0.1:8447), terminating `pds.<domain>` TLS
+# itself via the sealed cert blob it fetches from nest (atproto-pds-full.md
+# § Wire & process topology, F1 packaging resolution). The SNI router forwards
+# `pds.*` here with a PROXY-v2 header (see fauna-sni-router/run). Because 8447 is
+# an UNPRIVILEGED loopback port, there is still NO privileged-port setcap. The
+# repo/MST/subscribeRepos firehose that S3 adds will bring their own hardening.
+if [ ! -e /data/atproto-enabled ]; then
+    exec s6-svc -d /run/service/fauna-atproto-bridge
+fi
+# (security.md § Co-resident process trust boundary): 8447 is a LOOPBACK
+# bind the SNI router forwards `pds.*` to with a PROXY-v2 header conveying the
+# real client IP, which this bridge's per-IP XRPC rate limits and audit key on.
+# Every co-resident UID can reach that loopback port too, so loopback alone
+# cannot prove the router wrote the header — the router appends this secret as a
+# PROXY-v2 TLV and the bridge honours a conveyed source only when it matches.
+# Read AS ROOT here (before the s6-setuidgid drop; same file the nest, router and
+# MDA run-scripts read) and exported, not passed on the argv:
+# /proc/<pid>/cmdline is world-readable while /proc/<pid>/environ is
+# own-UID-only. Empty on a non-router box => trust-any-loopback.
+export FAUNA_ROUTER_PROXY_SECRET="$(cat /data/keys/router/proxy-secret 2>/dev/null || true)"
+exec s6-setuidgid fauna-atproto \
+  fauna-atproto-bridge \
+    --keypair-file /data/keys/atproto/atproto.pds.key \
+    --nest-endpoint "https://127.0.0.1:${FAUNA_PORT:-3000}" \
+    --xrpc-listen=127.0.0.1:8447 \
+    --data-dir /data \
+    --log-level "${FAUNA_LOG_LEVEL:-info}"

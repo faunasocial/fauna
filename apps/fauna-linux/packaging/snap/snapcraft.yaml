@@ -1,0 +1,49 @@
+name: fauna
+# The product version — must equal the root Cargo.toml [workspace.package]
+# version (product-version.md; version-lockstep merge gate).
+version: '0.1.2'
+summary: Decentralized social communication
+description: |
+  End-to-end encrypted messaging, group chat, calendar, file sync,
+  and bridges to Bluesky, Nostr, and ActivityPub.
+grade: devel
+confinement: strict
+base: core24
+
+apps:
+  fauna:
+    command: bin/fauna-desktop
+    extensions: [gnome]
+    plugs:
+      - network
+      - network-bind
+      - home
+      - desktop
+      - desktop-legacy
+      - wayland
+      - x11
+      # The launcher badge (linux.md § Home-screen widget): snapd's unity7
+      # interface is what admits the `com.canonical.Unity.LauncherEntry.Update`
+      # broadcast from `/com/canonical/unity/launcherentry/<digits>`; it is
+      # auto-connected on every classic desktop.
+      - unity7
+
+parts:
+  fauna-linux:
+    plugin: rust
+    source: .
+    rust-path: [apps/fauna-linux]
+    build-packages:
+      - libgtk-4-dev
+      - libadwaita-1-dev
+      - libsqlite3-dev
+    # The per-user sync agent ships beside the app on every channel
+    # (linux-desktop.md § Installation Files); under strict confinement the
+    # app runs it as a direct child (app-lifetime residency — the snapd
+    # daemon-scope:user shape is a designed follow-on, see linux-desktop.md
+    # § Snap). Channel remains build-unverified: no snapcraft on the dev
+    # machines (2026-07-12 ratified stance — no just recipe, no CI consumer).
+    override-build: |
+      craftctl default
+      cargo build --release -p fauna-sync-agent
+      install -Dm755 target/release/fauna-sync-agent $CRAFT_PART_INSTALL/bin/fauna-sync-agent

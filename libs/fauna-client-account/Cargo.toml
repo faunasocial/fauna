@@ -1,0 +1,33 @@
+[package]
+name = "fauna-client-account"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# fauna-protocol carries the typed `fauna.account.*` / `fauna.quota.get` /
+# `fauna.profile.handle.change` wire types + the `RpcRequester` seam this crate
+# is generic over (mirrors fauna-client-feed / fauna-client-posts). The wasm SPA
+# passes its `WsRpcClient` (no `NestClient`), so this crate consumes the generic
+# transport, not `fauna-client`. `default-features = false` drops native-only
+# features so the crate compiles to wasm32; native workspace builds re-enable
+# them via Cargo feature unification. The path form is required to override
+# `default-features`.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# `LocalizedText` — the one i18n carrier every shared fold returns, for the
+# Sessions page's `sessions_view`. Defaults off: the `network` half is native.
+fauna-core = { path = "../fauna-core", default-features = false }
+
+# wasm: forward fauna-protocol's `js` feature (fauna-core's js-sys time
+# backend) so the transitive wasm build resolves. Off on native.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# Names the serde bounds the `RpcRequester::request` method requires, for the
+# wire-contract tests' `RecordingRequester` mock impl. No `derive` needed
+# (trait paths only); mirrors fauna-client-events / -snapshots / -sync.
+serde = { workspace = true }

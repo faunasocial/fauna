@@ -1,0 +1,57 @@
+[package]
+name = "fauna-wasm-backups"
+description = "WASM bindings for the Fauna Backups page: the page-level BackupsMachine (the snapshot half)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Present for parity with fauna-wasm-folders / fauna-wasm-onboarding (future
+# E2E snapshot setters).
+test-helpers = ["fauna-backups-machine/test-helpers"]
+
+# wasm32-scoped on purpose: this crate builds only for wasm32, and a plain
+# [dependencies] table would leak its wasm-only feature activations (js,
+# wasm_js, …) into every HOST build's resolution under
+# resolver.feature-unification = "workspace". Add new deps here, never in a
+# plain [dependencies] table.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `js` so fauna-core's wasm build gets a getrandom backend (mirrors
+# fauna-wasm-folders); the machine itself only uses the pure `localized` +
+# `sync` modules, but feature unification needs *some* crate to request it.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+# `rpc-glue` for the wasm `build_backups_machine` (over `WsRpcClient`).
+fauna-backups-machine = { path = "../fauna-backups-machine", default-features = false, features = ["rpc-glue"] }
+# `seal_backfill::resolver_backed_custody` — the shared-set resolver + owner-key
+# `LabelCustody` constructor the page's snapshot custody now builds through
+# (`NestFolderKeyResolver` became transport-generic 2026-08-11).
+# `mls` mirrors fauna-wasm's own dependency line — same feature, same reason.
+fauna-client-folders = { path = "../fauna-client-folders", features = ["mls"] }
+# The account port's consumer half: the shared-set resolver reads the
+# account's folder-key custody (`fauna.state.folder-keys`) through the tab's
+# `SharedAccountPort` (`fauna_client_folders::port`). A thin transport crate.
+fauna-account-port = { workspace = true }
+# The browser WS-RPC transport the page's reads + gestures ride; `connect()`
+# opens the connection from the JS-passed nest URL + actor id + token provider.
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm" }
+# Installed at module init (`#[wasm_bindgen(start)]` in src/lib.rs) — each wasm
+# chunk is its own runtime, so this must be installed per-chunk.
+fauna-wasm-panic-hook = { path = "../fauna-wasm-panic-hook" }
+wasm-bindgen.workspace = true
+wasm-bindgen-futures = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+serde-wasm-bindgen = "0.6"
+getrandom = { workspace = true, features = ["wasm_js"] }
+# 0.2 alias: fauna-core's crypto stack transitively pulls getrandom 0.2, which
+# needs its `js` feature to compile for wasm. Same shape as fauna-wasm-folders.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+js-sys.workspace = true
+hex = { workspace = true }
+
+[dev-dependencies]
+wasm-bindgen-test.workspace = true

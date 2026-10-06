@@ -1,0 +1,1030 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.FeedPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
+    xmlns:models="using:FaunaApp.Core.Models"
+    xmlns:controls="using:FaunaApp.Controls"
+    xmlns:helpers="using:FaunaApp.Helpers"
+    xmlns:corehelpers="using:FaunaApp.Core.Helpers"
+    xmlns:loc="using:FaunaApp.Markup"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <Page.Resources>
+        <local:SourceToColorConverter x:Key="SourceToColor" />
+        <helpers:HexColorToBrushConverter x:Key="HexBrush" />
+        <helpers:TagChipTextConverter x:Key="TagChipText" />
+    </Page.Resources>
+
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="220" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <!-- Feed rail (feed-selector): visible list of feed-item rows, matching the
+             web/linux sidebar. A collapsed ComboBox previously hid the feed-items from
+             the UIA tree (count("feed-item") == 0); a visible ListView realizes them. -->
+        <Grid Grid.Column="0" Padding="8" BorderThickness="0,0,1,0"
+              BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <TextBlock Grid.Row="0"
+                       Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Margin="4,4,4,8"
+                       Text="{loc:Localize Key=feed/list/title}" />
+            <!-- Built-in Trending virtual feed (trending.md § The Trending feed): a
+                 pseudo-entry above the user's own feeds — and above Local, mirroring
+                 web/linux's ordering — NOT a feed-item (no feed row, no delete).
+                 Selecting it drives FeedManager::select_trending_feed; selecting a
+                 normal feed already clears trending_selected server-side (no client
+                 bookkeeping needed for mutual exclusion). Its selected/unselected
+                 visual state is toggled in SyncFeeds from Snapshot.trendingSelected
+                 (an AccentButtonStyle swap — this plain Button sits outside the
+                 FeedList ListView, so it can't ride the ListView's native
+                 SelectedItem highlight the feed-item rows use). -->
+            <Button Grid.Row="1" x:Name="TrendingFeedButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.FeedTrendingItem}"
+                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                    Click="TrendingFeed_Click" Margin="0,0,0,4"
+                    Content="{loc:Localize Key=feed/list/trending}" />
+            <!-- Local built-in feed (NOT a feed-item; selects the home/local feed).
+                 No test id — matches the web "Local" entry, which carries none. -->
+            <Button Grid.Row="2" x:Name="LocalFeedButton"
+                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                    Click="LocalFeed_Click" Margin="0,0,0,4"
+                    Content="{loc:Localize Key=conflicts/local}" />
+            <ListView Grid.Row="3" x:Name="FeedList"
+                      SelectionMode="Single"
+                      SelectionChanged="FeedList_SelectionChanged">
+                <ListView.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <!-- Non-virtualizing panel so count("feed-item") sees every
+                             row even when offscreen (memory: bounded count-all lists). -->
+                        <StackPanel />
+                    </ItemsPanelTemplate>
+                </ListView.ItemsPanel>
+                <ListView.ItemTemplate>
+                    <!-- The row root is a BUTTON, not a bare Grid — the windows shape for
+                         every clickable e2e row (account-switcher-item, media-item,
+                         addressbook-item, launch-instance-chooser-item). The FlaUI bridge
+                         drives a click through the first UIA pattern the element supports
+                         (Invoke → Toggle → SelectionItem → ExpandCollapse) and only falls
+                         back to a physical mouse click when it supports none. A Grid
+                         supports none, so `open_feed` took that fallback, the ListView's
+                         selection never moved, FeedList_SelectionChanged never fired, and
+                         `FeedManager::select_feed` was never called — the page silently kept
+                         serving the previously-selected feed, which no assertion could see
+                         because every nest-side key is 0 and a composed feed's first page is
+                         the same posts in the same order the local feed already showed. Selecting by the row's OWN FeedId Tag
+                         (never "whichever row the ListView thinks is selected") is
+                         RowDeleteFeed_Click's rule applied to the row itself; SyncFeeds
+                         still paints the rail's highlight from the snapshot. The id/Name stay
+                         on the row root so feed-delete-button nests as a real UIA descendant
+                         — `scope="feed-item[i]"` (test_feed_bridge_subscribe.py) resolves by
+                         DESCENDANT match. -->
+                    <DataTemplate x:DataType="models:FeedDefinition">
+                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.FeedItem}"
+                                AutomationProperties.Name="{x:Bind Name}"
+                                HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Stretch"
+                                Background="Transparent" BorderThickness="0"
+                                Padding="4,2"
+                                Click="FeedItem_Click" Tag="{x:Bind FeedId}">
+                            <Grid ColumnSpacing="4" HorizontalAlignment="Stretch">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="{x:Bind Name}"
+                                           VerticalAlignment="Center" />
+                                <Button Grid.Column="1"
+                                        AutomationProperties.AutomationId="{x:Bind ids:Ids.FeedDeleteButton}"
+                                        Content="&#xE74D;" FontFamily="Segoe MDL2 Assets"
+                                        Click="RowDeleteFeed_Click" Tag="{x:Bind FeedId}"
+                                        Padding="4" />
+                            </Grid>
+                        </Button>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+        </Grid>
+
+        <!-- Main feed content (search + posts + compose). -->
+        <Grid Grid.Column="1">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Header: Feed selector -->
+        <Grid Grid.Row="0" Padding="16,16,16,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                           VerticalAlignment="Center"
+                           Text="{loc:Localize Key=feed/list/title}" />
+                <Button x:Name="CreateFeedButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.FeedCreateFeedButton}"
+                        Content="&#xE710;" FontFamily="Segoe MDL2 Assets"
+                        Click="CreateFeed_Click" Padding="8"
+                        VerticalAlignment="Center"
+                        ToolTipService.ToolTip="{loc:Localize Key=feed/post/create_tooltip}" />
+                <!-- Opens the bridge-feed-subscribe form. Shown ONLY when the nest's
+                     build serves ≥1 bridge (AvailableBridges non-empty) — the feed-selector
+                     capability gate (version-compatibility.md § Dimension 3), matching
+                     web/linux/android/apple. Code-set Collapsed by SyncAvailableBridges. -->
+                <Button x:Name="BridgeFeedSubscribeToggle"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgeFeedSubscribeToggle}"
+                        Content="&#xE774;" FontFamily="Segoe MDL2 Assets"
+                        Click="BridgeFeedSubscribeToggle_Click" Padding="8"
+                        VerticalAlignment="Center"
+                        Visibility="Collapsed"
+                        ToolTipService.ToolTip="{loc:Localize Key=feed/list/subscribe_bridge}" />
+            </StackPanel>
+
+            <Button Grid.Column="1" x:Name="RefreshButton"
+                    Content="&#xE72C;" FontFamily="Segoe MDL2 Assets"
+                    Click="RefreshButton_Click" Padding="8"
+                    ToolTipService.ToolTip="{loc:Localize Key=common/refresh}" />
+        </Grid>
+
+        <!-- Feed search bar -->
+        <Grid Grid.Row="1" Padding="16,0,16,4">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <AutoSuggestBox Grid.Column="0" x:Name="FeedSearchBox"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.FeedSearchField}"
+                            QueryIcon="Find"
+                            TextChanged="FeedSearchBox_TextChanged" />
+            <Button Grid.Column="1" x:Name="FeedSearchClearButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.FeedSearchClear}"
+                    Content="&#xE711;" FontFamily="Segoe MDL2 Assets"
+                    Click="FeedSearchClear_Click" Padding="8"
+                    Visibility="Collapsed" Margin="4,0,0,0" />
+        </Grid>
+
+        <!-- Post list -->
+        <!-- No IsItemClickEnabled: each post-card DataTemplate root is itself a
+             Button (PostCard_Click) — the row-open path — so a ListView ItemClick
+             would double-open the detail dialog (event-card/AgendaPanel precedent). -->
+        <ListView Grid.Row="2" x:Name="PostsList" AutomationProperties.AutomationId="{x:Bind ids:Ids.FeedView}" Padding="16,0"
+                  SelectionMode="None">
+            <ListView.ItemsPanel>
+                <ItemsPanelTemplate>
+                    <!-- Non-virtualizing panel so count("post-card") sees every row
+                         even when offscreen — a virtualizing ItemsStackPanel only
+                         realizes visible rows, making the post count vary with scroll
+                         position (e.g. after a feed search→clear). Matches the
+                         feed-rail ListView above (memory: bounded count-all lists). -->
+                    <StackPanel />
+                </ItemsPanelTemplate>
+            </ListView.ItemsPanel>
+            <ListView.ItemTemplate>
+                <DataTemplate x:DataType="vm:FeedPostItem">
+                    <!-- Outer wrapper: the post-card id/Name stay here so count("post-card")
+                         is unaffected by ANY withholding arm (topic-factors.md § Scoring — a
+                         mute collapses everywhere; family-safety.md § Content policy — a
+                         blocked post names the policy rather than disappearing; mirrors the
+                         dm-message-muted precedent). The accessible Name must never leak a
+                         muted / collapsed / BLOCKED body into the a11y tree, so it is computed
+                         from the render gates rather than bound to BodyText directly. IsMuted
+                         is read once at construction (FeedManager::is_muted — a manager query,
+                         not persistence); Revealed is session-local render state mutated in
+                         place on THIS instance (Reconcile excludes it from ContentEquals, so an
+                         unrelated re-sync tick never resets an already-revealed post); the
+                         content-policy reveal instead lives in ContentPolicyCache's id-keyed
+                         set, which survives a rebuild into a new item. -->
+                    <!-- The post-card root is a transparent Button so `click post-card`
+                         opens post_detail (PostCard_Click): a bare Grid/StackPanel root has
+                         no UIA invoke pattern (reference_winui_clickable_row_needs_button_root,
+                         event-card/addressbook-item/media-item idiom). The id + accessible
+                         Name live on the Button, so count("post-card")/get_text are
+                         unaffected. Unlike event-card, the card's interactive children stay
+                         NESTED inside (not moved out as siblings): the feed e2e scopes
+                         load-remote-content-button + feed-post-actions-button under
+                         `post-card[i]`, and a scoped lookup is confined to this element's own
+                         subtree (flaui-bridge/ElementFinder.cs WalkScope). Each nested child
+                         keeps its own InvokePattern so FlaUI drives it directly; the Button's
+                         Invoke opens the detail without double-firing (Invoke is direct, not
+                         pointer-routed). Padding=0 so the inner rows keep their own padding. -->
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.PostCard}"
+                            AutomationProperties.Name="{x:Bind local:FeedPage.PostCardAccessibleName(RegionAccessibleNotice, ShowContentBlockedNotice, ShowMutedCollapse, ShowContentCollapse, BodyText), Mode=OneWay}"
+                            Tag="{x:Bind}" Click="PostCard_Click"
+                            Loaded="PostCard_Loaded" Unloaded="PostCard_Unloaded"
+                            Background="Transparent" BorderThickness="0" Padding="0"
+                            HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
+                            VerticalContentAlignment="Stretch">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <!-- REGION placeholder (region-blocking.md § The blocked render and
+                             the transparency surface): the app's frame naming the region and
+                             its authority, the authority's name, and its reason VERBATIM, in
+                             place of the body. Painted AHEAD of every family/muted arm
+                             (SocialRenderGate's RegionWithheld, checked first); a `collapse`
+                             adds the reveal, which shares the content-policy reveal set, a
+                             `block` has none. Shares Grid.Row 0 with the family block — the
+                             arms are exclusive. Each DataTemplate element carries a Name as
+                             well as its AutomationId, or UIA prunes it
+                             (reference_winui_flaui_datatemplate_name). The panel's Loaded /
+                             Unloaded feed convention 17's painted side
+                             (RegionPlaceholder_Loaded). -->
+                        <StackPanel Grid.Row="0" Spacing="4" Padding="8,12"
+                                    Tag="{x:Bind}"
+                                    Loaded="RegionPlaceholder_Loaded" Unloaded="RegionPlaceholder_Unloaded"
+                                    Visibility="{x:Bind local:FeedPage.BoolToVisibility(ShowRegionPlaceholder), Mode=OneWay}">
+                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.RegionBlockedNotice}"
+                                       AutomationProperties.Name="{x:Bind RegionNoticeText}"
+                                       Text="{x:Bind RegionNoticeText}"
+                                       FontStyle="Italic" Opacity="0.6" FontSize="12"
+                                       TextWrapping="Wrap" />
+                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.RegionBlockedAuthority}"
+                                       AutomationProperties.Name="{x:Bind RegionAuthority}"
+                                       Text="{x:Bind RegionAuthority}"
+                                       Opacity="0.6" FontSize="12" TextWrapping="Wrap" />
+                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.RegionBlockedReason}"
+                                       AutomationProperties.Name="{x:Bind RegionReason}"
+                                       Text="{x:Bind RegionReason}"
+                                       Opacity="0.6" FontSize="12" TextWrapping="Wrap" />
+                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.RegionCollapsedRevealButton}"
+                                    Content="{loc:Localize Key=region/reveal_button}"
+                                    Visibility="{x:Bind local:FeedPage.BoolToVisibility(ShowRegionReveal), Mode=OneWay}"
+                                    HorizontalAlignment="Left" Padding="8,2" FontSize="12"
+                                    Tag="{x:Bind}" Click="RegionRevealButton_Click" />
+                        </StackPanel>
+
+                        <!-- Content-policy BLOCK (family-safety.md § Content policy): the
+                             policy-naming notice paints in place of the body, with NO reveal
+                             affordance — a blocked item never silently disappears, and it can
+                             never be revealed past the guardian's floor. Checked ahead of both
+                             collapse arms by FeedPostItem.RenderArm (the shared
+                             SocialRenderGate the conversation bubble also uses), so a post
+                             that is both blocked and muted stays blocked.
+                             `content-policy-blocked-notice` is the one ui.yaml id this pillar
+                             renders (indexed, per post-card). A DataTemplate element carrying
+                             only an AutomationId is UIA-pruned, so Name carries the notice
+                             text too (reference_winui_flaui_datatemplate_name). -->
+                        <StackPanel Grid.Row="0" Spacing="4" Padding="8,12"
+                                    Visibility="{x:Bind local:FeedPage.BoolToVisibility(ShowContentBlockedNotice), Mode=OneWay}">
+                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.ContentPolicyBlockedNotice}"
+                                       AutomationProperties.Name="{loc:Localize Key=family/content_blocked_notice}"
+                                       Text="{loc:Localize Key=family/content_blocked_notice}"
+                                       FontStyle="Italic" Opacity="0.6" FontSize="12"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+
+                        <StackPanel Grid.Row="1" Spacing="4" Padding="8,12"
+                                    Visibility="{x:Bind local:FeedPage.BoolToVisibility(ShowMutedCollapse), Mode=OneWay}">
+                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.FeedPostMuted}"
+                                       Text="{loc:Localize Key=feed/post_muted_placeholder}"
+                                       FontStyle="Italic" Opacity="0.6" FontSize="12" />
+                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.FeedPostMutedRevealButton}"
+                                    Content="{loc:Localize Key=feed/post_muted_reveal}"
+                                    HorizontalAlignment="Left" Padding="8,2" FontSize="12"
+                                    Tag="{x:Bind}" Click="MutedRevealButton_Click" />
+                        </StackPanel>
+
+                        <!-- Content-policy COLLAPSE: a placeholder + one-tap session-local
+                             reveal (its own reveal set, keyed on the post id in
+                             ContentPolicyCache — NOT the muted arm's per-instance flag).
+                             Presentation-only, no ui.yaml id — the linux leg's shape:
+                             v1 e2e drives the `block` case; the collapse reveal is a user
+                             affordance. -->
+                        <StackPanel Grid.Row="2" Spacing="4" Padding="8,12"
+                                    Visibility="{x:Bind local:FeedPage.BoolToVisibility(ShowContentCollapse), Mode=OneWay}">
+                            <TextBlock Text="{loc:Localize Key=family/content_collapsed_notice}"
+                                       FontStyle="Italic" Opacity="0.6" FontSize="12"
+                                       TextWrapping="Wrap" />
+                            <Button Content="{loc:Localize Key=family/content_reveal_button}"
+                                    HorizontalAlignment="Left" Padding="8,2" FontSize="12"
+                                    Tag="{x:Bind}" Click="ContentRevealButton_Click" />
+                        </StackPanel>
+
+                    <Grid Grid.Row="3" Padding="8,12" ColumnSpacing="12" RowSpacing="4"
+                          Visibility="{x:Bind local:FeedPage.BoolToVisibility(ShowNormalContent), Mode=OneWay}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <!-- Author + time -->
+                        <StackPanel Grid.Row="0" Grid.Column="0"
+                                    Orientation="Horizontal" Spacing="8">
+                            <TextBlock Text="{x:Bind ShortAuthor}"
+                                       AutomationProperties.AutomationId="{x:Bind ids:Ids.PostAuthor}"
+                                       FontWeight="SemiBold" FontSize="13" />
+                            <!-- REPOST ROW attribution marker (feed.md § Interaction bar →
+                                 Repost, ratified 2026-08-10; id user-approved 2026-08-11): the ONLY affordance a repost row's
+                                 own card carries — its own interaction bar is hidden below
+                                 and PostCard_Click opens the ORIGINAL's detail instead. A
+                                 Border carrying only an AutomationId is UIA-pruned, so Name
+                                 carries the marker text too
+                                 (reference_winui_flaui_datatemplate_name). -->
+                            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.RepostAttribution}"
+                                    AutomationProperties.Name="{loc:Localize Key=feed/post/reposted_marker}"
+                                    CornerRadius="4" Padding="4,1" VerticalAlignment="Center"
+                                    Background="{ThemeResource SystemControlBackgroundBaseLowBrush}"
+                                    Visibility="{x:Bind local:FeedPage.BoolToVisibility(IsRepostRow), Mode=OneWay}">
+                                <StackPanel Orientation="Horizontal" Spacing="3">
+                                    <TextBlock Text="&#xE72D;" FontFamily="Segoe MDL2 Assets"
+                                               FontSize="10" Opacity="0.7" VerticalAlignment="Center" />
+                                    <TextBlock Text="{loc:Localize Key=feed/post/reposted_marker}"
+                                               FontSize="10" Opacity="0.7" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Border>
+                            <!-- Gated-post badge (feed.md § Encryption at rest; monetization.md
+                                 § Pillars 2+3): the tier name, shown iff the post is gated to a
+                                 tier — or, for a room-restricted post whose floor this reader is
+                                 on, the room's own label instead (GatedBadgeText; ui/feed.md
+                                 § Encryption at rest → Room-restricted — the card, (c)). The list
+                                 card body stays the public teaser; the full body unseals on
+                                 detail open. The Border carries the badge text as its
+                                 AutomationProperties.Name so FlaUI both COUNTS it (a bare
+                                 AutomationId-only Border is pruned) and returns it via
+                                 get_text (reference_winui_flaui_datatemplate_name) — the
+                                 content-label-badge pattern below. -->
+                            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.GatedPostBadge}"
+                                    AutomationProperties.Name="{x:Bind GatedBadgeText, Mode=OneWay}"
+                                    ToolTipService.ToolTip="{x:Bind GatedBadgeTooltip, Mode=OneWay}"
+                                    CornerRadius="4" Padding="4,1" VerticalAlignment="Center"
+                                    Background="{ThemeResource SystemControlBackgroundBaseLowBrush}"
+                                    Visibility="{x:Bind local:FeedPage.BoolToVisibility(HasGatedBadge), Mode=OneWay}">
+                                <StackPanel Orientation="Horizontal" Spacing="3">
+                                    <TextBlock Text="&#xE72E;" FontFamily="Segoe MDL2 Assets"
+                                               FontSize="9" VerticalAlignment="Center" Opacity="0.7" />
+                                    <TextBlock Text="{x:Bind GatedBadgeText, Mode=OneWay}" FontSize="10"
+                                               VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Border>
+
+                            <!-- Sold-post buyer teaser (gap (2c), monetization.md § Per-post
+                                 pay-to-unlock → the buyer's price read is post-addressed): price +
+                                 optional external payment link + buy affordance, present iff
+                                 fauna.subscriptions.post_unlock.get resolved an offer for this post
+                                 (FeedPage.SyncPosts's fire-once resolve trigger). Mirrors linux's
+                                 post_list.rs top_line group (same row as the badge). The payment
+                                 link's https-only guard fires on click (
+                                 same check ProfilePage's subscription-offer-payment-link intends),
+                                 not on visibility — a non-https url still shows the button, matching
+                                 the reference. -->
+                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.GatedPostPrice}"
+                                       Text="{x:Bind UnlockOfferPriceText, Mode=OneWay}"
+                                       FontSize="10" Opacity="0.7" VerticalAlignment="Center"
+                                       Visibility="{x:Bind local:FeedPage.BoolToVisibility(HasUnlockOffer), Mode=OneWay}" />
+                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.GatedPostPaymentLink}"
+                                    Tag="{x:Bind}" Click="UnlockOfferPaymentLink_Click"
+                                    Content="{loc:Localize Key=subscriptions/payment_url}"
+                                    FontSize="10" Padding="4,1" VerticalAlignment="Center"
+                                    Visibility="{x:Bind local:FeedPage.BoolToVisibility(HasUnlockPaymentLink), Mode=OneWay}" />
+                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.GatedPostBuyButton}"
+                                    Tag="{x:Bind}" Click="BuyUnlockOffer_Click"
+                                    Content="{loc:Localize Key=feed/post/buy_button}"
+                                    Style="{StaticResource AccentButtonStyle}"
+                                    FontSize="10" Padding="4,1" VerticalAlignment="Center"
+                                    Visibility="{x:Bind local:FeedPage.BoolToVisibility(HasUnlockOffer), Mode=OneWay}" />
+
+                            <!-- The tip display surface (monetization.md § Tips) — excised in a
+                                 store-safe build (dynamic-features.md § Platform-family surface
+                                 excision). The markup lives in
+                                 Views/Payments/PostTipDisplay.xaml, the removable build item
+                                 (XAML has no #if); this DataTemplate itself paints every
+                                 non-payments post-card element too, so it can't be the excision
+                                 unit. A `<payments:PostTipDisplay/>` element here would fail to
+                                 compile once FaunaApp.csproj drops Views\Payments\**, so this
+                                 always-present ContentControl is filled from code only —
+                                 FeedPage.xaml.cs's PostsList_ContainerContentChanging, under
+                                 `#if PAYMENTS`. -->
+                            <!-- ⚠ Loaded, NOT the page's ContainerContentChanging. That event
+                                 belongs to ListViewBase's PHASED-RENDERING path, which only runs
+                                 under a virtualizing ItemsPanel — and this list deliberately
+                                 overrides ItemsPanel to a plain StackPanel (see its own comment
+                                 above). So the host was never filled and none of the ids this
+                                 surface paints ever entered the UIA tree: the whole per-card
+                                 plane was invisible from the moment it moved out here — and
+                                 this comment must not name those ids, since the store-safe
+                                 excision gate reads markup text and a .xaml has no #if to hide
+                                 behind.
+                                 Loaded fires per realized container under ANY panel, which is
+                                 exactly what a non-recycling list needs; the page's post-Reconcile
+                                 RefreshTipDisplays covers the later re-bind that recycling would
+                                 otherwise have driven. The handler is declared unconditionally
+                                 (XAML resolves it at compile time and has no #if), with only its
+                                 body under PAYMENTS. -->
+                            <ContentControl x:Name="TipDisplayHost" VerticalAlignment="Center"
+                                            Loaded="TipDisplayHost_Loaded" />
+                        </StackPanel>
+                        <StackPanel Grid.Row="0" Grid.Column="1"
+                                    Orientation="Horizontal" Spacing="4">
+                            <TextBlock Text="{x:Bind TimeAgo}" Opacity="0.5"
+                                       FontSize="12" VerticalAlignment="Center" />
+                            <!-- Per-card ⋯ overflow (topic-factors.md § Authoring surface):
+                                 hosts the "more/less like this" training verbs. The
+                                 dm-message-actions-button precedent applied to posts — its
+                                 MenuFlyout (feed-post-actions-menu) is built imperatively in
+                                 BuildPostActionsMenu per the post's current example marker +
+                                 the feed's in-context training target. Always-enabled (a
+                                 disabled WinUI button can't be FlaUI-Invoked,
+                                 reference_windows_disabled_button_no_invoke) — training applies
+                                 to any post, no capability gate. -->
+                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.FeedPostActionsButton}"
+                                    Tag="{x:Bind}" Click="PostActionsButton_Click"
+                                    Content="&#xE712;" FontFamily="Segoe MDL2 Assets"
+                                    FontSize="10" Padding="4,2" VerticalAlignment="Center"
+                                    Background="Transparent" BorderThickness="0"
+                                    ToolTipService.ToolTip="{loc:Localize Key=feed/post_actions_tooltip}" />
+                        </StackPanel>
+
+                        <!-- Body: walked from the shared RenderDocument (render-model.md
+                             § D6) via DocumentPainter — the SAME painter the conversations
+                             bubble uses — so bold/italic/headings/links render structurally,
+                             not as raw markdown. A blocked remote image in the body reveals
+                             via the per-card load-remote-content-button (html-mail Slice 3;
+                             same posture + i18n strings as conversations + the linux/web legs). -->
+                        <StackPanel Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Spacing="2">
+                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.FeedPostText}"
+                                       helpers:FeedPostBodyBind.Item="{x:Bind}"
+                                       TextWrapping="Wrap" MaxLines="6" />
+                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.LoadRemoteContentButton}"
+                                    Content="{loc:Localize Key=conversations/detail/load_remote_content}"
+                                    Visibility="{x:Bind local:FeedPage.BoolToVisibility(HasBlockedRemoteImage), Mode=OneWay}"
+                                    HorizontalAlignment="Left" Padding="8,2" FontSize="12"
+                                    Click="LoadRemoteContent_Click" />
+                        </StackPanel>
+
+                        <!-- Body remote images (render-model.md § D3 + § Implementation
+                             status; apps/tui.md § Rendering): one `doc-remote-image` per
+                             RenderBlock::RemoteImage, painted just under the body — the SAME
+                             "own element ID ⇒ painted by the page" rule post-image/quoted-post/
+                             link-preview-card already follow. DocumentRenderer's body walker
+                             arm is inert for RemoteImage; RemoteImagesBind (the
+                             FeedPostBodyBind twin) paints this panel imperatively since a
+                             ListView DataTemplate can't reach a row's panel declaratively. -->
+                        <StackPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2"
+                                    helpers:RemoteImagesBind.Item="{x:Bind}" />
+
+                        <!-- Content label badge (spam/phishing/NSFW) — the highest-confidence
+                             entry of PostSummary.labels, styled entirely from the shared
+                             content_label_style map (icon/label/tint/accent; moderation.md
+                             § Per-row badge data path). No hard-coded category strings/colours;
+                             the tint background applies windows' own low-alpha treatment
+                             (ConverterParameter=38 ≈ 15%, mirroring web/android's per-app
+                             low-alpha convention). -->
+                        <Border Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.ContentLabelBadge}"
+                                AutomationProperties.Name="{x:Bind ContentLabelText, Mode=OneWay}"
+                                CornerRadius="4" Padding="4,1"
+                                Background="{x:Bind ContentLabelTint, Converter={StaticResource HexBrush}, ConverterParameter=38, Mode=OneWay}"
+                                Visibility="{x:Bind local:FeedPage.BoolToVisibility(HasContentLabel), Mode=OneWay}">
+                            <StackPanel Orientation="Horizontal" Spacing="3">
+                                <TextBlock Text="{x:Bind ContentLabelIcon, Mode=OneWay}" FontSize="10" VerticalAlignment="Center" />
+                                <TextBlock Text="{x:Bind ContentLabelText, Mode=OneWay}" FontSize="10"
+                                           Foreground="{x:Bind ContentLabelAccent, Converter={StaticResource HexBrush}, Mode=OneWay}"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Post image: visible once MediaHashHex resolves via BlobImageLoader.
+                             AutomationId + Click sit on the wrapping Button (never bare Tapped
+                             on the Image), so FlaUI drives it via UIA InvokePattern instead of
+                             falling back to physical SendInput — the SAME nested-Button-inside-
+                             post-card idiom load-remote-content-button/feed-post-actions-button
+                             already use below, and required here: a bare Image.Tapped measured
+                             2026-09-07 reliably hit SendInput's "Access is denied" off-foreground.
+                             The Button starts Collapsed and ImageHashBind.VisibilityTarget (not
+                             an x:Bind on the hash string) flips it once the async fetch actually
+                             resolves — gating on the hash alone let automation click the button
+                             before Source was set, silently no-op'ing (post-card's own click
+                             would then win instead, opening post_detail unexpectedly). feed.md
+                             § Element IDs, image-lightbox: five other apps already open the
+                             lightbox from this same list-card image. -->
+                        <Button x:Name="PostImageButton" Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="2"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.PostImage}"
+                                Click="PostImage_Click"
+                                Background="Transparent" BorderThickness="0" Padding="0"
+                                HorizontalAlignment="Left" HorizontalContentAlignment="Left"
+                                Margin="0,4,0,4"
+                                Visibility="Collapsed">
+                            <Image MaxHeight="300" Stretch="Uniform"
+                                   helpers:ImageHashBind.VisibilityTarget="{x:Bind PostImageButton, Mode=OneTime}"
+                                   helpers:ImageHashBind.Hash="{x:Bind MediaHashHex, Mode=OneWay}"
+                                   helpers:ImageHashBind.Loader="{x:Bind local:FeedPage.GetImageLoader(), Mode=OneTime}" />
+                        </Button>
+                        <!-- C2PA provenance badge (media.md § C2PA provenance): overlays the
+                             post image's bottom-right corner once FeedPage.SyncPosts's
+                             fire-once trigger resolves the `x-c2pa` header (the SAME
+                             authenticated blob GET post-image's own load performs — no extra
+                             request) and sets HasC2pa on this row. Same corner placement +
+                             glyph as windows' own conversations DmMessageBubble.BuildC2paBadge. -->
+                        <Border Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="2"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.C2paBadge}"
+                                AutomationProperties.Name="{x:Bind C2paLabel}"
+                                ToolTipService.ToolTip="{x:Bind C2paTooltip}"
+                                Visibility="{x:Bind local:FeedPage.BoolToVisibility(HasC2pa), Mode=OneWay}"
+                                HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                Margin="0,4,8,8" CornerRadius="12" Padding="6,2"
+                                Background="{ThemeResource SystemControlBackgroundBaseLowBrush}">
+                            <StackPanel Orientation="Horizontal" Spacing="4">
+                                <TextBlock Text="&#xE73E;" FontFamily="Segoe MDL2 Assets"
+                                           FontSize="10" VerticalAlignment="Center" />
+                                <TextBlock Text="{x:Bind C2paLabel}" FontSize="10"
+                                           FontWeight="SemiBold" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Border>
+                        <!-- Link-preview cards (render-model.md § D4): the producer folds a
+                             LinkPreview block after EACH standalone bare-URL paragraph (the inline
+                             link stays in the body), so a post can carry SEVERAL; this paints one
+                             card per resolved preview, in body order, from the shared
+                             LinkPreviewCardModel list. Until 2026-08-02 windows painted only the
+                             first (a FirstOrDefault twin) — the lone-outlier gap in
+                             render-model.md § Implementation status; the other six apps always
+                             iterated. An ItemsControl with no cards renders nothing, which is what
+                             replaces the old HasLinkPreviewCard visibility gate.
+                             A DataTemplate layout Border with only an AutomationId is UIA-pruned,
+                             so bind a non-empty Name (the title, always present on a resolved card)
+                             to keep link-preview-card discoverable for FlaUI (memory
+                             reference_winui_flaui_datatemplate_name). The og:image
+                             (link-preview-image) is reveal-gated per D4 (user-ratified 2026-06-27):
+                             blocked-by-default like a body RemoteImage until the post's
+                             load-remote-content-button reveals it. The click-to-open +
+                             post-detail-dialog render remain deferred. -->
+                        <!-- ItemsSource is OneWay (FeedPostItem is an ObservableObject), but every
+                             binding INSIDE the template is OneTime: LinkPreviewCardModel is an
+                             immutable record that raises no notifications, so OneWay there is a
+                             no-op the XAML compiler flags (WMC1506). A card changes by the post
+                             item being rebuilt (ContentEquals → replace), which re-runs the
+                             template — never by a property notification on the card itself. -->
+                        <ItemsControl Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="2"
+                                      ItemsSource="{x:Bind LinkPreviewCards, Mode=OneWay}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="corehelpers:LinkPreviewCardModel">
+                                    <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.LinkPreviewCard}"
+                                            AutomationProperties.Name="{x:Bind Title, Mode=OneTime}"
+                                            BorderThickness="1"
+                                            BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                                            Padding="8" Margin="0,4,0,0" CornerRadius="4">
+                                        <StackPanel Spacing="2">
+                                            <!-- og:image (link-preview-image): reveal-gated per D4
+                                                 (user-ratified 2026-06-27) — blocked-by-default like a body
+                                                 RemoteImage. Visibility is owned by the card's ShowImage (the
+                                                 post's reveal state), NOT by ImageHashBind
+                                                 (ManageVisibility=False): so a tier_2 load failure (no real
+                                                 nest blob) leaves the revealed element realized for the e2e,
+                                                 and the blob is never fetched before reveal (Hash is "" until
+                                                 then). A real blob paints it in tier_3+/prod. The one per-post
+                                                 load-remote-content-button reveals body images + every card's
+                                                 og:image together (shared has_blocked_remote_images /
+                                                 set_remote_images_revealed). -->
+                                            <Image AutomationProperties.AutomationId="{x:Bind ids:Ids.LinkPreviewImage}"
+                                                   MaxHeight="200" Stretch="UniformToFill"
+                                                   HorizontalAlignment="Stretch" Margin="0,0,0,2"
+                                                   Visibility="{x:Bind local:FeedPage.BoolToVisibility(ShowImage), Mode=OneTime}"
+                                                   helpers:ImageHashBind.ManageVisibility="False"
+                                                   helpers:ImageHashBind.Hash="{x:Bind ImageHash, Mode=OneTime}"
+                                                   helpers:ImageHashBind.Loader="{x:Bind local:FeedPage.GetImageLoader(), Mode=OneTime}" />
+                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.LinkPreviewTitle}"
+                                                       Text="{x:Bind Title, Mode=OneTime}"
+                                                       FontSize="13" FontWeight="SemiBold"
+                                                       TextWrapping="Wrap" MaxLines="2" />
+                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.LinkPreviewDescription}"
+                                                       Text="{x:Bind Description, Mode=OneTime}"
+                                                       FontSize="12" Opacity="0.8"
+                                                       TextWrapping="Wrap" MaxLines="3" />
+                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.LinkPreviewDomain}"
+                                                       Text="{x:Bind Domain, Mode=OneTime}"
+                                                       FontSize="11" Opacity="0.6" />
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <!-- Video thumbnail (video-thumbnail): the D6b `Video` sibling of `Image`
+                             (render-model.md § Implementation status today) — painted from the
+                             folded `RenderBlock.Video` hash via VideoHashHex, the exact twin of
+                             MediaHashHex/post-image. No poster frame exists to paint
+                             (`MediaItem.thumbnail`/`dimensions` are `None` from every writer,
+                             deliberately) — a play glyph + the hash as text, mirroring tui's
+                             `video_thumbnail_element` / android's `FeedPostVideo` (neither decodes
+                             a poster frame either). A DataTemplate layout Panel that sets only
+                             AutomationId is UIA-pruned, so bind a non-empty Name (the hash) to
+                             keep it discoverable (memory reference_winui_flaui_datatemplate_name),
+                             exactly as quoted-post binds Name below. -->
+                        <StackPanel Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="2"
+                                    Orientation="Horizontal" Spacing="4" Margin="0,4,0,0"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.VideoThumbnail}"
+                                    AutomationProperties.Name="{x:Bind VideoHashHex, Mode=OneWay}"
+                                    Visibility="{x:Bind local:FeedPage.BoolToVisibility(HasVideo), Mode=OneWay}">
+                            <TextBlock Text="&#xE768;" FontFamily="Segoe MDL2 Assets"
+                                       FontSize="14" VerticalAlignment="Center" />
+                            <TextBlock Text="{x:Bind VideoHashHex, Mode=OneWay}" FontSize="12"
+                                       Opacity="0.7" VerticalAlignment="Center" />
+                        </StackPanel>
+                        <!-- Quoted-post embed (render-model.md § D6). A bare layout Border inside a
+                             DataTemplate that sets only AutomationId is pruned from the UIA tree, so
+                             FlaUI's scoped is_visible("quoted-post", scope="post-card[i]") finds 0 even
+                             when realized (memory reference_winui_flaui_datatemplate_name) — bind a
+                             non-empty Name (the quoted author, always present when HasQuotedPost) to
+                             keep it discoverable, exactly as post-card binds Name to its body text. -->
+                        <Border Grid.Row="7" Grid.Column="0" Grid.ColumnSpan="2"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.QuotedPost}"
+                                AutomationProperties.Name="{x:Bind QuotedPostAccessibleName, Mode=OneWay}"
+                                Visibility="{x:Bind local:FeedPage.BoolToVisibility(HasQuotedPost), Mode=OneWay}"
+                                BorderThickness="3,0,0,0"
+                                BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                                Padding="8,4" Margin="0,4,0,0" CornerRadius="4">
+                            <StackPanel Spacing="2">
+                                <!-- Author + unverified-source header. Hidden for a legal-takedown
+                                     tombstone (moderation.md § Categories & enforcement item 1): the
+                                     nest withheld the envelope, so author is empty and only the shared
+                                     tombstone (QuotedPostDisplayBody below) is shown — mirrors web
+                                     QuotedPost.svelte omitting the header on the `legal_takedown_ref` arm. -->
+                                <StackPanel Orientation="Horizontal" Spacing="4"
+                                            Visibility="{x:Bind local:FeedPage.BoolToVisibility(QuotedPostShowHeaderRow), Mode=OneWay}">
+                                    <TextBlock Text="{x:Bind QuotedPostAuthor, Mode=OneWay}"
+                                               FontSize="11" FontWeight="SemiBold" Opacity="0.7"
+                                               VerticalAlignment="Center" />
+                                    <!-- Slice 2b: unverified-source badge on the quoted embed iff the
+                                         quoted post's OWN verification FAILED (security.md § Client display
+                                         of unverified content). Reuses the unverified-source-badge ID,
+                                         scoped under the quoted-post component (no new ID). -->
+                                    <Border CornerRadius="4" Padding="4,1" VerticalAlignment="Center"
+                                            Background="{ThemeResource SystemControlBackgroundBaseLowBrush}"
+                                            AutomationProperties.AutomationId="{x:Bind ids:Ids.UnverifiedSourceBadge}"
+                                            AutomationProperties.Name="{x:Bind UnverifiedSourceLabel}"
+                                            ToolTipService.ToolTip="{x:Bind UnverifiedSourceTooltip}"
+                                            Visibility="{x:Bind local:FeedPage.BoolToVisibility(QuotedPostIsUnverified), Mode=OneWay}">
+                                        <StackPanel Orientation="Horizontal" Spacing="3">
+                                            <TextBlock Text="&#xE7BA;" FontFamily="Segoe MDL2 Assets"
+                                                       FontSize="10" Opacity="0.7" VerticalAlignment="Center" />
+                                            <TextBlock Text="{x:Bind UnverifiedSourceLabel}" FontSize="10"
+                                                       Opacity="0.7" VerticalAlignment="Center" />
+                                        </StackPanel>
+                                    </Border>
+                                    <!-- The quoted embed's OWN D10 audit marker, scoped
+                                         under quoted-post (no new ID), same
+                                         Delegated-only rule as the card badge above. -->
+                                    <Border CornerRadius="4" Padding="4,1" VerticalAlignment="Center"
+                                            Background="{ThemeResource SystemControlBackgroundBaseLowBrush}"
+                                            AutomationProperties.AutomationId="{x:Bind ids:Ids.DelegatedOriginBadge}"
+                                            AutomationProperties.Name="{x:Bind DelegatedOriginLabel}"
+                                            ToolTipService.ToolTip="{x:Bind DelegatedOriginTooltip}"
+                                            Visibility="{x:Bind local:FeedPage.BoolToVisibility(QuotedPostIsDelegatedOrigin), Mode=OneWay}">
+                                        <StackPanel Orientation="Horizontal" Spacing="3">
+                                            <TextBlock Text="&#xE71B;" FontFamily="Segoe MDL2 Assets"
+                                                       FontSize="10" Opacity="0.7" VerticalAlignment="Center" />
+                                            <TextBlock Text="{x:Bind DelegatedOriginLabel}" FontSize="10"
+                                                       Opacity="0.7" VerticalAlignment="Center" />
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                                <TextBlock Text="{x:Bind QuotedPostDisplayBody, Mode=OneWay}"
+                                           FontSize="12" TextWrapping="Wrap" MaxLines="3" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Source badges: one protocol-badge per classified post source
+                             (shared fauna-feed classifier; color keyed off the stable id,
+                             label from the canonical shared label — feed.md § Where logic lives).
+                             ItemsControl's default StackPanel is non-virtualizing, so every
+                             badge realizes a UIA peer for the count-based e2e. -->
+                        <ItemsControl Grid.Row="8" Grid.Column="0" Margin="0,2,0,0"
+                                      HorizontalAlignment="Left"
+                                      ItemsSource="{x:Bind SourceBadges}">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <StackPanel Orientation="Horizontal" Spacing="4" />
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="vm:PostSourceBadge">
+                                    <Border CornerRadius="4" Padding="4,1"
+                                            Background="{x:Bind Id, Converter={StaticResource SourceToColor}}"
+                                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ProtocolBadge}"
+                                            AutomationProperties.Name="{x:Bind Label}">
+                                        <!-- Shared SourceGlyph emoji (render-model.md § D5) + the
+                                             canonical label, matching web's "{emoji} {label}" pill.
+                                             The emoji renders in color via the default font's Segoe
+                                             UI Emoji fallback (no white override, no symbol font). -->
+                                        <StackPanel Orientation="Horizontal" Spacing="3">
+                                            <TextBlock Text="{x:Bind Glyph}" FontSize="10" VerticalAlignment="Center" />
+                                            <TextBlock Text="{x:Bind Label}" FontSize="10" Foreground="White" VerticalAlignment="Center" />
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+
+                        <!-- Unverified-source indicator: a muted badge shown iff THIS
+                             client's own envelope verification of the post FAILED
+                             (security.md § App display of unverified content). Never
+                             fires on the feed-list projection (Unchecked — the home-nest
+                             index card carries no signed envelope), so it's wired uniformly
+                             but lights only on decode paths; the post still renders in full.
+                             Right-aligned in the badge row, opposite the source badges. -->
+                        <StackPanel Grid.Row="8" Grid.Column="0" Grid.ColumnSpan="2"
+                                    Orientation="Horizontal" Spacing="4"
+                                    HorizontalAlignment="Right" VerticalAlignment="Center"
+                                    Margin="0,2,0,0">
+                            <Border CornerRadius="4" Padding="4,1" VerticalAlignment="Center"
+                                    Background="{ThemeResource SystemControlBackgroundBaseLowBrush}"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.UnverifiedSourceBadge}"
+                                    AutomationProperties.Name="{x:Bind UnverifiedSourceLabel}"
+                                    ToolTipService.ToolTip="{x:Bind UnverifiedSourceTooltip}"
+                                    Visibility="{x:Bind local:FeedPage.BoolToVisibility(IsUnverifiedSource), Mode=OneWay}">
+                                <StackPanel Orientation="Horizontal" Spacing="3">
+                                    <TextBlock Text="&#xE7BA;" FontFamily="Segoe MDL2 Assets"
+                                               FontSize="10" Opacity="0.7" VerticalAlignment="Center" />
+                                    <TextBlock Text="{x:Bind UnverifiedSourceLabel}" FontSize="10"
+                                               Opacity="0.7" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Border>
+                            <!-- The D10 audit marker (`delegated-origin-badge`,
+                                 atproto-pds-full.md § Problem 1 → D10 → *Audit*): an
+                                 external app wrote this post as the account, under the
+                                 delegation the AT Protocol page's row governs. Trails the
+                                 unverified badge, the order every app paints these two
+                                 in.
+
+                                 Shown iff the origin is DELEGATED. `Unknown` covers
+                                 verification-FAILED as well as never-decoded, and it
+                                 must stay un-badged: reading origin off an envelope
+                                 that did not verify would let a forgery paint itself as
+                                 "merely delegated", inverting the audit surface this
+                                 badge IS. -->
+                            <Border CornerRadius="4" Padding="4,1" VerticalAlignment="Center"
+                                    Background="{ThemeResource SystemControlBackgroundBaseLowBrush}"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.DelegatedOriginBadge}"
+                                    AutomationProperties.Name="{x:Bind DelegatedOriginLabel}"
+                                    ToolTipService.ToolTip="{x:Bind DelegatedOriginTooltip}"
+                                    Visibility="{x:Bind local:FeedPage.BoolToVisibility(IsDelegatedOrigin), Mode=OneWay}">
+                                <StackPanel Orientation="Horizontal" Spacing="3">
+                                    <TextBlock Text="&#xE71B;" FontFamily="Segoe MDL2 Assets"
+                                               FontSize="10" Opacity="0.7" VerticalAlignment="Center" />
+                                    <TextBlock Text="{x:Bind DelegatedOriginLabel}" FontSize="10"
+                                               Opacity="0.7" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+
+                        <!-- Interaction buttons: icon + interaction count (count hidden at 0,
+                             a clean icon-only button until the post has activity), quote on
+                             all seven apps (feed.md § Interaction bar, ratified 2026-06-27).
+                             Counts bind PostSummary.{like,reply,repost,quote}_count. Like and
+                             repost are TOGGLEs through FfiFeedManager::like/repost
+                             (viewer_liked/viewer_repost_id drive the lit AccentButtonStyle);
+                             reply/quote still fire the generic fauna.posts.interact (client
+                             glue, feed.md § User actions). The WHOLE bar is hidden on a REPOST
+                             ROW (IsRepostRow — its own counters are structurally dark; feed.md
+                             § Interaction bar → Repost, ratified 2026-08-10) — see repost-attribution above, the only affordance such a
+                             row's card carries. Each button's Name says what it paints (verb +
+                             the count only while shown — FeedPostItem.LikeButtonName). -->
+                        <StackPanel Grid.Row="9" Grid.Column="0" Grid.ColumnSpan="2"
+                                    Orientation="Horizontal" Spacing="12" Margin="0,4,0,0"
+                                    Visibility="{x:Bind local:FeedPage.HideOnRepostRow(IsRepostRow), Mode=OneWay}">
+                            <Button Tag="{x:Bind PostId}" Click="LikeButton_Click" Padding="4,2"
+                                    Style="{x:Bind local:FeedPage.LikedToButtonStyle(ViewerLiked)}"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.FeedLikeButton}"
+                                    AutomationProperties.Name="{x:Bind LikeButtonName}">
+                                <StackPanel Orientation="Horizontal" Spacing="4">
+                                    <TextBlock Text="&#xEB51;" FontFamily="Segoe MDL2 Assets" FontSize="14" />
+                                    <TextBlock Text="{x:Bind LikeCount}" FontSize="12"
+                                               Visibility="{x:Bind local:FeedPage.CountToVisibility(LikeCount)}" />
+                                </StackPanel>
+                            </Button>
+                            <Button Tag="{x:Bind PostId}" Click="ReplyButton_Click" Padding="4,2"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.FeedReplyButton}"
+                                    AutomationProperties.Name="{x:Bind ReplyButtonName}">
+                                <StackPanel Orientation="Horizontal" Spacing="4">
+                                    <TextBlock Text="&#xE97A;" FontFamily="Segoe MDL2 Assets" FontSize="14" />
+                                    <TextBlock Text="{x:Bind ReplyCount}" FontSize="12"
+                                               Visibility="{x:Bind local:FeedPage.CountToVisibility(ReplyCount)}" />
+                                </StackPanel>
+                            </Button>
+                            <Button Tag="{x:Bind PostId}" Click="RepostButton_Click" Padding="4,2"
+                                    Style="{x:Bind local:FeedPage.RepostedToButtonStyle(ViewerRepostId)}"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.FeedRepostButton}"
+                                    AutomationProperties.Name="{x:Bind RepostButtonName}"
+                                    ToolTipService.ToolTip="{loc:Localize Key=feed/post/repost}">
+                                <StackPanel Orientation="Horizontal" Spacing="4">
+                                    <TextBlock Text="&#xE72D;" FontFamily="Segoe MDL2 Assets" FontSize="14" />
+                                    <TextBlock Text="{x:Bind RepostCount}" FontSize="12"
+                                               Visibility="{x:Bind local:FeedPage.CountToVisibility(RepostCount)}" />
+                                </StackPanel>
+                            </Button>
+                            <Button Tag="{x:Bind PostId}" Click="QuoteButton_Click" Padding="4,2"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.FeedQuoteButton}"
+                                    AutomationProperties.Name="{x:Bind QuoteButtonName}">
+                                <StackPanel Orientation="Horizontal" Spacing="4">
+                                    <TextBlock Text="&#xE70B;" FontFamily="Segoe MDL2 Assets" FontSize="14" />
+                                    <TextBlock Text="{x:Bind QuoteCount}" FontSize="12"
+                                               Visibility="{x:Bind local:FeedPage.CountToVisibility(QuoteCount)}" />
+                                </StackPanel>
+                            </Button>
+                        </StackPanel>
+
+                        <!-- Tags: an ItemsControl so ALL tags render (was a 5-slot static
+                             x:Bind cap that truncated post 5 — linux's append_tag_chips and
+                             this page's own post-detail dialog already render every tag
+                             uncapped). Mirrors the SourceBadges ItemsControl above. -->
+                        <ItemsControl Grid.Row="10" Grid.Column="0" Grid.ColumnSpan="2"
+                                      HorizontalAlignment="Left"
+                                      ItemsSource="{x:Bind Tags}">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <StackPanel Orientation="Horizontal" Spacing="4" />
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="x:String">
+                                    <TextBlock Text="{x:Bind Converter={StaticResource TagChipText}}"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.TagChip}"
+                                               FontSize="11" Opacity="0.4" />
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </Grid>
+                    </Grid>
+                    </Button>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+
+            <ListView.Footer>
+                <Button x:Name="LoadMoreButton"
+                        HorizontalAlignment="Center" Margin="0,8"
+                        Click="LoadMoreButton_Click"
+                        Content="{loc:Localize Key=common/load_more}" />
+            </ListView.Footer>
+        </ListView>
+
+        <!-- The feed's two empty states (`ui/feed.md` § Errors & edge cases), at most one
+             shown: painted in Refresh() off FeedViewModel.EmptyState — the shared
+             FeedSnapshot::empty_state over UniFFI — so both stay absent while a read is
+             in flight or posts are on screen. AutomationId only, no static Name, so
+             get_text reads the copy (the MediaPage EmptyText shape). -->
+        <TextBlock Grid.Row="2" x:Name="FeedEmptyStateText"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.FeedEmptyState}"
+                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                   Text="{loc:Localize Key=feed/list/no_posts}"
+                   Visibility="Collapsed" />
+        <TextBlock Grid.Row="2" x:Name="FeedNoResultsText"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.FeedNoResults}"
+                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                   Text="{loc:Localize Key=feed/list/no_matching_posts}"
+                   Visibility="Collapsed" />
+
+        <!-- Loading indicator -->
+        <ProgressRing Grid.Row="2" x:Name="LoadingRing"
+                      IsActive="False" Visibility="Collapsed"
+                      HorizontalAlignment="Center" VerticalAlignment="Center" />
+
+        <!-- Compose bar (text + tags + post + dialog button) -->
+        <controls:FeedComposeBar Grid.Row="3" x:Name="ComposeBar" Margin="16,0" />
+
+        <!-- Error/Warning display. ErrorBar is a CopyableInfoBar because THAT is
+             what carries `error-message` (its inner InfoBar stamps
+             ids:Ids.ErrorMessage), the same shape ConversationsPage and
+             NotificationsPage already use. A bare InfoBar here left the page's
+             only visible error surface untagged, so a real feed failure was
+             visible to the user and invisible to every e2e — convention 2
+             unmet on this page, which is exactly what the missing
+             `feed-read` 7 witness was hiding. -->
+        <controls:CopyableInfoBar Grid.Row="3" x:Name="ErrorBar"
+                 Severity="Error" IsOpen="False" IsClosable="True"
+                 Margin="16,0,16,60" />
+        <InfoBar Grid.Row="3" x:Name="WarningBar"
+                 Severity="Warning" IsOpen="False" IsClosable="True"
+                 Margin="16,0,16,30" />
+        <!-- Compose state indicators (compose-error kept for error display) -->
+        <InfoBar Grid.Row="3" x:Name="ComposeErrorBar"
+                 AutomationProperties.AutomationId="{x:Bind ids:Ids.ComposeError}"
+                 Severity="Error" IsOpen="False" IsClosable="True"
+                 Visibility="Collapsed"
+                 Margin="16,0,16,90" />
+        <!-- Image Lightbox — a Visibility-toggled full-page overlay, NOT ContentDialog:
+             SettingsAccountPage's sign-out-confirm-button / danger-zone confirm already
+             document the same ContentDialog/FlaUI friction (a dynamically-created
+             ContentDialog button carries no reachable AutomationId there; here the
+             DIALOG ITSELF measured count=1/visible=False while genuinely shown,
+             2026-09-07 — ContentDialog's own Popup layer doesn't reliably read
+             !IsOffscreen to FlaUI). A Button carries the AutomationId — NOT a
+             Grid/Border/ContentControl, all three of which measured a NULL
+             AutomationPeer here even with Visibility=Visible, correct layout size,
+             AND explicit forced creation via
+             FrameworkElementAutomationPeer.CreatePeerForElement (2026-09-07): a
+             Collapsed-at-load, later-shown element in this exact page position never
+             gets a peer from those three. Button is the one element type already
+             proven working for exactly this need (post-image, post-card below) —
+             transparent-styled, matching that same established idiom. Grid.RowSpan
+             covers every row so it overlays the whole page; the Click handler
+             dismisses only when the ORIGINAL source is the backdrop Button itself
+             (never the image/ScrollViewer) — UIA Invoke is direct, not
+             pointer-routed, so a driven dismiss click satisfies this too. -->
+        <Button x:Name="ImageLightboxDialog"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.ImageLightbox}"
+                Grid.RowSpan="4"
+                Visibility="Collapsed"
+                Background="#CC000000" BorderThickness="0" Padding="0"
+                HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"
+                Click="ImageLightboxDialog_Click">
+                <ScrollViewer ZoomMode="Enabled" MinZoomFactor="0.5" MaxZoomFactor="5"
+                              HorizontalScrollBarVisibility="Auto"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <Image x:Name="LightboxImage" Stretch="Uniform" MaxHeight="800" MaxWidth="1200" />
+                </ScrollViewer>
+        </Button>
+
+        <!-- Tip attribution window — excised in a store-safe build, same rationale and
+             mechanism as TipDisplayHost above. The markup lives in
+             Views/Payments/PostTipListDialog.xaml; FeedPage.xaml.cs fills this host under
+             `#if PAYMENTS` and forwards both the list-card's and the detail dialog's
+             "open" requests into it. -->
+        <ContentControl x:Name="TipListDialogHost" Grid.RowSpan="4"
+                         HorizontalAlignment="Center" VerticalAlignment="Center" />
+
+        <!-- Bridge feed subscription form -->
+        <StackPanel Grid.Row="0" x:Name="BridgeFeedPanel" Visibility="Collapsed"
+                    Spacing="8" Padding="16,8">
+            <!-- Options are the nest's available bridges (id+name), set from
+                 SyncAvailableBridges — NOT a hard-coded protocol list, so a
+                 bluesky-only nest never offers nostr/activitypub
+                 (version-compatibility.md § Dimension 3). Each item is hand-built in
+                 SyncAvailableBridges: Content is the human `name`, Tag and the UIA Name
+                 are the `id` — the selected item's `id` is the subscribe kind, and the
+                 cross-app `select` takes it. -->
+            <ComboBox x:Name="BridgeTypeSelector"
+                      AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgeFormBridgeSelect}"
+                      MinWidth="160" />
+            <TextBox x:Name="BridgeFeedUriBox"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgeFormUriInput}"
+                     PlaceholderText="{loc:Localize Key=feed/bridge_form/uri}" />
+            <TextBox x:Name="BridgeFeedNameBox"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgeFormNameInput}"
+                     PlaceholderText="{loc:Localize Key=feed/bridge_form/name}" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgeFormSubscribeButton}"
+                        Content="{loc:Localize Key=feed/list/subscribe_bridge}" Style="{StaticResource AccentButtonStyle}"
+                        Click="BridgeFeedSubscribe_Click" />
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgeFormCancelButton}"
+                        Content="{loc:Localize Key=common/cancel}" Click="BridgeFeedCancel_Click" />
+            </StackPanel>
+        </StackPanel>
+        <Button Grid.Row="0" x:Name="BridgeFeedUnsubscribeBtn"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgeFeedUnsubscribeButton}"
+                Click="BridgeFeedUnsubscribe_Click"
+                Visibility="Collapsed" />
+
+        <!-- The `error-message` mirror that used to sit here is GONE: it was
+             declared Visibility="Collapsed" (contradicting its own comment), so
+             it never realized a UIA peer and the id it carried was unobservable
+             — while the bar the user actually sees carried no id at all. The id
+             now lives on ErrorBar above, via CopyableInfoBar, which is both
+             visible and findable (proven on ConversationsPage, whose
+             oversized-attachment journey asserts is_visible("error-message") on
+             that very control). WarningTextMirror below is untouched: nothing
+             in this batch witnesses `warning-message`, and rewiring it blind
+             would be a change no test here could check. -->
+        <TextBlock Grid.Row="0" x:Name="WarningTextMirror"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.WarningMessage}"
+                   AutomationProperties.Name=" "
+                   Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+        </Grid>
+    </Grid>
+</Page>

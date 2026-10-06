@@ -1,0 +1,30 @@
+[
+  {
+    "timestamp": 1600000000,
+    "data": [ { "post": "Dobr\u00c3\u00bd den, p\u00c5\u0099\u00c3\u00a1tel\u00c3\u00a9" } ],
+    "title": "Test Owner updated his status.",
+    "privacy": "Friends"
+  },
+  {
+    "timestamp": 1610000000,
+    "attachments": [
+      { "data": [ { "media": { "uri": "your_facebook_activity/posts/media/Timeline_photos/photo_1.jpg", "creation_timestamp": 1609999000, "title": "Timeline photos", "description": "Photo caption" } } ] },
+      { "data": [ { "place": { "name": "Fixture Park", "coordinate": { "latitude": 59.91, "longitude": 10.75 }, "address": "1 Fixture Way", "url": "https://example.invalid/place" } } ] },
+      { "data": [ { "external_context": { "url": "https://example.invalid/link" } } ] }
+    ],
+    "data": [ { "post": "At the park" } ],
+    "tags": [ { "name": "Friend One" } ],
+    "title": "Test Owner was at Fixture Park.",
+    "privacy": "Public"
+  },
+  {
+    "timestamp": 1620000000,
+    "data": [ { "post": "Only me note" } ],
+    "title": "Test Owner updated his status.",
+    "privacy": "Only me"
+  },
+  {
+    "data": [ { "post": "orphan without a timestamp" } ],
+    "title": "Test Owner updated his status."
+  }
+]

@@ -1,0 +1,36 @@
+[package]
+name = "fauna-log"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Derive UniFFI `Record`/`Enum` on the owned `LogEntry` / `LogLevel` so the
+# native apps (Apple / Windows / Android) read the ring over the `fauna-ffi`
+# boundary with the *same* types Linux uses natively (observability.md § Surfaces
+# — "owned types that cross the UniFFI / WASM boundary unchanged"). Off by
+# default: only the `fauna-ffi` build turns it on; the nest + Linux + the web
+# (wasm, which maps to a JS shape) consume the plain Rust types. Mirrors the
+# `fauna-core` / `fauna-conversations` optional-`uniffi` pattern.
+uniffi = ["dep:uniffi"]
+
+[dependencies]
+# Reused for the wasm-safe millisecond clock (`Timestamp::now_millis`) so the
+# ring layer compiles for the web app too — don't re-roll the wasm time
+# backend (priority #2). default-features=false keeps the dep light.
+fauna-core = { path = "../fauna-core", default-features = false }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# Optional UniFFI derives (see [features].uniffi). Workspace pin, no `cli`
+# feature — only the leaf `fauna-ffi` crate needs the bindgen binary.
+uniffi = { workspace = true, optional = true }
+
+# Native-only: rolling on-disk persistence + the process-global subscriber
+# install. The browser has no filesystem, so the web app installs only the
+# in-memory `RingLayer` (its own slice; see observability.md § Web).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tracing-appender = "0.2"
+
+# wasm: forward fauna-core's js-sys time backend so `now_millis()` resolves.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }

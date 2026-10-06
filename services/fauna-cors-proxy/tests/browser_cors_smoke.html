@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>fauna-cors-proxy CORS smoke test</title>
+<h1>fauna-cors-proxy CORS smoke test</h1>
+<p>Served from an origin DIFFERENT from the proxy URL — e.g., open via
+<code>python3 -m http.server 8000</code> from the repository root and point to
+<code>http://localhost:8000/services/fauna-cors-proxy/tests/browser_cors_smoke.html</code>,
+while the proxy runs on port 18080. Same-origin would bypass CORS and
+hide the bug.</p>
+<button id="go">Run test</button>
+<pre id="out"></pre>
+<script>
+const PROXY = 'http://localhost:18080';
+document.getElementById('go').addEventListener('click', async () => {
+  const out = document.getElementById('out');
+  out.textContent = 'fetching…';
+  try {
+    // /healthz is a safe CORS check — no provider credentials involved.
+    const r = await fetch(PROXY + '/healthz', { method: 'GET', mode: 'cors' });
+    const text = await r.text();
+    if (r.ok && text.trim() === 'ok') {
+      out.textContent = 'PASS: proxy responded and CORS allowed.';
+    } else {
+      out.textContent = 'FAIL: unexpected response — status=' + r.status + ' body=' + text;
+    }
+  } catch (e) {
+    out.textContent = 'FAIL (probably CORS): ' + e.message;
+  }
+});
+</script>

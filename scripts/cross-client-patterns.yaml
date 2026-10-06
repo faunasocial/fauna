@@ -1,0 +1,89 @@
+patterns:
+  - id: auth-body-construction
+    description: "Auth request body (actor_id || timestamp signing) must use shared library"
+    shared_impl:
+      rust: "libs/fauna-client-core/src/auth.rs::build_auth_request"
+      ffi: "libs/fauna-ffi/src/auth.rs"
+    markers:
+      - "actor_id"
+      - "timestamp"
+      - "to_be_bytes"
+      - "sign"
+    negative_markers:
+      # Rust callers of the shared lib
+      - "fauna_client_core::auth::build_auth_request"
+      # FFI consumers (generated or hand-written wrappers)
+      - "buildAuthRequest"            # Swift/Kotlin UniFFI, C# uniffi-bindgen-cs
+      - "BuildAuthRequest"            # C# (PascalCase)
+      - "wasm().build_auth_request"   # Web WASM call site
+    exclude:
+      - "libs/"
+      - "tests/"
+      - "bins/fauna-nest"
+    exclude_files:
+      # UniFFI-generated bindings
+      - "apps/fauna-apple/FaunaFFISwift/Sources/FaunaFFI\\.swift$"
+      - "apps/fauna-apple/generated/FaunaFFI\\.swift$"
+      - "apps/fauna-android/app/src/[a-z]+/java/com/fauna/ffi/fauna_ffi\\.kt$"
+      - "apps/fauna-windows/FaunaApp/FaunaApp\\.Core/Generated/fauna_ffi\\.cs$"
+    severity: high
+
+  - id: register-body-construction
+    description: "Registration request (actor_id || handle || domain || timestamp) must use shared library"
+    shared_impl:
+      rust: "libs/fauna-client-core/src/auth.rs::build_register_request"
+      ffi: "libs/fauna-ffi/src/auth.rs"
+    markers:
+      - "actor_id"
+      - "handle"
+      - "domain"
+      - "signature"
+      - "timestamp"
+    negative_markers:
+      - "fauna_client_core::auth::build_register_request"
+      - "buildRegisterRequest"
+      - "BuildRegisterRequest"
+      - "wasm().build_register_request"
+      # Files that import the auth WASM wrapper are consumers, not reimplementors
+      - "buildAuthRequest"
+    exclude:
+      - "libs/"
+      - "tests/"
+      - "bins/fauna-nest"
+    exclude_files:
+      - "apps/fauna-apple/FaunaFFISwift/Sources/FaunaFFI\\.swift$"
+      - "apps/fauna-apple/generated/FaunaFFI\\.swift$"
+      - "apps/fauna-android/app/src/[a-z]+/java/com/fauna/ffi/fauna_ffi\\.kt$"
+      - "apps/fauna-windows/FaunaApp/FaunaApp\\.Core/Generated/fauna_ffi\\.cs$"
+      # DTO-only files: data classes with no signing code
+      - "apps/fauna-android/app/src/main/java/com/fauna/app/data/api/ApiTypes\\.kt$"
+    severity: high
+
+  - id: domain-search-signing
+    description: "Domain search signing (domain || public_key || timestamp) must use shared library"
+    shared_impl:
+      rust: "libs/fauna-client-core/src/auth.rs::sign_domain_search"
+      ffi: "libs/fauna-ffi/src/auth.rs"
+    markers:
+      - "domain"
+      - "public_key"
+      - "timestamp"
+      - "sign"
+    negative_markers:
+      - "fauna_client_core::auth::sign_domain_search"
+      - "signDomainSearch"
+      - "SignDomainSearch"
+      - "wasm().sign_domain_search"
+    exclude:
+      - "libs/"
+      - "tests/"
+      - "bins/fauna-nest"
+    exclude_files:
+      - "apps/fauna-apple/FaunaFFISwift/Sources/FaunaFFI\\.swift$"
+      - "apps/fauna-apple/generated/FaunaFFI\\.swift$"
+      - "apps/fauna-android/app/src/[a-z]+/java/com/fauna/ffi/fauna_ffi\\.kt$"
+      - "apps/fauna-windows/FaunaApp/FaunaApp\\.Core/Generated/fauna_ffi\\.cs$"
+      # DTO files and pure HTTP clients (take pre-signed fields as parameters)
+      - "apps/fauna-android/app/src/main/java/com/fauna/app/data/api/ApiTypes\\.kt$"
+      - "apps/fauna-apple/FaunaKit/Sources/FaunaKit/Core/RegistryClient\\.swift$"
+    severity: high

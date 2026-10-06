@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.ModerationPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:FaunaApp.Controls"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:helpers="using:FaunaApp.Helpers"
+    xmlns:loc="using:FaunaApp.Markup"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <Page.Resources>
+        <helpers:HexColorToBrushConverter x:Key="HexBrush" />
+    </Page.Resources>
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Padding="16" Spacing="24" MaxWidth="640" HorizontalAlignment="Left">
+
+            <TextBlock x:Name="ModerationTitle" Style="{StaticResource TitleTextBlockStyle}"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}" />
+
+            <!-- Enforcement Actions: the moderation queue is the page's primary content —
+                 matching linux/macOS/iOS/Android (ui.yaml's `moderation` page = the
+                 `moderation-queue` component). Spam-filtering *preferences* are the
+                 `spam-moderation-controls` component on Settings → Privacy, not a second
+                 copy here (they used to be duplicated on this page). -->
+            <StackPanel Spacing="8">
+                <TextBlock x:Name="EnforcementHeader" Style="{StaticResource SubtitleTextBlockStyle}" />
+
+                <!-- The `moderation-queue` container stays visible even when empty — it is
+                     the e2e scope anchor + the empty-state contract (moderation.md § Errors
+                     & edge cases: an empty queue is NOT an error; the peer of linux's
+                     set_placeholder). A MinHeight keeps the empty ListView on-screen (a
+                     0-height control reports IsOffscreen to UIA); NoActionsText overlays it
+                     centred when there are no rows. Because the queue is the top content it
+                     sits within the initial viewport, so is_visible("moderation-queue")
+                     holds without any scroll. -->
+                <Grid>
+                    <ListView x:Name="ActionsList" SelectionMode="None" MinHeight="160"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.ModerationQueue}">
+                        <ListView.ItemTemplate>
+                            <DataTemplate>
+                                <!-- Literal ids below — this DataTemplate has no x:DataType, so
+                                     `{x:Bind ids:Ids.…}` silently drops here; see
+                                     Controls/RecipientPicker.xaml. -->
+                                <Grid Padding="8" ColumnSpacing="12"
+                                      AutomationProperties.Name="{Binding CategoryLabel}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" Spacing="4">
+                                        <!-- content-label-badge: icon + category label + action, styled
+                                             entirely from the shared content_label_style map (icon + accent
+                                             colour) — no hard-coded category strings/colours. -->
+                                        <StackPanel Orientation="Horizontal" Spacing="6"
+                                                    AutomationProperties.AutomationId="content-label-badge"
+                                                    AutomationProperties.Name="{Binding CategoryLabel}">
+                                            <TextBlock Text="{Binding CategoryIcon}" VerticalAlignment="Center" />
+                                            <TextBlock Text="{Binding CategoryLabel}"
+                                                       Foreground="{Binding CategoryAccent, Converter={StaticResource HexBrush}}"
+                                                       Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                            <TextBlock Text="{Binding ActionLabel}" Opacity="0.6"
+                                                       VerticalAlignment="Center" />
+                                        </StackPanel>
+                                        <TextBlock Opacity="0.6" FontSize="12" TextTrimming="CharacterEllipsis">
+                                            <Run Text="{Binding ContentType}" />
+                                            <Run Text=" · " />
+                                            <Run Text="{Binding ContentId}" />
+                                            <Run Text="  ·  " />
+                                            <Run Text="{Binding ConfidencePercent}" /><Run Text="% " /><Run Text="{loc:Localize Key=moderation/confidence}" />
+                                        </TextBlock>
+                                    </StackPanel>
+                                    <Button Grid.Column="1" Content="{loc:Localize Key=moderation/correct}"
+                                            Tag="{Binding}" Click="TrainCorrection_Click" VerticalAlignment="Center"
+                                            AutomationProperties.AutomationId="train-correction-button" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                    <TextBlock x:Name="NoActionsText" Opacity="0.6"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               TextAlignment="Center" Visibility="Collapsed"
+                               IsHitTestVisible="False" />
+                </Grid>
+            </StackPanel>
+
+            <ProgressRing x:Name="LoadingRing" IsActive="False" Visibility="Collapsed"
+                          HorizontalAlignment="Center" />
+
+            <controls:CopyableInfoBar x:Name="ErrorBar" Severity="Error" IsOpen="False" IsClosable="True" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

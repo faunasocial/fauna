@@ -1,0 +1,186 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.AdminCustodyHostingPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+      The admin Held-Custody page (admin-custody-hosting) — the nest-wide
+      custody-hosting registry (account-data-plane.md § Two-sided bounds). A CONTEXTUAL detail page
+      like admin-dns / admin-logs / admin-bridges-pending — absent from
+      ui.yaml's navigation.admin_pages, present on the admin nav rail (see
+      AdminShellPage) so an admin can reach it. windows is the last of 7 apps
+      owing this leg; reference: apps/fauna-tui/src/admin/custody_hosting.rs,
+      apps/fauna-apple/.../AdminCustodyHostingView.swift.
+
+      Two honesty properties, easy to get subtly wrong (carried from the tui
+      lead's own tests): (1) an un-hydrated page paints NO count and NO empty
+      state; nothing paints here until RenderState() runs after the first
+      load completes, so "nobody asked this nest to hold anything" never
+      stands in for "the read has not answered yet"; (2) a retained-bytes-cap
+      of 0 renders *Default*, never `0 B` (AdminCustodyHostingViewModel owns
+      that substitution).
+
+      The Devices custody-held card + its remove button are NOT built here; same store-gated
+      reason linux/web/android/apple left it undone: verified zero
+      HeldCustody/custody_held references in windows app source outside
+      generated FFI/i18n.
+    -->
+
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="16" MaxWidth="720" HorizontalAlignment="Left">
+
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error" IsOpen="False" IsClosable="True" />
+
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=admin/custody_hosting/title}" />
+            <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=admin/custody_hosting/description}" />
+
+            <ProgressRing x:Name="LoadProgress" IsActive="False" Visibility="Collapsed"
+                          HorizontalAlignment="Left" />
+
+            <!-- Present only once the read has ANSWERED (RenderState runs after
+                 the first load); an unhydrated page shows neither this nor
+                 the empty state. -->
+            <TextBlock x:Name="CountText"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminCustodyHostingCount}"
+                       Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Visibility="Collapsed" />
+
+            <TextBlock x:Name="EmptyText"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminCustodyHostingEmpty}"
+                       Opacity="0.6" TextWrapping="Wrap" Visibility="Collapsed"
+                       Text="{loc:Localize Key=admin/custody_hosting/empty}" />
+
+            <ItemsControl x:Name="HostingList">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Orientation="Vertical" Spacing="8" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="local:AdminHostingRowPresentation">
+                        <!-- indexed: true in ui.yaml; the literal AutomationId
+                             repeats per row (the e2e driver's index= picks the
+                             Nth occurrence, the same shape admin-bridges-pending
+                             uses for its cards). AutomationProperties.Name is
+                             load-bearing (reference_windows_flaui_datatemplate_name):
+                             without it a DataTemplate row Border is not surfaced
+                             to FlaUI and count()/get_text() see zero rows. -->
+                        <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminCustodyHostingRow}"
+                                AutomationProperties.Name="{x:Bind Row.HostText}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1" CornerRadius="6" Padding="12">
+                            <StackPanel Spacing="6">
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="110" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{loc:Localize Key=admin/custody_hosting/host}" Opacity="0.6" />
+                                    <TextBlock Grid.Column="1"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminCustodyHostingHost}"
+                                               Text="{x:Bind Row.HostText}" FontFamily="Consolas" TextWrapping="Wrap" />
+                                </Grid>
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="110" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{loc:Localize Key=admin/custody_hosting/owner}" Opacity="0.6" />
+                                    <TextBlock Grid.Column="1"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminCustodyHostingOwner}"
+                                               Text="{x:Bind Row.OwnerText}" FontFamily="Consolas" TextWrapping="Wrap" />
+                                </Grid>
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="110" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{loc:Localize Key=admin/custody_hosting/url}" Opacity="0.6" />
+                                    <TextBlock Grid.Column="1"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminCustodyHostingUrl}"
+                                               Text="{x:Bind Row.UrlText}" IsTextSelectionEnabled="True" TextWrapping="Wrap" />
+                                </Grid>
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="110" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{loc:Localize Key=admin/custody_hosting/budget}" Opacity="0.6" />
+                                    <TextBlock Grid.Column="1"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminCustodyHostingBudget}"
+                                               Text="{x:Bind Row.BudgetText}" TextWrapping="Wrap" />
+                                </Grid>
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="110" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{loc:Localize Key=admin/custody_hosting/held}" Opacity="0.6" />
+                                    <TextBlock Grid.Column="1"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminCustodyHostingHeld}"
+                                               Text="{x:Bind Row.HeldText}" TextWrapping="Wrap" />
+                                </Grid>
+                                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminCustodyHostingStopped}"
+                                           Text="{x:Bind Row.StoppedText}" Opacity="0.7" />
+                                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminCustodyHostingReceipt}"
+                                           Text="{x:Bind Row.ReceiptText}" Opacity="0.7" />
+
+                                <!-- Exactly one of these two is ever shown for a
+                                     given row; a row whose confirm is armed
+                                     shows the confirm, never both (the remove
+                                     button and the confirm box are mutually
+                                     exclusive per row). -->
+                                <StackPanel Orientation="Horizontal" Spacing="8"
+                                            HorizontalAlignment="Right" Margin="0,4,0,0"
+                                            Visibility="{x:Bind local:AdminCustodyHostingPage.VisibleWhenNotArmed(Armed)}">
+                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminCustodyHostingRemoveButton}"
+                                            Content="{loc:Localize Key=admin/custody_hosting/remove}"
+                                            Tag="{x:Bind Row}" Click="Remove_Click" />
+                                </StackPanel>
+
+                                <StackPanel Spacing="8" Margin="0,4,0,0"
+                                            Visibility="{x:Bind local:AdminCustodyHostingPage.VisibleWhenArmed(Armed)}">
+                                    <TextBlock TextWrapping="Wrap" Style="{StaticResource BodyStrongTextBlockStyle}"
+                                               Text="{loc:Localize Key=admin/custody_hosting/remove_confirm_title}" />
+                                    <TextBlock TextWrapping="Wrap" Opacity="0.8"
+                                               Text="{loc:Localize Key=admin/custody_hosting/remove_confirm_body}" />
+                                    <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminCustodyHostingRemoveCancelButton}"
+                                                Content="{loc:Localize Key=admin/custody_hosting/remove_cancel}"
+                                                Click="RemoveCancel_Click" />
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminCustodyHostingRemoveConfirmButton}"
+                                                Content="{loc:Localize Key=admin/custody_hosting/remove_confirm}"
+                                                Style="{StaticResource AccentButtonStyle}"
+                                                Tag="{x:Bind Row}" Click="RemoveConfirm_Click"
+                                                Loaded="RemoveConfirmButton_Loaded" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <!-- The remove's own verdict; chrome, not error-message:
+                 removed=false on a row someone else already dropped is an
+                 honest no-op, not a failure. -->
+            <TextBlock x:Name="StatusText" TextWrapping="Wrap" Visibility="Collapsed" />
+
+            <TextBlock x:Name="ErrorTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+                       AutomationProperties.Name=" "
+                       Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

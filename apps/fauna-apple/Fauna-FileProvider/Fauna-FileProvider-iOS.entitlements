@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- iOS twin of Fauna-FileProvider.entitlements: iOS extensions are sandboxed
+       by construction and get outbound network without a macOS-style
+       network.client entitlement, so only the app group remains — the container
+       for the domain replica (NSExtensionFileProviderDocumentGroup), the unified
+       sync state dir, and the credential Keychain. -->
+  <key>com.apple.security.application-groups</key>
+  <array>
+    <string>group.social.fauna.shared</string>
+  </array>
+</dict>
+</plist>

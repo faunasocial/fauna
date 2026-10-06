@@ -1,0 +1,76 @@
+[package]
+name = "fauna-client-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# UniFFI scaffolding for native app bindings (Apple/Android/Windows). Enables
+# `fauna-core/uniffi` so the embedded `LocalizedText` snapshot fields get their
+# `uniffi::Record` registration — the cross-crate pattern `fauna-feed` uses. No
+# async-runtime feature is needed here: the generic `SearchManager<R>` can't be
+# `#[uniffi::export]`ed, so the async export lives on a concrete façade in
+# `fauna-ffi` (which carries the `async_runtime = "tokio"` attribute).
+uniffi = ["dep:uniffi", "fauna-core/uniffi"]
+# Test-helper surface: `SearchManager::set_snapshot_for_test`, so a client's
+# page tests can assert their projection of a given snapshot without a
+# transport. Compiled into debug + explicit test builds only — the exact mirror
+# of `fauna-feed/test-helpers`.
+test-helpers = []
+
+[dependencies]
+# fauna-protocol carries the typed `fauna.search.*` wire types + the
+# `RpcRequester` seam this crate is generic over. `default-features = false`
+# drops the native-only `p2p` feature so this crate compiles to wasm32; native
+# workspace builds re-enable `p2p` via Cargo feature unification. The path form
+# is required to override `default-features` (mirrors fauna-client-bridges).
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+
+# `LocalizedText` for the search-result badge map (`render::content_type_badge`)
+# — the shared i18n-aware text carrier so each app localizes the label.
+# `default-features = false` keeps it wasm-clean; the wasm `js` time backend is
+# forwarded below, mirroring fauna-protocol.
+fauna-core = { path = "../fauna-core", default-features = false }
+
+# The snapshot + its row projections are serde types (the wasm snapshot-poll
+# face serialises them, and `fauna-feed`'s snapshot does the same).
+serde = { workspace = true, features = ["derive"] }
+
+# The `LocalSearchIndex` seam is async so a native implementation can move a
+# blocking tantivy query off the reactor. Proc-macro only — wasm-safe, and the
+# seam is simply never implemented there.
+async-trait = "0.1"
+
+# `join` for the two concurrent arms (`search.md` § The local/nest merge).
+# wasm-safe; the SPA's manager just has one arm that resolves immediately.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+uniffi = { workspace = true, optional = true }
+
+# wasm: forward fauna-protocol's `js` feature (fauna-core's js-sys time
+# backend) so the transitive wasm build resolves. Off on native. Cargo merges
+# the two entries (features are additive).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# The generated string table, so the badge-key tests check each key against
+# en.yaml itself — a key the table lacks resolves to its own spelling and
+# paints `search_page.badge_…` on every app. Dependency-free; dev-only.
+fauna-i18n = { path = "../fauna-i18n" }
+# Names the serde bounds the `RpcRequester::request` method requires, for the
+# construction smoke test's mock impl.
+serde = { workspace = true }
+
+# The manager's flow tests need a real executor: its two arms are genuinely
+# concurrent, so the single-poll `block_on` the wire-contract tests use (which
+# panics on a parked future) cannot drive them. `Barrier` is what turns
+# "concurrent" into a causal fact a sequential mutation deadlocks on, and
+# `start_paused` keeps that deadlock a fast red instead of a hang (cross-app
+# e2e convention 14). Dev-only — the shipped crate stays runtime-free.
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "test-util"] }

@@ -1,0 +1,82 @@
+<UserControl
+    x:Class="FaunaApp.Controls.RecipientPicker"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:ids="using:FaunaApp.UiIds">
+    <StackPanel Spacing="8">
+        <!--
+            ItemsControl + StackPanel(Horizontal): a plain ItemsControl
+            with the default StackPanel panel renders items straight to
+            the visual tree so the recipient-picker-chip AutomationId is
+            queryable as soon as the chip is added. ItemsWrapGrid (used
+            elsewhere) requires a scroll-aware host like ListView and
+            silently fails to materialize items inside an ItemsControl,
+            which the e2e tests previously hit as a "chip not added"
+            assertion.
+        -->
+        <ItemsControl x:Name="ChipsList">
+            <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate>
+                    <StackPanel Orientation="Horizontal" />
+                </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                    <!--
+                        AutomationId on the TextBlock rather than the Border:
+                        Border lacks a specific AutomationPeer so UIA drops
+                        its AutomationId when the chip materializes inside
+                        an ItemsControl. TextBlock's TextBlockAutomationPeer
+                        carries the id through to the bridge.
+                    -->
+                    <Border Background="{ThemeResource SystemAccentColorLight2}"
+                            CornerRadius="12" Padding="8,4" Margin="0,0,4,4">
+                        <!-- ⚠ A LITERAL id, not `{x:Bind ids:Ids.…}`. `x:Bind`
+                             inside a DataTemplate resolves against that
+                             template's `x:DataType`, and this template has
+                             none — it is filled by the generic `SetChips<T>`,
+                             so there is no one type to declare. Without it the
+                             binding yields nothing and the element ships with
+                             NO AutomationId at all, which is invisible to
+                             MSBuild, to the C# unit tests and to
+                             ui-registry-lint (which greps for the id text) and
+                             shows up only as `count=0` in an e2e run. -->
+                        <TextBlock AutomationProperties.AutomationId="recipient-picker-chip"
+                                   Text="{Binding Display}" />
+                    </Border>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+        <TextBox x:Name="InputBox"
+                 AutomationProperties.AutomationId="{x:Bind ids:Ids.RecipientPickerInput}"
+                 PlaceholderText="{loc:Localize Key=conversations/unified/recipient_picker_placeholder}"
+                 TextChanged="OnInputChanged"
+                 KeyDown="OnInputKeyDown" />
+        <ListView x:Name="SuggestionsList"
+                  Visibility="Collapsed"
+                  SelectionChanged="OnSuggestionPicked">
+            <ListView.ItemTemplate>
+                <DataTemplate>
+                    <!-- Literal for the same reason as the chip above. -->
+                    <TextBlock AutomationProperties.AutomationId="recipient-picker-suggestion"
+                               Text="{Binding Display}" />
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+        <TextBlock x:Name="ResolveStatus"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.RecipientResolveStatus}"
+                   Tag="idle" />
+        <!-- The class of the room ABOUT to be created, stated once a recipient
+             chip is committed and before the first message goes out
+             (`conversation-rooms.md` § The three classes). Derived in shared
+             Rust from the committed chips (`prospective_room_class`); this only
+             paints it, and stays collapsed — absent — while there is nothing to
+             say. Its token rides HelpText, the `class` attribute, exactly as
+             `thread-room-class`'s does. -->
+        <TextBlock x:Name="ProspectiveClass"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.RecipientPickerClass}"
+                   Visibility="Collapsed"
+                   Opacity="0.7" FontSize="12" />
+    </StackPanel>
+</UserControl>

@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.SettingsPrivacyPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="24" MaxWidth="600" HorizontalAlignment="Left">
+
+            <!-- Error bar -->
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="False"
+                IsClosable="True" />
+
+            <!-- Header -->
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}" Style="{StaticResource TitleTextBlockStyle}" Text="{loc:Localize Key=settings/privacy}" />
+
+            <!-- Privacy / inbox-mode section -->
+            <StackPanel Spacing="12">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="{loc:Localize Key=settings/privacy}" />
+                <TextBlock Opacity="0.7" Text="{loc:Localize Key=settings/privacy_desc}" />
+
+                <!-- Rows built in code-behind (PopulateInboxModeOptions) from the
+                     shared FaunaFfiMethods.InboxModeOptions() catalog — label +
+                     description + selected-state per row, the richer rendering
+                     apple/android already carry (priority #4: richest pattern
+                     wins; settings.md § Where logic lives). A hand-typed XAML
+                     list here would be exactly the drift mail-policy-config.md's
+                     "one owner" rule exists to prevent. Container carries
+                     inbox-mode-selector + a Name so it isn't pruned from the UIA
+                     tree (memory reference_winui_flaui_datatemplate_name); each
+                     row keeps its own inbox-mode-{value} id. No default is ever
+                     pre-selected while InboxMode is unfetched (settings.md item 7). -->
+                <StackPanel x:Name="InboxModeItems" Spacing="4"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.InboxModeSelector}"
+                            AutomationProperties.Name="inbox mode selector" />
+
+                <ProgressRing
+                    x:Name="InboxModeProgress"
+                    IsActive="False"
+                    Visibility="Collapsed"
+                    HorizontalAlignment="Left" />
+            </StackPanel>
+
+            <!-- Separator -->
+            <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+            <!-- Spam preferences section -->
+            <StackPanel Spacing="12">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.SpamPreferences}"
+                           Text="{loc:Localize Key=status/spam/title}" />
+                <TextBlock Opacity="0.7" Text="{loc:Localize Key=status/spam/description}" />
+
+                <TextBlock Text="{loc:Localize Key=status/spam/spam_threshold}" Opacity="0.7" FontSize="12" />
+                <Slider x:Name="SpamThresholdSlider"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.SpamThreshold}"
+                        Minimum="0" Maximum="1" StepFrequency="0.1" Value="0.5" />
+                <TextBlock Text="{loc:Localize Key=status/spam/phishing_threshold}" Opacity="0.7" FontSize="12" />
+                <Slider x:Name="PhishingThresholdSlider"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.PhishingThreshold}"
+                        Minimum="0" Maximum="1" StepFrequency="0.1" Value="0.5" />
+                <Button x:Name="SaveSpamPrefsButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.SaveSpamPrefs}"
+                        Click="SaveSpamPrefs_Click"
+                        Content="{loc:Localize Key=common/save}" />
+            </StackPanel>
+
+            <!-- Separator -->
+            <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+            <!-- Email Filters section -->
+            <StackPanel Spacing="12">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="{loc:Localize Key=settings/privacy_page/email_filters}" />
+                <controls:EmailFilterPanel x:Name="EmailFilterControl" />
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

@@ -1,0 +1,161 @@
+[package]
+name = "fauna-feed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared feed snapshot + rendering logic: the FeedManager read model, post source classification, and the quoted-post projection."
+
+[features]
+default = []
+# UniFFI scaffolding for native app bindings (Apple/Android/Windows/Linux).
+# Enables `fauna-core/uniffi` so the embedded `LocalizedText` snapshot fields
+# get their `uniffi::Record` registration (the cross-crate pattern the
+# devices/folders machines use). No async-runtime feature is needed here: the
+# generic `FeedManager<R>` can't be `#[uniffi::export]`ed, so the async export
+# lives on the concrete `FfiFeedManager` façade in `fauna-ffi` (which carries
+# the `async_runtime = "tokio"` attribute), not in this crate.
+uniffi = ["dep:uniffi", "fauna-core/uniffi"]
+# e2e test-helper surface: the feed-snapshot injection seam
+# (`FeedManager::set_feed_snapshot_for_test` + the `test_support` snapshot
+# builder), compiled into the wasm + native **test** builds (fauna-wasm enables
+# it; the linux app enables it on its `fauna-feed` dep) and driven solely from
+# the Playwright e2e command bridge — inert in production. The exact mirror of
+# `fauna-conversations/test-helpers`.
+test-helpers = []
+# The `payments` registry feature (`dynamic-features.md` § Charter members —
+# tips are a named buy-side gate surface). Gates ONLY `resolve_post_tips`, the
+# one thing here that names the `fauna.tips.list` kind; `PostSummary::tips` and
+# the `TipView`/`TipSenderView` records stay ungated and simply have no way to
+# be populated in an excised build (the inert-`Option` posture
+# `fauna-protocol`'s `p2p` feature takes). That keeps the snapshot record shape
+# — and so every generated binding for it — identical across flavors, while the
+# excision criteria that actually matter still hold: no wire sender, and no
+# re-enable path short of a different build.
+#
+# **Opt-in here, default-on at the flavor roots** (`dynamic-features.md` § The
+# cargo feature spine): this is a deep shared crate, and a default-on feature
+# down here is switched back on by any consumer taking the crate with defaults,
+# which would silently turn the store-safe hatch into a no-op.
+payments = ["dep:fauna-client-payments", "fauna-protocol/payments"]
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+# The engagement-cue rollup seals through serde_json (the topic-model precedent;
+# the sealed blob is nest-opaque, so JSON's additive field semantics are what we
+# want). Pure-Rust, wasm-safe — the web SPA compiles `fauna-feed` to WASM.
+serde_json = { workspace = true }
+uniffi = { workspace = true, optional = true }
+hex = { workspace = true }
+# The posts-rail draft restore error (`drafts.rs`). Pure-derive, wasm-safe —
+# the same dep `fauna-conversations` carries for the conversations rail's twin.
+thiserror = { workspace = true }
+# An unreadable `__drafts` blob is swallowed rather than failing the composer
+# (`FeedManager::restore_drafts`), so it has to be visible SOMEWHERE — same
+# posture, and same wasm-safe dep, as the conversations rail.
+tracing = { workspace = true }
+
+# `default-features = false` keeps the wasm32 build lean (drops fauna-core's
+# native `network` feature, fauna-client-core's `spam` classifier) — the manager
+# is consumed by web (WASM) as well as the native apps. Path form (not
+# `workspace = true`) so the `default-features = false` override is allowed.
+fauna-core = { path = "../fauna-core", default-features = false }
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+fauna-client-feed = { path = "../fauna-client-feed" }
+fauna-client-posts = { path = "../fauna-client-posts" }
+# The `OwnPostIndexObserver` seam only — the local index's ear at the posts
+# trickle chokepoint (this manager owns the create flows). Engine-free and
+# wasm-clean by that crate's own charter, so the wasm build carries no index
+# code through this edge (web never registers an observer).
+fauna-client-search = { path = "../fauna-client-search" }
+fauna-client-linkpreview = { path = "../fauna-client-linkpreview" }
+fauna-client-bridges = { path = "../fauna-client-bridges" }
+fauna-client-core = { path = "../fauna-client-core", default-features = false }
+# The tip attribution read (`fauna.tips.list`) behind `resolve_post_tips`.
+# OPTIONAL: reached only through this crate's own `payments` feature, so a
+# store-safe build never compiles the tip client at all — rule (b) of the
+# two-halves spine (a consumer forwards from its own feature, never names one
+# on a dep line).
+fauna-client-payments = { path = "../fauna-client-payments", optional = true }
+# (No fauna-payments dep since 2026-08-10.) The sell-post leg's only use of it
+# was the sats→msat conversion, which moved to its wire twin as
+# `fauna_protocol::subscriptions::TierAskingPrice::from_sats` — so composing a
+# priced post needs the wire layer alone, and this crate compiles unchanged in
+# a flavor that excises the payments plane
+# (`docs/goal/architecture/dynamic-features.md` § The cargo feature spine).
+
+# The sealed-factor compose seam (topic-factors.md § Scoring). All three are
+# wasm-safe: `fauna-text-model` is uniffi-free (serde/serde_json/unicode-* only)
+# and the two client crates already back wasm consumers — so the web SPA's
+# `FeedManager` gets the same seam as the native apps, with no native-only
+# dep sneaking into the WASM graph.
+fauna-text-model = { workspace = true }
+fauna-client-personalization = { path = "../fauna-client-personalization" }
+# The subscribed `text-model` labeler seam: the compose path fetches a
+# subscribed labeler's raw artifact via `fauna.labelers.inspect` at feed
+# (re)load, because a client-evaluated kind has no nest-side bus row to read
+# (content-moderation-and-ranking.md § Tier-3 artifact kinds). Pure RPC over
+# `fauna-protocol`, so wasm-safe like the personalization client above.
+fauna-client-labelers = { path = "../fauna-client-labelers" }
+fauna-client-config = { path = "../fauna-client-config" }
+
+# Layer-B engagement-signal producer (engagement-cues.md § Layer B write path):
+# `record_observation` submits a derived cue verdict for a public post to the
+# k-anon aggregate via `ModerationClient::signal_contribute`, gated on the
+# cached opt-in. wasm-clean (`uniffi` feature off by default; fauna-wasm already
+# depends on it) — same posture as fauna-client-personalization.
+fauna-client-moderation = { path = "../fauna-client-moderation" }
+
+# Gate-to-tier compose + gated-post unlock (`ui/feed.md` § Encryption at rest;
+# monetization.md § Pillars 2+3): period-key custody reads + the
+# `key_blob.get` / `tiers.list` thin calls. wasm-clean (it backs the web SPA's
+# subscriptions seam) — same default-features posture as fauna-client-config.
+fauna-client-subscriptions = { path = "../fauna-client-subscriptions" }
+
+# The gated-compose attachment seal (`FeedManager::seal_compose_attachment`):
+# `process_and_seal_with_mime` under `Audience::RestrictedPost { .. Period }`.
+# It lives HERE, not behind the FFI, because `ui/media.md` § Encryption at rest
+# ratifies that a tier's period key must never cross the FFI/wasm boundary —
+# `fauna_ffi::FfiUploadAudience` expresses only the two client-key audiences, so
+# the restricted seal has to be a shared-Rust seal-by-id helper.
+#
+# `default-features = false` + `process_media` is the minimal honest request:
+# the curated pipeline (EXIF/IPTC strip, MIME sniff, thumbnail) cross-compiles
+# to wasm32, and the web SPA already carries this exact feature set through
+# `fauna-wasm`'s own edge — so this adds no weight to the wasm bundle. The
+# heavier `c2pa-detect` reaches native builds through `fauna-ffi` /
+# `fauna-client`'s own edges via feature unification, as it already did.
+fauna-media = { path = "../fauna-media", default-features = false, features = [
+    "process_media",
+] }
+
+# The gated-media unseal holds one derived per-post key per unlocked post
+# (`FeedManager::sealed_media_keys`), so it wants the same `Zeroizing` wrapper
+# the period key it derives from already travels in (`fauna-client`'s
+# `PeriodMediaSeal`). Pure-Rust and no_std-capable — wasm-clean like every
+# dep above it; already in the workspace graph via fauna-client / fauna-mls.
+zeroize = { workspace = true }
+
+# wasm: forward the `js` feature so fauna-core's js-sys time/getrandom backend
+# resolves (mirrors fauna-client-feed / -posts / -bridges).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-client-core = { path = "../fauna-client-core", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# `PostGetReply.body` / `PostCreateRequest.body` are `serde_bytes::ByteBuf`;
+# the manager's mock transport constructs them. Direct dep matching
+# fauna-protocol (not a workspace dependency).
+serde_bytes = "0.11"
+# The gated-compose tests hash the sealed blob the way the nest's blob store
+# does (content addressing), asserting `submit_gated_post`'s echo check.
+blake3 = { workspace = true }
+# The shared `block_on` single-poll test executor — wasm-clean (see that
+# crate's own docs), so it keeps this crate's dev-deps wasm32-testable.
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# The room-post unlock tests implement `fauna_core::room_post::RoomPostKeys`,
+# an `async_trait` seam; same direct-version form fauna-core itself uses.
+async-trait = "0.1"
+# The door-exact in-memory period-key store (`period_keys::MemoryPeriodKeyStore`)
+# the gated compose / unlock / sell-post tests install on the manager.
+fauna-client-subscriptions = { path = "../fauna-client-subscriptions", features = ["test-helpers"] }

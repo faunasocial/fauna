@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.SettingsWebPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+      Settings → Web sub-page (web-content-hosting.md § Implementation status → Client
+      authoring UI, Slice 4; ui.yaml web-settings). The per-user subdomain opt-in: a
+      non-optimistic toggle (renders the nest-confirmed echo, state mirrored to HelpText so
+      the e2e reads it via get_attr(id,"state")), the live https://<handle>.<domain>/ URL or
+      a disabled reason, and a static content explainer. A dumb renderer of the testable
+      FaunaApp.Core WebSettingsViewModel over the shared fauna_client_web::WebClient (UniFFI
+      FfiWebClient); all URL / reserved-label logic lives in shared Rust (priority #2). No
+      ConfigureAwait(false) in the handlers (off-thread bound-state mutation throws a silent
+      COMException). Lifts the linux reference apps/fauna-linux/src/settings/web.rs; mirrors
+      the SettingsMailPage host + MailSettingsPanel toggle idiom.
+    -->
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="24" MaxWidth="600" HorizontalAlignment="Left">
+
+            <controls:CopyableInfoBar x:Name="ErrorBar"
+                     Severity="Error" IsOpen="False" IsClosable="True" />
+
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=web_settings/title}" />
+
+            <StackPanel Spacing="4">
+                <ToggleSwitch x:Name="SubdomainToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.WebSettingsSubdomainToggle}"
+                              Header="{loc:Localize Key=web_settings/subdomain_toggle_label}"
+                              Toggled="SubdomainToggle_Toggled" />
+                <TextBlock Opacity="0.6" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=web_settings/subdomain_toggle_subtitle}" />
+                <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7"
+                           Text="{loc:Localize Key=web_settings/subdomain_url_label}" />
+                <TextBlock x:Name="SubdomainUrl"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.WebSettingsSubdomainUrl}"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.WebSettingsContentInfo}"
+                       Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=web_settings/content_info}" />
+
+            <!-- Published-posts management section (web-content-hosting.md
+                 § Published-post management, windows leg). Rows are built
+                 imperatively (SettingsWebPage.RenderPublishedPosts) — this page's
+                 established style, and simplest for a list whose row count and
+                 per-row enabled-state both change on every hydrate/toggle. -->
+            <StackPanel Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=web_settings/published_posts_title}" />
+                <TextBlock x:Name="PublishedPostsEmpty"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.WebPublishedPostsEmpty}"
+                           Opacity="0.7" Visibility="Collapsed"
+                           Text="{loc:Localize Key=web_settings/published_posts_empty}" />
+                <StackPanel x:Name="PublishedPostsList"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.WebPublishedPostsList}"
+                            AutomationProperties.Name="web-published-posts-list"
+                            Spacing="8" Visibility="Collapsed" />
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

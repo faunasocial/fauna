@@ -1,0 +1,367 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FaunaApp.Controls.DmMessageBubble"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:helpers="using:FaunaApp.Helpers"
+    xmlns:controls="using:FaunaApp.Controls"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- SelectionRing: the SearchNav.Mail deep-link mark (conversations.md §
+         The selected message) — an amber #F59E0B ring, matching linux's/
+         android's cross-app-consistent treatment. Toggled in Bind() via
+         BorderBrush/Thickness rather than fill, so it reads as a "you are
+         here" outline rather than obscuring the bubble's own content. Wraps
+         every render arm (deleted/tombstone/muted/collapsed/live), since the
+         mark must apply uniformly — a mail hit can point at a since-withheld
+         message, which is exactly the case most needing it. -->
+    <Border x:Name="SelectionRing" CornerRadius="6" BorderThickness="0" Margin="0,1">
+    <StackPanel Padding="4,8" Spacing="4">
+      <!-- Deleted tombstone placeholder (conversations.md § Reactions & message
+           delete). Shown iff the message is deleted; Bind() collapses the body,
+           attachments, reply row, actions button and reaction pills and returns
+           early so none of them carry a UIA peer (the e2e then counts 0 for a
+           deleted message's body/actions/pills). Collapsed → no UIA peer on a
+           live message. -->
+      <TextBlock
+          x:Name="DeletedPlaceholder"
+          AutomationProperties.AutomationId="{x:Bind ids:Ids.DmMessageDeleted}"
+          Text="{loc:Localize Key=conversations/detail/message_deleted}"
+          Visibility="Collapsed"
+          FontStyle="Italic"
+          Opacity="0.6"
+          FontSize="12" />
+      <!-- Legal-takedown tombstone placeholder (moderation.md § Categories & enforcement
+           item 1). Shown iff the nest took this message down under a legal obligation
+           (MessageSnapshot.legalTakedownRef set); Bind() sets its Text to the shared
+           localized tombstone and collapses the body/attachments/actions/pills like the
+           deleted tombstone, returning early. Presentation-only (no ui.yaml id — the paint
+           lives inside the existing bubble scope, like the post quoted-post tombstone),
+           mirroring web's `message-legal-takedown` div + linux message_bubble.rs. -->
+      <TextBlock
+          x:Name="LegalTakedownPlaceholder"
+          Visibility="Collapsed"
+          FontStyle="Italic"
+          Opacity="0.6"
+          FontSize="12"
+          TextWrapping="Wrap" />
+      <!-- REGION placeholder (region-blocking.md § The blocked render and the
+           transparency surface): the region content policy withholds this message.
+           The app's frame naming the region and its authority, the authority's
+           name, and its reason VERBATIM, in place of the body; a `collapse` adds
+           the reveal (the content-policy reveal set, shared), a `block` has none.
+           Bind() paints it AHEAD of every family/muted arm (SocialRenderGate's
+           RegionWithheld) and collapses the live surfaces like the tombstones.
+           Bind() sets each Name beside its AutomationId so FlaUI realizes the peers. -->
+      <StackPanel
+          x:Name="RegionPlaceholderPanel"
+          Visibility="Collapsed"
+          Spacing="2">
+        <TextBlock
+            x:Name="RegionNoticeText"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.RegionBlockedNotice}"
+            FontStyle="Italic"
+            Opacity="0.6"
+            FontSize="12"
+            TextWrapping="Wrap" />
+        <TextBlock
+            x:Name="RegionAuthorityText"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.RegionBlockedAuthority}"
+            Opacity="0.6"
+            FontSize="12"
+            TextWrapping="Wrap" />
+        <TextBlock
+            x:Name="RegionReasonText"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.RegionBlockedReason}"
+            Opacity="0.6"
+            FontSize="12"
+            TextWrapping="Wrap" />
+        <Button
+            x:Name="RegionRevealButton"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.RegionCollapsedRevealButton}"
+            Content="{loc:Localize Key=region/reveal_button}"
+            Visibility="Collapsed"
+            HorizontalAlignment="Left"
+            Margin="0,2,0,0"
+            Padding="8,2"
+            FontSize="12"
+            Click="RegionRevealButton_Click" />
+      </StackPanel>
+      <!-- Content-policy BLOCK placeholder (family-safety.md § Content policy).
+           Shown iff the shared render verdict for this message's post-decrypt
+           labels is `block` — the guardian's per-category floor. Bind() collapses
+           the body/attachments/actions/pills like the tombstones above and returns
+           early. NO reveal button accompanies it: SocialRenderGate resolves `block`
+           ahead of the muted arm AND ahead of every reveal set, so a blocked message
+           can never be revealed past the floor. It NAMES the policy rather than
+           silently disappearing, and `content-policy-blocked-notice` is the one
+           ui.yaml id this pillar renders (mirrors linux message_bubble.rs + web
+           `+page.svelte`'s content-blocked div + android's ConversationDetailScreen).
+           Name is set alongside AutomationId so FlaUI realizes the peer
+           (reference_winui_flaui_datatemplate_name). -->
+      <TextBlock
+          x:Name="ContentBlockedPlaceholder"
+          AutomationProperties.AutomationId="{x:Bind ids:Ids.ContentPolicyBlockedNotice}"
+          AutomationProperties.Name="{loc:Localize Key=family/content_blocked_notice}"
+          Text="{loc:Localize Key=family/content_blocked_notice}"
+          Visibility="Collapsed"
+          FontStyle="Italic"
+          Opacity="0.6"
+          FontSize="12"
+          TextWrapping="Wrap" />
+      <!-- Content-policy COLLAPSE placeholder + reveal (family-safety.md § Content
+           policy). The revealable twin of the block above: same collapse, but a
+           one-tap session-local "show anyway" (ContentPolicyCache's id-keyed set —
+           its OWN set, not the muted arm's). Presentation-only, no ui.yaml id — the
+           linux leg's shape (v1 e2e drives the `block` case; the collapse reveal is
+           a user affordance). -->
+      <TextBlock
+          x:Name="ContentCollapsedPlaceholder"
+          Text="{loc:Localize Key=family/content_collapsed_notice}"
+          Visibility="Collapsed"
+          FontStyle="Italic"
+          Opacity="0.6"
+          FontSize="12"
+          TextWrapping="Wrap" />
+      <Button
+          x:Name="ContentRevealButton"
+          Content="{loc:Localize Key=family/content_reveal_button}"
+          Visibility="Collapsed"
+          HorizontalAlignment="Left"
+          Margin="0,2,0,0"
+          Padding="8,2"
+          FontSize="12"
+          Click="ContentRevealButton_Click" />
+      <!-- Muted-word placeholder + reveal (moderation.md § Muted keywords;
+           content-moderation-and-ranking.md § Q3). Shown iff the decrypted body
+           matched the client-cached muted-keyword list and hasn't been revealed
+           this session (DmMessageView.Muted); Bind() collapses the body/
+           attachments/actions/pills like the deleted tombstone and returns
+           early. Unlike Deleted/LegalTakedown this is NOT permanent — a
+           hide/collapse the reveal button undoes for the session, mirroring
+           the dm-message-deleted tombstone + the load-remote-content-button
+           reveal shape exactly. -->
+      <TextBlock
+          x:Name="MutedPlaceholder"
+          AutomationProperties.AutomationId="{x:Bind ids:Ids.DmMessageMuted}"
+          Text="{loc:Localize Key=conversations/detail/muted_word}"
+          Visibility="Collapsed"
+          FontStyle="Italic"
+          Opacity="0.6"
+          FontSize="12" />
+      <Button
+          x:Name="MutedRevealButton"
+          AutomationProperties.AutomationId="{x:Bind ids:Ids.DmMessageMutedRevealButton}"
+          Content="{loc:Localize Key=conversations/detail/muted_reveal}"
+          Visibility="Collapsed"
+          HorizontalAlignment="Left"
+          Margin="0,2,0,0"
+          Padding="8,2"
+          FontSize="12"
+          Click="MutedRevealButton_Click" />
+      <Grid x:Name="HeaderRow">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8">
+            <TextBlock
+                x:Name="SenderText"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.DmSender}"
+                FontWeight="SemiBold"
+                FontSize="12" />
+            <TextBlock
+                x:Name="SubjectText"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.DmSubject}"
+                Visibility="Collapsed"
+                FontWeight="SemiBold"
+                FontSize="13" />
+            <TextBlock
+                x:Name="EncryptedBadge"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.EncryptedBadge}"
+                Text="&#xE72E;" FontFamily="Segoe MDL2 Assets"
+                FontSize="10"
+                VerticalAlignment="Center"
+                Visibility="Collapsed"
+                ToolTipService.ToolTip="{loc:Localize Key=conversations/detail/badge_encrypted}" />
+            <TextBlock
+                x:Name="VerifiedBadge"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.VerifiedBadge}"
+                Text="&#xE73E;" FontFamily="Segoe MDL2 Assets"
+                FontSize="10"
+                Visibility="Collapsed"
+                VerticalAlignment="Center" />
+            <TextBlock
+                x:Name="SignedBadge"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.SignedBadge}"
+                Text="&#xED2E;" FontFamily="Segoe MDL2 Assets"
+                FontSize="10"
+                Visibility="Collapsed"
+                VerticalAlignment="Center" />
+            <TextBlock
+                x:Name="SignatureText"
+                FontSize="10"
+                Opacity="0.5"
+                VerticalAlignment="Center" />
+        </StackPanel>
+        <!-- Per-message bubble timestamp (today → local HH:MM / Yesterday /
+             weekday / older → date), formatted by the shared bucketer
+             ValueFormat.ConversationTimestamp (value-formatting.md
+             § Conversation timestamp). Right-aligned, muted metadata. -->
+        <TextBlock
+            x:Name="MessageTimestampText"
+            Grid.Column="1"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.DmMessageTimestamp}"
+            FontSize="10"
+            Opacity="0.5"
+            Margin="8,0,0,0"
+            VerticalAlignment="Center" />
+      </Grid>
+        <!-- In-bubble reply-quote card (render-model.md § D2 QuotedMessage). Shown ABOVE
+             the body iff the manager folded a RenderBlock.QuotedMessage into this (reply)
+             message's document — its parent's author + a ≤2-line ellipsized snippet,
+             populated imperatively in RenderQuote off DocumentRenderer.QuotedMessage. A muted
+             accent-barred card. Collapsed → no UIA peer, so the e2e counts 0 on a non-reply
+             (and on a deleted message; the deleted early-return collapses it too). -->
+        <Border
+            x:Name="QuoteCard"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.DmMessageQuote}"
+            Visibility="Collapsed"
+            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+            BorderBrush="{ThemeResource AccentControlElevationBorderBrush}"
+            BorderThickness="3,0,0,0"
+            CornerRadius="2"
+            Padding="8,4"
+            Margin="0,0,0,2"
+            HorizontalAlignment="Left">
+          <StackPanel Spacing="1">
+            <TextBlock x:Name="QuoteAuthorText" FontSize="11" FontWeight="SemiBold" Opacity="0.7" />
+            <TextBlock x:Name="QuoteSnippetText" FontSize="12" Opacity="0.6"
+                       TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxLines="2" />
+          </StackPanel>
+        </Border>
+        <!-- The body: the document painted as its shared line-run segments — one TextBlock
+             for an ordinary message, a virtualizing ItemsRepeater of 16-line TextBlocks for a
+             body with a block over the shared budget (a multi-megabyte plain-text mail), so
+             only the on-screen runs ever lay out (render-model.md § Implementation status
+             today, the windows line-run entry). The element id sits on this control, whose
+             automation peer answers the Value pattern with the DOCUMENT's plaintext — the
+             `dm-message-text` read is the document, never the painted widgets. -->
+        <controls:DocumentBodyView
+            x:Name="BodyView"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.DmMessageText}" />
+        <!-- Body remote images (render-model.md § D3 + § Implementation status; apps/tui.md
+             § Rendering): one `doc-remote-image` per RenderBlock::RemoteImage, painted just
+             under the body — the SAME "own element ID ⇒ painted by the page" rule
+             link-preview-card/dm-attachment-image already follow. DocumentRenderer's body
+             walker arm is inert for RemoteImage; RenderRemoteImages fills this panel from the
+             shared RemoteImageCardModel list (mirrors RenderLinkPreview / RenderAttachments). -->
+        <StackPanel x:Name="RemoteImagesList" />
+        <!-- D4 link-preview cards (render-model.md § D4) — the SAME card the feed post
+             paints, for a bubble whose body carries one or more bare URLs. The producer folds
+             a LinkPreview after EACH standalone bare-URL paragraph, so this is a PANEL of N
+             cards, not one: RenderLinkPreview fills it from the shared LinkPreviewCardModel
+             list both surfaces derive from, so the feed and the bubble can't drift
+             (priority #2/#4). Until 2026-08-02 the bubble had a single fixed card slot fed by
+             a FirstOrDefault twin — the lone-outlier gap in render-model.md § Implementation
+             status. Empty panel → no UIA peers, so the e2e counts 0 on a non-preview message
+             (and a deleted one — CollapseAllArms clears it), exactly like AttachmentsList.
+             Each card's Name is set in RenderLinkPreview (a bare AutomationId-only Border is
+             UIA-pruned — reference_winui_flaui_datatemplate_name), like QuoteCard. -->
+        <StackPanel x:Name="LinkPreviewCards" />
+        <!-- html-mail Slice 3: per-message reveal for remote images. Shown only
+             while the body has ≥1 blocked remote image not yet revealed; clicking
+             it is the SOLE point an inbound remote image is fetched. Collapsed → no
+             UIA peer, so the e2e counts 0 once revealed (privacy perimeter:
+             html-mail.md § Security & privacy). -->
+        <Button
+            x:Name="LoadRemoteContentButton"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.LoadRemoteContentButton}"
+            Content="{loc:Localize Key=conversations/detail/load_remote_content}"
+            Visibility="Collapsed"
+            HorizontalAlignment="Left"
+            Margin="0,2,0,0"
+            Padding="8,2"
+            FontSize="12"
+            Click="LoadRemoteContentButton_Click" />
+        <!-- Content label badge (spam/phishing/NSFW) — the highest-confidence entry of
+             MessageSnapshot.labels, styled entirely from the shared content_label_style map
+             (icon/label/tint/accent; moderation.md § Per-row badge data path), populated
+             imperatively in RenderContentLabel (mirrors RenderLinkPreview) since this bubble
+             renders imperatively, not via x:Bind. -->
+        <Border
+            x:Name="ContentLabelBadgeBorder"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.ContentLabelBadge}"
+            CornerRadius="4" Padding="4,1"
+            HorizontalAlignment="Left"
+            Margin="0,2,0,0"
+            Visibility="Collapsed">
+            <StackPanel Orientation="Horizontal" Spacing="3">
+                <TextBlock x:Name="ContentLabelIconText" FontSize="10" VerticalAlignment="Center" />
+                <TextBlock x:Name="ContentLabelText" FontSize="10" VerticalAlignment="Center" />
+            </StackPanel>
+        </Border>
+        <!-- Attachments — one indexed dm-attachment-image[i] / dm-attachment-file[i]
+             per first-class Attachment block the manager folded into
+             MessageSnapshot.document after the body (render-model.md § D2), built
+             imperatively in DmMessageBubble.RenderAttachments off the document (NOT a
+             sibling field, NOT the legacy [attachment:HASH:mime] body-marker).
+             Non-virtualizing StackPanel so the e2e count-all over the indexed ids is
+             bounded (conversations.md § Attachments; reference_winui_flaui_datatemplate_name). -->
+        <StackPanel x:Name="AttachmentsList" Spacing="6" HorizontalAlignment="Left" />
+        <!-- Reaction pills (conversations.md § Reactions & message delete) — one
+             dm-reaction-pill per ReactionGroup the manager folded onto the snapshot
+             (emoji + count, own/reactedByMe highlighted), tap-to-toggle. Built
+             imperatively in RenderReactionPills into this NON-VIRTUALIZING StackPanel
+             so the e2e count-all over dm-reaction-pill is bounded, and each pill
+             carries AutomationProperties.Name (FlaUI counts 0 on a row without one —
+             reference_winui_flaui_datatemplate_name). -->
+        <StackPanel
+            x:Name="ReactionPillsList"
+            Orientation="Horizontal"
+            Spacing="4"
+            HorizontalAlignment="Left" />
+        <StackPanel x:Name="ActionsRow" Orientation="Horizontal" Spacing="4" HorizontalAlignment="Left">
+            <Button
+                x:Name="ReplyButton"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.DmReplyButton}"
+                Content="&#xE97A;"
+                FontFamily="Segoe MDL2 Assets"
+                FontSize="10"
+                Padding="4,2"
+                Click="ReplyButton_Click"
+                ToolTipService.ToolTip="{loc:Localize Key=common/reply}" />
+            <!-- Reply-all: seeds the editable To line with every participant but
+                 self. Collapsed unless ShowReplyAll (mail = supports_recipient_selection)
+                 so the e2e counts 0 on a FaunaMls thread. -->
+            <Button
+                x:Name="ReplyAllButton"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.DmReplyAllButton}"
+                Content="&#xE8C2;"
+                FontFamily="Segoe MDL2 Assets"
+                FontSize="10"
+                Padding="4,2"
+                Visibility="Collapsed"
+                Click="ReplyAllButton_Click"
+                ToolTipService.ToolTip="{loc:Localize Key=conversations/unified/reply_all}" />
+            <!-- The "⋯" per-message actions button (conversations.md § Reactions &
+                 message delete). Shown iff ≥1 action is available (reactions OR an
+                 own-message delete); its MenuFlyout (dm-message-actions-menu) is built
+                 imperatively in BuildActionsFlyout per the thread's capabilities +
+                 the message's isOwn. Always-enabled (no IsEnabled bind — a disabled
+                 WinUI button can't be FlaUI-Invoked, reference_windows_disabled_button_no_invoke);
+                 capability-gated off → Collapsed (no UIA peer). -->
+            <Button
+                x:Name="MessageActionsButton"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.DmMessageActionsButton}"
+                Content="&#xE712;"
+                FontFamily="Segoe MDL2 Assets"
+                FontSize="10"
+                Padding="4,2"
+                Visibility="Collapsed"
+                ToolTipService.ToolTip="{loc:Localize Key=conversations/detail/message_actions}" />
+        </StackPanel>
+    </StackPanel>
+    </Border>
+</UserControl>

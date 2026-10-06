@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.SettingsMemberReviewPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+      Settings to Members To Review (succession-aftermath.md § Propagation,
+      Removing a flagged member): the
+      PERMANENT half of the post-succession unattested-member review. Holds
+      whatever the ephemeral kit-side pass (a separate arm, NOT built here;
+      gated behind windows' identity-stolen ceremony legs) leaves unanswered. No sweep gate on
+      purpose: the only condition is whether anything is open, so this page is
+      reachable at all times and empty most of the time; that is the design,
+      not a gap. Reference: apps/fauna-tui/src/settings/member_review.rs.
+    -->
+
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="16" MaxWidth="720" HorizontalAlignment="Left">
+
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error" IsOpen="False" IsClosable="True" />
+
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=settings/member_review_page/title}" />
+
+            <!-- The lead line the ephemeral pass never has to say: chrome,
+                 not an id (ui.yaml scopes none for it); only while something
+                 is open, same gate as the rows below. -->
+            <TextBlock x:Name="Intro" TextWrapping="Wrap" Visibility="Collapsed"
+                       Text="{loc:Localize Key=settings/member_review_page/intro}" />
+
+            <!-- Not a safety verdict: an empty list says nothing about whether
+                 the account is safe (succession-aftermath.md § Implementation
+                 status today). Hidden while loading too: "nobody asked this
+                 nest to hold anything" must never stand in for "the read has
+                 not answered yet". -->
+            <TextBlock x:Name="EmptyState"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.MemberReviewEmpty}"
+                       Opacity="0.6" TextWrapping="Wrap" Visibility="Collapsed"
+                       Text="{loc:Localize Key=settings/member_review_page/empty}" />
+
+            <ItemsControl x:Name="ReviewList">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Orientation="Vertical" Spacing="8" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:MemberReviewRow">
+                        <!-- The row's own AutomationId carries BOTH the text an
+                             e2e get_text reads and the container the keep/remove
+                             buttons are scoped inside (mirrors nostr-bunker-app-item:
+                             AutomationId + a dynamic Name, no separate static
+                             Name — reference_windows_flaui_gettext_dynamic_label_no_name). -->
+                        <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.MemberReviewRow}"
+                                AutomationProperties.Name="{x:Bind DisplayText}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1" CornerRadius="6" Padding="12">
+                            <StackPanel Spacing="8">
+                                <TextBlock Text="{x:Bind DisplayText}" TextWrapping="Wrap" />
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MemberReviewKeepButton}"
+                                            AutomationProperties.Name="{x:Bind DisplayText}"
+                                            Tag="{x:Bind Person}"
+                                            Content="{loc:Localize Key=settings/recovery_kit/review_keep}"
+                                            Click="Keep_Click" />
+                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MemberReviewRemoveButton}"
+                                            AutomationProperties.Name="{x:Bind DisplayText}"
+                                            Tag="{x:Bind Person}"
+                                            Content="{loc:Localize Key=settings/recovery_kit/review_remove}"
+                                            Click="Remove_Click" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

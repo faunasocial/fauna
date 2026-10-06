@@ -1,0 +1,14 @@
+[package]
+name = "fauna-wasm-panic-hook"
+description = "Tiny panic-hook installer shared by every wasm chunk — see src/lib.rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# wasm32-scoped on purpose: this crate builds only for wasm32, and a plain
+# [dependencies] table would leak its wasm-only feature activations into every
+# HOST build's resolution under resolver.feature-unification = "workspace".
+# Add new deps here, never in a plain [dependencies] table.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen.workspace = true
+web-sys = { version = "0.3", features = ["console"] }

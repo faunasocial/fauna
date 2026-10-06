@@ -1,0 +1,500 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  Fauna for Windows — MSI Installer (WiX v6)
+
+  Build (the -ext flags are required — Util + UI + Firewall extensions):
+    wix build -arch x64 -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext \
+      -ext WixToolset.Firewall.wixext \
+      -o Fauna-Setup-x64.msi installer/*.wxs \
+      -d SyncBin=stage/x64/fauna-sync-agent.exe \
+      -d TuiBin=stage/x64/fauna-tui.exe \
+      -d NestBin=stage/x64/fauna-nest-svc.exe \
+      -d BridgeBin=stage/x64/fauna-bridge-svc.exe \
+      -d ShellDll=stage/x64/fauna_shell.dll \
+      -d IconDir=stage/x64/icons/ \
+      -d AppDir=stage/x64/app/
+
+  (fauna-ctl no longer exists — no CtlBin var; see § Feature Tree in
+   docs/goal/architecture/installers/windows.md. The Bridge/MailBridge -d vars
+   are also required — see ServiceBridge.wxs.)
+
+  All binary paths are passed via -d variables so the same .wxs files
+  work for both x64 and arm64 builds.
+-->
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package
+    Name="Fauna"
+    Manufacturer="Fauna Social"
+    Version="0.1.2"
+    UpgradeCode="4a7b8c00-f1e2-4d3a-b5c6-000000000001"
+    Scope="perMachine"
+    InstallerVersion="500">
+
+    <!-- AllowSameVersionUpgrades: every dev build (and any same-version hotfix
+         reinstall) carries the current Version above with a fresh auto ProductCode but a
+         stable UpgradeCode. Without this, a same-version install is NOT detected
+         as an upgrade, so RemoveExistingProducts never runs and the prior install
+         lingers — producing TWO "Fauna" entries in Apps & Features. With it, a
+         same-version reinstall is treated as a major upgrade and replaces the old
+         product (a single ARP entry). Production version bumps upgrade normally
+         regardless. (WiX may emit ICE61 for this; it is the sanctioned same-version
+         upgrade pattern.) -->
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of Fauna is already installed."
+      AllowSameVersionUpgrades="yes"
+      Schedule="afterInstallInitialize" />
+
+    <!-- CompressionLevel="high" → LZX-high cabinet (vs the default mszip/medium);
+         ~10-20% smaller MSI on this code-heavy payload, build-time cost only. -->
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- ── UI ── -->
+    <ui:WixUI Id="WixUI_FeatureTree" />
+
+    <!-- ── Force-kill the INSTALL-FOLDER FaunaApp only if Restart Manager couldn't: scoped last-resort net ──
+      FaunaApp.exe can linger as a windowless background process, locking FaunaApp.exe and
+      every DLL under AppFolder. The built-in Restart Manager runs at InstallValidate (1400)
+      and gracefully shuts down COOPERATING current-version instances there — session-end
+      persists the user's draft (Close-to-tray included) and `RegisterApplicationRestart`
+      relaunches the app afterward (app-side Slice 2c; apps/windows.md § App Lifecycle).
+      RM cannot shut a windowless process down, though, so this CA is now the pure force-only
+      net for whatever RM leaves behind: non-cooperating zombies and
+      cross-session instances (observed 2026-06-19: 3 stuck FaunaApp processes blocked an
+      upgrade, before the app-side cooperation existed).
+
+      SCOPED TO [INSTALLFOLDER] — do NOT kill by image name. Reproduced + measured
+      2026-06-19: a lingering instance keeps reporting window title "Fauna" (not "N/A"), so
+      no title filter can spare an in-use window; and `taskkill /IM FaunaApp.exe` would kill
+      EVERY FaunaApp.exe on the machine — including instances a user runs from another
+      location (and, on a dev box, other working trees' builds). So this matches only
+      FaunaApp.exe whose ExecutablePath is under [INSTALLFOLDER] — the app THIS MSI manages —
+      and leaves any FaunaApp launched from elsewhere untouched. On a real machine that is
+      exactly the one installed app, so the path scope changes nothing there; it just makes
+      the action correct (an installer should only close its own app) and dev-box-safe.
+
+      Runs AFTER InstallValidate (still an *immediate* CA — a deferred CA can only read
+      [CustomActionData], not [INSTALLFOLDER] directly, and there is no reason to thread it
+      through here), so RM gets the first, graceful crack at a cooperating app before this CA
+      ever runs — while still landing ahead of the major-upgrade RemoveExistingProducts
+      (~1501), RemoveFiles (3500) and InstallFiles (4000), which need the lock clear. FORCE
+      ONLY — no WM_CLOSE, no Start-Sleep: that graceful step used to run first (when this CA
+      itself sat Before InstallValidate) and pre-empted RM's own graceful close; it is gone
+      now that RM owns graceful. What used to be tracked as follow-up work for the Windows
+      client — "once FaunaApp autosaves drafts + handles WM_CLOSE/Restart-Manager cleanly +
+      is single-instance + exits on close, the graceful step closes it losslessly and the
+      force step finds nothing" — is now DONE (app-side Slice 2c); this softened CA is the
+      result. util:CloseApplication was rejected: its CA auto-schedules at ~3999, after every
+      step that touches the locked files.
+
+      Uses Windows PowerShell because taskkill has no path filter (and WMIC is
+      deprecated/absent on current Windows 11). The `if($d.Length -gt 3)` guard makes an
+      empty/unresolved [INSTALLFOLDER] a no-op rather than an everything-match. The script
+      uses only single-quotes, `-and`/`-gt`, and `|` (no double-quotes, no `&`, no `[...]`
+      except [INSTALLFOLDER]) so it survives MSI formatting + XML escaping with only the
+      outer -Command quotes escaped. Return="ignore" tolerates a no-match — the normal
+      first-install case, and now also the common case where RM already closed the app. -->
+    <CustomAction Id="KillFaunaApp"
+                  Directory="System64Folder"
+                  ExeCommand="[System64Folder]WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command &quot;$d='[INSTALLFOLDER]'; if($d.Length -gt 3){Get-CimInstance Win32_Process|Where-Object{$_.Name -eq 'FaunaApp.exe' -and $_.ExecutablePath -and $_.ExecutablePath.ToLower().StartsWith($d.ToLower())}|ForEach-Object{Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue}}&quot;"
+                  Execute="immediate"
+                  Return="ignore" />
+
+    <!-- ── Force-kill the INSTALL-FOLDER sync agent — the sync-agent counterpart of KillFaunaApp
+      (2026-07-17, live incident) ──
+      The sync agent is a PER-USER logon agent (Run-key launched, not a service — see the Sync
+      feature below), so it survives an MSI upgrade unless something kills it: the Run key only
+      fires at the NEXT logon, and — unlike FaunaApp — the agent has no lifecycle window at all, so
+      the built-in Restart Manager can NEVER close it (RM only reaches processes holding a visible
+      top-level window; a windowless agent is invisible to it — the identical reasoning that makes
+      KillFaunaApp's own force-net necessary for non-cooperating FaunaApp stragglers, except here there
+      is no cooperative path to try first). Observed live 2026-06-16→07-17: the prior day's agent ran
+      a full day past the upgrade, and — hitting the not-yet-fixed pre-persistence teardown path —
+      unregistered the sync roots and destroyed un-hydrated placeholders out from under the new
+      install. So this CA is not a "net after RM tries" like KillFaunaApp; it IS the only mechanism,
+      unconditionally, for this binary. Same [INSTALLFOLDER]-path scope and rationale as KillFaunaApp
+      (never kill a sibling dev checkout's own agent by image name alone); relaunch is
+      app-side (SyncAgentLauncher, on next app start / logon), not this CA's job. -->
+    <CustomAction Id="KillFaunaSync"
+                  Directory="System64Folder"
+                  ExeCommand="[System64Folder]WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command &quot;$d='[INSTALLFOLDER]'; if($d.Length -gt 3){Get-CimInstance Win32_Process|Where-Object{$_.Name -eq 'fauna-sync-agent.exe' -and $_.ExecutablePath -and $_.ExecutablePath.ToLower().StartsWith($d.ToLower())}|ForEach-Object{Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue}}&quot;"
+                  Execute="immediate"
+                  Return="ignore" />
+
+    <!-- ── Orphan shell-DLL cleanup (Path 1 follow-on, 2026-06-26; delete-first refinement
+         2026-06-27) — reclaim stale versioned fauna_shell_*.dll: immediate delete, reboot-delete
+         fallback only for the genuinely-locked ──
+      Path 1's shell DLL is `Permanent` (MSI never removes it — that is exactly what keeps the
+      in-use file untouchable so Explorer never strands). The cost: a version-bump upgrade
+      leaves the PRIOR `fauna_shell_<oldver>.dll`, and an uninstall leaves the current one, as
+      inert orphans in %ProgramFiles%\Fauna\ (their CLSIDs are gone, so they load nothing). We
+      reclaim them in TWO strand-safe tiers:
+      (1) **Try a direct `Remove-Item` first.** A NOT-currently-loaded orphan — a leftover from a
+          prior uninstall, the fresh-install-over-leftovers case — deletes immediately with NO
+          reboot. A failed delete on a locked file is a harmless no-op: we NEVER force-close
+          Explorer to free it (that is the B1 strand).
+      (2) **Reboot-delete fallback for whatever survived the delete** (genuinely locked — Explorer
+          still holds the just-superseded DLL). `MoveFileEx(path, NULL, MOVEFILE_DELAY_UNTIL_REBOOT)`
+          semantics: append `\??\<path>` + an empty target to
+          HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\PendingFileRenameOperations, so
+          Windows deletes it at the next reboot. (The USER's own Explorer-restart / sign-in — done
+          anyway to activate the new ext — also releases the lock, so the practical cost is a
+          sign-out, never a forced reboot.)
+      Neither tier ever opens/locks/removes the IN-USE DLL, so the Restart Manager is NEVER engaged.
+      WiX `RemoveFile` is intentionally NOT used — it routes through the RM-aware RemoveFiles
+      standard action and would re-strand on the in-use orphan (design tracked internally;
+      installers/windows.md § Shell Extension).
+
+      MUST be DEFERRED + Impersonate="no" (runs as LocalSystem). PendingFileRenameOperations lives
+      under HKLM\SYSTEM, which an IMMEDIATE CA CANNOT write — immediate CAs run impersonating the
+      installing user, NOT elevated to LocalSystem, even in a UAC-elevated per-machine install
+      (PROVEN live 2026-06-26: an immediate version silently wrote nothing; KillFaunaApp gets away
+      with immediate only because killing one's OWN processes needs no elevation).
+
+      Reads everything it needs from the REGISTRY + FILESYSTEM and uses NO MSI properties — so it
+      sidesteps the deferred-CA property-passing trap: a deferred *EXE* CA's `[CustomActionData]`
+      (and any `[PROPERTY]`) is formatted at schedule time, when CustomActionData does not yet exist,
+      so it resolves to EMPTY at runtime (PROVEN live 2026-06-26 — the script ran with `$cad=''` and
+      did nothing). Only deferred *DLL* CAs can read CustomActionData. Instead, this CA reads the
+      active shell DLL from a known overlay CLSID's InprocServer32 (kept in lockstep with
+      ShellExt.wxs) and schedules every OTHER fauna_shell_*.dll in that DLL's folder:
+      - install / upgrade: the CLSID points at the CURRENT DLL → keep it, reclaim prior versions /
+        leftover orphans. (Runs after WriteRegistryValues, so the CLSID is the just-installed one.)
+      - uninstall: the CLSID is already removed (RemoveRegistryValues precedes this) → keep nothing
+        → reclaim ALL fauna_shell_*.dll. Folder falls back to the default %ProgramFiles%\Fauna; a
+        non-default INSTALLFOLDER leaves its orphan on uninstall (harmless dead weight — accepted).
+      Condition `NOT UPGRADINGPRODUCTCODE` keeps it from running during a major upgrade's
+      RemoveExistingProducts of the OLD product, which (CLSID already gone) would wrongly schedule
+      the same-named DLL the new product is about to keep.
+
+      MoveFileEx is reached WITHOUT P/Invoke (Add-Type needs `[DllImport]`, an MSI `[..]` collision)
+      by writing PendingFileRenameOperations directly — the exact value MoveFileEx writes; the
+      REG_MULTI_SZ (path, '') delete-pairs round-trip correctly under Windows PowerShell 5.1
+      (verified 2026-06-26) and EXISTING entries are PRESERVED (append, never clobber — the OS keeps
+      its own pending ops there). Escaping contract: single-quotes only, `-ne`/`-gt`, `|`, no
+      double-quotes, no `&`, NO `[..]` at all, and NO EMPTY `{}` — MSI's Formatted-field processor
+      strips an empty brace group, so `catch{}` becomes `catch;` (a PowerShell parse error → exit 1,
+      PROVEN live 2026-06-27); hence no try/catch (use `-ErrorAction SilentlyContinue` + null-filter).
+      powershell.exe is given an
+      ABSOLUTE path: MSI's deferred-CA host does NOT search the working directory for the executable,
+      so a relative `WindowsPowerShell\v1.0\powershell.exe` fails with error 1314 even though the
+      Directory IS set as cwd (PROVEN live 2026-06-27 — all three earlier CA forms died here, not in
+      the script); and a deferred CA can't format [System64Folder] into the path. SystemRoot is
+      C:\Windows on every standard install; a non-standard root just makes this best-effort cleanup a
+      no-op (Return="ignore"). Return="ignore": a harmless orphan beats a failed install.
+
+      A prior uninstall (while Explorer held the
+      DLL) reboot-defers a delete-pair for it; a later same-version reinstall does NOT rewrite the
+      file (NeverOverwrite) and, before this fix, never revisited that pending pair either — so the
+      DLL that is now ACTIVE stays armed for silent deletion at the next reboot (observed live: THREE
+      stacked delete-pairs for the live DLL from three prior uninstalls). Before scheduling any new
+      deletes, the script now walks the existing PendingFileRenameOperations pairs and drops any pair
+      whose source equals the just-resolved $keep path — so a DLL this run decided to KEEP can never
+      carry a stale delete-pair forward. Pairing is tracked with a single carry-flag over a `foreach`
+      (no array indexing — this CA's escaping contract forbids `[..]` entirely, see below, and MSI's
+      Formatted-field pass would mangle `$raw[$i]`), matching the read side's own delete-pair shape
+      (source, ''). The write-back now fires whenever anything was pruned OR added, not just added. -->
+    <CustomAction Id="CleanShellDlls"
+                  Directory="System64Folder"
+                  ExeCommand="C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command &quot;$sm='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'; $reg='HKLM:\SOFTWARE\Classes\CLSID\{4a7b8c01-f1e2-4d3a-b5c6-d7e8f9a0b1c2}\InprocServer32'; $active=(Get-ItemProperty -Path $reg -ErrorAction SilentlyContinue).'(default)'; if($active){$dir=Split-Path -Parent $active; $keep=Split-Path -Leaf $active}else{$dir='C:\Program Files\Fauna'; $keep='_none_'}; if(Test-Path -LiteralPath $dir){$keepEntry='\??\'+(Join-Path $dir $keep); $raw=@(@((Get-ItemProperty -Path $sm -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations)|Where-Object{$_ -ne $null}); $cur=@(); $skip=$false; foreach($e in $raw){if($skip){$skip=$false}elseif($e -eq $keepEntry){$skip=$true}else{$cur=$cur+@($e)}}; $add=@(); Get-ChildItem -LiteralPath $dir -Filter 'fauna_shell_*.dll' -ErrorAction SilentlyContinue|Where-Object{$_.Name -ne $keep}|ForEach-Object{$p=$_.FullName; Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue; if(Test-Path -LiteralPath $p){$add=$add+@('\??\'+$p)+@('')}}; if($add.Count -gt 0 -or $cur.Count -ne $raw.Count){Set-ItemProperty -Path $sm -Name PendingFileRenameOperations -Value @($cur+$add) -Type MultiString}}&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!-- ── Sparse-package register / deregister (STEP E — the Win11 DEFAULT context menu) ──
+      An HKCR verb (ShellExt.wxs) surfaces only under "Show more options". The Windows 11
+      DEFAULT menu renders context-menu handlers ONLY from a component that carries PACKAGE
+      IDENTITY, which the (unpackaged) Fauna shell extension obtains from a manifest-only
+      MSIX "sparse package" (installer/sparse/, shipped as Fauna-Sparse.msix in
+      INSTALLFOLDER by ShellExt.wxs). There is NO MSI-native mechanism to register it, so
+      two custom actions do it, using the OFFICIAL per-machine sequence (MS Learn,
+      "grant-identity-to-nonpackaged-apps" § Per-Machine):
+        install:   Add-AppxPackage -Stage <msix> -ExternalLocation <installdir>   (stages +
+                   binds the external content) ; Add-AppxProvisionedPackage -Online
+                   -PackagePath <msix>          (provisions for all users)
+        uninstall: Remove-AppxProvisionedPackage -Online  (deprovision) ; Remove-AppxPackage
+                   -AllUsers                     (remove any per-user registration)
+      Uninstall MUST deregister, or a stale registration is left pointing at a deleted
+      external location (installers/windows.md § Menu placement).
+
+      BOTH are DEFERRED + Impersonate="no" (LocalSystem) — Add-/Remove-AppxProvisionedPackage
+      -Online is a MACHINE-WIDE operation that an immediate CA (which impersonates the
+      installing user, not elevated — PROVEN 2026-06-26 for CleanShellDlls) cannot perform.
+
+      They obey the SAME four deferred-CA traps CleanShellDlls documents above (each proven
+      live):
+        (1) A deferred EXE CA's [CustomActionData]/[PROPERTY] resolves to EMPTY at runtime,
+            so the register CA reads the install dir NOT from [INSTALLFOLDER] but from the
+            overlay CLSID's InprocServer32 (written by WriteRegistryValues) — the exact trick
+            CleanShellDlls uses. The .msix and external location both sit in that dir.
+        (2) powershell.exe by ABSOLUTE path (the deferred-CA host does not search cwd → a
+            relative path fails 1314). Windows PowerShell 5.1 (built in, always present — pwsh
+            is a separate install and cannot be assumed); its Appx + DISM modules cover all
+            four cmdlets. No Cert: drive is used, so the win-arm64 5.1 Cert:-drive gap is moot.
+        (3) Escaping contract: single-quotes only (no double-quotes inside the -Command),
+            no `&`, no `[..]` (MSI would substitute/empty it), no empty `{}` (MSI's
+            Formatted-field processor strips it into a parse error). Non-empty `{...}` groups
+            survive (as in CleanShellDlls's own `{4a7b8c01-…}` / ForEach-Object{…}).
+        (4) Return="ignore": a failed registration must never fail the install — the HKCR
+            legacy verb remains the correct fallback (and IS the only surface < build 19041 /
+            for users who force the classic menu). On a genuine version bump the new package
+            registers cleanly; a same-version dev reinstall hits 0x80073CF9 (already
+            registered) which is harmlessly ignored (remove-then-add, or bump, to iterate).
+
+      OS floor: packaging-with-external-location needs Windows 10 build 19041 — the register
+      script gates on CurrentBuildNumber and no-ops below it (goal doc + sparse manifest
+      TargetDeviceFamily MinVersion 10.0.19041.0).
+
+      DIAGNOSTIC LOGGING (2026-07-17, live incident): a real upgrade install left NO
+      FaunaSocial.Fauna provisioned package (`Get-AppxProvisionedPackage -Online` empty) even
+      though the identical CA body was live-verified working on a clean install — and
+      Return="ignore" meant the failure left zero trace. The register CA now runs both Appx
+      cmdlets with -ErrorAction SilentlyContinue -ErrorVariable +err (append, no try/catch —
+      still bound by the same no-empty-{} contract, and a bare `catch{}` is exactly what MSI's
+      Formatted-field pass corrupted 2026-06-27) and, if either recorded an error, appends the
+      error text to %ProgramData%\Fauna\install-log.txt. Return="ignore" is unchanged — this
+      only stops the NEXT failure from being silent.
+
+      Deregister matches the package by DisplayName == Identity/@Name ('FaunaSocial.Fauna'),
+      NOT by PackageFamilyName: Publisher feeds the family-name hash, so the dev-signed and
+      production-signed packages are DIFFERENT identities — DisplayName is stable across the
+      cert swap, so one deregister removes whichever is installed. -->
+    <CustomAction Id="RegisterSparsePackage"
+                  Directory="System64Folder"
+                  ExeCommand="C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command &quot;$reg='HKLM:\SOFTWARE\Classes\CLSID\{4a7b8c01-f1e2-4d3a-b5c6-d7e8f9a0b1c2}\InprocServer32'; $active=(Get-ItemProperty -Path $reg -ErrorAction SilentlyContinue).'(default)'; $b=(Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name CurrentBuildNumber -ErrorAction SilentlyContinue).CurrentBuildNumber; if($active -and $b -and (0 + $b) -ge 19041){$dir=Split-Path -Parent $active; $msix=Join-Path $dir 'Fauna-Sparse.msix'; if(Test-Path -LiteralPath $msix){$err=@(); Add-AppxPackage -Stage $msix -ExternalLocation $dir -ErrorAction SilentlyContinue -ErrorVariable +err; Add-AppxProvisionedPackage -Online -PackagePath $msix -SkipLicense -ErrorAction SilentlyContinue -ErrorVariable +err; if($err.Count -gt 0){$ld='C:\ProgramData\Fauna'; if(-not(Test-Path -LiteralPath $ld)){New-Item -ItemType Directory -Path $ld -Force|Out-Null}; $lines=$err|ForEach-Object{$_.ToString()}; Add-Content -LiteralPath (Join-Path $ld 'install-log.txt') -Value $lines}}}&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <CustomAction Id="DeregisterSparsePackage"
+                  Directory="System64Folder"
+                  ExeCommand="C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command &quot;$name='FaunaSocial.Fauna'; $prov=Get-AppxProvisionedPackage -Online | Where-Object{$_.DisplayName -eq $name}; foreach($p in $prov){Remove-AppxProvisionedPackage -Online -PackageName $p.PackageName -ErrorAction SilentlyContinue}; $pkgs=Get-AppxPackage -AllUsers -Name $name -ErrorAction SilentlyContinue; foreach($k in $pkgs){Remove-AppxPackage -Package $k.PackageFullName -AllUsers -ErrorAction SilentlyContinue}&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!-- ── Uninstall: unregister PERSISTENT cfapi sync-root registrations (2026-07-16 ask) ──
+      Sync-root registrations became persistent 2026-07-16 (they belong to the folder-binding,
+      not the service's lifetime), so plain MSI uninstall now strands every `Fauna!*`
+      SyncRootManager entry: Explorer keeps rendering a "Fauna – <set>" cloud location whose
+      provider is gone (opens fail), removable only via regedit
+      (docs/goal/behavior/file-sync.md § Per-file sync-status display). This CA runs the
+      just-installed fauna-sync-agent.exe with a dedicated cleanup_roots flag (see ExeCommand below;
+      fauna-sync-agent::cfapi_host::unregister_all_shell_sync_roots) that enumerates every
+      Fauna! entry (fauna_cfapi::list_shell_sync_roots)
+      and unregisters both halves (cfapi filter + StorageProviderSyncRootManager shell) for
+      each — reusing the exact primitives the product's own ghost-registration startup janitor
+      uses, unconditionally rather than ghost-only (the whole product is going away, so a still
+      -live folder's binding must go too; the folder and its files are untouched — only the
+      binding is removed, and un-hydrated cloud-only placeholders are reclaimed by the OS as
+      part of unregistering, same as the janitor).
+
+      IMMEDIATE, not deferred: unlike CleanShellDlls / RegisterSparsePackage (which need
+      LocalSystem to write HKLM\SYSTEM / provision machine-wide), this only needs the SAME
+      non-elevated per-user context fauna-sync-agent.exe itself runs in every day (a per-user Run-key
+      agent, never elevated, never a service) — exactly the context an immediate CA runs
+      impersonated as. So [INSTALLFOLDER] resolves reliably here (only DEFERRED EXE CAs hit the
+      resolves-to-empty-at-runtime trap CleanShellDlls's comments document) and this can
+      reference it directly, the same as KillFaunaApp / KillFaunaSync above.
+
+      Sequenced right after KillFaunaSync: the OLD agent's live filter CONNECTION must be torn
+      down first — a still-connected root refuses the shell unregister — which killing the
+      process holding it achieves. `NOT UPGRADINGPRODUCTCODE` keeps this from firing during a
+      routine version upgrade's RemoveExistingProducts of the OLD product (that teardown is not
+      a real uninstall; without the guard, every ordinary upgrade would strip every binding and
+      leave the new agent to silently re-register everything on its next start — an avoidable
+      disruption, the same class of reason CleanShellDlls's own UPGRADINGPRODUCTCODE guard
+      exists for). Return="ignore": a stray registration must never fail an uninstall. -->
+    <CustomAction Id="CleanSyncRoots"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="&quot;[INSTALLFOLDER]fauna-sync-agent.exe&quot; --cleanup-roots"
+                  Execute="immediate"
+                  Return="ignore" />
+
+    <!-- ── Shell-ext upgrade = Path 1 (USER-decision 2026-06-25): side-by-side
+         version-stamped DLL filenames, never close Explorer ──
+      The shell DLL ships under a VERSION-STAMPED filename (`fauna_shell_<ver>.dll`,
+      see ShellExt.wxs). A genuine change ships under a NEW filename — installed with
+      no lock conflict because explorer.exe still holds the OLD file — and the install
+      NEVER removes or replaces the in-use DLL, so Explorer is never closed and the
+      desktop can never strand. The change applies on the next Explorer restart /
+      sign-out (NO reboot); the orphaned old DLL is reclaimed out-of-band (a follow-on
+      — MoveFileEx reboot-delete / the sync agent, NOT WiX RemoveFile; harmless until then).
+
+      This REPLACES the in-place close-and-restart machinery that was PROVEN BROKEN
+      under live RDP testing 2026-06-23→25: the `RestartExplorer` CA, the three
+      `AutoRestartShell`-suppression CAs (B1), and the `util:RestartResource`
+      registration on the shell DLL (ShellExt.wxs) are all REMOVED — every one of
+      them existed only to survive an in-place hot-swap, which Path 1 no longer does.
+      Forensics + design tracked internally;
+      installers/windows.md § Feature Tree / § Shell Extension. `KillFaunaApp` below
+      stays — it is the FaunaApp.exe files-in-use concern, unrelated to the shell. -->
+
+    <InstallExecuteSequence>
+      <Custom Action="KillFaunaApp" After="InstallValidate" />
+      <!-- KillFaunaSync right after KillFaunaApp — same rationale (must clear the lock on
+           fauna-sync-agent.exe before InstallFiles can replace it), no dependency between the two. -->
+      <Custom Action="KillFaunaSync" After="KillFaunaApp" />
+      <!-- CleanSyncRoots right after KillFaunaSync — the old agent's live filter connection
+           must be torn down first (see the CustomAction comment above). Uninstall-only
+           (REMOVE), and never during a routine upgrade's old-product teardown
+           (NOT UPGRADINGPRODUCTCODE). -->
+      <Custom Action="CleanSyncRoots" After="KillFaunaSync" Condition="REMOVE AND NOT UPGRADINGPRODUCTCODE" />
+      <!-- Sparse-package register / deregister (deferred/system; read state from the registry +
+           filesystem, no MSI props — see the CustomAction notes above). Both anchor BEFORE
+           CleanShellDlls, which puts them after WriteRegistryValues (install: the overlay CLSID the
+           register CA reads is written) / RemoveRegistryValues (uninstall) and after InstallFiles
+           (the .msix is on disk), and before InstallFinalize.
+             - RegisterSparsePackage runs on INSTALL only (NOT REMOVE).
+             - DeregisterSparsePackage runs whenever the product / ShellExt feature is REMOVEd, and
+               BEFORE CleanShellDlls so the COM surrogate's hold on the shell DLL is released before
+               the orphan cleanup tries its immediate Remove-Item. -->
+      <Custom Action="DeregisterSparsePackage" Before="CleanShellDlls" Condition="REMOVE" />
+      <Custom Action="RegisterSparsePackage" Before="CleanShellDlls" Condition="NOT REMOVE" />
+      <!-- Orphan shell-DLL cleanup (deferred/system; reads the active CLSID + filesystem, no MSI
+           props). Before InstallFinalize so it runs AFTER WriteRegistryValues (install/upgrade: the
+           CLSID is the just-installed DLL → keep it) and AFTER RemoveRegistryValues (uninstall: CLSID
+           gone → reclaim all). NOT UPGRADINGPRODUCTCODE skips it during a major upgrade's
+           RemoveExistingProducts of the old product (CLSID already gone → would over-schedule the
+           new DLL). Deferred/system is REQUIRED to write HKLM\SYSTEM (immediate CAs aren't
+           elevated — proven 2026-06-26). -->
+      <Custom Action="CleanShellDlls" Before="InstallFinalize" Condition="NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+
+    <!-- ── Properties ── -->
+    <Property Id="REMOVE_USER_DATA" Value="0" />
+    <!--
+      ARPPRODUCTICON (2026-07-20): AppIcon.ico is rendered from Fauna's one
+      brand mark via a dedicated icon-rendering script, staged from the FaunaApp
+      project's own Assets/AppIcon.ico (the same file FaunaApp.csproj's
+      <ApplicationIcon> uses) — see installer/README.md's staging step.
+    -->
+    <Icon Id="FaunaIcon" SourceFile="$(var.IconDir)AppIcon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="FaunaIcon" />
+
+    <!-- ── Features ── -->
+
+    <!--
+      Feature tree:
+        Fauna (root)
+        + DesktopApp (optional, default on)
+        + Sync       (optional, default on)   ← per-user logon agent, not a service
+        |   + ShellExt  (optional, default on)
+        + Nest       (optional, default OFF — self-hosting is opt-in on desktop)
+        |   + Bridge    (optional, default off, requires Nest)
+
+      Every feature is deselectable (AllowAbsent="yes"), so a headless
+      nest-only install (Nest [+Bridge], no Sync, no Desktop App) is possible.
+      There is no admin CLI (fauna-ctl left the MSI 2026-06-20, deleted 2026-10-02);
+      a headless box is configured entirely from a client at `test@<ip>`.
+    -->
+
+    <!-- Desktop App — optional, default on -->
+    <Feature Id="DesktopApp"
+             Title="Fauna Desktop App"
+             Description="Desktop application for messaging, contacts, and sync management."
+             Level="1"
+             AllowAbsent="yes">
+      <ComponentGroupRef Id="AppComponents" />
+      <ComponentGroupRef Id="ProtocolComponents" />
+      <ComponentGroupRef Id="StartMenuComponents" />
+    </Feature>
+
+    <!-- Sync — optional, default on (per-user logon agent, not a machine service) -->
+    <Feature Id="Sync"
+             Title="Sync Service"
+             Description="File sync engine with background synchronisation."
+             Level="1"
+             AllowAbsent="yes">
+      <ComponentGroupRef Id="SyncService" />
+      <!-- DataDir registry metadata + ProgramData uninstall cleanup (see UI.wxs).
+           Referenced by BOTH Sync and Nest so the DataDir value is written
+           whenever EITHER is installed — now that Sync is optional, a Sync-absent
+           nest-only install still writes it via the Nest ref below. (A
+           Sync-and-Nest-absent install has no %ProgramData%\Fauna\ machine data
+           to clean, so the value is unneeded there.) MSI component
+           reference-counting handles the shared component. -->
+      <ComponentGroupRef Id="DataCleanup" />
+
+      <!-- Explorer Integration (child of Sync) — default ON (Level=1, USER-decision
+           2026-06-23). The shell-ext DLL loads into explorer.exe via COM. Under Path 1
+           (USER-decision 2026-06-25, live-verified 2026-06-26) the DLL is installed under a
+           version-stamped filename and is Permanent+NeverOverwrite, so an upgrade ships a NEW
+           filename side-by-side and NEVER closes Explorer — the new ext applies on the next
+           Explorer restart / sign-out, no reboot, no strand. The prior in-place RestartExplorer
+           machinery that could strand the desktop is GONE (see the Path 1 comment above); stale
+           versioned DLLs are reclaimed out-of-band by the CleanShellDlls CA (immediate delete,
+           reboot-delete fallback for the locked). So
+           the overlay icons + context menus ship by default (works-out-of-the-box). The user can
+           untick it (it still requires Sync, its parent). -->
+      <Feature Id="ShellExt"
+               Title="Explorer Integration"
+               Description="Sync status overlay icons and context menus in File Explorer."
+               Level="1"
+               AllowAbsent="yes">
+        <ComponentGroupRef Id="ShellExtComponents" />
+      </Feature>
+
+    </Feature>
+
+    <!-- Terminal App — optional, default ON. fauna-tui.exe beside the agent, plus
+         the PATH entry that makes `fauna-tui` typeable (TerminalApp.wxs). The same
+         binary the per-OS release archive carries; the MSI is its signed form on
+         Windows (installers/tui.md § The ratified channel, user ruling 2026-09-26).
+         A top-level feature, not a child of Sync or Desktop App: a user may want
+         the terminal app on a box with neither (a headless nest box managed over
+         SSH), and unticking either must not take it away. -->
+    <Feature Id="TerminalApp"
+             Title="Fauna Terminal App"
+             Description="The terminal (text-mode) Fauna app, usable over SSH; adds it to PATH."
+             Level="1"
+             AllowAbsent="yes">
+      <ComponentGroupRef Id="TerminalAppComponents" />
+    </Feature>
+
+    <!-- Nest — optional, default OFF (Level=1000, same default-off pattern as
+         Bridge). The Windows desktop is primarily a CLIENT; self-hosting a nest is
+         opt-in. A default install is Desktop App + Sync only, connecting to a
+         remote nest by handle (test@<ip-or-domain>); the user ticks "Nest Service"
+         in the FeatureTree (or `ADDLOCAL=Nest`) to self-host. USER-ratified
+         2026-06-21. (DataCleanup is still written for a default install via the
+         Sync feature's ref; the Nest ref below covers a Sync-absent nest-only
+         install.) -->
+    <Feature Id="Nest"
+             Title="Nest Service"
+             Description="Run a personal Fauna nest server on this machine."
+             Level="1000"
+             AllowAbsent="yes">
+      <ComponentGroupRef Id="NestService" />
+      <!-- Re-home of DataCleanup (see the Sync feature): a nest-only install
+           (Sync deselected) still writes the DataDir reg value + arms the
+           ProgramData uninstall cleanup via this ref. -->
+      <ComponentGroupRef Id="DataCleanup" />
+
+      <!-- Bridge — optional child of Nest, default off (Level=1000), requires Nest.
+           The Nest requirement is enforced by the parent/child nesting ALONE: the
+           FeatureTree auto-deselects Bridge when Nest is unchecked, and MSI will not
+           install a child feature Local without its parent (so ADDLOCAL=Bridge pulls in
+           Nest automatically). Do NOT re-add a `<Level Value="0" Condition="NOT(&amp;Nest=3)"/>`
+           override: &Nest is the action state, which is NOT yet resolved when this child's
+           Level condition is evaluated during a silent `INSTALLLEVEL=0 ADDLOCAL=Nest,Bridge`
+           install — so it wrongly collapses Bridge to level 0 (unavailable) and Bridge
+           silently never installs (Request/Action: Null) even though ADDLOCAL requested it.
+           That broke TestCalDAVImapServingAfterInstall (FaunaBridge service absent). -->
+      <Feature Id="Bridge"
+               Title="Bridge Service"
+               Description="IMAP/SMTP bridge for accessing Fauna messages from email clients."
+               Level="1000"
+               AllowAbsent="yes">
+        <ComponentGroupRef Id="BridgeService" />
+      </Feature>
+
+    </Feature>
+
+  </Package>
+
+</Wix>

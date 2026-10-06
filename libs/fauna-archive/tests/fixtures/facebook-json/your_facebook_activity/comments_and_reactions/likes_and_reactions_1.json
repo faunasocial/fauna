@@ -1,0 +1,4 @@
+[
+  { "timestamp": 1603000000, "data": [ { "reaction": { "reaction": "LIKE", "actor": "Test Owner" } } ], "title": "Test Owner likes Friend One's post." },
+  { "timestamp": 1604000000, "data": [ { "reaction": { "reaction": "LOVE", "actor": "Test Owner" } } ], "title": "Test Owner reacted to Friend Two's photo." }
+]

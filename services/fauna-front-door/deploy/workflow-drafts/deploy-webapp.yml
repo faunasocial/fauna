@@ -1,0 +1,45 @@
+# DRAFT — Track H swaps this into .github/workflows/deploy-webapp.yml at the
+# VPS cutover. Replaces the GitHub-Pages half of the existing dispatch-only
+# workflow (wasm + SPA build + provenance steps carry over verbatim; the
+# Pages/CNAME steps are dropped). app.fauna.social DNS flips at the cutover.
+name: Deploy app.fauna.social
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/fauna-web/**"
+      - "libs/**"
+      - "i18n/**"
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-webapp
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Carry over the existing deploy-webapp.yml's toolchain setup (rust
+      # toolchain via rust-toolchain.toml, wasm-pack, deno) and provenance
+      # attestation — but NOT its build commands: the served tree must come
+      # from `just web-manifest` (the full `just web` build, all wasm chunks,
+      # plus `asset-manifest.json` written into the tree), because a verifier's
+      # `just web-verify` rebuilds with that same recipe and compares
+      # (release-integrity.md § Release signing → Web-app verifiability).
+      - name: Build SPA + asset manifest
+        run: echo "toolchain setup, then: just web-manifest"
+      - name: Upload release
+        env:
+          DEPLOY_KEY: ${{ secrets.DOOR_DEPLOY_KEY }}
+        run: |
+          STAMP="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA::12}"
+          install -m 600 /dev/null key && printf '%s\n' "$DEPLOY_KEY" > key
+          # `-az --delete` and the absolute release path are the ONE shape the
+          # box's forced command accepts (door-deploy-receive.sh) — change both together.
+          rsync -az --delete -e "ssh -i key -o StrictHostKeyChecking=accept-new" \
+            apps/fauna-web/build/ \
+            deploy@fauna.social:/srv/fauna/app/releases/"$STAMP"/
+          ssh -i key deploy@fauna.social flip app "$STAMP"

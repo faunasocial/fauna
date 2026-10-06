@@ -1,0 +1,1216 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		FD0000000000000000000010 /* FaunaWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD0000000000000000000001 /* FaunaWidget.swift */; };
+		FD0000000000000000000011 /* FaunaWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD0000000000000000000001 /* FaunaWidget.swift */; };
+		FD0000000000000000000012 /* FaunaExtensionKit in Frameworks */ = {isa = PBXBuildFile; productRef = FD0000000000000000000016 /* FaunaExtensionKit */; };
+		FD0000000000000000000013 /* FaunaExtensionKit in Frameworks */ = {isa = PBXBuildFile; productRef = FD0000000000000000000017 /* FaunaExtensionKit */; };
+		FD0000000000000000000014 /* Fauna-Widget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = FD0000000000000000000005 /* Fauna-Widget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		FD0000000000000000000015 /* Fauna-iOS-Widget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = FD0000000000000000000006 /* Fauna-iOS-Widget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		FA000000000000000000000A /* FaunaMacOSMain.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA0000000000000000000009 /* FaunaMacOSMain.swift */; };
+		FA0000000000000000000008 /* FaunaMacOSLib in Frameworks */ = {isa = PBXBuildFile; productRef = FA0000000000000000000007 /* FaunaMacOSLib */; };
+		27A070680A4045F8BAE8D8D0 /* FileProviderExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 044022A26E7D8AD9729D4658 /* FileProviderExtension.swift */; };
+		CD03722BD2A3D1C983D23EE2 /* FileProviderItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 744DE69399F187B1CCCBA43D /* FileProviderItem.swift */; };
+		48B8AA2E7DAFEF0CE34BEF6A /* FileProviderEnumerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1101225BA46596D5E990C9CB /* FileProviderEnumerator.swift */; };
+		885367B167C6185CCFA90CC0 /* Fauna-FileProvider.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 64AF9229C1C1D21F878AD72F /* Fauna-FileProvider.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		FA0000000000000000000004 /* FaunaKit in Frameworks */ = {isa = PBXBuildFile; productRef = FA0000000000000000000002 /* FaunaKit */; };
+		FA0000000000000000000006 /* FaunaKit in Frameworks */ = {isa = PBXBuildFile; productRef = FA0000000000000000000005 /* FaunaKit */; };
+		FB0000000000000000000001 /* FaunaiOSMain.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB0000000000000000000002 /* FaunaiOSMain.swift */; };
+		FB0000000000000000000003 /* FaunaiOSLib in Frameworks */ = {isa = PBXBuildFile; productRef = FB0000000000000000000004 /* FaunaiOSLib */; };
+		FB0000000000000000000005 /* FaunaKit in Frameworks */ = {isa = PBXBuildFile; productRef = FB0000000000000000000006 /* FaunaKit */; };
+		FB0000000000000000000007 /* FileProviderExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 044022A26E7D8AD9729D4658 /* FileProviderExtension.swift */; };
+		FB0000000000000000000008 /* FileProviderItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 744DE69399F187B1CCCBA43D /* FileProviderItem.swift */; };
+		FB0000000000000000000009 /* FileProviderEnumerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1101225BA46596D5E990C9CB /* FileProviderEnumerator.swift */; };
+		FB000000000000000000000A /* FaunaKit in Frameworks */ = {isa = PBXBuildFile; productRef = FB000000000000000000000B /* FaunaKit */; };
+		FB000000000000000000000C /* Fauna-iOS-FileProvider.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = FB000000000000000000000D /* Fauna-iOS-FileProvider.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		FC0000000000000000000001 /* ActionViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC0000000000000000000010 /* ActionViewController.swift */; };
+		FC0000000000000000000002 /* ActionViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC0000000000000000000010 /* ActionViewController.swift */; };
+		FC0000000000000000000003 /* FaunaDeepLink in Frameworks */ = {isa = PBXBuildFile; productRef = FC0000000000000000000011 /* FaunaDeepLink */; };
+		FC0000000000000000000004 /* FaunaDeepLink in Frameworks */ = {isa = PBXBuildFile; productRef = FC0000000000000000000012 /* FaunaDeepLink */; };
+		FC0000000000000000000005 /* Fauna-FileProviderUI.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = FC0000000000000000000013 /* Fauna-FileProviderUI.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		FC0000000000000000000006 /* Fauna-iOS-FileProviderUI.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = FC0000000000000000000014 /* Fauna-iOS-FileProviderUI.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		FE0000000000000000000002 /* social.fauna.FaunaMacOS.plist in Embed Launch Agent */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000001 /* social.fauna.FaunaMacOS.plist */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		FD0000000000000000000050 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = FD0000000000000000000030;
+			remoteInfo = "Fauna-Widget";
+		};
+		FD0000000000000000000051 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = FD0000000000000000000031;
+			remoteInfo = "Fauna-iOS-Widget";
+		};
+		431387EB7262E1CFC79B125E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 4B513C0B32B1EB1D3862EAAE;
+			remoteInfo = "Fauna-FileProvider";
+		};
+		FB000000000000000000000E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = FB000000000000000000000F;
+			remoteInfo = "Fauna-iOS-FileProvider";
+		};
+		FC0000000000000000000007 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = FC000000000000000000001A;
+			remoteInfo = "Fauna-FileProviderUI";
+		};
+		FC0000000000000000000008 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = FC000000000000000000001B;
+			remoteInfo = "Fauna-iOS-FileProviderUI";
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		2EA44C985436CB93F3492BE5 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				885367B167C6185CCFA90CC0 /* Fauna-FileProvider.appex in Embed App Extensions */,
+				FC0000000000000000000005 /* Fauna-FileProviderUI.appex in Embed App Extensions */,
+				FD0000000000000000000014 /* Fauna-Widget.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FB0000000000000000000010 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				FB000000000000000000000C /* Fauna-iOS-FileProvider.appex in Embed App Extensions */,
+				FC0000000000000000000006 /* Fauna-iOS-FileProviderUI.appex in Embed App Extensions */,
+				FD0000000000000000000015 /* Fauna-iOS-Widget.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FE0000000000000000000003 /* Embed Launch Agent */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = Contents/Library/LaunchAgents;
+			dstSubfolderSpec = 1;
+			files = (
+				FE0000000000000000000002 /* social.fauna.FaunaMacOS.plist in Embed Launch Agent */,
+			);
+			name = "Embed Launch Agent";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		FD0000000000000000000001 /* FaunaWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaunaWidget.swift; sourceTree = "<group>"; };
+		FD0000000000000000000002 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		FD0000000000000000000003 /* Fauna-Widget.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Fauna-Widget.entitlements"; sourceTree = "<group>"; };
+		FD0000000000000000000004 /* Fauna-Widget-iOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Fauna-Widget-iOS.entitlements"; sourceTree = "<group>"; };
+		FD0000000000000000000005 /* Fauna-Widget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Fauna-Widget.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		FD0000000000000000000006 /* Fauna-iOS-Widget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Fauna-iOS-Widget.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		81918909E83595C8F4212CCC /* Fauna.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Fauna.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		64AF9229C1C1D21F878AD72F /* Fauna-FileProvider.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Fauna-FileProvider.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		FA0000000000000000000009 /* FaunaMacOSMain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaunaMacOSMain.swift; sourceTree = "<group>"; };
+		044022A26E7D8AD9729D4658 /* FileProviderExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderExtension.swift; sourceTree = "<group>"; };
+		744DE69399F187B1CCCBA43D /* FileProviderItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderItem.swift; sourceTree = "<group>"; };
+		1101225BA46596D5E990C9CB /* FileProviderEnumerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderEnumerator.swift; sourceTree = "<group>"; };
+		0589AE871A7FE5BE6A60003E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		53E433A94CB5B254894FE7F1 /* Fauna-FileProvider.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Fauna-FileProvider.entitlements"; sourceTree = "<group>"; };
+		FB0000000000000000000002 /* FaunaiOSMain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaunaiOSMain.swift; sourceTree = "<group>"; };
+		FB000000000000000000000D /* Fauna-iOS-FileProvider.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Fauna-iOS-FileProvider.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		FB0000000000000000000011 /* Fauna-iOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Fauna-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		FB0000000000000000000012 /* Fauna-iOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; name = "Fauna-iOS.entitlements"; path = "Fauna-iOS/Resources/Fauna-iOS.entitlements"; sourceTree = "<group>"; };
+		FB0000000000000000000013 /* Fauna-FileProvider-iOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Fauna-FileProvider-iOS.entitlements"; sourceTree = "<group>"; };
+		FC0000000000000000000010 /* ActionViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionViewController.swift; sourceTree = "<group>"; };
+		FC0000000000000000000013 /* Fauna-FileProviderUI.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Fauna-FileProviderUI.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		FC0000000000000000000014 /* Fauna-iOS-FileProviderUI.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Fauna-iOS-FileProviderUI.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		FC0000000000000000000015 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		FC0000000000000000000016 /* Fauna-FileProviderUI.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Fauna-FileProviderUI.entitlements"; sourceTree = "<group>"; };
+		FE0000000000000000000001 /* social.fauna.FaunaMacOS.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; name = social.fauna.FaunaMacOS.plist; path = "Fauna-macOS/Resources/LaunchAgents/social.fauna.FaunaMacOS.plist"; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		FD0000000000000000000022 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FD0000000000000000000012 /* FaunaExtensionKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FD0000000000000000000023 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FD0000000000000000000013 /* FaunaExtensionKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6084DFFB756969D0D85EE642 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FA0000000000000000000006 /* FaunaKit in Frameworks */,
+				FA0000000000000000000008 /* FaunaMacOSLib in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		77CC190B398D6F40FBDAC6C9 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FA0000000000000000000004 /* FaunaKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FB0000000000000000000014 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FB0000000000000000000005 /* FaunaKit in Frameworks */,
+				FB0000000000000000000003 /* FaunaiOSLib in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FB0000000000000000000015 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FB000000000000000000000A /* FaunaKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FC0000000000000000000021 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FC0000000000000000000003 /* FaunaDeepLink in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FC0000000000000000000024 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FC0000000000000000000004 /* FaunaDeepLink in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		FD0000000000000000000060 /* Fauna-Widget */ = {
+			isa = PBXGroup;
+			children = (
+				FD0000000000000000000001 /* FaunaWidget.swift */,
+				FD0000000000000000000002 /* Info.plist */,
+				FD0000000000000000000003 /* Fauna-Widget.entitlements */,
+				FD0000000000000000000004 /* Fauna-Widget-iOS.entitlements */,
+			);
+			path = "Fauna-Widget";
+			sourceTree = "<group>";
+		};
+		8D3FC6DB5D0827F168A73277 = {
+			isa = PBXGroup;
+			children = (
+				FA000000000000000000000B /* Fauna-macOS-Main */,
+				FB0000000000000000000016 /* Fauna-iOS-Main */,
+				4368315D5AB2E7F23BD33CAF /* Fauna-FileProvider */,
+				FC0000000000000000000017 /* Fauna-FileProviderUI */,
+				FD0000000000000000000060 /* Fauna-Widget */,
+				FB0000000000000000000012 /* Fauna-iOS.entitlements */,
+				FE0000000000000000000001 /* social.fauna.FaunaMacOS.plist */,
+				1BADDC1D73C1A20F347483E1 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		1BADDC1D73C1A20F347483E1 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				81918909E83595C8F4212CCC /* Fauna.app */,
+				64AF9229C1C1D21F878AD72F /* Fauna-FileProvider.appex */,
+				FB0000000000000000000011 /* Fauna-iOS.app */,
+				FB000000000000000000000D /* Fauna-iOS-FileProvider.appex */,
+				FC0000000000000000000013 /* Fauna-FileProviderUI.appex */,
+				FC0000000000000000000014 /* Fauna-iOS-FileProviderUI.appex */,
+				FD0000000000000000000005 /* Fauna-Widget.appex */,
+				FD0000000000000000000006 /* Fauna-iOS-Widget.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		FC0000000000000000000017 /* Fauna-FileProviderUI */ = {
+			isa = PBXGroup;
+			children = (
+				FC0000000000000000000010 /* ActionViewController.swift */,
+				FC0000000000000000000015 /* Info.plist */,
+				FC0000000000000000000016 /* Fauna-FileProviderUI.entitlements */,
+			);
+			path = "Fauna-FileProviderUI";
+			sourceTree = "<group>";
+		};
+		FB0000000000000000000016 /* Fauna-iOS-Main */ = {
+			isa = PBXGroup;
+			children = (
+				FB0000000000000000000002 /* FaunaiOSMain.swift */,
+			);
+			path = "Fauna-iOS-Main";
+			sourceTree = "<group>";
+		};
+		FA000000000000000000000B /* Fauna-macOS-Main */ = {
+			isa = PBXGroup;
+			children = (
+				FA0000000000000000000009 /* FaunaMacOSMain.swift */,
+			);
+			path = "Fauna-macOS-Main";
+			sourceTree = "<group>";
+		};
+		4368315D5AB2E7F23BD33CAF /* Fauna-FileProvider */ = {
+			isa = PBXGroup;
+			children = (
+				044022A26E7D8AD9729D4658 /* FileProviderExtension.swift */,
+				744DE69399F187B1CCCBA43D /* FileProviderItem.swift */,
+				1101225BA46596D5E990C9CB /* FileProviderEnumerator.swift */,
+				0589AE871A7FE5BE6A60003E /* Info.plist */,
+				53E433A94CB5B254894FE7F1 /* Fauna-FileProvider.entitlements */,
+				FB0000000000000000000013 /* Fauna-FileProvider-iOS.entitlements */,
+			);
+			path = "Fauna-FileProvider";
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		FD0000000000000000000030 /* Fauna-Widget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FD0000000000000000000032 /* Build configuration list for PBXNativeTarget "Fauna-Widget" */;
+			buildPhases = (
+				FD0000000000000000000020 /* Sources */,
+				FD0000000000000000000022 /* Frameworks */,
+				FD0000000000000000000024 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Fauna-Widget";
+			packageProductDependencies = (
+				FD0000000000000000000016 /* FaunaExtensionKit */,
+			);
+			productName = "Fauna-Widget";
+			productReference = FD0000000000000000000005 /* Fauna-Widget.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		FD0000000000000000000031 /* Fauna-iOS-Widget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FD0000000000000000000033 /* Build configuration list for PBXNativeTarget "Fauna-iOS-Widget" */;
+			buildPhases = (
+				FD0000000000000000000021 /* Sources */,
+				FD0000000000000000000023 /* Frameworks */,
+				FD0000000000000000000025 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Fauna-iOS-Widget";
+			packageProductDependencies = (
+				FD0000000000000000000017 /* FaunaExtensionKit */,
+			);
+			productName = "Fauna-iOS-Widget";
+			productReference = FD0000000000000000000006 /* Fauna-iOS-Widget.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		3D4C91345015A4DD0A099400 /* Fauna */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AC573CC2B6EF8ABF3A944EA0 /* Build configuration list for PBXNativeTarget "Fauna" */;
+			buildPhases = (
+				3E22ADB96939D67B35BF987D /* Sources */,
+				6084DFFB756969D0D85EE642 /* Frameworks */,
+				5D171669BF9EDBBCA95555CC /* Resources */,
+				2EA44C985436CB93F3492BE5 /* Embed App Extensions */,
+				FE0000000000000000000003 /* Embed Launch Agent */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				2254342BECCEAFBD04538E0A /* PBXTargetDependency */,
+				FC0000000000000000000009 /* PBXTargetDependency */,
+				FD0000000000000000000052 /* PBXTargetDependency */,
+			);
+			name = Fauna;
+			packageProductDependencies = (
+				FA0000000000000000000005 /* FaunaKit */,
+				FA0000000000000000000007 /* FaunaMacOSLib */,
+			);
+			productName = Fauna;
+			productReference = 81918909E83595C8F4212CCC /* Fauna.app */;
+			productType = "com.apple.product-type.application";
+		};
+		4B513C0B32B1EB1D3862EAAE /* Fauna-FileProvider */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 56ABA30703E76FEC00E1EFF0 /* Build configuration list for PBXNativeTarget "Fauna-FileProvider" */;
+			buildPhases = (
+				A40CA74AD47AC77836894CE5 /* Sources */,
+				77CC190B398D6F40FBDAC6C9 /* Frameworks */,
+				1173F0B023794F5F676F60F1 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Fauna-FileProvider";
+			packageProductDependencies = (
+				FA0000000000000000000002 /* FaunaKit */,
+			);
+			productName = "Fauna-FileProvider";
+			productReference = 64AF9229C1C1D21F878AD72F /* Fauna-FileProvider.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		FB0000000000000000000017 /* Fauna-iOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FB0000000000000000000024 /* Build configuration list for PBXNativeTarget "Fauna-iOS" */;
+			buildPhases = (
+				FB0000000000000000000018 /* Sources */,
+				FB0000000000000000000014 /* Frameworks */,
+				FB000000000000000000001A /* Resources */,
+				FB0000000000000000000010 /* Embed App Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				FB000000000000000000001C /* PBXTargetDependency */,
+				FC000000000000000000000A /* PBXTargetDependency */,
+				FD0000000000000000000053 /* PBXTargetDependency */,
+			);
+			name = "Fauna-iOS";
+			packageProductDependencies = (
+				FB0000000000000000000006 /* FaunaKit */,
+				FB0000000000000000000004 /* FaunaiOSLib */,
+			);
+			productName = "Fauna-iOS";
+			productReference = FB0000000000000000000011 /* Fauna-iOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+		FB000000000000000000000F /* Fauna-iOS-FileProvider */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FB0000000000000000000025 /* Build configuration list for PBXNativeTarget "Fauna-iOS-FileProvider" */;
+			buildPhases = (
+				FB0000000000000000000019 /* Sources */,
+				FB0000000000000000000015 /* Frameworks */,
+				FB000000000000000000001B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Fauna-iOS-FileProvider";
+			packageProductDependencies = (
+				FB000000000000000000000B /* FaunaKit */,
+			);
+			productName = "Fauna-iOS-FileProvider";
+			productReference = FB000000000000000000000D /* Fauna-iOS-FileProvider.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		FC000000000000000000001A /* Fauna-FileProviderUI */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FC0000000000000000000026 /* Build configuration list for PBXNativeTarget "Fauna-FileProviderUI" */;
+			buildPhases = (
+				FC0000000000000000000020 /* Sources */,
+				FC0000000000000000000021 /* Frameworks */,
+				FC0000000000000000000022 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Fauna-FileProviderUI";
+			packageProductDependencies = (
+				FC0000000000000000000011 /* FaunaDeepLink */,
+			);
+			productName = "Fauna-FileProviderUI";
+			productReference = FC0000000000000000000013 /* Fauna-FileProviderUI.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		FC000000000000000000001B /* Fauna-iOS-FileProviderUI */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FC0000000000000000000027 /* Build configuration list for PBXNativeTarget "Fauna-iOS-FileProviderUI" */;
+			buildPhases = (
+				FC0000000000000000000023 /* Sources */,
+				FC0000000000000000000024 /* Frameworks */,
+				FC0000000000000000000025 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Fauna-iOS-FileProviderUI";
+			packageProductDependencies = (
+				FC0000000000000000000012 /* FaunaDeepLink */,
+			);
+			productName = "Fauna-iOS-FileProviderUI";
+			productReference = FC0000000000000000000014 /* Fauna-iOS-FileProviderUI.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		46F86FAA6BBF9AC94A7E4595 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastSwiftUpdateCheck = 2650;
+				LastUpgradeCheck = 2650;
+				TargetAttributes = {
+					3D4C91345015A4DD0A099400 = {
+						CreatedOnToolsVersion = 26.5;
+					};
+					4B513C0B32B1EB1D3862EAAE = {
+						CreatedOnToolsVersion = 26.5;
+					};
+				};
+			};
+			buildConfigurationList = A7492CCDE30BE8F54F16B52E /* Build configuration list for PBXProject "Fauna" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 8D3FC6DB5D0827F168A73277;
+			packageReferences = (
+				FA0000000000000000000001 /* XCLocalSwiftPackageReference "." */,
+			);
+			productRefGroup = 1BADDC1D73C1A20F347483E1 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				3D4C91345015A4DD0A099400 /* Fauna */,
+				4B513C0B32B1EB1D3862EAAE /* Fauna-FileProvider */,
+				FC000000000000000000001A /* Fauna-FileProviderUI */,
+				FD0000000000000000000030 /* Fauna-Widget */,
+				FB0000000000000000000017 /* Fauna-iOS */,
+				FB000000000000000000000F /* Fauna-iOS-FileProvider */,
+				FC000000000000000000001B /* Fauna-iOS-FileProviderUI */,
+				FD0000000000000000000031 /* Fauna-iOS-Widget */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		FD0000000000000000000024 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FD0000000000000000000025 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5D171669BF9EDBBCA95555CC /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1173F0B023794F5F676F60F1 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FB000000000000000000001A /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FB000000000000000000001B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FC0000000000000000000022 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FC0000000000000000000025 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		FD0000000000000000000020 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FD0000000000000000000010 /* FaunaWidget.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FD0000000000000000000021 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FD0000000000000000000011 /* FaunaWidget.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		3E22ADB96939D67B35BF987D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FA000000000000000000000A /* FaunaMacOSMain.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A40CA74AD47AC77836894CE5 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				27A070680A4045F8BAE8D8D0 /* FileProviderExtension.swift in Sources */,
+				CD03722BD2A3D1C983D23EE2 /* FileProviderItem.swift in Sources */,
+				48B8AA2E7DAFEF0CE34BEF6A /* FileProviderEnumerator.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FB0000000000000000000018 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FB0000000000000000000001 /* FaunaiOSMain.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FB0000000000000000000019 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FB0000000000000000000007 /* FileProviderExtension.swift in Sources */,
+				FB0000000000000000000008 /* FileProviderItem.swift in Sources */,
+				FB0000000000000000000009 /* FileProviderEnumerator.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FC0000000000000000000020 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FC0000000000000000000001 /* ActionViewController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FC0000000000000000000023 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FC0000000000000000000002 /* ActionViewController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		FD0000000000000000000052 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = "Fauna-Widget";
+			target = FD0000000000000000000030 /* Fauna-Widget */;
+			targetProxy = FD0000000000000000000050 /* PBXContainerItemProxy */;
+		};
+		FD0000000000000000000053 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = "Fauna-iOS-Widget";
+			target = FD0000000000000000000031 /* Fauna-iOS-Widget */;
+			targetProxy = FD0000000000000000000051 /* PBXContainerItemProxy */;
+		};
+		2254342BECCEAFBD04538E0A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = "Fauna-FileProvider";
+			target = 4B513C0B32B1EB1D3862EAAE /* Fauna-FileProvider */;
+			targetProxy = 431387EB7262E1CFC79B125E /* PBXContainerItemProxy */;
+		};
+		FB000000000000000000001C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = "Fauna-iOS-FileProvider";
+			target = FB000000000000000000000F /* Fauna-iOS-FileProvider */;
+			targetProxy = FB000000000000000000000E /* PBXContainerItemProxy */;
+		};
+		FC0000000000000000000009 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = "Fauna-FileProviderUI";
+			target = FC000000000000000000001A /* Fauna-FileProviderUI */;
+			targetProxy = FC0000000000000000000007 /* PBXContainerItemProxy */;
+		};
+		FC000000000000000000000A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = "Fauna-iOS-FileProviderUI";
+			target = FC000000000000000000001B /* Fauna-iOS-FileProviderUI */;
+			targetProxy = FC0000000000000000000008 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		FD0000000000000000000040 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Fauna-Widget/Fauna-Widget.entitlements";
+				CURRENT_PROJECT_VERSION = 1;
+				INFOPLIST_FILE = "Fauna-Widget/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.2;
+				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.Widget";
+				PRODUCT_MODULE_NAME = Fauna_Widget;
+				PRODUCT_NAME = "Fauna-Widget";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Debug;
+		};
+		FD0000000000000000000041 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Fauna-Widget/Fauna-Widget.entitlements";
+				CURRENT_PROJECT_VERSION = 1;
+				INFOPLIST_FILE = "Fauna-Widget/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.2;
+				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.Widget";
+				PRODUCT_MODULE_NAME = Fauna_Widget;
+				PRODUCT_NAME = "Fauna-Widget";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Release;
+		};
+		FD0000000000000000000042 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Fauna-Widget/Fauna-Widget-iOS.entitlements";
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Fauna-Widget/Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.2;
+				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.Widget";
+				PRODUCT_MODULE_NAME = Fauna_Widget;
+				PRODUCT_NAME = "Fauna-iOS-Widget";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		FD0000000000000000000043 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Fauna-Widget/Fauna-Widget-iOS.entitlements";
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Fauna-Widget/Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.2;
+				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.Widget";
+				PRODUCT_MODULE_NAME = Fauna_Widget;
+				PRODUCT_NAME = "Fauna-iOS-Widget";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		EDF2539783D433988A316B18 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_VERSION = 5.0;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		20E4CE03CB913D0E9181E6D4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_VERSION = 5.0;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+		A1CFBB66A86B7730D411A17C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Fauna-macOS/Fauna-macOS.entitlements";
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				INFOPLIST_FILE = "Fauna-macOS/Resources/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.2;
+				PRODUCT_BUNDLE_IDENTIFIER = social.fauna.fauna;
+				PRODUCT_NAME = Fauna;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Debug;
+		};
+		9E4CE29EBD7E6E2434449A41 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Fauna-macOS/Fauna-macOS.entitlements";
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				INFOPLIST_FILE = "Fauna-macOS/Resources/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.2;
+				PRODUCT_BUNDLE_IDENTIFIER = social.fauna.fauna;
+				PRODUCT_NAME = Fauna;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Release;
+		};
+		7BEEBEDC000A93A7D0D9C301 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Fauna-FileProvider/Fauna-FileProvider.entitlements";
+				CURRENT_PROJECT_VERSION = 1;
+				INFOPLIST_FILE = "Fauna-FileProvider/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.2;
+				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProvider";
+				PRODUCT_MODULE_NAME = Fauna_FileProvider;
+				PRODUCT_NAME = "Fauna-FileProvider";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Debug;
+		};
+		BC6BF27AF8DDD406F5E76F69 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Fauna-FileProvider/Fauna-FileProvider.entitlements";
+				CURRENT_PROJECT_VERSION = 1;
+				INFOPLIST_FILE = "Fauna-FileProvider/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.2;
+				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProvider";
+				PRODUCT_MODULE_NAME = Fauna_FileProvider;
+				PRODUCT_NAME = "Fauna-FileProvider";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Release;
+		};
+		FB0000000000000000000020 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Fauna-iOS/Resources/Fauna-iOS.entitlements";
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Fauna-iOS/Resources/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Fauna;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.2;
+				PRODUCT_BUNDLE_IDENTIFIER = social.fauna.fauna;
+				PRODUCT_NAME = "Fauna-iOS";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		FB0000000000000000000021 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Fauna-iOS/Resources/Fauna-iOS.entitlements";
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Fauna-iOS/Resources/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Fauna;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.2;
+				PRODUCT_BUNDLE_IDENTIFIER = social.fauna.fauna;
+				PRODUCT_NAME = "Fauna-iOS";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		FB0000000000000000000022 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Fauna-FileProvider/Fauna-FileProvider-iOS.entitlements";
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Fauna-FileProvider/Info-iOS.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.2;
+				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProvider";
+				PRODUCT_MODULE_NAME = Fauna_FileProvider;
+				PRODUCT_NAME = "Fauna-iOS-FileProvider";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		FB0000000000000000000023 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Fauna-FileProvider/Fauna-FileProvider-iOS.entitlements";
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Fauna-FileProvider/Info-iOS.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.2;
+				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProvider";
+				PRODUCT_MODULE_NAME = Fauna_FileProvider;
+				PRODUCT_NAME = "Fauna-iOS-FileProvider";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		FC0000000000000000000030 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Fauna-FileProviderUI/Fauna-FileProviderUI.entitlements";
+				CURRENT_PROJECT_VERSION = 1;
+				INFOPLIST_FILE = "Fauna-FileProviderUI/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.2;
+				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProviderUI";
+				PRODUCT_MODULE_NAME = Fauna_FileProviderUI;
+				PRODUCT_NAME = "Fauna-FileProviderUI";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Debug;
+		};
+		FC0000000000000000000031 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Fauna-FileProviderUI/Fauna-FileProviderUI.entitlements";
+				CURRENT_PROJECT_VERSION = 1;
+				INFOPLIST_FILE = "Fauna-FileProviderUI/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.2;
+				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProviderUI";
+				PRODUCT_MODULE_NAME = Fauna_FileProviderUI;
+				PRODUCT_NAME = "Fauna-FileProviderUI";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Release;
+		};
+		FC0000000000000000000032 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Fauna-FileProviderUI/Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.2;
+				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProviderUI";
+				PRODUCT_MODULE_NAME = Fauna_FileProviderUI;
+				PRODUCT_NAME = "Fauna-iOS-FileProviderUI";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		FC0000000000000000000033 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Fauna-FileProviderUI/Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.2;
+				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProviderUI";
+				PRODUCT_MODULE_NAME = Fauna_FileProviderUI;
+				PRODUCT_NAME = "Fauna-iOS-FileProviderUI";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		FD0000000000000000000032 /* Build configuration list for PBXNativeTarget "Fauna-Widget" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FD0000000000000000000040 /* Debug */,
+				FD0000000000000000000041 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		FD0000000000000000000033 /* Build configuration list for PBXNativeTarget "Fauna-iOS-Widget" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FD0000000000000000000042 /* Debug */,
+				FD0000000000000000000043 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A7492CCDE30BE8F54F16B52E /* Build configuration list for PBXProject "Fauna" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				EDF2539783D433988A316B18 /* Debug */,
+				20E4CE03CB913D0E9181E6D4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AC573CC2B6EF8ABF3A944EA0 /* Build configuration list for PBXNativeTarget "Fauna" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1CFBB66A86B7730D411A17C /* Debug */,
+				9E4CE29EBD7E6E2434449A41 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		56ABA30703E76FEC00E1EFF0 /* Build configuration list for PBXNativeTarget "Fauna-FileProvider" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7BEEBEDC000A93A7D0D9C301 /* Debug */,
+				BC6BF27AF8DDD406F5E76F69 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		FB0000000000000000000024 /* Build configuration list for PBXNativeTarget "Fauna-iOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FB0000000000000000000020 /* Debug */,
+				FB0000000000000000000021 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		FB0000000000000000000025 /* Build configuration list for PBXNativeTarget "Fauna-iOS-FileProvider" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FB0000000000000000000022 /* Debug */,
+				FB0000000000000000000023 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		FC0000000000000000000026 /* Build configuration list for PBXNativeTarget "Fauna-FileProviderUI" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FC0000000000000000000030 /* Debug */,
+				FC0000000000000000000031 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		FC0000000000000000000027 /* Build configuration list for PBXNativeTarget "Fauna-iOS-FileProviderUI" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FC0000000000000000000032 /* Debug */,
+				FC0000000000000000000033 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		FA0000000000000000000001 /* XCLocalSwiftPackageReference "." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ".";
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		FD0000000000000000000016 /* FaunaExtensionKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FaunaExtensionKit;
+		};
+		FD0000000000000000000017 /* FaunaExtensionKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FaunaExtensionKit;
+		};
+		FA0000000000000000000002 /* FaunaKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FaunaKit;
+		};
+		FA0000000000000000000005 /* FaunaKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FaunaKit;
+		};
+		FA0000000000000000000007 /* FaunaMacOSLib */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FaunaMacOSLib;
+		};
+		FB0000000000000000000004 /* FaunaiOSLib */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FaunaiOSLib;
+		};
+		FB0000000000000000000006 /* FaunaKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FaunaKit;
+		};
+		FB000000000000000000000B /* FaunaKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FaunaKit;
+		};
+		FC0000000000000000000011 /* FaunaDeepLink */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FaunaDeepLink;
+		};
+		FC0000000000000000000012 /* FaunaDeepLink */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FaunaDeepLink;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
+}

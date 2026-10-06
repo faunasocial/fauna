@@ -1,0 +1,83 @@
+[package]
+name = "fauna-nest-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# One home for native Rust talking HTTP to a fauna nest — the residual REST
+# surface (auth bootstrap, blob/chunk transfer, public discovery, the bridge
+# daemon's surface, and the Layer-1 /api/v1/* CRUD that hasn't migrated to
+# WS-RPC yet). NOT WS-RPC (that's fauna-protocol + fauna-client).
+#
+# Two layers, split by feature:
+#   - always available, std-only, wasm-trivial: `error` (the `ApiError`
+#     taxonomy) + `paths` (the path constants). This is what the wasm consumer
+#     — `fauna-onboarding-machine`'s `nest_api` — pulls (with `default-features
+#     = false`); it keeps its own typed-endpoint trait, but shares this
+#     taxonomy + these constants (design tracked internally).
+#   - feature `client` (default): the bearer-authed REST machinery —
+#     `NestContentApi` + `ReqwestNestContentApi` + `BearerSource` impls. Native
+#     concerns (reqwest + the LaunchMachine/keypair bearer flows); the web
+#     app keeps its TS HTTP layer. fauna-linux / fauna-client get this via
+#     `default`.
+
+[features]
+default = ["client"]
+# The bearer-authed REST surface: `NestContentApi` + `ReqwestNestContentApi`
+# + `BearerSource` (`StaticBearer`, plus `LaunchMachineBearer` under
+# `launch-machine`). Pulls reqwest / async-trait / bytes / serde / serde_json.
+client = [
+    "dep:reqwest",
+    "dep:async-trait",
+    "dep:bytes",
+    "dep:serde",
+    "dep:serde_json",
+]
+# Pulls in the `LaunchMachineBearer` impl (a fauna-nest-http -> fauna-launch-machine
+# dep) — implies `client` (the impl is part of the content/bearer layer). The
+# eventual macOS/iOS/Windows adoptions turn this on; fauna-linux turns it on.
+# Without it, `StaticBearer` is the only available `BearerSource` impl (tests).
+launch-machine = [
+    "client",
+    "dep:fauna-launch-machine",
+    "dep:fauna-core",
+    # For `auth::BEARER_REFRESH_BUFFER_SECS` — the one owner of the pre-expiry
+    # buffer `LaunchMachineBearer` shares with every other bearer cache. Already
+    # in this feature's tree via fauna-launch-machine; the direct dep just makes
+    # the constant nameable here.
+    "dep:fauna-protocol",
+]
+# Exposes `FakeNestContentApi` so consumers can write logic tests against the
+# trait without an HTTP server (mirrors fauna_onboarding_machine::nest_api's
+# `test-helpers`). Implies `client` — the fake impls the content trait. The
+# crate's own tests get it via `#[cfg(test)]` (default features → `client`).
+test-helpers = ["client"]
+
+[dependencies]
+# Dimension-4 localized error text (`error::nest_identity_changed`) for
+# `ApiError`'s `Display` — zero-dependency, always available regardless of
+# feature set (the `error` module itself is unconditional).
+fauna-i18n = { path = "../fauna-i18n" }
+# `multipart` feature: the encrypted-mode blob-upload wire shape posts
+# `multipart/form-data` (sidecar + bytes parts) via `post_multipart_blob`.
+reqwest = { workspace = true, optional = true, features = ["multipart"] }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+async-trait = { version = "0.1", optional = true }
+fauna-launch-machine = { path = "../fauna-launch-machine", optional = true }
+fauna-core = { workspace = true, optional = true }
+fauna-protocol = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+wiremock = "0.6"
+# The `launch-machine`-gated bearer tests build a `SilentChallengeOutcome::
+# Success(VerifyReply)` to script the MockAuthConnector's recovery round-trip.
+fauna-protocol.workspace = true
+# The `launch-machine`-gated tests drive a real LaunchMachine to Online via a
+# wiremock silent challenge — they need its test helpers (InMemoryPersistence,
+# NullObserver). Mirrors apps/fauna-linux/Cargo.toml's dev-dep feature set
+# (minus `uniffi`, which this crate doesn't use). Cargo unifies this with the
+# optional regular dep when the `launch-machine` feature is on.
+fauna-launch-machine = { path = "../fauna-launch-machine", features = ["test-helpers", "test-observer"] }

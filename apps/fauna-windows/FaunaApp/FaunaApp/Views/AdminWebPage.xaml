@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.AdminWebPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+      Admin → Web page (web-content-hosting.md § Admin apex hosting; ui.yaml admin-web).
+      The nest-wide apex-actor designation — the web analogue of the per-domain catch-all
+      mail actor: pick one actor whose `web` content serves https://<domain>/, or "None"
+      (index 0) to clear → the built-in info page. A dumb renderer of the testable
+      FaunaApp.Core AdminWebViewModel over the shared fauna_client_web::WebClient (UniFFI
+      FfiWebClient); the actor list reuses fauna.admin.users.list (FfiNestClient.Admin),
+      exactly like the AdminDnsPage catch-all picker. All logic in shared Rust (priority #2).
+      No ConfigureAwait(false) in handlers (off-thread bound-state mutation throws a silent
+      COMException). The admin-nav-back affordance lives in the shared AdminShell header.
+      Lifts the linux reference apps/fauna-linux/src/settings/admin_web.rs.
+    -->
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="16" MaxWidth="640" HorizontalAlignment="Left">
+
+            <controls:CopyableInfoBar x:Name="ErrorBar"
+                     Severity="Error" IsOpen="False" IsClosable="True" />
+
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminWebHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=admin/web_page/title}" />
+            <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=admin/web_page/description}" />
+
+            <StackPanel Spacing="4">
+                <TextBlock Text="{loc:Localize Key=admin/web_page/apex_select_label}" />
+                <ComboBox x:Name="ApexSelect"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminWebApexActorSelect}"
+                          HorizontalAlignment="Left" MinWidth="260"
+                          SelectionChanged="ApexSelect_SelectionChanged" />
+                <TextBlock Opacity="0.6" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/web_page/apex_select_subtitle}" />
+            </StackPanel>
+
+            <TextBlock x:Name="ApexInfo"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminWebApexInfo}"
+                       Opacity="0.7" TextWrapping="Wrap" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

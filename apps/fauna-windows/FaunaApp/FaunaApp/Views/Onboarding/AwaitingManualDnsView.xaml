@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FaunaApp.Views.Onboarding.AwaitingManualDnsView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:controls="using:FaunaApp.Controls"
+    xmlns:loc="using:FaunaApp.Markup"
+    mc:Ignorable="d"
+    xmlns:ids="using:FaunaApp.UiIds">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <Grid Padding="48" HorizontalAlignment="Center" MaxWidth="600">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <!-- Error display -->
+            <controls:CopyableInfoBar
+                Grid.Row="0"
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="{Binding HasError, Mode=OneWay}"
+                Message="{Binding ErrorMessage, Mode=OneWay}"
+                IsClosable="True"
+                Margin="0,0,0,16" />
+
+            <StackPanel Grid.Row="1" Spacing="12" VerticalAlignment="Center">
+                <TextBlock Text="{loc:Localize Key=onboarding/awaiting_dns/title}"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                           Style="{StaticResource TitleTextBlockStyle}"
+                           HorizontalAlignment="Center" />
+
+                <!-- The machine owns the status wording (including the terminal
+                     Error{cause}), handed over as a LocalizedText — never
+                     re-derived here, so every client says the same thing in the
+                     same state. AutomationId only (no static Name), per
+                     reference_windows_flaui_gettext_dynamic_label_no_name. -->
+                <TextBlock x:Name="StatusText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AwaitingDnsStatus}"
+                           Text="{x:Bind ViewModel.AwaitingDnsStatusText, Mode=OneWay}"
+                           TextWrapping="Wrap"
+                           Opacity="0.7" />
+
+                <!-- Read-only text block of DNS records. TextBox (rather than
+                     TextBlock) so the FlaUI bridge can probe visibility via
+                     UIA's value pattern — mirrors DnsPostInstructionsView. -->
+                <ScrollViewer MaxHeight="300" VerticalScrollBarVisibility="Auto">
+                    <TextBox x:Name="RecordsText"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AwaitingDnsRecords}"
+                             Text="{x:Bind ViewModel.AwaitingDnsRecordsText, Mode=OneWay}"
+                             IsReadOnly="True"
+                             FontFamily="Consolas"
+                             AcceptsReturn="True"
+                             TextWrapping="Wrap" />
+                </ScrollViewer>
+
+                <!-- Copy-to-clipboard handler is in codebehind because the
+                     Windows.ApplicationModel.DataTransfer APIs aren't reachable
+                     from FaunaApp.Core. -->
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AwaitingDnsCopyButton}"
+                        Content="{loc:Localize Key=onboarding/awaiting_dns/copy_button}"
+                        Click="OnCopyClick"
+                        IsEnabled="{x:Bind ViewModel.AwaitingDnsCopyEnabled, Mode=OneWay}"
+                        HorizontalAlignment="Stretch" />
+
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AwaitingDnsRecheckButton}"
+                        Content="{loc:Localize Key=onboarding/awaiting_dns/recheck_button}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Command="{Binding RecheckManualDnsCommand}"
+                        IsEnabled="{x:Bind ViewModel.AwaitingDnsRecheckEnabled, Mode=OneWay}"
+                        HorizontalAlignment="Stretch"
+                        Margin="0,16,0,0" />
+
+                <!-- The exit for a box that will never answer
+                     (onboarding-provisioning.md § "Almost ready" surface → Exit):
+                     the mirror of launch_retry's launch-fallthrough-button, so it
+                     borrows that surface's label. Enablement is the machine's own
+                     rule (off only under a claim) — NOT the recheck button's probe
+                     state, since a never-answering box lives in Checking. -->
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AwaitingDnsFallthroughButton}"
+                        Content="{loc:Localize Key=onboarding/launch/use_different_nest}"
+                        Command="{Binding AbandonAwaitingManualDnsCommand}"
+                        IsEnabled="{x:Bind ViewModel.AwaitingDnsFallthroughEnabled, Mode=OneWay}"
+                        HorizontalAlignment="Stretch" />
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</UserControl>

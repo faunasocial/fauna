@@ -1,0 +1,57 @@
+[package]
+name = "fauna-client-moderation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Derives `uniffi::Record`/`uniffi::Enum` on the reader types (`LocalDetection`,
+# `QueueRow`, `QueueRowSource`) so a native app's `ConversationsSession`
+# reader can return them across the UniFFI boundary. Forwarded by
+# `fauna-conversations/uniffi` (itself turned on by `fauna-ffi`'s default-on
+# `conversations-session`), so it is OFF in the Go mail-bridge's
+# `--no-default-features` build → no Go-binding regen for these types (they are
+# a client-only moderation-queue surface the bridge never sees).
+uniffi = ["dep:uniffi"]
+
+[dependencies]
+# fauna-protocol carries the typed `fauna.moderation.*` wire types + the
+# `RpcRequester` seam this crate is generic over. `default-features = false`
+# drops the native-only `p2p` feature so this crate compiles to wasm32; native
+# workspace builds re-enable `p2p` via Cargo feature unification. The path form
+# is required to override `default-features` (mirrors fauna-client-search).
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# fauna-core: `LocalizedText` — the takedown console's shared form/confirm/
+# verdict views return `(key, args)` so every app routes them through its own
+# i18n pipeline (the fauna-client-admin pattern). `default-features = false`
+# keeps this wasm32-clean; already in the graph via fauna-protocol.
+fauna-core = { path = "../fauna-core", default-features = false }
+# Optional — only pulled in by the `uniffi` feature (native FFI clients); the
+# reader records carry only built-in scalar fields, so no `fauna-core/uniffi`
+# type registration is needed here.
+uniffi = { workspace = true, optional = true }
+# The reader types (`LocalDetection`, `QueueRow`, `QueueRowSource`) derive
+# `Serialize`/`Deserialize` so the shared `merge_queue` union crosses the wasm
+# serde boundary too — `fauna-wasm`'s `moderationQueue` binding deserializes the
+# server/local inputs and serializes the merged rows for the web SPA, the twin of
+# the UniFFI `moderation_queue` façade the natives use. Built-in scalar fields
+# only, so this stays wasm-clean + `--no-default-features`-clean (serde is already
+# in the graph via `fauna-protocol`).
+serde = { workspace = true }
+
+# wasm: forward fauna-protocol's `js` feature (fauna-core's js-sys time
+# backend) so the transitive wasm build resolves. Off on native. Cargo merges
+# the two entries (features are additive).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# Pins the JSON field names / enum tags the `QueueRow` + `LocalDetection` reader
+# types serialize to — the exact shape the web SPA's `moderationQueue` binding
+# consumes (serde_wasm_bindgen uses the same serde names), so a rename can't
+# silently break web's row renderer.
+serde_json = { workspace = true }

@@ -1,0 +1,22 @@
+[package]
+name = "fauna-uniffi-async"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Every UniFFI async export in the workspace goes through this crate's
+# `#[export]` attribute, which runs the exported future on a tokio runtime
+# worker instead of on the foreign executor's small poll stack
+# (`docs/goal/architecture/apps/native-async-execution.md` § The rule).
+# Native UniFFI builds only: a crate lists it as an optional dependency behind
+# its own `uniffi` feature, so wasm and the Go-bridge builds never see it.
+
+[dependencies]
+fauna-uniffi-async-macros = { path = "../fauna-uniffi-async-macros" }
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+# The expansion names `uniffi::export` / `uniffi::method`, so the tests export
+# a real object through it.
+uniffi = { workspace = true, features = ["tokio"] }

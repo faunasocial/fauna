@@ -1,0 +1,91 @@
+[package]
+name = "fauna-iroh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# OFF by default. The iroh-QUIC substrate is the P2P transport behind the
+# `fauna-transport` seam (the only one since the bespoke WireGuard stack was
+# deleted 2026-08-23). The shipping `--features bluesky` nest image
+# never enables `quic`, so iroh's large single-vendor tree never *compiles* into
+# production — it only sits in `Cargo.lock` as an optional dep, exactly like the
+# `bluesky`/`nostr` deps. With no feature, this crate is an empty shell
+# (no iroh, instant build) — that is what keeps the default workspace build and
+# the nest Docker build iroh-free.
+default = []
+quic = [
+    "dep:iroh",
+    "dep:rustls",
+    "dep:async-trait",
+    "dep:futures-util",
+    "dep:tracing",
+    "dep:fauna-transport",
+    "dep:tokio",
+    "dep:fauna-sync-engine",
+]
+
+[dependencies]
+fauna-transport = { workspace = true, optional = true }
+# `ceremony_transport()`'s `CeremonyTransportFactory`/`CeremonyBinding` types
+# (`offline_share` — needs both features below). Every `quic`-enabled
+# consumer (tui, linux) already depends on `fauna-sync-engine` directly with
+# these same features, so this adds no new build-graph weight, only a
+# formal edge for the wrapper both apps otherwise hand-rolled identically.
+fauna-sync-engine = { workspace = true, optional = true, features = [
+    "account-runtime",
+    "p2p-share",
+] }
+tokio = { workspace = true, optional = true }
+# iroh + its TLS provider ride the `quic` feature. `tls-ring`, NOT
+# `tls-aws-lc-rs`: the whole tree is ring-based to avoid the aws-lc-sys cmake/C
+# build that isn't in the nest Docker toolchain (see the root Cargo.toml
+# `mail-auth` note). PQ (`X25519MLKEM768` via aws-lc-rs + rustls
+# `prefer-post-quantum`) is the separate §7.3 `ring → aws-lc-rs` provider
+# migration — a provider swap proven SPKI-neutral by the 2026-06-28 iroh
+# prototype — NOT part of this additive landing. The crypto provider is an
+# injection point on `IrohTransport::builder` so that swap stays a one-line change.
+iroh = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+async-trait = { version = "0.1", optional = true }
+futures-util = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+anyhow.workspace = true
+# The W2.6 (account-data-plane.md § Workstreams) composition proof (`tests/peer_sync_over_quic.rs`, `--features
+# quic` only): the peer-sync engine served + walked over a REAL iroh QUIC
+# connection — the engine⇄substrate composition the seam-level convergence
+# test (`fauna-sync-engine/tests/peer_leg_convergence.rs`) deliberately
+# abstracts. Dev-only: never in the library build or the nest image.
+fauna-peer-sync = { workspace = true }
+# `account-runtime` is for the W5.7 assembly twin
+# (`tests/peer_leg_assembly_over_quic.rs`): the runtime itself hosts the
+# listener there, so the test needs the runtime module. Dev-only as ever.
+fauna-sync-engine = { workspace = true, features = ["account-runtime"] }
+fauna-account-store = { workspace = true }
+# The T10 slot type the W5.7 assembly twin's params carry (file backend on a
+# tempdir — never the OS keyring, testing.md § point 10).
+fauna-credential-store = { workspace = true }
+fauna-core = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+tempfile = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+# The Y.1 peer channel (slice 4) + the L3 wire types, ONLY for the composition test
+# proving a `PeerChannel` round-trips a real Request/Reply over a live iroh loopback
+# connection (the deferred deliverable). Dev-only: no dependency cycle —
+# both crates depend on `fauna-transport`, neither on the other in their libs — and
+# never compiled into the library build or the nest Docker image.
+fauna-peer-channel = { workspace = true }
+fauna-protocol = { workspace = true }
+# Self-hosted `iroh-relay` server, ONLY for the relay-round-trip test (the durable
+# form of the 2026-06-28 relay-sovereignty proof). `server` → `Server::spawn`;
+# `test-utils` → the self-signed-cert helper. Dev-only: never compiled for the
+# library build, the default workspace build, or the nest Docker image (which
+# never builds this crate's tests). iroh-relay 1.0.0 is already in `Cargo.lock`
+# as iroh's transitive client dep, so this only widens its enabled features.
+iroh-relay = { workspace = true, features = ["server", "test-utils"] }

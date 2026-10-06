@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The ONE AppStream metainfo for the Linux app. `<id>` is the app's single
+  identifier — the same string as the Flatpak `app-id`, the GtkApplication
+  `APP_ID`, and this file's `<launchable>`; Flathub requires the manifest id
+  and this `<id>` to match exactly. See `installers/macos.md` § Identifier
+  domain for how the leaf is spelled, and `packaging_identity_test.rs` for the
+  test that pins all four spellings together.
+
+  A second metainfo file used to sit at `apps/fauna-linux/`, declaring a
+  different id; its content was merged here 2026-08-22 and the file deleted.
+  Do not add another — one file, one id.
+-->
+<component type="desktop-application">
+  <id>social.fauna.fauna</id>
+  <name>Fauna</name>
+  <summary>Private messaging, groups, and file sync for your personal nest</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0 OR MIT</project_license>
+  <developer id="social.fauna">
+    <name>Fauna Social</name>
+  </developer>
+  <description>
+    <p>
+      Fauna is a native Linux desktop app for the Fauna social platform.
+      Connect to your personal nest server for private messaging, group chats,
+      contacts, calendar events, feeds, file sync, and encrypted backups.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>End-to-end encrypted messaging and group chat</li>
+      <li>Contact management with knock-based introductions</li>
+      <li>Calendar with cross-nest event invitations and RSVP</li>
+      <li>Custom feeds with filter rules and bridge integrations</li>
+      <li>File synchronization with chunked upload/download</li>
+      <li>Versioned backup snapshots</li>
+      <li>System tray with background sync when window is closed</li>
+      <li>Full nest setup wizard — provision your own server from the app</li>
+    </ul>
+  </description>
+  <url type="homepage">https://fauna.social</url>
+  <launchable type="desktop-id">social.fauna.fauna.desktop</launchable>
+  <!-- The binary the desktop entry's Exec= runs. Both predecessors of this
+       file named a binary that does not exist (`fauna` and `fauna-linux`). -->
+  <provides>
+    <binary>fauna-desktop</binary>
+  </provides>
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-chat">intense</content_attribute>
+    <content_attribute id="social-contacts">intense</content_attribute>
+  </content_rating>
+  <!-- Nothing has shipped yet: entries are appended at release time (owner:
+       docs/goal/architecture/product-version.md § Release-history records). -->
+  <releases/>
+</component>

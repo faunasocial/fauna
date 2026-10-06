@@ -1,0 +1,307 @@
+[package]
+name = "fauna-sync-engine"
+description = "Shared file-sync engine: watcher, chunk pipeline, conflict-aware sync, state DB. Runs app-side in-process one-shots and hosts the always-resident engines in the per-user fauna-sync-agent."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["format_blob", "format_text"]
+# The client-side engine lifecycle (`src/engine_lifecycle.rs`): build one folder
+# engine from nest state (row or custody read → FAIL-CLOSED content-key binding →
+# seal roots) — the one builder every engine host shares, the `fauna-ffi` hosts
+# and the desktop sync agent alike (`on-demand-files.md` § Shared sets on a
+# capability host → *One mechanism*). Needs only the lean custody read
+# (`fauna-client-config`) and the base, fauna-mls-free `fauna-client-folders`
+# resolvers — never its `mls` feature's conversations graph — so the bearer-only
+# agent can build through it. Default-OFF so a deployment that only needs the
+# raw engine (the Go mail-bridge builds fauna-ffi `--no-default-features`)
+# compiles none of it.
+engine-lifecycle = ["dep:fauna-client-config"]
+# The account plane's `fauna-client-config` seam (`fauna-account-plane`'s
+# feature of the same name owns what it gates). Needs only the lean
+# `fauna-client-config` (wasm-clean), deliberately NOT the whole
+# `engine-lifecycle` graph — it is on wherever the account-state plane runs,
+# including deployments that host no folder engine. First added for the
+# CAS-blob bridge, which is deleted (config-dissolution.md § The `__config`
+# dissolution schedule → The closure order, step (5)); renamed from
+# `preference-bridge` at step (6).
+preference-store = [
+    "dep:fauna-client-config",
+    "fauna-account-plane/preference-store",
+]
+# The client-side account-store lifecycle (`src/account_runtime.rs`, W3 of
+# account-data-plane.md § Workstreams —
+# account-data-plane.md § The account store → The client-side lifecycle): one
+# dedicated store thread per (process, account) pumping the account-state
+# plane (prologue + nudge/ticker/reconnect), served to the app through the
+# Send `AccountStoreHandle`. Needs `preference-store` (the store seams the
+# handle implements) plus the T10 credential slot for the store's writer key.
+# The two surface crates are here rather than at each app's call site so the
+# plane sequence for their gestures (`src/preference_surfaces.rs`) is
+# written ONCE for all seven apps — priority #1. Both are wasm-clean and light (`fauna-client-config` +
+# `fauna-protocol`), so they widen this crate's graph by nothing it does not
+# already carry.
+account-runtime = [
+    "preference-store",
+    "fauna-account-plane/account-driver",
+    "dep:fauna-credential-store",
+    "dep:fauna-client-accounts",
+    "dep:fauna-client-capabilities",
+    "dep:fauna-peer-sync",
+    "dep:fauna-peer-channel",
+    "dep:fauna-transport",
+]
+format_blob = []
+format_text = ["fauna-core/format_text"]
+# (`compress_chunks` retired 2026-09-03: it chose whether the upload path
+# framed chunks, i.e. what the AEAD plaintext was, under a deterministic
+# nonce derived from the UNFRAMED hash — so a feature-off build was a second
+# writer resting a second plaintext under the same (key, nonce). Framing is
+# now `fauna_core::chunk_seal`'s single, unconditional decision.)
+# Escape hatch to build the `FAUNA_E2E_DEBOUNCE_MS` override (always_resident.rs)
+# into a --release profile (debug_assertions off). Never default-on; a release-
+# profile e2e build turns this on explicitly (testing.md convention 15).
+e2e-agent = ["fauna-account-plane/e2e-agent"]
+# Exposes the in-memory `nest_api::FakeSyncControl` (and `SyncEngine::set_control_api`)
+# to OTHER crates' tests. The crate's own `#[cfg(test)]` modules get them without
+# this — `#[cfg(any(test, feature = "test-helpers"))]`, the same gating the six
+# machine crates' `nest_api/fake.rs` use.
+#
+# Also exposes `test_support::{MockNest, BlobStore}` — the one wiremock
+# byte-plane double that eight of this crate's test modules and
+# `bins/fauna-nest`'s `conformance_shared_folders.rs` had hand-copied. That is
+# what `dep:wiremock` is for: an OPTIONAL dependency this feature alone turns
+# on, so no ordinary build (debug or release, native or wasm) ever compiles a
+# test HTTP server. It is also why `test_support`'s gate deliberately omits
+# rule (a)'s `debug_assertions` arm — Cargo cannot make a dependency
+# conditional on a profile, so that arm would force `wiremock` to be
+# unconditional. Stricter than rule (a), never weaker; see the module docs
+# (e2e-automation-surface-gating.md § convention 15).
+test-helpers = ["dep:wiremock"]
+# The share leg's ROW half over the engine's own store (B2 — p2p-shared-set-build.md § Build
+# design — the row half): the `ShareStore` impl serving retained own-authored
+# rows (`peer_share_store`), the serve-side byte half, and — when
+# `account-runtime` is ALSO on — the app-side share pump (`share_pump`, the
+# cross-user twin of `peer_leg`'s pump; the weak forward below lights the
+# ceremony node it dials through). Excision-spine forwarding rule: consumers
+# gate their dep on their own `p2p-share` feature, never take this
+# unconditionally (the `fauna-client-folders/p2p-share` precedent; dep tree
+# is native-only — the share leg is web's declared absence).
+p2p-share = [
+    "dep:fauna-peer-share",
+    "dep:fauna-client-features",
+    "fauna-client-capabilities?/p2p-share",
+    "dep:rustix",
+]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("e2e-agent"))'] }
+
+[dependencies]
+# OPTIONAL, and reachable ONLY through `test-helpers` (see that feature's
+# comment): the mock nest `test_support` lends other crates' tests. It stays in
+# `[dev-dependencies]` too, so this crate's own `#[cfg(test)]` modules keep
+# compiling with no features named at all.
+wiremock = { version = "0.6", optional = true }
+fauna-account-store.workspace = true
+# The wasm-capable plane half (account-state + group planes, generation
+# passes, page walk, preference surfaces), re-exported module by module at its
+# old paths — see `src/lib.rs`.
+fauna-account-plane.workspace = true
+fauna-core.workspace = true
+# `segment_backup::edit_destination`'s "That URL points to a different nest"
+# message — zero-dep, wasm-safe, same as every other machine crate returning
+# a rendered i18n string directly (`fauna_launch_machine::render_text`).
+fauna-i18n = { path = "../fauna-i18n" }
+fauna-mls.workspace = true
+openmls.workspace = true
+tokio.workspace = true
+# The shared cross-target retry combinator backing engine_lifecycle's
+# WS-RPC-warm-up retries.
+fauna-sleep.workspace = true
+anyhow.workspace = true
+async-trait = "0.1"
+# The outbox's intent-id mint (`outbox::enqueue_intent`) — the same source
+# `fauna-core`'s ActorKeypair::generate uses.
+getrandom.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_bytes = "0.11"
+serde_json.workspace = true
+blake3.workspace = true
+# `nest_client::SegmentBody` hands out the transport's own chunk type.
+bytes.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+base64.workspace = true
+zeroize.workspace = true
+# `resolve_and_enroll_destination`'s caller-minted opaque destination-row id —
+# same v4 idiom every app used before the lift (native-only crate, rusqlite
+# hard dep above, so no wasm-cleanliness concern).
+uuid.workspace = true
+reqwest.workspace = true
+futures-util.workspace = true
+rusqlite.workspace = true
+notify.workspace = true
+fastcdc.workspace = true
+walkdir.workspace = true
+tempfile.workspace = true
+globset.workspace = true
+fauna-client.workspace = true
+# The shared `fauna.sync.*` WS-RPC adapter — the engine drives the
+# control plane (`register` / `changes.{list,record}`) through it over the
+# `NestClient` connection (byte routes stay HTTP on `SyncClient`).
+fauna-client-sync = { path = "../fauna-client-sync" }
+# The client-side engine lifecycle (`engine_lifecycle`) resolves each set's
+# content-key binding from the nest-authoritative roster + the owner's account-plane
+# custody — the fail-closed decision every in-process deployment shares (linux,
+# the apple `FfiSyncEngineHost`). Free of charge in every build: each consumer of
+# this crate (fauna-linux, fauna-windows, fauna-sync-agent, fauna-nest,
+# fauna-ffi) already depends on both crates directly. NB the
+# reverse edge is impossible — `fauna-client-folders` is compiled for wasm32 by
+# `libs/fauna-wasm`, which cannot take this crate's rusqlite/notify.
+# NB a hard dep since the sync-type resolver moved into the engine
+# (`SyncEngine::refresh_sync_mode`, file-sync.md § 4) — but WITHOUT `mls`, which
+# only `engine-lifecycle` adds: the base `list`/`members.list` kind composition
+# is free of the conversations/MLS graph, and (per the note above) every
+# consumer of this crate already depends on `fauna-client-folders` directly.
+fauna-client-folders = { path = "../fauna-client-folders" }
+fauna-client-config = { path = "../fauna-client-config", optional = true }
+# The share plane's client crate — `p2p-share` only (see the feature's note).
+fauna-peer-share = { workspace = true, optional = true }
+# The gated-feature vocabulary the share driver's transfer surface reads a
+# refusal through (`tier_label` — Dim-3's "limited by <tier>"), so the six app
+# legs resolve ONE key rather than each mapping `RuleTier` themselves.
+# `p2p-share` only; the crate is protocol+core light and wasm-clean.
+fauna-client-features = { path = "../fauna-client-features", optional = true }
+# The custody-ceremony seams (`custody_ceremony::CustodyRegistryWriter`) —
+# implemented on `AccountStoreHandle` so every app wires the ceremony driver's
+# registry-row door with zero per-app glue (W8.4; priority #1). Wasm-clean.
+fauna-client-capabilities = { path = "../fauna-client-capabilities", optional = true }
+# The T10 per-user credential slot (namespace `fauna-account-store`) holding
+# the account store's durable writer key — `account-runtime` only.
+fauna-credential-store = { workspace = true, optional = true }
+# The `SecretStore` trait the slot is read/written through — `account-runtime` only.
+fauna-client-accounts = { workspace = true, optional = true }
+fauna-protocol.workspace = true
+# The client-custodian **custody policy** (`custodian::plan_reclaim`,
+# `HeldGeneration`, `CapState`) the local sealed store
+# (`custodian_store`) is planned over. The policy deliberately lives in a
+# wasm-clean crate — it is shared by all 7 apps — while the store that holds the
+# bytes is native (`behavior/backup-destinations.md` § Third destination kind: the store layout is
+# shared Rust, only *where* it lives is glue). The edge only runs this way: the
+# policy crate takes fauna-protocol + fauna-core and nothing from here, which is
+# what keeps it compiling to wasm32 for the web SPA.
+fauna-client-backup = { path = "../fauna-client-backup" }
+tokio-util.workspace = true
+# The `BearerSource` trait (feature `client`, default) — the cross-nest writer's
+# byte-plane token source (`write_token_bearer::WriteTokenBearer`) impls it, and
+# the byte-plane `AuthClient` consumes it. Native-only (per the note above), so a
+# hard dep is fine. Also serves the SyncClient bearer unit tests (formerly a
+# dev-dep).
+fauna-nest-http = { path = "../fauna-nest-http" }
+# Client-side thumbnail producer for synced media: `seal_thumbnail_only` renders
+# a JPEG thumbnail for a >300px image and seals it under the file's audience, so
+# `upload_file` can POST it as a standalone blob + record its hash on the member
+# (`fauna.media.list` thumbnail_hash). Curated `process_media` only — the sync
+# path records no `has_c2pa`, so the heavy `c2pa-detect` tree is unneeded.
+# `fauna-sync-engine` is native-only (not a wasm dep), so a hard feature is fine.
+fauna-media = { path = "../fauna-media", default-features = false, features = [
+    "process_media",
+] }
+# The peer-leg assembly seam (W5.7 — `src/peer_leg.rs`, `account-runtime`
+# only): the runtime binds the same-account peer listener when it holds the
+# engine-singleton role, the T10 slot carries the enrollment witness, and the
+# nest advertises the `peer-sync` brake. The transport arrives through the
+# seam trait (`fauna_transport::PeerTransport`) via an app-supplied factory —
+# iroh itself never enters this crate's graph. The same three crates stay in
+# [dev-dependencies] below so the peer-leg convergence tests run without the
+# feature.
+fauna-peer-sync = { workspace = true, optional = true }
+fauna-peer-channel = { workspace = true, optional = true }
+fauna-transport = { workspace = true, optional = true }
+
+# `statvfs` for the share plane's storage floor (`share_landing::free_space`):
+# an on-demand replica never lands a peer's body into the device's last free
+# space. `p2p-share` only, and unix-only — the replicas that land by policy
+# are the phones'; elsewhere the measurement answers "unknown" and the floor
+# does not refuse. The same crate and version the nest's disk guard uses.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"], optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+# The generation-writer test fixture the account-runtime suite drives
+# (`generation_fixture_test_support`, re-exported at its old test path).
+fauna-account-plane = { workspace = true, features = ["test-helpers"] }
+# The real segment-pair fixtures (`conformance::fixtures::real_segment`) the
+# custody budget's segment-plane pin adopts.
+fauna-account-store = { workspace = true, features = ["test-helpers"] }
+wiremock = "0.6"
+# `test-helpers` unlocks `fauna_core::process_hook::ProcessHook` — the shared
+# process-wide interleaving-fence hook `principal_succession.rs`'s
+# `reauthor_window` module uses (round 116 lift; mirrors
+# `fauna-account-store`'s own dev-dep re-declaration of
+# fauna-core/test-helpers for the same lift). The [dependencies] entry above
+# stays production-clean; this feature reaches test builds only.
+fauna-core = { workspace = true, features = ["test-helpers"] }
+# The custodian pull's "the pair it stores reopens" proof
+# (`custodian_pull.rs`): a real `.dat`/`.meta` pair is written with the
+# segment store and, after a pull pass, opened again with
+# `FramedSegment::open` — the only witness that a backed-up segment is a
+# segment and not two blobs (`message-segment-store.md` § Cross-location
+# backup protocol, the 2026-08-29 sidecar widening). Test-only: the
+# production pull treats both files as opaque bytes. `fauna-cbor` is the
+# record-id mint the same proof appends under.
+fauna-segment-store = { workspace = true }
+fauna-cbor = { workspace = true }
+# The W2.6 store↔store convergence proof (`tests/peer_leg_convergence.rs`):
+# the peer leg's engine + admission + transport seam, driven against this
+# crate's AccountStatePlane over an in-memory PeerTransport.
+fauna-peer-sync = { workspace = true }
+fauna-peer-channel = { workspace = true }
+fauna-transport = { workspace = true, features = ["test-helpers"] }
+# The mocked-socket `SupervisedChannel` (`fauna_client::testing`) — the only
+# seam that can drive a real `NestClient`'s connect/reconnect lifecycle without
+# a live WS, and therefore the only way to pin `always_resident::run_watch_loop`'s
+# `Connected` arm at tier_1 (`connected_arm_heal_test`). The sibling
+# `fauna-client-testkit` below cannot: it doubles the *pure* `RpcRequester`
+# seam and is deliberately runtime-free, so it has no connection state to
+# transition. `fauna-client` is already a normal dependency; this line only
+# turns on its `test-util` feature for the test build.
+fauna-client = { workspace = true, features = ["test-util"] }
+# `Supervisor`/`run_supervisor` — the real reconnect supervisor the mocked
+# socket above is fed to, so the connect lifecycle the arm hangs on is the
+# production one and only the socket is fake.
+fauna-ws-substrate = { path = "../fauna-ws-substrate" }
+# The group plane's restart proof (`tests/group_plane_restart.rs`): the
+# ceremony state machine whose outputs the group store persists.
+fauna-client-capabilities = { path = "../fauna-client-capabilities" }
+# Turns on `fauna-media`'s shared `test_fixtures::build_png` — the >300px PNG
+# fixture the thumbnail-producer tests feed to upload_file, the same fixture
+# `fauna-media`'s own tests use (priority #2, one canonical body). `image` is
+# already in-graph via the normal `process_media` dep above; this re-listing
+# just turns on the feature gate exposing the shared builder to the test build.
+fauna-media = { path = "../fauna-media", default-features = false, features = [
+    "test-fixtures",
+] }
+# Drives the merge-convergence oracle's schedule fuzzer (`merge_convergence_test`,
+# the fuzzer section) — random delivery schedules WITH the churn the hand-written
+# schedules damp, shrinking to a minimal failing schedule. std-only: the
+# `fork`/`timeout` features would add rusty-fork + wait-timeout to the package set.
+proptest = { workspace = true }
+# The shared `RejectingRequester` / `block_on` test doubles
+# (`peer_leg_convergence`, `custody_leg`'s tests).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# The shared in-memory account-store doubles (`test_helpers`, e.g.
+# `FakeCustodyCeremonyStore` in `custody_leg`'s tests).
+fauna-client-config = { path = "../fauna-client-config", features = ["test-helpers"] }
+# The redaction pin (`conformance_log_redaction.rs`'s pattern, mirrored here):
+# capture a real production log line through the real `tracing` ring and
+# assert a user-chosen folder name/path reaches it only in
+# `fauna_core::log_redact` hash-prefix form, never plaintext
+# (`path-sealing.md` § Sealed names & paths, S7).
+fauna-log = { path = "../fauna-log" }
+tracing-subscriber = { workspace = true }

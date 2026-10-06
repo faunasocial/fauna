@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The consumer-side claim-redemption input of Settings → Subscriptions
+  (monetization.md § Pillar 3 Q4 — the universal fallback binding).
+
+  ⚠ A payments render, so it lives under Views/Payments/ and nowhere else: the whole
+  directory is dropped from Page and Compile when `/p:FaunaStoreSafe=true`, which is
+  the only construct that removes an AutomationId literal from the artifact (XAML has
+  no preprocessor). See PaymentsAuthorSections.xaml's header for the full statement,
+  and note the same rule about markup references — SettingsSubscriptionsPage hosts
+  this through a ContentControl, never by naming the type.
+-->
+<UserControl
+    x:Class="FaunaApp.Views.Payments.ClaimRedeemPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- Paste a post-payment claim code → the entitlement binds to this actor and
+         lands as a queued grant in the subscriptions list above. -->
+    <StackPanel Spacing="8">
+        <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                   Text="{loc:Localize Key=subscriptions/redeem_claim_title}" />
+        <StackPanel Orientation="Horizontal" Spacing="8">
+            <TextBox x:Name="ClaimRedeemInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionClaimRedeemInput}"
+                     MinWidth="240"
+                     PlaceholderText="{loc:Localize Key=subscriptions/claim_code}" />
+            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionClaimRedeemButton}"
+                    Style="{StaticResource AccentButtonStyle}"
+                    Click="RedeemClaim_Click"
+                    Content="{loc:Localize Key=subscriptions/redeem}" />
+        </StackPanel>
+    </StackPanel>
+</UserControl>

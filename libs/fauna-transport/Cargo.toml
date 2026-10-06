@@ -1,0 +1,21 @@
+[package]
+name = "fauna-transport"
+description = "The substrate-agnostic P2P-transport seam: dial / listen / reliable bidi byte stream + NAT-traversed path selection, behind which iroh-QUIC (and any future substrate) sit as interchangeable impls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Exposes the in-memory `testing::MemTransport` seam double to OTHER crates'
+# tests (the `fauna-sync-engine` peer-leg convergence suite, the nest's
+# runtime conformance) — one shared double instead of a per-suite copy.
+test-helpers = ["tokio/sync", "tokio/time"]
+
+[dependencies]
+async-trait = "0.1"
+futures-util.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "rt"] }

@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The author-side payments surface of the profile Tiers tab: §4 payment providers
+  and §5 manual claim codes (monetization.md § Pillar 3).
+
+  ⚠ THIS FILE IS THE EXCISION UNIT, and that is why it is a file at all. XAML has
+  no preprocessor, so `#if PAYMENTS` cannot reach an AutomationId literal — the
+  XAML compiler emits every one into the generated .g.cs and the binary XBF, both
+  of which ship inside FaunaApp.dll. Removing the ITEM is the only construct that
+  removes the markup, so FaunaApp.csproj drops `Views\Payments\**` from Page and
+  Compile when `/p:FaunaStoreSafe=true` (dynamic-features.md § Platform-family
+  surface excision; the C# twin of web's isolated-module pattern and android's
+  per-build-type source sets).
+
+  Consequences, both load-bearing:
+    · NOTHING may reference this type from markup. ProfilePage hosts it through a
+      ContentControl its `#if PAYMENTS` code-behind fills — a
+      `<payments:PaymentsAuthorSections/>` in ProfilePage.xaml would make the
+      store-safe XAML compile fail on a type that is no longer there.
+    · A payments render placed ANYWHERE ELSE compiles clean in both flavors, paints
+      nothing in the excised one, and still ships every id it would have painted.
+      That is the mutant `just windows-store-safe-check` is graded against and the
+      one no compile gate can see. New payments markup goes here.
+-->
+<UserControl
+    x:Class="FaunaApp.Views.Payments.PaymentsAuthorSections"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- Spacing mirrors ProfilePage's SelfAuthorSections (20), so hosting the two
+         sections inside one ContentControl leaves the page's rhythm unchanged. -->
+    <StackPanel Spacing="20">
+
+        <!-- ── §4 Payment providers (monetization.md § Pillar 3, IDs reserved
+             2026-07-12) ── -->
+        <StackPanel AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionProviderSection}"
+                    AutomationProperties.Name="subscription-provider-section" Spacing="8">
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=subscriptions/payment_providers}" />
+            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionProviderAddButton}"
+                    Style="{StaticResource AccentButtonStyle}"
+                    Click="AddProvider_Click" HorizontalAlignment="Left"
+                    Content="{loc:Localize Key=subscriptions/add_provider}" />
+
+            <!-- Inline add form. The secret is a PasswordBox and is NEVER
+                 pre-filled — the nest deliberately omits it from providers.list,
+                 so editing means re-entering it. The webhook-URL preview is a
+                 read-only live derivation (no nest round-trip), recomputed as
+                 the kind select changes. -->
+            <StackPanel x:Name="ProviderForm"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionProviderForm}"
+                        AutomationProperties.Name="subscription-provider-form"
+                        Visibility="Collapsed" Spacing="6" MaxWidth="460">
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <TextBlock VerticalAlignment="Center"
+                               Text="{loc:Localize Key=subscriptions/provider_kind_label}" />
+                    <ComboBox x:Name="ProviderKindSelect"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionProviderFormKind}"
+                              MinWidth="160" SelectionChanged="ProviderKindSelect_SelectionChanged" />
+                </StackPanel>
+                <PasswordBox x:Name="ProviderSecretBox"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionProviderFormSecret}"
+                             Header="{loc:Localize Key=subscriptions/webhook_secret}" />
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <TextBlock VerticalAlignment="Center"
+                               Text="{loc:Localize Key=subscriptions/provider_tier_label}" />
+                    <ComboBox x:Name="ProviderTierSelect"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionProviderFormTierMap}"
+                              MinWidth="160" />
+                </StackPanel>
+                <!-- Grid (star/auto columns), not a horizontal StackPanel — a
+                     TextBlock label + a fixed-MinWidth TextBox + a trailing Button
+                     overflows a horizontal StackPanel's implicit width, clipping the
+                     copy button offscreen (realized-but-not-visible;
+                     reference_windows_e2e_is_visible_offscreen). -->
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                               Text="{loc:Localize Key=subscriptions/webhook_url_label}" />
+                    <TextBox Grid.Column="1" x:Name="ProviderWebhookUrlBox"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionProviderFormWebhookUrl}"
+                             IsReadOnly="True" />
+                    <Button Grid.Column="2"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionProviderFormWebhookUrlCopyButton}"
+                            Click="CopyProviderWebhookUrl_Click"
+                            Content="{loc:Localize Key=profile/copy_id}" />
+                </Grid>
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionProviderFormCancel}"
+                            Click="CancelProviderForm_Click"
+                            Content="{loc:Localize Key=subscriptions/cancel}" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionProviderFormSave}"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Click="SaveProviderForm_Click"
+                            Content="{loc:Localize Key=subscriptions/save}" />
+                </StackPanel>
+            </StackPanel>
+
+            <TextBlock x:Name="NoProvidersText" Opacity="0.6"
+                       Text="{loc:Localize Key=subscriptions/no_providers}" />
+            <ItemsControl x:Name="ProvidersList">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <!-- Literal ids below — this DataTemplate has no x:DataType, so
+                             `{x:Bind ids:Ids.…}` silently drops here; see
+                             Controls/RecipientPicker.xaml. -->
+                        <Grid AutomationProperties.AutomationId="subscription-provider-row"
+                              AutomationProperties.Name="{Binding Kind}"
+                              Padding="0,4" ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                                       AutomationProperties.AutomationId="subscription-provider-kind"
+                                       Text="{Binding Kind}" />
+                            <!-- Entitled tier — rendered like linux (a plain label, no
+                                 dedicated ui.yaml id; subscription-provider-list only
+                                 defines row/kind/status/remove-button). -->
+                            <TextBlock Grid.Column="1" VerticalAlignment="Center" Text="{Binding Tier}" />
+                            <TextBlock Grid.Column="2" VerticalAlignment="Center" Opacity="0.7"
+                                       AutomationProperties.AutomationId="subscription-provider-status"
+                                       Text="{Binding Status}" />
+                            <Button Grid.Column="3"
+                                    AutomationProperties.AutomationId="subscription-provider-remove-button"
+                                    Tag="{Binding}" Click="RemoveProvider_Click"
+                                    Content="{loc:Localize Key=subscriptions/remove}" />
+                        </Grid>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </StackPanel>
+
+        <!-- ── §5 Manual claim codes (monetization.md § Pillar 3) ── -->
+        <StackPanel AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionClaimSection}"
+                    AutomationProperties.Name="subscription-claim-section" Spacing="8">
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=subscriptions/manual_claims}" />
+            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <TextBlock VerticalAlignment="Center"
+                           Text="{loc:Localize Key=subscriptions/tier_select_label}" />
+                <ComboBox x:Name="ClaimTierSelect"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionClaimTierSelect}"
+                          MinWidth="160" />
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionClaimMintButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="MintClaim_Click"
+                        Content="{loc:Localize Key=subscriptions/mint_claim}" />
+            </StackPanel>
+            <TextBlock x:Name="NoClaimsText" Opacity="0.6"
+                       Text="{loc:Localize Key=subscriptions/no_claims}" />
+            <ItemsControl x:Name="ClaimsList">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <!-- Literal for the same reason as subscription-provider-row above. -->
+                        <Grid AutomationProperties.AutomationId="subscription-claim-row"
+                              AutomationProperties.Name="{Binding Code}"
+                              Padding="0,4" ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis"
+                                       AutomationProperties.AutomationId="subscription-claim-code"
+                                       Text="{Binding Code}" />
+                            <TextBlock Grid.Column="1" VerticalAlignment="Center"
+                                       AutomationProperties.AutomationId="subscription-claim-tier"
+                                       Text="{Binding Tier}" />
+                            <TextBlock Grid.Column="2" VerticalAlignment="Center" Opacity="0.7"
+                                       AutomationProperties.AutomationId="subscription-claim-status"
+                                       Text="{Binding StatusLabel}" />
+                        </Grid>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </StackPanel>
+
+    </StackPanel>
+</UserControl>

@@ -1,0 +1,507 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.AdminUsersPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+      Consolidated admin-users hub — five sections (admin.md § Users): Pending
+      requests / Registration / Admit / Invite / Users, all framed around assigning
+      a TIER. A dumb renderer of the shared AdminUsersViewModel (FaunaApp.Core, over
+      the INestRpcClient WS-RPC seam → FfiAdminClient; no /admin/api/* twins) —
+      mirrors EventsPage / FeedPage VM consumption. Tier pickers are native
+      ComboBoxes (the converged cross-app select shape — web <select>, linux
+      gtk::DropDown); lists use non-virtualizing StackPanel item panels with
+      AutomationProperties.Name row anchors so the e2e driver can count every
+      indexed row. The Users section adds per-row one-click eviction / cancel
+      (mutually exclusive on AdminUserRow's EvictionActive) and prev/next
+      pagination (page size 50).
+    -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- Header. The uniform admin-nav-back "leave admin" button lives in the
+             AdminShellPage header (admin.md § Navigation model), not per-page, so
+             this page no longer carries its own back button. -->
+        <Grid Grid.Row="0" Padding="16,16,16,8">
+            <StackPanel Spacing="4">
+                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersHeading}"
+                           Style="{StaticResource TitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/users_page/title}" />
+                <ProgressRing x:Name="LoadProgress" IsActive="False"
+                              Visibility="Collapsed" HorizontalAlignment="Left" />
+            </StackPanel>
+        </Grid>
+
+        <!-- Dedicated hub action-error surface (admin.md § Errors). Hidden mirrors keep
+             the app-wide error-message / warning-message IDs present for infra. -->
+        <StackPanel Grid.Row="1" Padding="16,0">
+            <TextBlock x:Name="ActionError"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersActionError}"
+                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                       TextWrapping="Wrap" Visibility="Collapsed" />
+            <TextBlock x:Name="ErrorTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+                       AutomationProperties.Name=" " Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+            <TextBlock x:Name="WarningTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.WarningMessage}"
+                       AutomationProperties.Name=" " Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="2" Padding="16,0,16,16">
+            <StackPanel Spacing="24">
+
+                <!-- ── Section 1: Pending requests ───────────────────────────── -->
+                <StackPanel Spacing="8">
+                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersRequestsSection}"
+                               Style="{StaticResource SubtitleTextBlockStyle}"
+                               Text="{loc:Localize Key=admin/users_page/section_requests}" />
+                    <TextBlock x:Name="NoRequestsText" Opacity="0.7" FontSize="13"
+                               Text="{loc:Localize Key=admin/invite_requests_page/empty}" />
+                    <ItemsControl x:Name="RequestsList"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminInviteRequestsList}"
+                                  AutomationProperties.Name="{loc:Localize Key=admin/users_page/section_requests}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Spacing="8" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:AdminInviteRequestRow">
+                                <Grid Padding="8,12" RowSpacing="6" ColumnSpacing="8"
+                                      BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                      BorderThickness="0,0,0,1"
+                                      AutomationProperties.Name="{x:Bind Handle}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+
+                                    <TextBlock Grid.Row="0" Grid.Column="0"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.InviteRequestRowHandle}"
+                                               Text="{x:Bind Handle}" FontWeight="SemiBold" />
+                                    <TextBlock Grid.Row="1" Grid.Column="0"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.InviteRequestRowActor}"
+                                               Text="{x:Bind ActorIdHex}"
+                                               FontFamily="Consolas" FontSize="12" Opacity="0.7"
+                                               TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Row="2" Grid.Column="0"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.InviteRequestRowMessage}"
+                                               Text="{x:Bind Message}" Opacity="0.7"
+                                               FontSize="12" TextWrapping="Wrap" />
+                                    <!-- The applicant's recorded age claim — total: a request with
+                                         no claim says so (family-safety.md § The account age band
+                                         D6, absence as signal). -->
+                                    <TextBlock Grid.Row="3" Grid.Column="0"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.InviteRequestRowAgeClaim}"
+                                               Text="{x:Bind AgeClaimText}" Opacity="0.7"
+                                               FontSize="12" TextWrapping="Wrap" />
+
+                                    <StackPanel Grid.Row="0" Grid.RowSpan="4" Grid.Column="1"
+                                                Spacing="6" VerticalAlignment="Top">
+                                        <ComboBox AutomationProperties.AutomationId="{x:Bind ids:Ids.InviteRequestRowTierSelect}"
+                                                  Loaded="RequestTierSelect_Loaded"
+                                                  SelectionChanged="RequestTierSelect_SelectionChanged"
+                                                  HorizontalAlignment="Stretch" />
+                                        <!-- Supervised admission (family-safety.md § Client
+                                             surface); "None" ⇒ an ordinary account. -->
+                                        <ComboBox AutomationProperties.AutomationId="{x:Bind ids:Ids.InviteRequestRowGuardianSelect}"
+                                                  Loaded="RequestGuardianSelect_Loaded"
+                                                  SelectionChanged="RequestGuardianSelect_SelectionChanged"
+                                                  HorizontalAlignment="Stretch" />
+                                        <!-- The admitting guardian's age band (family-safety.md §
+                                             App surface → Age-band surfaces): seeded from the
+                                             applicant's claim, enabled only while a guardian is
+                                             picked. -->
+                                        <ComboBox AutomationProperties.AutomationId="{x:Bind ids:Ids.InviteRequestRowAgeBandSelect}"
+                                                  Loaded="RequestAgeBandSelect_Loaded"
+                                                  SelectionChanged="RequestAgeBandSelect_SelectionChanged"
+                                                  HorizontalAlignment="Stretch" />
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.InviteRequestRowApproveButton}"
+                                                Loaded="ApproveButton_Loaded"
+                                                Click="ApproveRequest_Click" HorizontalAlignment="Stretch" />
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.InviteRequestRowDenyButton}"
+                                                Loaded="DenyButton_Loaded"
+                                                Click="DenyRequest_Click" HorizontalAlignment="Stretch" />
+                                        <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.InviteRequestRowDenyReasonField}"
+                                                 PlaceholderText="{loc:Localize Key=admin/invite_requests_page/deny_reason_placeholder}"
+                                                 TextChanged="DenyReason_TextChanged"
+                                                 Width="180" />
+                                    </StackPanel>
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+
+                <!-- ── Section 2: Registration ───────────────────────────────── -->
+                <StackPanel Spacing="8">
+                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersRegistrationSection}"
+                               Style="{StaticResource SubtitleTextBlockStyle}"
+                               Text="{loc:Localize Key=admin/users_page/section_registration}" />
+
+                    <!-- Unknown/absent posture (an absent field, or a newer
+                         mode this build predates) — a read-only explainer, never a
+                         picker+save (public-mode.md § Implementation status today: a
+                         save would overwrite the nest's real posture with a guess).
+                         Same automation id as the picker below — the two are mutually
+                         exclusive (mirrors tui's registration_section / AdminVM.swift's
+                         registrationSection, both rendering one-or-the-other at the
+                         SAME id). -->
+                    <TextBlock x:Name="RegistrationUnknownText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersRegistrationModeSelect}"
+                               Opacity="0.7" FontSize="13" TextWrapping="Wrap"
+                               Visibility="Collapsed" />
+
+                    <!-- A VERTICAL form, NOT a horizontal StackPanel. The hub's content
+                         column is only ~234 DIP wide at the 600-DIP minimum window (the
+                         nav pane takes the rest), and a horizontal StackPanel lays its
+                         children out past that edge: WinUI clips rather than scrolls, and
+                         UIA reports everything past it IsOffscreen (frame -123,-123,0,0)
+                         — the ceiling input, the age toggle and the Save button were all
+                         unreachable for a user, and to e2e as `visible=False, count=1`
+                         (measured 2026-09-26; the "not visible after 30s"). The
+                         bridge's scroll-into-view walks only VERTICAL scrollers, so it can
+                         never rescue a horizontal overflow — a vertical form cannot
+                         overflow at any window width or label length. Same class as
+                         Controls/WrapStack.cs and FoldersPage's pending-share row. -->
+                    <StackPanel x:Name="RegistrationKnownPanel" Spacing="8"
+                                Visibility="Collapsed">
+                        <ComboBox x:Name="RegistrationModeSelect"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersRegistrationModeSelect}"
+                                  MinWidth="160"
+                                  SelectionChanged="RegistrationModeSelect_SelectionChanged" />
+                        <StackPanel Spacing="4">
+                            <!-- A static label, NOT PlaceholderText: an empty WinUI TextBox's
+                                 UIA ValuePattern can read back its PlaceholderText instead of
+                                 "" (measured — test_the_free_tier_ceiling_saves_alongside_the_mode
+                                 read back "Limit free accounts" for a blank box), which breaks
+                                 the cross-app "blank = no cap" get_text contract. -->
+                            <TextBlock TextWrapping="Wrap"
+                                       Text="{loc:Localize Key=admin/users_page/max_free_users_label}" />
+                            <TextBox x:Name="MaxFreeUsersTextBox"
+                                     AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersMaxFreeUsersInput}"
+                                     TextChanged="MaxFreeUsersTextBox_TextChanged"
+                                     HorizontalAlignment="Left" Width="100" />
+                        </StackPanel>
+                        <!-- The age require-knob (family-safety.md § The account age band
+                             D5+D6) — a draft saved by the Save below it, only when it
+                             changed; HelpText mirrors on/off for the driver's `state`. -->
+                        <ToggleSwitch x:Name="AgeVerificationToggle"
+                                      AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersRegistrationAgeVerificationToggle}"
+                                      Header="{loc:Localize Key=admin/users_page/age_verification_required_label}"
+                                      Toggled="AgeVerificationToggle_Toggled" />
+                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersRegistrationSaveButton}"
+                                Click="SaveRegistration_Click"
+                                Content="{loc:Localize Key=admin/users_page/registration_save}" />
+                    </StackPanel>
+                </StackPanel>
+
+                <!-- ── Section 3: Admit (direct admission — fauna.admin.users.create;
+                     the third account-creation path, public-mode.md § Registration &
+                     Identity; user-approved 2026-08-15) ─────────────────────────── -->
+                <StackPanel Spacing="8">
+                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersAdmitSection}"
+                               Style="{StaticResource SubtitleTextBlockStyle}"
+                               Text="{loc:Localize Key=admin/users_page/section_admit}" />
+                    <!-- A VERTICAL form for the same reason as the Registration section
+                         above: two fixed-width inputs + a select + a button in a
+                         horizontal StackPanel overflow the ~234-DIP content column and
+                         UIA reports the overflowed controls IsOffscreen (measured
+                         2026-09-26: the actor input a 24-px sliver, the handle input and
+                         the Admit button -123,-123,0,0). Each input is a label over its box,
+                         and the actor input's column is capped at its old 260 DIP rather
+                         than fixed there, so it can also shrink. -->
+                    <StackPanel Spacing="4">
+                        <!-- Static labels, NOT PlaceholderText — an empty WinUI TextBox's
+                             UIA ValuePattern can read back its PlaceholderText instead of
+                             "" (measured on the neighboring Registration section's ceiling
+                             input), which would break get_text on a blank
+                             admin-users-admit-handle-input (blank ⇒ the deliberate
+                             handle-less admission, public-mode.md § A handle-less account). -->
+                        <TextBlock TextWrapping="Wrap"
+                                   Text="{loc:Localize Key=admin/users_page/admit_actor_label}" />
+                        <!-- A capped star column, not Width="260" (overflows a narrow
+                             column) and not Stretch+MaxWidth (WinUI centres a stretched
+                             element clamped by MaxWidth): the box fills the column up to
+                             260 DIP, left-aligned. -->
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" MaxWidth="260" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="AdmitActorTextBox"
+                                     AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersAdmitActorInput}"
+                                     TextChanged="AdmitActorTextBox_TextChanged"
+                                     FontFamily="Consolas" />
+                        </Grid>
+                    </StackPanel>
+                    <StackPanel Spacing="4">
+                        <TextBlock TextWrapping="Wrap"
+                                   Text="{loc:Localize Key=admin/users_page/admit_handle_label}" />
+                        <TextBox x:Name="AdmitHandleTextBox"
+                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersAdmitHandleInput}"
+                                 TextChanged="AdmitHandleTextBox_TextChanged"
+                                 HorizontalAlignment="Left" Width="200" />
+                    </StackPanel>
+                    <ComboBox x:Name="AdmitTierSelect"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersAdmitTierSelect}"
+                              MinWidth="120"
+                              SelectionChanged="AdmitTierSelect_SelectionChanged" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersAdmitButton}"
+                            Click="AdmitUser_Click"
+                            Content="{loc:Localize Key=admin/users_page/admit_button}" />
+                </StackPanel>
+
+                <!-- ── Section 4: Invite ─────────────────────────────────────── -->
+                <StackPanel Spacing="8">
+                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersInviteSection}"
+                               Style="{StaticResource SubtitleTextBlockStyle}"
+                               Text="{loc:Localize Key=admin/users_page/section_invite}" />
+
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.CreateInviteCodeBtn}"
+                                Click="CreateInviteButton_Click"
+                                Content="{loc:Localize Key=admin/settings_page/create_code}" />
+                        <Button x:Name="CopyCodeButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersInviteCodeCopyBtn}"
+                                Click="CopyCodeButton_Click" Visibility="Collapsed"
+                                Content="{loc:Localize Key=admin/users_page/copy_code}" />
+                    </StackPanel>
+
+                    <!-- Create form (revealed by create-invite-code-btn) -->
+                    <StackPanel x:Name="InviteCreateForm"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsInviteCreateForm}"
+                                AutomationProperties.Name="admin-settings-invite-create-form"
+                                Spacing="8" Visibility="Collapsed"
+                                Padding="12" CornerRadius="4"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1">
+                        <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                            <TextBlock VerticalAlignment="Center"
+                                       Text="{loc:Localize Key=admin/settings_page/tiers}" />
+                            <ComboBox x:Name="CreateFormTierSelect"
+                                      AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsTierSelect}"
+                                      MinWidth="120"
+                                      SelectionChanged="CreateFormTierSelect_SelectionChanged" />
+                            <TextBlock VerticalAlignment="Center"
+                                       Text="{loc:Localize Key=admin/settings_page/max_uses}" />
+                            <TextBox x:Name="MaxUsesInput"
+                                     AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsMaxUsesInput}"
+                                     Text="1" Width="80" />
+                        </StackPanel>
+                        <!-- Supervised admission (family-safety.md § App surface —
+                             admission surfaces); "None" ⇒ an ordinary code. -->
+                        <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                            <TextBlock VerticalAlignment="Center"
+                                       Text="{loc:Localize Key=admin/users_page/guardian_label}" />
+                            <ComboBox x:Name="CreateFormGuardianSelect"
+                                      AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersInviteGuardianSelect}"
+                                      MinWidth="160"
+                                      SelectionChanged="CreateFormGuardianSelect_SelectionChanged" />
+                        </StackPanel>
+                        <!-- The supervised admission's age band — enabled only while a
+                             guardian is picked, reset when it is cleared (family-safety.md §
+                             App surface → Age-band surfaces). -->
+                        <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                            <TextBlock VerticalAlignment="Center"
+                                       Text="{loc:Localize Key=family/age_band/label}" />
+                            <ComboBox x:Name="CreateFormAgeBandSelect"
+                                      AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersInviteAgeBandSelect}"
+                                      MinWidth="160"
+                                      SelectionChanged="CreateFormAgeBandSelect_SelectionChanged" />
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.CreateInviteConfirmBtn}"
+                                    Style="{StaticResource AccentButtonStyle}"
+                                    Click="ConfirmCreateButton_Click"
+                                    Content="{loc:Localize Key=common/create}" />
+                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsInviteCancelButton}"
+                                    Click="CancelCreateButton_Click"
+                                    Content="{loc:Localize Key=common/cancel}" />
+                        </StackPanel>
+                    </StackPanel>
+
+                    <TextBlock x:Name="NoCodesText" Opacity="0.7" FontSize="13"
+                               Text="{loc:Localize Key=admin/settings_page/no_codes}" />
+                    <ItemsControl x:Name="InviteCodesList">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Spacing="4" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:AdminInviteCodeRow">
+                                <Grid Padding="8,10" ColumnSpacing="8"
+                                      AutomationProperties.AutomationId="{x:Bind ids:Ids.InviteCodeItem}"
+                                      AutomationProperties.Name="{x:Bind Code}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.InviteCodeValue}"
+                                               Text="{x:Bind Code}"
+                                               FontFamily="Consolas" FontSize="13"
+                                               VerticalAlignment="Center" />
+                                    <!-- tier · uses left, plus the minted band when there is one
+                                         (the row's read text; no new id). -->
+                                    <TextBlock Grid.Column="1" Text="{x:Bind ItemText}"
+                                               Opacity="0.6" FontSize="12"
+                                               VerticalAlignment="Center" Margin="0,0,8,0" />
+                                    <Button Grid.Column="2"
+                                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsInviteDeleteButton}"
+                                            Click="DeleteInviteCode_Click">
+                                        <FontIcon Glyph="&#xE74D;" FontSize="14" />
+                                    </Button>
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+
+                <!-- ── Section 5: Users ──────────────────────────────────────── -->
+                <StackPanel Spacing="8">
+                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersListSection}"
+                               Style="{StaticResource SubtitleTextBlockStyle}"
+                               Text="{loc:Localize Key=admin/users_page/section_users}" />
+                    <TextBlock x:Name="UserCountText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.UserCountText}"
+                               Opacity="0.7" FontSize="13" />
+                    <ItemsControl x:Name="UsersList">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Spacing="4" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:AdminUserRow">
+                                <Grid Padding="8,12" ColumnSpacing="12"
+                                      BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                      BorderThickness="0,0,0,1"
+                                      AutomationProperties.AutomationId="{x:Bind ids:Ids.UserRow}"
+                                      AutomationProperties.Name="{x:Bind ActorIdHex}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+
+                                    <TextBlock Grid.Row="0" Grid.Column="0"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.UserActorId}"
+                                               Text="{x:Bind ActorIdHex}"
+                                               FontFamily="Consolas" FontSize="13"
+                                               TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Row="1" Grid.Column="0"
+                                               Text="{x:Bind Label}" Opacity="0.6" FontSize="12" />
+                                    <!-- Read-only IMAP/CalDAV-serving audit indicator (admin.md § Users):
+                                         the admin SEES the user's serve-here choice; never an admin control. -->
+                                    <TextBlock Grid.Row="2" Grid.Column="0"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersMailServingStatus}"
+                                               Text="{x:Bind MailServingStatus}" Opacity="0.6" FontSize="12" />
+
+                                    <StackPanel Grid.Row="0" Grid.RowSpan="3" Grid.Column="1"
+                                                Orientation="Horizontal" Spacing="6"
+                                                VerticalAlignment="Center">
+                                        <ComboBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersTierSelect}"
+                                                  MinWidth="120"
+                                                  Loaded="UserTierSelect_Loaded"
+                                                  SelectionChanged="UserTierSelect_SelectionChanged" />
+                                        <!-- Suspend / evict / restore render from the shared
+                                             admin_user_row_controls decision (admin.md § Users →
+                                             Cutting a user off): suspend is reachable from Active
+                                             OR a mid-eviction warning row (and clears the pending
+                                             delete); evict only from Active; restore (cancel) is
+                                             the single exit from either. An admin row withholds
+                                             suspend + evict but keeps restore. One-click each. -->
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersSuspendButton}"
+                                                Visibility="{x:Bind local:AdminUsersPage.BoolToVisibility(CanSuspend)}"
+                                                Loaded="SuspendButton_Loaded"
+                                                Click="SuspendUser_Click" />
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersEvictButton}"
+                                                Visibility="{x:Bind local:AdminUsersPage.BoolToVisibility(CanEvict)}"
+                                                Loaded="EvictButton_Loaded"
+                                                Click="EvictUser_Click" />
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersCancelEvictionButton}"
+                                                Visibility="{x:Bind local:AdminUsersPage.BoolToVisibility(EvictionActive)}"
+                                                Loaded="CancelEvictionButton_Loaded"
+                                                Click="CancelEviction_Click" />
+                                    </StackPanel>
+
+                                    <!-- Admin-role grant/revoke get their OWN full-width row
+                                         (ColumnSpan="2"), not squeezed beside text + tier-select +
+                                         suspend/evict/cancel — that ran out of horizontal room on the
+                                         app's narrow 600 DIP default launch width (present in the UIA
+                                         tree but IsOffscreen, the same clip class
+                                         BuildPendingShareRow/BuildSharedWithMeRow/
+                                         BuildLocationBindingSection already document). make-admin and
+                                         remove-admin are mutually exclusive per row (never both), so
+                                         this row only ever needs ONE button's width. -->
+                                    <StackPanel Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2"
+                                                Orientation="Horizontal" Spacing="6"
+                                                HorizontalAlignment="Left"
+                                                Margin="0,8,0,0">
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersMakeAdminButton}"
+                                                Visibility="{x:Bind local:AdminUsersPage.BoolToVisibility(CanMakeAdmin)}"
+                                                Loaded="MakeAdminButton_Loaded"
+                                                Click="MakeAdmin_Click" />
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersRemoveAdminButton}"
+                                                Visibility="{x:Bind local:AdminUsersPage.BoolToVisibility(CanRemoveAdmin)}"
+                                                Loaded="RemoveAdminButton_Loaded"
+                                                Click="RemoveAdmin_Click" />
+                                    </StackPanel>
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <!-- Pagination (admin.md § Users — prev/next over users.list
+                         limit/offset, page size 50). IsEnabled is set imperatively from
+                         UpdatePagination() (code-behind, matching this page's other
+                         dynamic state) rather than bound here: the app DISABLES the
+                         button at each bound, which is the guard a user meets, so the
+                         cross-app test asserts the disabled state directly rather than
+                         clicking through it (test_admin_users_hub.py, 2026-08-28). The
+                         VM command handlers (PrevPageAsync/NextPageAsync) keep their own
+                         no-op guard as a harmless second line of defense. The indicator
+                         label carries the admin-users-pagination container id. -->
+                    <StackPanel Orientation="Horizontal" Spacing="8"
+                                HorizontalAlignment="Center" Padding="0,8">
+                        <Button x:Name="PrevPageButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersPrevPage}"
+                                Click="PrevPage_Click"
+                                Content="{loc:Localize Key=admin/users_page/prev_page}" />
+                        <TextBlock x:Name="PaginationIndicator"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersPagination}"
+                                   Opacity="0.7" VerticalAlignment="Center" />
+                        <Button x:Name="NextPageButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersNextPage}"
+                                Click="NextPage_Click"
+                                Content="{loc:Localize Key=admin/users_page/next_page}" />
+                    </StackPanel>
+                </StackPanel>
+
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Page>

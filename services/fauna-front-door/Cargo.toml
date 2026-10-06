@@ -1,0 +1,29 @@
+[package]
+name = "fauna-front-door"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+fauna-acme-http01 = { path = "../../libs/fauna-acme-http01" }
+fauna-conn-limit = { path = "../../libs/fauna-conn-limit" }
+fauna-core = { path = "../../libs/fauna-core", default-features = false }
+hyper-util.workspace = true
+# Self-signed floor certificate. Same pin as fauna-nest (not a workspace dep).
+rcgen = "0.13"
+reqwest.workspace = true
+rustls.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tower-http.workspace = true
+tower-service.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+fauna-acme-http01 = { path = "../../libs/fauna-acme-http01", features = ["test-helpers"] }
+tempfile.workspace = true
+# Only for crafting near-expiry test certificates (already in-tree via rcgen).
+time = "0.3"

@@ -1,0 +1,292 @@
+{
+  "schema": 1,
+  "about": "The identities of Fauna's official apps and release artifacts, one entry per identity a user can compare against what they installed. fauna.social/official-apps is rendered from this file and nothing else, and a merge-time check in the development tree refuses a merge whose entry disagrees with the tracked file the identity is pinned in (`source`), or whose tracked signing input this file does not list. Status `live` means the identity is in force today; `pending` means it is not issued or not published yet, and the `pending` sentence says why. A pending entry may still carry the value that will apply once it is tracked in the tree. Owner: docs/goal/architecture/release-integrity.md § Release signing → The official-apps list. A `source` under scripts/publish/public-files/ is published at the repository root (the release workflows live at .github/workflows/ in the public repository).",
+  "publisher": {
+    "name": "Fauna Social",
+    "trademark_policy": "TRADEMARK.md"
+  },
+  "platforms": [
+    {
+      "id": "web",
+      "label": "Web app",
+      "channel": "Served by every nest at its own address under /app/, and later by the project's own hosted origin.",
+      "identities": [
+        {
+          "kind": "front-door-app-host",
+          "label": "Hosted web app address",
+          "value": "https://app.fauna.social",
+          "status": "pending",
+          "pending": "The hosted web app is not live yet. Until it is, the web app you use comes from the nest you connect to, at that nest's own address.",
+          "source": "services/fauna-front-door/src/config.rs",
+          "how_to_check": "Once live, the address bar reads exactly app.fauna.social. Any other address serving a Fauna app is a nest's own copy or someone else's."
+        },
+        {
+          "kind": "web-asset-manifest",
+          "label": "Published hash manifest of the served files",
+          "value": null,
+          "status": "pending",
+          "pending": "Every release will publish a list of the served files and their SHA-256 hashes, so anyone can rebuild the tagged source and compare. No release has published one yet.",
+          "source": null,
+          "how_to_check": "Rebuild the tagged source, hash the output, and compare it with the published list."
+        }
+      ]
+    },
+    {
+      "id": "macos",
+      "label": "macOS",
+      "channel": "A signed and notarized download from fauna.social, updated in place by the app's own update channel.",
+      "identities": [
+        {
+          "kind": "apple-bundle-id",
+          "label": "Bundle identifier",
+          "value": "social.fauna.fauna",
+          "status": "live",
+          "source": "apps/fauna-apple/Fauna.xcodeproj/project.pbxproj",
+          "how_to_check": "Open the app bundle's Info.plist, or run `codesign -dv /Applications/Fauna.app`: the Identifier line reads social.fauna.fauna."
+        },
+        {
+          "kind": "apple-team-id",
+          "label": "Apple Developer Team ID",
+          "value": "7457N3M72H",
+          "status": "live",
+          "source": "libs/fauna-core/src/platform_ids.rs",
+          "how_to_check": "Run `codesign -dv --verbose=2 /Applications/Fauna.app`: the TeamIdentifier line reads 7457N3M72H, and the Authority line names Developer ID Application: Fauna Social (7457N3M72H)."
+        },
+        {
+          "kind": "sparkle-ed25519-public-key",
+          "label": "Update-channel signing key (Sparkle, Ed25519, public half)",
+          "value": "6lnpmCLfr2Rl60Sf1VL8oIOn8Djl2gRw/Cwmh0wxP+s=",
+          "status": "live",
+          "source": "apps/fauna-apple/Fauna-macOS/Resources/Info.plist",
+          "how_to_check": "Open the app bundle's Info.plist: the SUPublicEDKey entry is this key. Every update the app installs is signed by the matching private key, which only the association holds."
+        },
+        {
+          "kind": "sparkle-feed-url",
+          "label": "Update feed address",
+          "value": "https://fauna.social/appcast.xml",
+          "status": "pending",
+          "pending": "No release has been published to the feed yet.",
+          "source": "apps/fauna-apple/Fauna-macOS/Resources/Info.plist",
+          "how_to_check": "Open the app bundle's Info.plist: the SUFeedURL entry is this address, and the feed itself is served from fauna.social."
+        },
+        {
+          "kind": "github-attestation",
+          "label": "Build attestation of the download",
+          "value": "faunasocial/fauna",
+          "status": "pending",
+          "pending": "No signed macOS release has been published yet.",
+          "source": ".github/workflows/release-macos.yml",
+          "how_to_check": "Run `gh attestation verify Fauna-<version>.dmg --repo faunasocial/fauna`: it succeeds only for a download built by this repository's own release workflow."
+        },
+        {
+          "kind": "mac-app-store-listing",
+          "label": "Mac App Store listing",
+          "value": null,
+          "status": "pending",
+          "pending": "There is no Mac App Store listing. The macOS app is distributed as a download from fauna.social.",
+          "source": null,
+          "how_to_check": "A Mac App Store entry calling itself Fauna is not the association's."
+        }
+      ]
+    },
+    {
+      "id": "ios",
+      "label": "iOS",
+      "channel": "The App Store, once the listing exists.",
+      "identities": [
+        {
+          "kind": "apple-bundle-id",
+          "label": "Bundle identifier",
+          "value": "social.fauna.fauna",
+          "status": "live",
+          "source": "apps/fauna-apple/Fauna.xcodeproj/project.pbxproj",
+          "how_to_check": "The same identifier as the macOS app: Apple keeps one record for both."
+        },
+        {
+          "kind": "apple-team-id",
+          "label": "Apple Developer Team ID",
+          "value": "7457N3M72H",
+          "status": "live",
+          "source": "libs/fauna-core/src/platform_ids.rs",
+          "how_to_check": "On the App Store page, the seller reads Fauna Social; the Team ID is what Apple ties that name to."
+        },
+        {
+          "kind": "app-store-listing",
+          "label": "App Store listing",
+          "value": null,
+          "status": "pending",
+          "pending": "No App Store listing exists yet. The only way to run the iOS app today is to build it from the source yourself.",
+          "source": null,
+          "how_to_check": "Until the listing is announced here, an App Store entry calling itself Fauna is not the association's."
+        }
+      ]
+    },
+    {
+      "id": "android",
+      "label": "Android",
+      "channel": "Google Play, once the listing exists; a direct-download package and F-Droid may follow.",
+      "identities": [
+        {
+          "kind": "android-application-id",
+          "label": "Package name",
+          "value": "social.fauna.fauna",
+          "status": "live",
+          "source": "apps/fauna-android/app/build.gradle.kts",
+          "how_to_check": "In the system settings' app details, or in the Play address bar (`id=social.fauna.fauna`), the package name is exactly this."
+        },
+        {
+          "kind": "play-listing",
+          "label": "Google Play listing",
+          "value": null,
+          "status": "pending",
+          "pending": "No Play listing exists yet.",
+          "source": null,
+          "how_to_check": "Until the listing is announced here, a Play entry calling itself Fauna is not the association's."
+        },
+        {
+          "kind": "play-app-signing-cert-sha256",
+          "label": "App signing certificate (SHA-256)",
+          "value": null,
+          "status": "pending",
+          "pending": "Google mints the app signing key at the first upload. Its certificate fingerprint is published here the day the listing goes live.",
+          "source": null,
+          "how_to_check": "Compare the installed app's signing certificate fingerprint (`apksigner verify --print-certs`, or a package-inspector app) with the value here."
+        }
+      ]
+    },
+    {
+      "id": "windows",
+      "label": "Windows",
+      "channel": "The Microsoft Store, once the submission is published; a direct-download installer for self-hosting.",
+      "identities": [
+        {
+          "kind": "msix-identity-name",
+          "label": "Store package name",
+          "value": "FaunaSocial.FaunaSocial",
+          "status": "live",
+          "source": "docs/goal/architecture/installers/windows.md",
+          "how_to_check": "Run `Get-AppxPackage FaunaSocial.FaunaSocial` in PowerShell: the Name field is exactly this."
+        },
+        {
+          "kind": "msix-publisher",
+          "label": "Store package publisher",
+          "value": "CN=E8868D60-047A-46A3-B608-0D4CA88AB791",
+          "status": "live",
+          "source": "docs/goal/architecture/installers/windows.md",
+          "how_to_check": "The same `Get-AppxPackage` output's Publisher field is exactly this. The Store signs the package to it; nobody else can."
+        },
+        {
+          "kind": "msix-package-family-name",
+          "label": "Package family name",
+          "value": "FaunaSocial.FaunaSocial_hra91aebets7r",
+          "status": "live",
+          "source": "docs/goal/architecture/installers/windows.md",
+          "how_to_check": "The same output's PackageFamilyName field is exactly this."
+        },
+        {
+          "kind": "msix-publisher-display-name",
+          "label": "Publisher shown in the Store",
+          "value": "Fauna Social",
+          "status": "live",
+          "source": "apps/fauna-windows/installer/store/AppxManifest.xml.in",
+          "how_to_check": "The Store listing's publisher line reads Fauna Social."
+        },
+        {
+          "kind": "microsoft-store-listing",
+          "label": "Microsoft Store listing",
+          "value": "https://apps.microsoft.com/detail/9PLWNB0DJ0V7",
+          "status": "pending",
+          "pending": "The listing is reserved and nothing has been submitted yet. The address does not resolve until the first submission is published.",
+          "source": "docs/goal/architecture/installers/windows.md",
+          "how_to_check": "Once live, the Store page for Fauna Social is at exactly this address; the Store ID in it is 9PLWNB0DJ0V7."
+        },
+        {
+          "kind": "msi-code-signing",
+          "label": "Direct-download installer signature",
+          "value": null,
+          "status": "pending",
+          "pending": "The direct-download installer carries no Windows code signature: the association holds no public-trust certificate. Each release's installer is signed as a file with the release identity under Server and installers below, and Store installs are signed by the Store.",
+          "source": null,
+          "how_to_check": "Verify the installer file with cosign against the release identity below rather than by its Windows signature."
+        }
+      ]
+    },
+    {
+      "id": "linux",
+      "label": "Linux",
+      "channel": "Packages published with the releases; not on Flathub.",
+      "identities": [
+        {
+          "kind": "linux-app-id",
+          "label": "Application ID",
+          "value": "social.fauna.fauna",
+          "status": "live",
+          "source": "apps/fauna-linux/packaging/social.fauna.fauna.metainfo.xml",
+          "how_to_check": "The desktop entry, the Flatpak ID and the AppStream metainfo all carry exactly this ID."
+        },
+        {
+          "kind": "linux-package-release",
+          "label": "Published desktop packages",
+          "value": null,
+          "status": "pending",
+          "pending": "No desktop packages for Linux have been released yet. Fauna is not on Flathub; a Flathub entry calling itself Fauna is not the association's.",
+          "source": null,
+          "how_to_check": "Packages will be published with the releases under Server and installers below and signed with the same release identity."
+        }
+      ]
+    },
+    {
+      "id": "tui",
+      "label": "Terminal app",
+      "channel": "One archive per operating system and processor with each release (the terminal app plus the sync agent), signed with the same release identity as the server binaries; the macOS archives are also Developer ID-signed and notarized. The same program is included in the macOS package and the Windows installer.",
+      "identities": [
+        {
+          "kind": "tui-release",
+          "label": "Published terminal-app binaries",
+          "value": null,
+          "status": "pending",
+          "pending": "No release has been published yet. Until the first one, build the terminal app from the source.",
+          "source": null,
+          "how_to_check": "Binaries will be published with the releases under Server and installers below and signed with the same release identity."
+        }
+      ]
+    },
+    {
+      "id": "releases",
+      "label": "Server and installers (GitHub releases)",
+      "channel": "The server binaries and the Windows installer are built and signed by the repository's own release workflow.",
+      "identities": [
+        {
+          "kind": "github-release-repo",
+          "label": "Release repository",
+          "value": "https://github.com/faunasocial/fauna",
+          "status": "pending",
+          "pending": "No release has been published on this repository yet.",
+          "source": null,
+          "how_to_check": "Downloads come from this repository's Releases page and nowhere else."
+        },
+        {
+          "kind": "sigstore-identity",
+          "label": "Release signing identity (Sigstore, keyless)",
+          "value": {
+            "certificate_identity_regexp": "^https://github\\.com/faunasocial/fauna/",
+            "oidc_issuer": "https://token.actions.githubusercontent.com"
+          },
+          "status": "pending",
+          "pending": "No signed release has been published yet. There is no key fingerprint to list: the release workflow signs with a short-lived certificate naming this repository, which is what you verify against.",
+          "source": ".github/workflows/release.yml",
+          "how_to_check": "Run `cosign verify-blob --certificate-identity-regexp='^https://github\\.com/faunasocial/fauna/' --certificate-oidc-issuer='https://token.actions.githubusercontent.com' --bundle <file>.bundle <file>`: it succeeds only for a file signed by this repository's own workflow."
+        },
+        {
+          "kind": "nest-image-signing",
+          "label": "Server container image signature",
+          "value": null,
+          "status": "pending",
+          "pending": "The server image at ghcr.io/faunasocial/nest is not signed yet.",
+          "source": null,
+          "how_to_check": "Once signed, the image is verified with cosign against the release identity above."
+        }
+      ]
+    }
+  ]
+}

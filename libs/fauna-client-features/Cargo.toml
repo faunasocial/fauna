@@ -1,0 +1,51 @@
+[package]
+name = "fauna-client-features"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Exposes `test_fixtures::zaps_row` to a downstream crate's own test build —
+# a self dev-dependency turns this on the same way fauna-media's
+# `test-fixtures` feature does. No new dep pulled in: fauna-core and
+# fauna-protocol are already unconditional deps below.
+test-fixtures = []
+
+[dependencies]
+# fauna-protocol carries the typed `fauna.features.*` wire types + the
+# `RpcRequester` seam this crate is generic over. `default-features = false`
+# keeps it wasm32-clean, matching `fauna-client-family`.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# fauna-core for the registry + the policy types the wire carries verbatim
+# (`feature_gate`) and the canonical `localized::LocalizedText` the label maps
+# return. `default-features = false` keeps it wasm-clean; its js-sys time
+# backend rides fauna-protocol's `js` forward below (Cargo feature unification
+# — same shape as fauna-client-bridges).
+fauna-core = { path = "../fauna-core", default-features = false }
+# The guardian tier mints no kind of its own: its authoring arm reads the ward's
+# `fauna.family.status` entry and writes through `fauna.family.policy.update`
+# (family-safety.md § Wire & data shape), so it calls the family plane's one
+# typed client rather than spelling those two kinds a second time.
+fauna-client-family = { path = "../fauna-client-family" }
+# The row shapes the faces serialize (`row.rs`) carry serde derives.
+serde = { workspace = true }
+
+# wasm: forward fauna-protocol's `js` feature so the transitive wasm build
+# resolves. Off on native (same shape as fauna-client-family).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+serde = { workspace = true }
+# Dev-only: the generated `en.yaml` lookup, so `every_emitted_key_resolves` can
+# prove this crate's i18n keys exist. A typo'd key is invisible at compile time
+# and renders as the raw key on all 7 apps (`LocalizedText::resolve` falls back
+# to the key itself), so it needs a test rather than review. Already in the
+# graph via fauna-protocol, so this adds nothing to the shipped build.
+fauna-i18n = { path = "../fauna-i18n" }
+# `row.rs`'s serde round-trip pin — the web face serializes those shapes
+# straight to JS, so a field that cannot survive a round trip is a web bug.
+serde_json = { workspace = true }

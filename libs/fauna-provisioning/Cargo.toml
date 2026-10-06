@@ -1,0 +1,89 @@
+[package]
+name = "fauna-provisioning"
+description = "Direct VPS and DNS provider APIs for nest provisioning"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["native"]
+native = ["reqwest/rustls-tls", "dep:tokio"]
+js = ["getrandom/js", "fauna-core/js"]
+uniffi = ["dep:uniffi"]
+# Enables `atproto::seal_atproto_identity_for_provision` — K-256 keygen +
+# HPKE-seal-to-bridge for the per-user ATProto identity keys (nest
+# provision-on-read, `atproto-pds-bridge.md` § State & data shape). Off by
+# default so the lean web onboarding WASM build (which never seals to a bridge)
+# doesn't pull fauna-mls.
+atproto-seal = ["dep:fauna-mls", "dep:fauna-protocol", "dep:k256", "oauth-issuer"]
+# Enables `oauth_issuer::mint_issuer_key` — ES256 keygen for the nest-held
+# OAuth issuer signing key, plus the RFC 7638 thumbprint both it and
+# `atproto` use. Deliberately NOT part of `atproto-seal`: the goal docs rule
+# that the authorization server "is up whenever the nest is up" and that the
+# key moved to nest custody precisely so the issuer stops depending on an
+# optional bridge, so the independence is held by the build system rather
+# than by the nest happening to enable an ATProto feature. `atproto-seal`
+# enables it because the thumbprint moved here; off by default for the same
+# lean-WASM reason as the one above.
+oauth-issuer = ["dep:p256"]
+
+[dependencies]
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror.workspace = true
+# `run_step`'s per-attempt narration (wasm-safe, no runtime cost when unfiltered
+# out — `docs/goal/architecture/apps/observability.md` § Level mapping).
+tracing = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+sha1_smol = "1"
+rand = { workspace = true }
+getrandom = { version = "0.2", optional = true }
+tokio = { workspace = true, optional = true }
+uniffi = { workspace = true, optional = true }
+# Direct path dep (not the workspace dep) so we can disable defaults.
+# fauna-core's `network` default pulls in tokio + redb + hickory-resolver,
+# which break wasm builds via Cargo feature unification. We only need
+# fauna-core's always-available crypto types here.
+fauna-core = { path = "../fauna-core", default-features = false }
+# Pure (WASM-safe) DMARC `_dmarc` body assembler + the per-domain/host DNS-record
+# builders (`dns-records`). Direct path dep (not the workspace dep) so we can
+# disable defaults — `default-features = false` keeps out fauna-mail's
+# tokio/hickory/reqwest stack (`multidomain`/`outbound`) that breaks the web
+# onboarding WASM build. The onboarding publish path frames its matrix with these
+# shared builders so it is byte-identical to what `fauna.dns.{list,verify}_records`
+# renders (`docs/goal/behavior/dns-management.md` § byte-for-byte).
+fauna-mail = { path = "../fauna-mail", default-features = false, features = ["dmarc-policy", "dns-records"] }
+ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
+rsa = { workspace = true, features = ["sha2", "pem"] }
+# Optional (feature `atproto-seal`): the HPKE seal-to-bridge primitive
+# (`wrapped_blob::{seal_atproto_identity, AtprotoIdentityKeyBundle}`).
+# default-features=false keeps out fauna-mls's `native` (rusqlite/tokio) stack —
+# only the pure crypto is needed.
+fauna-mls = { path = "../fauna-mls", default-features = false, optional = true }
+# Optional (feature `atproto-seal`): did:key encoding for the freshly-minted
+# identity pubkeys + K-256 keygen. Direct path dep with defaults off for the
+# same wasm-unification reason as fauna-core/fauna-mail above.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, optional = true }
+k256 = { workspace = true, optional = true }
+# Optional (feature `oauth-issuer`): P-256 keygen for the nest-held OAuth
+# issuer signing key. Distinct curve from `k256` above and deliberately so —
+# repo commits and PLC ops are ES256K because ATProto identity says so, while
+# the AS signs OAuth tokens with ES256 because the OAuth spec does.
+p256 = { workspace = true, optional = true }
+pkcs8 = { version = "0.10", features = ["pem", "alloc"] }
+spki = { version = "0.7", features = ["pem", "alloc"] }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
+tracing-subscriber = { workspace = true }
+# `split_host_port`'s own unit test needs
+# `fauna_core::web::AUTHORITY_TERMINATOR_CASES`, which is `#[cfg(any(test,
+# feature = "test-helpers"))]` on fauna-core's own side — `cfg(test)` is
+# never set on a dependency, only on the crate under test, so the shared
+# cases need the feature turned on explicitly (mirrors `fauna-launch-machine`'s
+# self dev-dependency for the same reason).
+fauna-core = { path = "../fauna-core", default-features = false, features = ["test-helpers"] }

@@ -1,0 +1,81 @@
+#!/command/with-contenv /bin/bash
+# fauna-sni-router — L4 SNI-passthrough front for the container's public :443.
+# Terminates NO TLS: it peeks the ClientHello SNI and splices the raw byte
+# stream to a backend, so nest and the MDA each terminate their own TLS and no
+# single process ever sees the union of their plaintext.
+#
+#   SNI mail.<domain>  → the MDA CalDAV listener (127.0.0.1:8444, set via the
+#                        operator-hatch caldav_listen_https in entrypoint.sh)
+#   everything else    → nest (127.0.0.1:${FAUNA_PORT})
+#
+# Always up (no `down` file): on a mail-disabled box the MDA isn't bound, but
+# the default route to nest keeps :443 serving and the mail.<domain> route just
+# fails the backend connect until mail is enabled — a mis-route is only a failed
+# handshake, never a plaintext leak. The router binds the privileged :443 as the
+# non-root `fauna-router` user via CAP_NET_BIND_SERVICE (setcap in the
+# Dockerfile). nest distinguishes this legitimate PROXY-header writer from a
+# co-resident bridge UID (which could forge a header to spoof a source IP) by a
+# shared secret the router appends as a PROXY-v2 TLV — NOT SO_PEERCRED, which is
+# unavailable on the TCP-loopback router→nest hop (security.md §
+# Co-resident process trust boundary). See
+# docs/goal/behavior/caldav-server.md § Network exposure.
+# --default mirrors the nest port default (entrypoint.sh PORT="${FAUNA_PORT:-3000}",
+# and the bridge run scripts' ${FAUNA_PORT:-3000}): all of nest, the router, and
+# the bridges default to 3000, so a `just docker-run` single container with
+# FAUNA_PORT unset and a compose deploy (which also sets FAUNA_PORT=3000) both
+# route to nest:3000. nest's port is kept off 8443 so 8443 means CalDAV only
+# (a bare-IP box serves user-facing CalDAV at <ip>:8443).
+#
+# --send-proxy-to: prepend a PROXY-protocol-v2 header (conveying the real client
+# IP) to a backend. Without it the raw L4 splice makes the backend see this
+# router's loopback address for every internet client, which collapses per-source
+# rate limits and opens nest's loopback-only `request_enrollment` trust gate to
+# the whole internet. Each value MUST equal a
+# backend address verbatim (string match). Both backends are listed:
+#   - nest (the --default address): parses PROXY v2 on its serve_tls accept path.
+#   - the MDA CalDAV route (127.0.0.1:8444): the Go MDA now peels PROXY v2 below
+#     its tls.NewListener (internal/proxyproto), so its AUTH lockout +
+#     report_auth_event audit key on the real client IP, not the router's
+#     loopback. The MDA trusts the
+#     header only from a loopback peer (us); a header sent to a backend that did
+#     NOT understand it would corrupt that backend's TLS handshake — so this list
+#     and the backends' parsers must stay in lock-step.
+# router-auth secret: read as root and exported (NOT on the argv, which
+# /proc/<pid>/cmdline exposes world-readable) so the router appends it as a
+# PROXY-v2 TLV nest verifies. Same file the nest run-script reads; a bridge UID
+# can read neither the root-owned file nor the router's own-UID environ. Empty
+# ⇒ a plain header (nest then keeps its trust-any-loopback behaviour).
+# relay.<domain> route → the iroh P2P relay sidecar (127.0.0.1:8445). On a box
+# with no public name the relay stands by with no certificate, so the route ends
+# in a failed handshake — a mis-route is a failed handshake, never a plaintext
+# leak. Deliberately NO matching --send-proxy-to: iroh-relay does not
+# parse PROXY v2 (a header it can't peel would corrupt its TLS handshake), and the
+# relay rate-limits per node-key, not source IP, so losing the L4 client IP is fine
+# (D.1, transport.md § Future directions). Only the relay's HTTPS port is fronted;
+# its plaintext http_bind (127.0.0.1:8446) is loopback-only, never routed.
+# pds.<domain> route → the out-of-process ATProto PDS bridge's XRPC/OAuth listener
+# (127.0.0.1:8447), down on a Bluesky-disabled box (no /data/atproto-enabled flag)
+# so the route just fails the backend connect until enabled — a mis-route is a
+# failed handshake, never a plaintext leak (atproto-pds-full.md § Wire & process
+# topology, F1 packaging resolution). UNLIKE the relay, the PDS bridge DOES parse
+# PROXY v2 (`proxyproto.New` under `http.Serve`) and keys its per-IP XRPC rate
+# limits on the conveyed client IP, so it takes a matching --send-proxy-to below.
+# The bridge terminates `pds.<domain>` TLS itself (sealed cert blob) — the router
+# stays pure L4 pass-through and never sees plaintext.
+export FAUNA_ROUTER_PROXY_SECRET="$(cat /data/keys/router/proxy-secret 2>/dev/null || true)"
+# Domain-agnostic leading-label routes (`mail.*` / `relay.*`): the box boots
+# DOMAINLESS and learns its domain only at claim, so the run-script cannot name
+# `mail.<domain>` here. `mail.*` matches `mail.<any-domain>` → the MDA CalDAV
+# listener; `relay.*` → the relay. Any other SNI (the apex, `<handle>.<domain>`
+# subdomains) falls through to `--default` (nest). See domains-and-tls-bootstrap.md
+# § Claim + the router's `--route <label>.*` support.
+exec s6-setuidgid fauna-router \
+  fauna-sni-router \
+    --listen 0.0.0.0:443 \
+    --default "127.0.0.1:${FAUNA_PORT:-3000}" \
+    --route "mail.*=127.0.0.1:8444" \
+    --route "relay.*=127.0.0.1:8445" \
+    --route "pds.*=127.0.0.1:8447" \
+    --send-proxy-to "127.0.0.1:${FAUNA_PORT:-3000}" \
+    --send-proxy-to "127.0.0.1:8444" \
+    --send-proxy-to "127.0.0.1:8447"

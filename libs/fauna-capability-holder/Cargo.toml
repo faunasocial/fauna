@@ -1,0 +1,23 @@
+[package]
+name = "fauna-capability-holder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# `GrantBlob::from_canonical_bytes` + `unseal_capability{,_hybrid}` — the holder
+# side of the capability-grant plane (design § 2.3). `default-features = false`
+# drops the `native` default (`dep:rusqlite`); only the pure `wrapped_blob`
+# crypto is used here. This crate is native-only (tokio) — the holder loop runs
+# in nests and bridges, never in wasm clients — so no `js` forwarding block.
+fauna-mls = { path = "../fauna-mls", default-features = false }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+# `sync::Mutex` (single-flight refresh) + `sync::Notify`/`time` for the optional
+# background refresh loop. rt only — the loop is spawned by the host process.
+tokio = { workspace = true }
+
+[dev-dependencies]
+# Mint-side fixtures: real `build_grant_blob` seal → registry unseal roundtrip.
+fauna-mls = { path = "../fauna-mls", default-features = false }

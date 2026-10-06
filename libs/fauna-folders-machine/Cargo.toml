@@ -1,0 +1,94 @@
+[package]
+name = "fauna-folders-machine"
+description = "Shared-Rust folder creation wizard state machine (Devices page). Mirrors fauna-onboarding-machine."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Turn on UniFFI scaffolding when consumed by fauna-ffi.
+uniffi = ["dep:uniffi", "fauna-core/uniffi", "dep:fauna-uniffi-async"]
+# Test helpers — FakeFolderNestApi + the nest_api-injecting `new` constructor.
+test-helpers = []
+# Test observer — CountingObserver / NullObserver.
+test-observer = []
+# Shared WS-RPC seam glue (`nest_api::ws_rpc` + `build_folder_wizard_machine`) —
+# the production `FolderNestApi` impl over `fauna-client-folders`. Pulls the
+# per-target transport (native `fauna-client`'s `NestClient`, wasm
+# `fauna-rpc-wasm`'s `WsRpcClient` — each in its own `cfg(...)` table, so the
+# off-target one is an inert `dep:` here). `fauna-ffi` + linux (native) and
+# `fauna-wasm-folders` (web) enable it; pure-machine + fake consumers skip it.
+# Mirrors `fauna-client-mail-settings`'s `rpc-glue`.
+rpc-glue = [
+    "dep:fauna-client-folders",
+    "dep:fauna-client",
+    "dep:fauna-rpc-wasm",
+]
+
+[dependencies]
+# default-features = false: avoid fauna-core's `network` default (redb, tokio,
+# hickory-resolver) which breaks wasm builds via Cargo feature unification.
+# We only need the always-on `localized::LocalizedText` (+ its uniffi derive)
+# and `MaybeSendSync` (the seam supertrait).
+fauna-core = { path = "../fauna-core", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `on_demand_presence`: actor ids render as lowercase hex (the scoped
+# identifier's grammar) and the prefs file store reports I/O as `anyhow`.
+hex = { workspace = true }
+anyhow = { workspace = true }
+async-trait = "0.1"
+thiserror = { workspace = true }
+# Producer-side error logging: the wizard's submit error transitions log the
+# localized banner message once (observability.md § Log on the *event*, not the
+# *paint*). wasm-safe — a no-op without a subscriber; web installs `RingLayer`.
+tracing = { workspace = true }
+
+uniffi = { workspace = true, optional = true, features = ["tokio"] }
+# `#[fauna_uniffi_async::export]` runs each async export on a tokio runtime
+# worker, off the foreign executor's small poll stack
+# (`docs/goal/architecture/apps/native-async-execution.md` § The rule).
+fauna-uniffi-async = { workspace = true, optional = true }
+
+# `rpc-glue`: the transport-agnostic, wasm-clean typed `fauna.folders.*` call
+# surface the WS-RPC seam delegates to, plus `fauna-protocol` for the
+# `RpcErrorClass`/`RpcError` error mapping. Generic over `RpcRequester`, so both
+# are plain optional deps (not target-gated); the seam that uses them is gated.
+fauna-client-folders = { path = "../fauna-client-folders", optional = true }
+# NOT optional (2026-08-15, phase 2 slice e): `PlaceFlags` is the single
+# authority for what a place's flags mean and what role string names a flag
+# point, and the wizard's device step now stores flags — so the core machine
+# needs it, not just the `rpc-glue` seam. Mirrors `fauna-devices-machine`, which
+# depends on it the same way for the same reason (wire types in, snapshot
+# records out). default-features = false drops fauna-protocol's `p2p` default
+# (native-only wireguard → tokio net → mio) so the wasm seam builds; `js` time
+# backend forwarded on wasm below. Path form required to override defaults.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `rpc-glue`: the native `NestClient` (`Arc<NestClient>: RpcRequester`) the
+# WS-RPC seam binds. Native-gated; excluded from wasm so the crate stays
+# wasm-clean. Pulled with `rpc-glue` (Cargo can't AND a `cfg(...)` table key
+# with a feature, so it rides whenever a native build enables `rpc-glue`).
+fauna-client = { path = "../fauna-client", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `rpc-glue`: the browser `WsRpcClient` (`RpcRequester` over gloo-net) the web
+# wizard drives. Optional + pulled by `rpc-glue`; `#![cfg(wasm32)]` itself, so it
+# only links into the SPA bundle. Mirrors the native `fauna-client` entry above.
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm", optional = true }
+# Forward fauna-protocol's `js` (fauna-core's js-sys time backend) on wasm.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The shared `RpcRequester` doubles + `ClassifiedError`, the one home for
+# "a rejection is exactly an answer carrying an RpcError" (priority #2).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+tokio = { workspace = true }
+# Self dev-dependency turns on the test-only features for the integration-test
+# build only (the `#[cfg(any(test, feature = "..."))]` items aren't visible to
+# `tests/*.rs` otherwise — `cfg(test)` isn't set on the crate-under-test when an
+# integration test links it). Mirrors fauna-onboarding-machine. `rpc-glue` so the
+# native ws_rpc seam + its unit tests compile under `cargo test`.
+fauna-folders-machine = { path = ".", features = ["test-helpers", "test-observer", "rpc-glue"] }

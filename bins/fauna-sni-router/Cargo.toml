@@ -1,0 +1,18 @@
+[package]
+name = "fauna-sni-router"
+description = "L4 SNI-passthrough router: forwards a TLS stream to a backend by ClientHello SNI, terminating no TLS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+fauna-proxy-protocol.workspace = true
+fauna-conn-limit.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

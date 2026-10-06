@@ -1,0 +1,109 @@
+[package]
+name = "fauna-wasm-media"
+description = "WASM bindings for the Fauna Media page: the page-level MediaMachine (cross-set all-media browser)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Forwards to fauna-media-machine/test-helpers (none exposed on the wasm surface
+# yet; present for parity with fauna-wasm-folders and future E2E snapshot setters).
+test-helpers = ["fauna-media-machine/test-helpers"]
+
+# wasm32-scoped on purpose: this crate builds only for wasm32, and a plain
+# [dependencies] table would leak its wasm-only feature activations (js,
+# web-localstorage, wasm_js, …) into every HOST build's resolution under
+# resolver.feature-unification = "workspace". Add new deps here, never in a
+# plain [dependencies] table.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `js` so fauna-core's wasm build gets a getrandom backend (mirrors
+# fauna-wasm-folders); the media machine itself only uses the pure `localized`
+# module, but feature unification needs *some* crate to request it.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+# `rpc-glue` for the wasm `build_media_machine_with_folder_keys` (over
+# `WsRpcClient`). Its own chunk (not folded into fauna-wasm-folders) because
+# Media is a distinct page from Devices — the web Media route loads only the
+# media code, Devices only its.
+fauna-media-machine = { path = "../fauna-media-machine", default-features = false, features = ["rpc-glue"] }
+# The shared-folder content-key resolver (`NestFolderKeyResolver`) the
+# constructor hands the machine — the same one tui, linux and the FFI apps
+# build for theirs (priority #2: one resolver), so a shared set's bytes AND its
+# sealed names open under the content keys in the member's own custody rather
+# than the owner root, which is what makes the `media-item-detail-download-button`
+# gesture (and a member's Media listing) real on web. `mls` is the feature
+# `fauna-wasm-folders` already takes this crate with, so the combination is a
+# proven wasm32 cross-compile.
+fauna-client-folders = { path = "../fauna-client-folders", features = ["mls"] }
+# ONLY for `StoreFollowedFoldersSource`, the shared `FollowedMediaSource` impl
+# that `setFollowedMediaSource` injects — the same type tui builds for its media
+# machine and the same one `fauna-wasm-folders` builds for the Devices page, so
+# the followed rows and the followed browse scopes read one implementation
+# (priority #2; `ui/media.md` § Followed public folders). It lives in the devices
+# crate because it also serves the Devices page's `FollowedFoldersSource`;
+# `rpc-glue` is the feature that exposes it, and `fauna-wasm-folders` already
+# proves that combination cross-compiles to wasm32.
+fauna-devices-machine = { path = "../fauna-devices-machine", default-features = false, features = ["rpc-glue"] }
+# The account's follows (`fauna.state.follows`) the followed-folders source
+# reads live in the core chunk's account runtime, so this chunk reaches them
+# across the account port: the followed-folders seam's forwarder
+# (`fauna-client-config`'s `follows_port`, its `account-port` feature) over the
+# thin transport crate — the same pair `fauna-wasm-folders` takes. No plane, no
+# store. The same port carries the shared-set resolver's reads of the account's
+# folder-key custody (`fauna.state.folder-keys`, `fauna_client_folders::port`).
+fauna-account-port = { workspace = true }
+fauna-client-config = { path = "../fauna-client-config", features = ["account-port"] }
+# The account registry, ONLY for `setPredecessorBackupKeys`' walk over the
+# identities this account succeeded from (`succession-aftermath.md` § Re-key
+# scope — *media*, folders, backups). Taken as a dep rather than crossing the
+# JS boundary with the derived keys, because the seam in `wasm-media.ts` states
+# the property this preserves: "the BackupKey is derived inside wasm; the raw
+# key never enters JS". `web-localstorage` is the same feature `fauna-wasm` and
+# `fauna-wasm-launch` already take, so this is the third consumer of an
+# established combination rather than a new edge.
+fauna-client-accounts = { path = "../fauna-client-accounts", features = ["web-localstorage"] }
+# The CURATED thumbnail producer for the web Media-library upload. This is the
+# wasm mirror of native `fauna-ffi`'s producer flip (`fauna-ffi/Cargo.toml`):
+# a direct `fauna-media` dep whose `process_media` feature Cargo unifies into the
+# copy `fauna-media-machine` pulls, so the shared `MediaMachine::do_upload` sees a
+# populated `payload.thumbnail` and POSTs it as a companion blob — a web-uploaded
+# item then carries a real `thumbnail_hash` (media.md § Implementation status,
+# Producer remaining (1)). We take `process_media` ALONE, NOT `c2pa-detect`: the
+# curated pipeline (MIME sniff + EXIF/IPTC strip + JPEG thumbnail via
+# `image`+`img-parts`) is the privacy-critical baseline, while `c2pa` drags a
+# large crypto tree that would bloat the wasm chunk — so `has_c2pa` stays `false`
+# on web (the native-only additive layer). Both `image`+`img-parts` cross-compile
+# cleanly to wasm32.
+fauna-media = { path = "../fauna-media", default-features = false, features = ["process_media"] }
+# `js` (= `openmls/js`): the media machine's `upload` gesture seals through
+# `fauna-media`, which pulls `fauna-mls` → `openmls`; OpenMLS refuses to build for
+# wasm without its `js` feature (JS time + randomness). Feature unification then
+# turns it on for the transitively-pulled seal layer. Mirrors fauna-wasm's line 14
+# (the other wasm artifact that pulls fauna-media).
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"] }
+# The browser WS-RPC transport `build_media_machine` rides; `connect()` opens the
+# connection from the JS-passed nest URL + actor id + token provider.
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm" }
+# Installed at module init (`#[wasm_bindgen(start)]` in src/lib.rs) — each wasm
+# chunk is its own runtime, so this must be installed per-chunk. See the crate
+# doc comment.
+fauna-wasm-panic-hook = { path = "../fauna-wasm-panic-hook" }
+wasm-bindgen.workspace = true
+wasm-bindgen-futures = "0.4"
+# `uploadSelected` derives the owner `BackupKey` from the JS-passed secret hex
+# (mirrors fauna-wasm's `process_and_seal_library` seed decode).
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde-wasm-bindgen = "0.6"
+getrandom = { workspace = true, features = ["wasm_js"] }
+# 0.2 alias: fauna-core's crypto stack transitively pulls getrandom 0.2, which
+# needs its `js` feature to compile for wasm. Same shape as fauna-wasm-folders.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+js-sys.workspace = true
+
+[dev-dependencies]
+wasm-bindgen-test.workspace = true

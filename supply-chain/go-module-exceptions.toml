@@ -1,0 +1,31 @@
+# Recorded exceptions for the `dep-go-module-audit` check — the module-level
+# known-vulnerability check over every tracked go.mod (govulncheck -scan module).
+# Owner: docs/goal/architecture/release-integrity.md § Dependency verification →
+# *Go modules: reachable and module-level*.
+#
+# An advisory is closed by bumping the go.mod to a fixed version. An entry here is
+# for an advisory that cannot be fixed yet (no fixed version exists, or the fix is
+# a move still owed) AND whose vulnerable code is shown not to run in anything this
+# project ships or builds — for Go, `govulncheck`'s symbol-level scan of the module
+# finding no call path into it. `reason` states that showing, in our own words —
+# never the advisory's text pasted in.
+#
+# One entry per (module, advisory id, package); every field is required. An entry
+# that matches no reported finding fails the check: remove it, so it cannot cover a
+# later advisory by accident.
+#
+# [[exception]]
+# module = "bins/fauna-bridges"        # the directory that tracks the go.mod
+# id = "<the Go vulnerability database id>"
+# package = "golang.org/x/…"           # the Go module path the finding names
+# reason = "..."
+# recorded = "YYYY-MM-DD"
+
+# Re-check at every x/crypto release: removed in the commit that moves the bridge
+# to the first version that fixes it.
+[[exception]]
+module = "bins/fauna-bridges"
+id = "GO-2026-5932"
+package = "golang.org/x/crypto"
+reason = "No fixed x/crypto release exists. The symbol-level scan of the bridge (just mail-bridge-vulncheck, the same govulncheck in its default mode) finds no call path from any bridge package into the affected code, so only the module version matches, not anything the bridge runs. Owner-approved 2026-10-05."
+recorded = "2026-10-05"

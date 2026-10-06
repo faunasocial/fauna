@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.AdminShellPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+      Distinct admin shell — Model B (admin.md § Navigation model, ratified
+      2026-06-01; vertical sidebar-swap 2026-06-03). Entered via the single gated
+      `admin-tab` in the main nav (MainPage); the admin pages are switched by THIS
+      shell-local NavigationView, which renders as a **vertical (Left) nav rail**
+      that takes over the app sidebar slot in place — MainPage hides its own pane
+      while the shell is shown (NavView.IsPaneVisible=false), so there is one rail,
+      not two. This is the uniform desktop shape (linux StackSidebar + web's rail
+      that replaces the app sidebar are the references). The `admin-nav-back`
+      "leave admin" button lives in the rail header (PaneHeader) so it is present
+      on every admin sub-page. NavBack_Click → MainPage.LeaveAdmin() returns to the
+      non-admin app (Status), restoring the main pane; it is NOT an inter-admin-page
+      jump. The nav-by-id map is the platform-agnostic, unit-tested
+      FaunaApp.Core AdminNavigation.
+    -->
+    <NavigationView
+        x:Name="AdminNav"
+        PaneDisplayMode="Left"
+        IsBackButtonVisible="Collapsed"
+        IsSettingsVisible="False"
+        IsPaneToggleButtonVisible="False"
+        SelectionChanged="AdminNav_SelectionChanged">
+
+        <NavigationView.PaneHeader>
+            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <Button x:Name="NavBackButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNavBack}"
+                        AutomationProperties.Name="{loc:Localize Key=admin/exit}"
+                        ToolTipService.ToolTip="{loc:Localize Key=admin/exit}"
+                        Click="NavBack_Click"
+                        VerticalAlignment="Center">
+                    <FontIcon Glyph="&#xE72B;" FontSize="14" />
+                </Button>
+                <TextBlock VerticalAlignment="Center"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=common/admin}" />
+            </StackPanel>
+        </NavigationView.PaneHeader>
+
+        <!-- Order matches ui.yaml navigation.admin_pages (dashboard, users,
+             settings, nest, mail, calendar, contacts, files, aliases) then the
+             contextual detail pages (web, dns, bridges-pending, logs).
+             admin-services was removed + admin-nest added 2026-06-04 (admin.md
+             § Admin IA redesign); admin-contacts / admin-files added 2026-07-10
+             (admin.md § Contacts / § Files). -->
+        <NavigationView.MenuItems>
+            <NavigationViewItem x:Name="SubDashboard" Tag="dashboard" Content="{loc:Localize Key=admin/dashboard/title}" />
+            <NavigationViewItem x:Name="SubUsers" Tag="users" Content="{loc:Localize Key=admin/users_page/title}" />
+            <NavigationViewItem x:Name="SubSettings" Tag="settings" Content="{loc:Localize Key=admin/settings_page/title}" />
+            <NavigationViewItem x:Name="SubNest" Tag="admin-nest" Content="{loc:Localize Key=admin/nest_page/title}" />
+            <NavigationViewItem x:Name="SubMail" Tag="admin-mail" Content="{loc:Localize Key=admin/mail_page/title}" />
+            <NavigationViewItem x:Name="SubCalendar" Tag="admin-calendar" Content="{loc:Localize Key=admin/calendar_page/title}" />
+            <NavigationViewItem x:Name="SubContacts" Tag="admin-contacts" Content="{loc:Localize Key=admin/contacts_page/title}" />
+            <NavigationViewItem x:Name="SubFiles" Tag="admin-files" Content="{loc:Localize Key=admin/files_page/title}" />
+            <NavigationViewItem x:Name="SubWeb" Tag="admin-web" Content="{loc:Localize Key=admin/web_page/title}" />
+            <NavigationViewItem x:Name="SubAliases" Tag="admin-aliases" Content="{loc:Localize Key=admin/aliases_page/title}" />
+            <NavigationViewItem x:Name="SubDns" Tag="admin-dns" Content="{loc:Localize Key=admin/dns/title}" />
+            <NavigationViewItem x:Name="SubBridgesPending" Tag="admin-bridges-pending" Content="{loc:Localize Key=admin/bridges_pending/title}" />
+            <NavigationViewItem x:Name="SubCustodyHosting" Tag="admin-custody-hosting" Content="{loc:Localize Key=admin/custody_hosting/title}" />
+            <NavigationViewItem x:Name="SubLogs" Tag="admin-logs" Content="{loc:Localize Key=admin/logs_page/title}" />
+        </NavigationView.MenuItems>
+
+        <Frame x:Name="AdminContentFrame" />
+    </NavigationView>
+</Page>

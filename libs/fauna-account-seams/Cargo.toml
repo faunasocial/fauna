@@ -1,0 +1,81 @@
+[package]
+name = "fauna-account-seams"
+description = "The conversations seams that rest on the account plane — the group-reception keys, the read positions and the private contact overlays a `ConversationsManager` reaches through the account driver's handle — in the one wasm-capable home every runtime-hosting app registers them from (docs/goal/architecture/account-client-lifecycle.md § The client-side lifecycle → The trigger fired, ruling (4)); `fauna-client-account-runtime` re-exports each module at its old path."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ⚠️ WASM-CAPABLE BY CONSTRUCTION — and that is the whole reason this crate
+# exists. `fauna-conversations` declares the three account-plane seams
+# (`backend::GroupReceptionKeys`, `backend::ReadPositions`,
+# `backend::ContactOverlayFolds`) and must never learn about the account
+# runtime; `fauna-account-plane` serves them through `AccountStoreHandle` and
+# must never learn about conversations. Neither crate can host the join, and
+# the native assembly crate (`fauna-client-account-runtime`) is native-only by
+# construction — so the few lines that join the two live here, above both,
+# compiled for every host: tui, linux and the `fauna-ffi` seat through the
+# assembly crate's re-exports, web directly. A host hands in how to spawn the
+# seams' tasks (`spawner::TaskSpawner` — a tokio handle natively, the browser's
+# `spawn_local` on web); the seams themselves name no runtime, no thread and
+# no timer (`tests/no_native_time.rs` pins it textually, as the plane crate's
+# does).
+
+[dependencies]
+# The handle the seams serve through (`account_driver::AccountStoreHandle`)
+# and the overlay row types (`contact_overlay_rows`). The driver feature is
+# what puts the handle in the crate.
+fauna-account-plane = { workspace = true, features = ["account-driver"] }
+# The seam declarations and the manager they register on. Lean: the default
+# feature set is what `fauna-wasm` and the native apps already build.
+fauna-conversations = { path = "../fauna-conversations", default-features = false }
+# `BlessedNestsStore` — the Nests page's blessing seam `blessed_nests` serves
+# (already in this crate's graph through the conversations stack; pair never
+# depends back on the account runtime).
+fauna-client-pair = { path = "../fauna-client-pair" }
+# `FleetRemoval` — the Devices page's fleet door `fleet_removal` serves
+# natively and, through web's account port, from the core chunk. Default
+# features only: the wasm-clean trait and its types, no transport.
+fauna-devices-machine = { path = "../fauna-devices-machine" }
+# `PeriodKeyStore` — the period-key custody seam `period_keys` serves — and
+# the `StoreError` it answers with. Both wasm-clean; neither depends back on
+# the account runtime.
+fauna-client-subscriptions = { path = "../fauna-client-subscriptions" }
+fauna-client-config = { path = "../fauna-client-config" }
+# `AtprotoIdentityStore` — the ATProto identity seam `atproto_identity`
+# serves natively and, through web's account port, from the core chunk.
+# Wasm-clean, and already in every runtime host's graph (the alert sweep).
+fauna-client-atproto = { path = "../fauna-client-atproto" }
+# `AtprotoCredentialStore` — the ATProto settings page's credential seam
+# `atproto_credentials` serves natively and, through web's account port, from
+# the core chunk (it answers with `fauna-client-config`'s `StoreError`, above).
+# Default features only: the wasm-clean trait, no transport.
+fauna-atproto-settings-machine = { path = "../fauna-atproto-settings-machine" }
+# `FolderKeyReader` / `FolderKeyStore` — the shared-folder content-key custody
+# seam `folder_keys` serves (and its account-port crossing web's core chunk
+# answers). The base, fauna-mls-free feature set: wasm-clean, and it never
+# depends back on the account runtime.
+fauna-client-folders = { path = "../fauna-client-folders" }
+# `GroupReceptionKeyRecord` — the record the group-reception seam moves.
+fauna-core = { path = "../fauna-core", default-features = false }
+# The store-observer poll — the one wait the watchers take, cross-target.
+fauna-sleep = { workspace = true }
+# `sync` for the seams' queues; `macros` for the watchers' `select!`. Never
+# `time` (banned by test) and never `rt` here — the native spawner arm below
+# is the one place a runtime handle is named.
+tokio = { version = "1", default-features = false, features = ["sync", "macros"] }
+async-trait = "0.1"
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `tokio::runtime::Handle` — the native `TaskSpawner`.
+tokio = { version = "1", default-features = false, features = ["rt"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `spawn_local` — the web `TaskSpawner`.
+wasm-bindgen-futures = "0.4"
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# `#[tokio::test]` for `fleet_removal`'s absent-runtime pins.
+tokio = { workspace = true }

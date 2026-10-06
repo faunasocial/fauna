@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.SettingsLinkedNestsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="24" MaxWidth="600" HorizontalAlignment="Left">
+
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="False"
+                IsClosable="True" />
+
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}" Style="{StaticResource TitleTextBlockStyle}" Text="{loc:Localize Key=nests/title}" />
+
+            <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=nests/description}" />
+
+            <controls:NestsPanel x:Name="NestsControl" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

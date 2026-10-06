@@ -1,0 +1,251 @@
+[package]
+name = "fauna-client-mail-settings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# UniFFI scaffolding for consumers in fauna-ffi (Apple/Android) +
+# uniffi-bindgen-cs (Windows). Off by default — most consumers wrap
+# the machine in a per-app glue layer that owns the FFI surface.
+# Forwards `fauna-core/uniffi` for the blanket `SecretBytes` custom-type reg
+# used by the `MailSettingsAction` variants (registered in `fauna_core::secret`).
+#
+# Forwards `fauna-mail/uniffi` for the same reason, one layer down: since
+# 2026-09-21 `export::ExportFormat` is a `pub use` of `fauna_mail::export::
+# ExportFormat`, and a re-export carries no derives — without the forward the
+# FFI face would compile and the bindings would silently lack the enum the
+# `mail-export` wizard's whole step 1 is.
+uniffi = ["dep:uniffi", "fauna-core/uniffi", "fauna-mail/uniffi", "dep:fauna-uniffi-async"]
+# Fakes for downstream integration tests, plus the forward of `fauna-mail`'s
+# source-IMAP trust seed (`FAUNA_E2E_IMAP_EXTRA_CA_PEM`, read inside
+# `NativeImapConnector::new`) — `rpc_glue`'s `RpcImportSourceNest` is one of the
+# two native construction sites, so a release-profile e2e build of linux/tui
+# needs the arm compiled in. A debug build gets it via `debug_assertions`.
+# Convention 15 rule (b): forwarded from a feature, NEVER named on a dep line.
+test-helpers = ["fauna-mail/test-helpers", "fauna-client-config/test-helpers"]
+# Shared WS-RPC seam glue (`rpc_glue`) — the `build_*_machine` constructors
+# `fauna-ffi` + linux (native) and `fauna-wasm` (web) call instead of hand-rolling
+# each machine's `…Nest` seam. Pulls the per-target transport (native
+# `fauna-client`, wasm `fauna-rpc-wasm` — each in its own `cfg(...)` table, so the
+# off-target one is an inert `dep:` here). Off by default — pure-machine consumers
+# (the seam is theirs to provide) skip it. `fauna-client-bridges` is NOT gated
+# here: it is a base (non-optional) dependency because the always-compiled
+# `NestClient` trait names its `HolderInfo` type (2026-07-19 rotation-heal lift).
+rpc-glue = [
+    "dep:fauna-client",
+    "dep:fauna-client-pair",
+    "dep:fauna-rpc-wasm",
+]
+
+[dependencies]
+# default-features = false on fauna-core to avoid pulling the `network`
+# default (redb, tokio, hickory-resolver) into wasm builds via Cargo
+# feature unification. Mirrors the onboarding-machine + launch-machine
+# pattern. The path form (rather than `workspace = true`) is required
+# because Cargo refuses `default-features = false` overrides on
+# `workspace = true` deps when the workspace entry doesn't already
+# disable defaults.
+fauna-core = { path = "../fauna-core", default-features = false }
+# `default-features = false` drops fauna-mls's `native` default (`dep:rusqlite`,
+# a C SQLite that can't build on wasm); only the pure-crypto `wrapped_blob`
+# seals and key derivations are used here. Native consumers (fauna-ffi/linux) re-add `native` via
+# additive unification; the dev-dep below keeps it for the integration tests.
+# `js` (openmls/js) forwarded on wasm below. Mirrors fauna-wasm + fauna-media.
+fauna-mls = { path = "../fauna-mls", default-features = false }
+# `default-features = false` drops fauna-protocol's `p2p` default (native-only
+# wireguard → tokio net → mio) so the rpc-glue wasm seam builds; `js` time backend
+# forwarded on wasm below. Path form required to override defaults (see fauna-core
+# above). Mirrors fauna-client-bridges.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# `aliases` + `role-overrides` features only — the pure, WASM-safe per-account
+# alias validators (`validate_exact_local_part` / `validate_wildcard_prefix` /
+# `AliasValidationError` + the kind consts) the user-aliases machine reuses for
+# add-sheet pre-validation, plus `role_overrides::RoleAddressOverrides` — the one
+# shared parser the `admin-dns` role-address picker reads the override map with
+# (the same parser the nest writer + RCPT-time resolver use; priority #2).
+# `default-features = false` drops the heavy auth/spam/dns stack (tokio/hickory →
+# not wasm-safe); both `aliases` and `role-overrides` pull only serde_json + hex,
+# so this is a plain (non-target-gated) dep that builds on both native + wasm.
+# `imap-client` (the mail-import wizard's fetch-drive loop, `import.rs`) is
+# wasm-safe on its own — pure `imap-proto` parser + protocol core, no
+# tokio/rustls (that's the native-only `imap-client-native` sub-feature,
+# never enabled here; the platform transport is the app-glue layer's job,
+# same split as `ImportSourceNest`'s own module docs).
+# `mail-export` (the mailbox-export wizard's serializers, container and per-session
+# seal, `export.rs`'s drive loop) is wasm-safe on the same terms as `imap-client`:
+# pure `zip`/`zstd`/`blake3`/`chacha20poly1305` over `std`, no tokio and no socket
+# (§ Export pipeline puts the conversion on the CLIENT unconditionally, so the web
+# app runs this identical code). It is named here rather than only on the native
+# dep table below because the loop and the `ExportFormat` re-export are in the
+# always-compiled half of this crate.
+# `body-ref-resolve` is the export down-leg's escape for an over-frame record:
+# `fetch_export_chunk_ciphertext` hands one back as a `body_ref` on the bulk-byte
+# plane, and the `rpc_glue` seam resolves it before the drive loop sees it. It
+# pulls only the width-checked resolver and `fauna-core`'s `BlobFetcher` trait
+# (the network half of fauna-core stays behind its own gate), so it is as
+# wasm-safe as the rest of this line. Without it the loop could only drop such
+# a message — which § An unopenable record fails the session forbids.
+# `forward-config` is the pure address/limit validators the `forwarding` draft
+# parsers wrap (the nest runs the same two at its set doors). std only.
+fauna-mail ={ path = "../fauna-mail", default-features = false, features = ["aliases", "role-overrides", "spam-classifier", "segments-receive", "domain-rename", "imap-client", "mail-export-client", "body-ref-resolve", "forward-config"] }
+serde = { workspace = true }
+# `serving_enablement::serving_enablement_json` — the one shared JSON shape of the
+# `fauna_e2e_agent::SERVING_ENABLEMENT_KEY` observable (wasm-safe).
+serde_json = { workspace = true }
+serde_bytes = "0.11"
+async-trait = "0.1"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# `SigningKey` for the submission-token signing seam (`rpc_glue`); the testing
+# fakes derive a `VerifyingKey`. (DKIM keygen's `pkcs8`/`pem` features were dropped
+# with the client-side DKIM path — DKIM is provisioned nest-side now.)
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+hex = { workspace = true }
+
+# `tokio` feature backs the `async_runtime = "tokio"` exports on the admin
+# machines' async `hydrate`/`dispatch` methods. Mirrors fauna-onboarding-machine.
+uniffi = { workspace = true, optional = true, features = ["tokio"] }
+# `#[fauna_uniffi_async::export]` runs each async export on a tokio runtime
+# worker, off the foreign executor's small poll stack
+# (`docs/goal/architecture/apps/native-async-execution.md` § The rule).
+fauna-uniffi-async = { workspace = true, optional = true }
+
+# The typed `fauna.bridges.*` admin client the shared seams delegate to, PLUS
+# the lifted `HolderInfo` / `discover_holders` (2026-07-19). Generic over
+# `RpcRequester` (transport-agnostic, wasm-safe) and light (protocol+core deps),
+# so it is a plain (non-target-gated) **base** dep — NOT gated behind `rpc-glue`:
+# the always-compiled `NestClient` trait names `HolderInfo` in its
+# `content_processor_holders` method (the rotation-heal driver's discovery seam).
+fauna-client-bridges = { path = "../fauna-client-bridges" }
+# The **shared account-store seam traits + `StoreError`** the machine injects
+# (`fauna_client_config::{MailStore, SuccessionLedgerStore, StoreError}`,
+# re-exported from `machine.rs`/`error.rs`).
+# Non-optional (base) because `MailSettingsMachine` — always compiled —
+# names the seam types; the crate is transport-generic + wasm-clean + lightweight
+# (fauna-core/fauna-protocol defaults-off + serde + blake3), already a
+# non-optional dep of `fauna-ffi`, so it adds no crate to any real build.
+fauna-client-config = { path = "../fauna-client-config" }
+# The client-side capability mint: `mint_grant` (builds the keyless
+# `content.read{spam-model}` GrantBlob), `grant_log::{build_mint_event,
+# build_revoke_event, append_signed, current_grants}` (the signed grant-event
+# log), `DEFAULT_GRANT_WINDOW_SECS`, and the `rpc::CapabilitiesClient`
+# (`fauna.capabilities.{mint,revoke}` seam `rpc_glue` drives). The `mail-spam`
+# contribute toggle mints/revokes a baseline-contribution grant (piece (b),
+# `mail-spam.md` § Encrypted-mode interaction). Non-optional (base) because
+# `MailSettingsMachine` — always compiled — names `mint_grant`/`grant_log`; the
+# crate is wasm-clean + lightweight (fauna-core/mls/protocol defaults-off), the
+# same substrate `fauna-client-pair` already links.
+fauna-client-capabilities = { path = "../fauna-client-capabilities" }
+# The period-key store type the Nests-page builder threads through to the
+# trust facet (`fauna.state.subscriptions`). Wasm-clean.
+fauna-client-subscriptions = { path = "../fauna-client-subscriptions" }
+# `AccountClient::am_i_admin` — the admin-claim gate
+# `rpc_glue::dispatch_provision_mailbox_at_first_setup` shares across every
+# native app's CalDAV/CardDAV first-setup auto-mint. Generic over
+# `RpcRequester` (transport-agnostic, wasm-safe) and light (fauna-protocol
+# defaults-off only), so — like `fauna-client-config` above — a plain
+# (non-optional, non-target-gated) base dep adds no crate to any real build.
+fauna-client-account = { path = "../fauna-client-account" }
+# `PostsClient::posts_get` + `ModerationClient::train` — the two WS-RPC halves of
+# the shared moderation-queue training correction
+# (`MailSettingsMachine::train_moderation_correction`), driven by `rpc_glue`'s
+# `NestClient` seam. Same shape as `fauna-client-account` above: generic over
+# `RpcRequester`, wasm-clean, light (fauna-protocol/-core defaults-off), already
+# in every real consumer's graph (fauna-ffi, fauna-wasm, linux, tui) — so a
+# plain base dep adds no crate to any real build. Acyclic: neither reaches back.
+fauna-client-posts = { path = "../fauna-client-posts" }
+fauna-client-moderation = { path = "../fauna-client-moderation" }
+fauna-sleep = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `rand::thread_rng()` (the MSEK CSPRNG in `machine.rs`) needs getrandom's wasm
+# backend, which `fauna-wasm` enables workspace-wide via the `wasm_js` cfg — this
+# crate just needs the dep in its graph (no per-crate feature). Formerly pulled
+# transitively through `fauna-provisioning`'s `js` feature for DKIM keygen; that
+# dep was removed with the client-side DKIM path. Mirrors fauna-launch-machine.
+getrandom = { workspace = true }
+# Forward fauna-protocol's `js` (fauna-core's js-sys time backend) on wasm.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+# Forward fauna-mls's `js` (openmls/js) on wasm.
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"] }
+# Wasm concrete `…Nest` seam (`rpc_glue::wasm::build_*_machine`) — the browser
+# `WsRpcClient` (`RpcRequester` over gloo-net) the web admin pages drive through
+# `libs/fauna-wasm`. Optional + pulled by `rpc-glue` (the wasm seam module that
+# names it is feature-gated); `#![cfg(wasm32)]` itself, so it only links into the
+# SPA bundle. Mirrors the native `fauna-client` entry below.
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm", optional = true }
+# Backoff timer for `rpc_glue`'s idempotent-provision retry on wasm (the
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Sync primitives + RT enough for the in-memory snapshot mutex; `time`
+# backs the native backoff in `rpc_glue`'s idempotent-provision retry.
+# Avoid `full` so wasm builds don't pull mio via Cargo's feature
+# unification.
+tokio = { version = "1", default-features = false, features = ["sync", "rt", "time"] }
+# Native concrete `…Nest` seam (`rpc_glue::build_*_machine`) — the `NestClient`
+# the shared glue binds. Native-gated (mirrors the tokio entry above); excluded
+# from wasm so the crate stays wasm-clean. Pulled only with `rpc-glue`, but
+# Cargo can't AND a `cfg(...)` table key with a feature, so it rides whenever a
+# native build enables `rpc-glue` (the module that names it is feature-gated).
+fauna-client = { path = "../fauna-client", optional = true }
+# `rpc-glue` (native): the linked-nests pairing machine + its generic
+# `PostLinkHook` seam. The mail relay-provisioning hook
+# (`build_linked_nests_machine_with_mail_relay`) wires onto it so a both-ends
+# `LinkBoth` auto-provisions the just-linked home box's mailbox reusing the fleet
+# MSEK (the one-action home-with-public-relay flow). Native-only — the builder
+# binds `NestClient`. Acyclic: fauna-client-pair depends only on
+# protocol/core/client, none of which reach back here.
+# Forward fauna-mail's `imap-client-native` (tokio TCP + tokio-rustls) — the
+# mail-import wizard's native `ImportSourceNest` seam
+# (`rpc_glue::build_mail_import_machine`), `mailbox-migration.md` § Where the
+# IMAP client runs' native row. Mirrors the `fauna-protocol`/`fauna-mls`
+# `js`-forwarding entries in the wasm target table above: same crate, same
+# key, an ADDITIONAL feature Cargo unions onto the base `[dependencies]`
+# entry's set for this target only — never wasm, where `imap-client-native`'s
+# tokio/rustls stack doesn't compile. Not gated behind `rpc-glue` (unlike
+# `fauna-client` below) because `fauna-mail` is already a non-optional base
+# dependency and Cargo cannot mark a name both optional and required; every
+# real native consumer of this crate (fauna-ffi, linux, tui) enables
+# `rpc-glue` anyway to get any `build_*_machine` at all, so the practical cost
+# is the same either way.
+fauna-mail = { path = "../fauna-mail", default-features = false, features = [
+    "imap-client-native",
+] }
+fauna-client-pair = { path = "../fauna-client-pair", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+# `forwarding`'s guard that every `LocalizedText` key it emits resolves in the
+# shared string table.
+fauna-i18n = { path = "../fauna-i18n" }
+# `role_address_options`'s guard pins the serialized `kind` tag, because that
+# tag — not just the storage key — is what every app's picker hands back in the
+# `SetRoleAddress` action and matches `role_address_overrides[].role` against.
+serde_json = { workspace = true }
+# Integration tests assert the registered recipient pubkey equals the
+# MSEK-derived keypair, so they name `fauna_mls` directly.
+fauna-mls = { workspace = true }
+# Self dev-dep turns on `test-helpers` for integration-test builds
+# only (the production lib build stays feature-clean). Same shape as
+# fauna-onboarding-machine's `Cargo.toml` § dev-dependencies.
+# `rpc-glue` additionally builds the native `build_*_machine` constructors, so
+# `hydrate_waits_for_socket` can drive a machine over a REAL `NestClient`
+# instead of a hand-written double — the whole point of that test is the
+# transport's connect-race behaviour, which a double cannot exhibit.
+fauna-client-mail-settings = { path = ".", features = ["test-helpers", "rpc-glue"] }
+# Same test: a real `NestClient` plus `fauna_client::testing`'s mocked-socket
+# `SupervisedChannel`, so the machine's first read is issued while the
+# dispatcher slot is still `None` (the post-login state).
+fauna-client = { path = "../fauna-client", features = ["test-util"] }
+# `Supervisor` / `run_supervisor` — driven directly so the test controls exactly
+# when the connection lands.
+fauna-ws-substrate = { path = "../fauna-ws-substrate", features = ["test-util"] }
+# The test's fake nest speaks frames itself: decode the request, encode the
+# `FetchConfigReply`.
+fauna-protocol = { workspace = true }
+fauna-cbor = { workspace = true }
+fauna-core = { workspace = true }

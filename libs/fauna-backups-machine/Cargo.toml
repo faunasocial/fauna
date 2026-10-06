@@ -1,0 +1,84 @@
+[package]
+name = "fauna-backups-machine"
+description = "Shared-Rust page-level Backups state machine: owns the snapshot half of the Backups page (folder selector + snapshot list + create/delete/prune/check). Mirrors fauna-devices-machine."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Turn on UniFFI scaffolding when consumed by fauna-ffi.
+uniffi = ["dep:uniffi", "fauna-core/uniffi", "dep:fauna-uniffi-async"]
+# Test helpers — FakeBackupsNestApi.
+test-helpers = []
+# Test observer — CountingObserver / NullObserver.
+test-observer = []
+# Shared WS-RPC seam glue (`nest_api::ws_rpc` + `build_backups_machine`) — the
+# production `BackupsNestApi` impl over the custody-wired
+# `fauna-client-snapshots` `SnapshotsClient` + `fauna-client-folders`. Pulls the
+# per-target transport (native `fauna-client`'s `NestClient`, wasm
+# `fauna-rpc-wasm`'s `WsRpcClient`). Mirrors `fauna-devices-machine`'s `rpc-glue`.
+rpc-glue = [
+    "dep:fauna-client-snapshots",
+    "dep:fauna-client-folders",
+    "dep:fauna-client",
+    "dep:fauna-rpc-wasm",
+]
+
+[dependencies]
+# default-features = false: avoid fauna-core's `network` default (redb, tokio,
+# hickory-resolver) which breaks wasm. We need `localized::LocalizedText` (+ its
+# uniffi derive), `MaybeSendSync` (the seam supertrait), and
+# `sync::is_reserved_folder_name` (the selector's reserved-set filter).
+fauna-core = { path = "../fauna-core", default-features = false }
+# NOT optional: the seam hands the machine the **wire** `SnapshotSummaryRow` /
+# `FolderSummary` / check + prune replies so the machine owns every transcribe
+# and derivation (`ui/backups.md` § Snapshot-list shape). Same division as
+# `fauna-devices-machine`, whose seam likewise carries wire rows.
+# `default-features = false` drops fauna-protocol's `p2p` default (native-only
+# wireguard) so the wasm build works; `js` time backend forwarded on wasm below.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = "0.1"
+hex = { workspace = true }
+# Producer-side error logging: the page's error transitions log the localized
+# banner message once (observability.md § Log on the *event*, not the *paint*).
+tracing = { workspace = true }
+
+uniffi = { workspace = true, optional = true, features = ["tokio"] }
+# `#[fauna_uniffi_async::export]` runs each async export on a tokio runtime
+# worker, off the foreign executor's small poll stack
+# (`docs/goal/architecture/apps/native-async-execution.md` § The rule).
+fauna-uniffi-async = { workspace = true, optional = true }
+
+# `rpc-glue`: the transport-agnostic, wasm-clean typed call surfaces the WS-RPC
+# seam delegates to. Generic over `RpcRequester`, so plain optional deps (not
+# target-gated); the seam that uses them is gated.
+fauna-client-snapshots = { path = "../fauna-client-snapshots", optional = true }
+fauna-client-folders = { path = "../fauna-client-folders", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `rpc-glue`: the native `NestClient` (`Arc<NestClient>: RpcRequester`) the
+# WS-RPC seam binds. Native-gated; excluded from wasm.
+fauna-client = { path = "../fauna-client", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `rpc-glue`: the browser `WsRpcClient` the web Backups page drives.
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm", optional = true }
+# Forward fauna-protocol's `js` (fauna-core's js-sys time backend) on wasm.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+# Only so the tier_1 suite can pin the machine's local copy of
+# `immediate_delete_button_enabled` against the shared original — see
+# `the_local_friction_bar_predicate_agrees_with_the_shared_one`. Deliberately
+# NOT a normal dependency: it pulls the WS-RPC transport, and the machine's
+# `default` build must stay transport-free.
+fauna-client-snapshots = { path = "../fauna-client-snapshots" }
+# Self dev-dependency turns on the test-only features for the integration-test
+# build only (the `#[cfg(any(test, feature = "..."))]` items aren't visible to
+# `tests/*.rs` otherwise). `rpc-glue` so the native ws_rpc seam compiles under
+# `cargo test`. Mirrors fauna-devices-machine.
+fauna-backups-machine = { path = ".", features = ["test-helpers", "test-observer", "rpc-glue"] }

@@ -1,0 +1,7 @@
+# Prettier (e.g. the VS Code extension) reflows GitHub-Flavored-Markdown tables —
+# column-aligning cells and dash-padding the `|---|` separators. That churns
+# hand-authored docs and, when it lands as an uncommitted working-tree change in
+# the shared main checkout, silently blocks git from refreshing the file (it
+# happened to docs/guides/home-relay-setup.md, 2026-06-12). Keep the guides out of
+# auto-formatting. gitignore syntax; anchored to the repo root.
+/docs/guides/

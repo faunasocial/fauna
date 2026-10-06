@@ -1,0 +1,24 @@
+[package]
+name = "fauna-labeler"
+description = "Sandboxed WASM community-labeler execution runtime (shared by nest publish-gate + the FFI content-processor holder)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# `default-features = false`: the interpreter needs none of fauna-core's `network`
+# (tokio/redb), and keeping it off is what lets the region plane's scorer runner
+# (`fauna_labeler::region`) reach the wasm32 build through `fauna-client-region`.
+fauna-core = { path = "../fauna-core", default-features = false }
+wasmi.workspace = true
+anyhow.workspace = true
+# The `label()` ABI's wire format (module doc § Module Protocol): dag-cbor
+# forbids floats and a `Label`'s confidence is an `f64`.
+serde_bare.workspace = true
+# The runner's typed refusals (`LabelerAbiNewer`), downcast through `anyhow`.
+thiserror.workspace = true
+
+[dev-dependencies]
+# The facet-loop tests block on `build_attachment_facet`, which is async
+# because a position's `fetch` reads a blob store.
+tokio = { workspace = true }

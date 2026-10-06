@@ -1,0 +1,99 @@
+[package]
+name = "fauna-labeler-catalog-machine"
+description = "Shared-Rust page-level community-labeler-catalog state machine: browse + inspect-before-subscribe + (un)subscribe. Mirrors fauna-devices-machine."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Turn on UniFFI scaffolding when consumed by fauna-ffi.
+uniffi = ["dep:uniffi", "fauna-core/uniffi", "dep:fauna-uniffi-async"]
+# Test helpers — FakeLabelerCatalogNestApi.
+test-helpers = []
+# Test observer — CountingObserver / NullObserver.
+test-observer = []
+# Shared WS-RPC seam glue (`nest_api::ws_rpc` + `build_labeler_catalog_machine{,_with_grants}`) —
+# the production `LabelerCatalogNestApi` impl over `fauna-client-labelers`.
+# Mirrors `fauna-devices-machine`'s `rpc-glue`.
+rpc-glue = [
+    "dep:fauna-client-labelers",
+    "dep:fauna-protocol",
+    "dep:fauna-client",
+    "dep:fauna-rpc-wasm",
+]
+
+[dependencies]
+# default-features = false: avoid fauna-core's `network` default (redb, tokio,
+# hickory-resolver), which breaks wasm. We only need `localized::LocalizedText`
+# (+ its uniffi derive), `MaybeSendSync`, and the canonical-CBOR decode of the
+# signed `AlgorithmLabeler` metadata for the inspect panel.
+fauna-core = { path = "../fauna-core", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = "0.1"
+hex = { workspace = true }
+# Producer-side error logging (observability.md § Log on the *event*, not the
+# *paint*). wasm-safe — a no-op without a subscriber.
+tracing = { workspace = true }
+# The per-labeler grant a `wasm` mail-labeler subscription mints
+# (`content-moderation-and-ranking.md` § Tier-3 → *Subscribing = minting a
+# capability*): `mint_bounded_mail_labeler_grant`, the grant log's
+# record-then-deposit type (`UndepositedGrant`), its labeler-scope twin, and
+# the shared `GrantEventSigner` seam. Wasm-clean by its own discipline.
+fauna-client-capabilities = { path = "../fauna-client-capabilities" }
+# `SuccessionLedgerStore` + `MailStore` — the shared account-store seams the mint
+# records through (the same seams dns/mail/pair all inject; priority #4).
+fauna-client-config = { path = "../fauna-client-config" }
+# `HolderInfo` — the MDA holder the grant is sealed to, named by the nest-api
+# seam trait outside the optional `rpc-glue` feature (hence a base dep, exactly
+# as `fauna-client-mail-settings` does; the crate is wasm-clean and light).
+fauna-client-bridges = { path = "../fauna-client-bridges" }
+# `GrantWindow` + `ScopeTuple::KIND_MAIL` (the sealed content kind whose
+# subscription needs a grant). `default-features = false` drops the native
+# `rusqlite` default; `js` forwarded on wasm below.
+fauna-mls = { path = "../fauna-mls", default-features = false }
+# `rand::thread_rng()` — the 16-byte `grant_id` CSPRNG (random, never a
+# counter: the nest keys on `(owner, grant_id)`), the `fauna-client-pair` idiom.
+rand = { workspace = true }
+# The mint/revoke failure enum (`machine::LabelerGrantError`).
+thiserror = { workspace = true }
+
+uniffi = { workspace = true, optional = true, features = ["tokio"] }
+# `#[fauna_uniffi_async::export]` runs each async export on a tokio runtime
+# worker, off the foreign executor's small poll stack
+# (`docs/goal/architecture/apps/native-async-execution.md` § The rule).
+fauna-uniffi-async = { workspace = true, optional = true }
+
+# `rpc-glue`: the transport-agnostic, wasm-clean typed call surface the WS-RPC
+# seam delegates to, plus `fauna-protocol` for the `RpcErrorClass`/`RpcError`
+# error mapping. Generic over `RpcRequester`, so plain optional deps (not
+# target-gated); the seam that uses them is gated.
+fauna-client-labelers = { path = "../fauna-client-labelers", optional = true }
+fauna-protocol = { path = "../fauna-protocol", default-features = false, optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fauna-client = { path = "../fauna-client", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm", optional = true }
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"], optional = true }
+# `rand::thread_rng()` needs getrandom's wasm backend; `fauna-wasm` enables it
+# workspace-wide via the `wasm_js` cfg, so this crate just needs the dep in its
+# wasm graph. Mirrors fauna-client-pair.
+getrandom = { workspace = true }
+# Forward fauna-core's `js` (the js-sys time backend `Timestamp::now_secs`
+# stamps the grant window with) and fauna-mls's `js` on wasm.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The shared single-poll `block_on` the seam tests below drive (one owner for
+# the `RpcRequester` seam's test scaffolding).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+tokio = { workspace = true }
+ed25519-dalek = { workspace = true }
+fauna-labeler-catalog-machine = { path = ".", features = ["test-helpers", "test-observer", "rpc-glue"] }
+# The shared in-memory account-store doubles (`test_helpers`) the mint's
+# record-then-deposit tests drive (one owner for those doubles).
+fauna-client-config = { path = "../fauna-client-config", features = ["test-helpers"] }

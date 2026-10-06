@@ -1,0 +1,57 @@
+[package]
+name = "fauna-wasm-labeler-catalog"
+description = "WASM bindings for the Fauna community-labeler-catalog page: the page-level LabelerCatalogMachine (browse / inspect-before-subscribe / (un)subscribe)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+test-helpers = ["fauna-labeler-catalog-machine/test-helpers"]
+
+# wasm32-scoped on purpose: this crate builds only for wasm32, and a plain
+# [dependencies] table would leak its wasm-only feature activations (js,
+# wasm_js, …) into every HOST build's resolution under
+# resolver.feature-unification = "workspace". Add new deps here, never in a
+# plain [dependencies] table.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `js` so fauna-core's wasm build gets a getrandom backend (mirrors
+# fauna-wasm-folders); the machine itself only uses the pure `localized`
+# module + the labeler-metadata decode/verify, but feature unification needs
+# *some* crate to request it.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+# The mail-custody seam the per-labeler grant mint reads (the account-port
+# forwarder `PortMailStore`, wired in src/lib.rs).
+async-trait = "0.1"
+# `rpc-glue` for the wasm `build_labeler_catalog_machine_with_grants` (over `WsRpcClient`).
+fauna-labeler-catalog-machine = { path = "../fauna-labeler-catalog-machine", default-features = false, features = ["rpc-glue"] }
+# The browser WS-RPC transport the machine's gestures ride; `connect()` opens
+# the connection from the JS-passed nest URL + actor id + token provider.
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm" }
+# The account-port forwarders of the succession-ledger seam the machine records
+# its grant events through (`succession_ledger_port::PortLedgerStore`) and of
+# the mail seam (`mail_port::PortMailStore`) the per-labeler grant mint reads
+# the MSEK through.
+fauna-client-config = { path = "../fauna-client-config", features = ["account-port"] }
+# Installed at module init (`#[wasm_bindgen(start)]` in src/lib.rs) — each wasm
+# chunk is its own runtime, so this must be installed per-chunk. See the crate
+# doc comment.
+fauna-wasm-panic-hook = { path = "../fauna-wasm-panic-hook" }
+# The account port's JS transport (`JsAccountPort` → `JsAccountTransport`).
+fauna-account-port = { workspace = true }
+wasm-bindgen.workspace = true
+wasm-bindgen-futures = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+getrandom = { workspace = true, features = ["wasm_js"] }
+# 0.2 alias: fauna-core's crypto stack transitively pulls getrandom 0.2, which
+# needs its `js` feature to compile for wasm. Same shape as
+# fauna-wasm-folders / fauna-wasm-media.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+js-sys.workspace = true
+
+[dev-dependencies]
+wasm-bindgen-test.workspace = true

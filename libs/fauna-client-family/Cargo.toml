@@ -1,0 +1,35 @@
+[package]
+name = "fauna-client-family"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# fauna-protocol carries the typed `fauna.family.*` wire types + the
+# `RpcRequester` seam this crate is generic over. `default-features = false`
+# keeps it wasm32-clean, matching `fauna-client-admin`.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# The two shared policy types the supervision snapshot replicates at rest
+# (`ContentPolicy`, `ScreenTimePolicy`). Already in the graph via
+# fauna-protocol, which builds `ReachPolicy` out of them.
+fauna-core = { path = "../fauna-core", default-features = false }
+# `row_text`'s shared `lookup` fn — both native drivers (tui, linux) already
+# pass the exact same `fauna_i18n::strings::lookup`, so resolving here instead
+# of per-app needed no new capability, only a dependency edge. Mirrors
+# `fauna-client-backup`'s `row_text.rs`.
+fauna-i18n = { path = "../fauna-i18n" }
+# The snapshot's at-rest (de)serialization — the ruling puts the record's
+# format in this crate so seven apps cannot drift on it.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# wasm: forward fauna-protocol's `js` feature so the transitive wasm build
+# resolves. Off on native (same shape as fauna-client-admin).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+serde = { workspace = true }

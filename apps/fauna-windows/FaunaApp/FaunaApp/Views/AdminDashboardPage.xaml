@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.AdminDashboardPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="24" MaxWidth="600" HorizontalAlignment="Left">
+
+            <!-- Error bar -->
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="False"
+                IsClosable="True" />
+
+            <!-- Header -->
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDashboardHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=admin/dashboard/title}" />
+
+            <!-- Loading -->
+            <ProgressRing
+                x:Name="LoadProgress"
+                IsActive="False"
+                Visibility="Collapsed"
+                HorizontalAlignment="Left" />
+
+            <!-- Stat cards grid -->
+            <Grid x:Name="StatsGrid" RowSpacing="12" ColumnSpacing="12">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <!-- Users stat card -->
+                <Border Grid.Row="0" Grid.Column="0" CornerRadius="8" Padding="16"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCard}"
+                        AutomationProperties.Name="{loc:Localize Key=admin/view/registered_users}">
+                    <StackPanel Spacing="4">
+                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardLabel}"
+                                   Opacity="0.7" FontSize="13"
+                                   Text="{loc:Localize Key=admin/view/registered_users}" />
+                        <TextBlock x:Name="UsersValue"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardValue}"
+                                   Text="--" FontSize="28" FontWeight="SemiBold" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Storage stat card -->
+                <Border Grid.Row="0" Grid.Column="1" CornerRadius="8" Padding="16"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCard}"
+                        AutomationProperties.Name="{loc:Localize Key=admin/view/total_storage_used}">
+                    <StackPanel Spacing="4">
+                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardLabel}"
+                                   Opacity="0.7" FontSize="13"
+                                   Text="{loc:Localize Key=admin/view/total_storage_used}" />
+                        <TextBlock x:Name="StorageValue"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardValue}"
+                                   Text="--" FontSize="28" FontWeight="SemiBold" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Inbox messages stat card -->
+                <Border Grid.Row="1" Grid.Column="0" CornerRadius="8" Padding="16"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCard}"
+                        AutomationProperties.Name="{loc:Localize Key=admin/view/total_inbox_messages}">
+                    <StackPanel Spacing="4">
+                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardLabel}"
+                                   Opacity="0.7" FontSize="13"
+                                   Text="{loc:Localize Key=admin/view/total_inbox_messages}" />
+                        <TextBlock x:Name="InboxValue"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardValue}"
+                                   Text="--" FontSize="28" FontWeight="SemiBold" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Sessions stat card -->
+                <Border Grid.Row="1" Grid.Column="1" CornerRadius="8" Padding="16"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCard}"
+                        AutomationProperties.Name="{loc:Localize Key=admin/view/active_sessions}">
+                    <StackPanel Spacing="4">
+                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardLabel}"
+                                   Opacity="0.7" FontSize="13"
+                                   Text="{loc:Localize Key=admin/view/active_sessions}" />
+                        <TextBlock x:Name="SessionsValue"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardValue}"
+                                   Text="--" FontSize="28" FontWeight="SemiBold" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Server version stat card. Mirrors linux's server-version row +
+                     web's version card; value comes from node-info, not /admin/api/stats. -->
+                <Border Grid.Row="2" Grid.Column="0" CornerRadius="8" Padding="16"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCard}"
+                        AutomationProperties.Name="{loc:Localize Key=admin/dashboard/version}">
+                    <StackPanel Spacing="4">
+                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardLabel}"
+                                   Opacity="0.7" FontSize="13"
+                                   Text="{loc:Localize Key=admin/dashboard/version}" />
+                        <TextBlock x:Name="VersionValue"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardValue}"
+                                   Text="--" FontSize="28" FontWeight="SemiBold" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <!-- TextBlock mirrors for E2E -->
+            <TextBlock x:Name="ErrorTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+                       AutomationProperties.Name=" "
+                       Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+            <TextBlock x:Name="WarningTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.WarningMessage}"
+                       AutomationProperties.Name=" "
+                       Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

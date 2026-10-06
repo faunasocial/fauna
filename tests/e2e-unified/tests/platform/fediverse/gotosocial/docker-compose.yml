@@ -1,0 +1,93 @@
+# GoToSocial interop-harness compose stack (pinned 0.22.1).
+#
+# The second, stricter peer beside Mastodon. GoToSocial is one Go binary on
+# SQLite — no Rails, no sidekiq, no Postgres, no streaming service — so this
+# stack is two services against Mastodon's seven, and boots in seconds rather
+# than ~25s. Bumping the tag is a deliberate commit, like the Rust toolchain pin.
+#
+# The `peer` fixture brings this up, waits on the `gts` /readyz healthcheck, then
+# tears it down with `-v` (self-terminating per the e2e conventions). Topology
+# mirrors the Mastodon stack exactly — one nginx, two SNI vhosts (gts.test and
+# nest.test), a per-run ephemeral CA — so only the peer service differs.
+
+name: fauna-gotosocial-interop
+
+services:
+  gts:
+    image: superseriousbusiness/gotosocial:0.22.1
+    restart: "no"
+    environment:
+      GTS_HOST: gts.test
+      # https even though GoToSocial itself serves plain HTTP here: nginx
+      # terminates TLS in front, and this is what makes GoToSocial mint `https://`
+      # AP ids for its own objects. Serving cleartext behind a TLS front is its
+      # documented reverse-proxy posture, not a weakening.
+      GTS_PROTOCOL: https
+      GTS_BIND_ADDRESS: 0.0.0.0
+      GTS_PORT: "8080"
+      GTS_DB_TYPE: sqlite
+      GTS_DB_ADDRESS: /gotosocial/storage/sqlite.db
+      GTS_STORAGE_LOCAL_BASE_PATH: /gotosocial/storage
+      GTS_LETSENCRYPT_ENABLED: "false"
+      # Accounts come from the admin CLI; nobody should be able to sign up.
+      GTS_ACCOUNTS_REGISTRATION_OPEN: "false"
+      # nginx sits in front, so trust its X-Forwarded-* — otherwise every request
+      # appears to come from the proxy and rate limiting keys on one address.
+      GTS_TRUSTED_PROXIES: 172.29.72.0/24
+      # GoToSocial's SSRF guard blocks private ranges by default. `nest.test`
+      # resolves (via the compose alias) to nginx's address *in this subnet*, so
+      # the harness's own topology needs an explicit allowance — the counterpart
+      # of Mastodon's ALLOWED_PRIVATE_ADDRESSES. Scoped to this run's subnet.
+      GTS_HTTP_CLIENT_ALLOW_IPS: 172.29.72.0/24
+      GTS_LOG_LEVEL: info
+      # Go reads SSL_CERT_FILE for its root pool. We point it at the per-run test
+      # CA *alone* rather than merging it into the system bundle: the only TLS
+      # peer in this topology is `nest.test`, so a dial to anything else should
+      # fail loudly instead of silently reaching the real internet from a test.
+      SSL_CERT_FILE: /certs/ca.crt
+    volumes:
+      - ${FAUNA_TEST_CERT_DIR:-./certs}:/certs:ro
+      - gts_storage:/gotosocial/storage
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/readyz || exit 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 10s
+
+  # TLS front: SNI-selected vhosts gts.test + nest.test, published on a per-run
+  # loopback port the nest's resolve-override targets. Defaults to 8444 for a
+  # manual `compose up` (8443 is the Mastodon stack's default — distinct so the
+  # two can coexist on one machine).
+  nginx:
+    image: nginx:1.27-alpine
+    restart: "no"
+    ports:
+      - "127.0.0.1:${FAUNA_TEST_NGINX_PORT:-8444}:443"
+    volumes:
+      - ${FAUNA_TEST_CERT_DIR:-./certs}:/certs:ro
+      - ${FAUNA_TEST_NGINX_CONF:-./nginx.conf.template}:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      default:
+        aliases:
+          - gts.test
+          - nest.test
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      gts:
+        condition: service_healthy
+
+# Pin the default network to a fixed subnet, for the same reason the Mastodon
+# stack does (the SSRF allowance above names it) — and to a DIFFERENT one, so
+# both stacks can be up at once without docker refusing an overlapping range.
+# Inside 172.16.0.0/12, so one docker-bridge→host firewall allowance covers both
+# stacks (see the dev-setup notes).
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.29.72.0/24
+
+volumes:
+  gts_storage:

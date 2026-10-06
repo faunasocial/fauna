@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.ConnectedAppsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- Settings → Connected apps (docs/goal/ui/connected-apps.md; ui.yaml page
+         `connected-apps`; rail slot directly after Task delegation — settings.md §
+         Navigation model). Reached via {"view":"settings","id":"connected-apps"} and by
+         a `fauna://consent/<request_uri>` route (App.ApplyRoute).
+
+         Four regions, top to bottom: Requests (the quiet-push tray, painted only while a
+         request is live — never a "no requests" row), Connect an app (the typed-code
+         start), the roster (one row per connected app), Blocked apps (painted only while
+         something is blocked).
+
+         A dumb renderer of ConnectedAppsViewModel over the shared ConnectedAppsMachine.
+         The request cards, roster rows and blocked rows are built in code-behind
+         (Page_Loaded / Render): a row carries a joined description as its own text plus
+         scoped leaf ids, and the mail rows add leaves only they carry, which a
+         DataTemplate cannot express as cleanly (mirrors SettingsTaskDelegationPage).
+         Visibility of the regions is applied from code-behind, like AtprotoPage. -->
+
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="16" MaxWidth="700" HorizontalAlignment="Left">
+
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="False"
+                IsClosable="True" />
+
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=connected_apps/title}" />
+            <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=connected_apps/description}" />
+
+            <ProgressRing x:Name="LoadProgress" IsActive="False" Visibility="Collapsed"
+                          HorizontalAlignment="Left" Width="24" Height="24" />
+
+            <!-- 1. Requests — only while a request is live. -->
+            <StackPanel x:Name="RequestsSection" Spacing="8" Visibility="Collapsed">
+                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                           Text="{loc:Localize Key=connected_apps/requests_heading}" />
+                <StackPanel x:Name="RequestsHost" Spacing="8" />
+            </StackPanel>
+
+            <!-- 2. Connect an app — the typed-code start. -->
+            <StackPanel Spacing="8">
+                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                           Text="{loc:Localize Key=connected_apps/connect_heading}" />
+                <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=connected_apps/connect_hint}" />
+                <TextBox x:Name="CodeBox"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ConnectedAppsConnectCode}"
+                         PlaceholderText="{loc:Localize Key=connected_apps/connect_placeholder}"
+                         TextChanged="CodeBox_TextChanged" />
+                <Button x:Name="ConnectBtn"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ConnectedAppsConnectSubmit}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        IsEnabled="False"
+                        Content="{loc:Localize Key=connected_apps/connect_submit}"
+                        Click="Connect_Click" />
+            </StackPanel>
+
+            <!-- 3. The roster. The empty state is Collapsed (pruned from UIA) until a read has
+                 returned empty: an empty roster is a claim only a read that returned may make. -->
+            <StackPanel Spacing="8">
+                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                           Text="{loc:Localize Key=connected_apps/roster_heading}" />
+                <TextBlock x:Name="EmptyText" Opacity="0.7" Visibility="Collapsed"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.ConnectedAppsEmpty}"
+                           Text="{loc:Localize Key=connected_apps/empty}" />
+                <StackPanel x:Name="RowsHost" Spacing="8" />
+            </StackPanel>
+
+            <!-- 4. Blocked apps — only while something is blocked. -->
+            <StackPanel x:Name="BlockedSection" Spacing="8" Visibility="Collapsed">
+                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                           Text="{loc:Localize Key=connected_apps/blocked_heading}" />
+                <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=connected_apps/blocked_hint}" />
+                <StackPanel x:Name="BlockedHost" Spacing="8" />
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

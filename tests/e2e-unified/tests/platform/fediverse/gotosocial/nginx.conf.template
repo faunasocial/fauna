@@ -1,0 +1,62 @@
+# nginx TLS front for the GoToSocial interop stack (rendered per run by the
+# fixture, which substitutes __NEST_PORT__ and bind-mounts this at
+# /etc/nginx/conf.d/default.conf).
+#
+# One nginx, two SNI-selected vhosts, both served with per-run test-CA certs:
+#   * gts.test  → the GoToSocial binary on the compose network.
+#   * nest.test → the fauna-nest binary on the HOST, via host-gateway.
+#
+# GoToSocial dials https://nest.test (compose alias → this nginx → host nest);
+# our nest dials https://gts.test (resolve-override → the loopback-published
+# port → this nginx → gts). Both certs chain to the CA the nest trusts
+# (FAUNA_TEST_AP_EXTRA_CA_PEM) and GoToSocial trusts (SSL_CERT_FILE).
+#
+# The `nest.test` server block is character-for-character the Mastodon stack's:
+# the nest side of the topology is peer-independent, and keeping it identical is
+# what makes a divergence attributable to the peer rather than to the harness.
+
+server {
+    listen 443 ssl default_server;
+    server_name gts.test;
+
+    ssl_certificate     /certs/gts.test.crt;
+    ssl_certificate_key /certs/gts.test.key;
+
+    client_max_body_size 40m;
+
+    location / {
+        proxy_pass http://gts:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name nest.test;
+
+    ssl_certificate     /certs/nest.test.crt;
+    ssl_certificate_key /certs/nest.test.key;
+
+    client_max_body_size 40m;
+
+    location / {
+        # The fauna-nest binary runs on the host; host-gateway routes to it.
+        # The nest must bind 0.0.0.0:__NEST_PORT__ (loopback is unreachable
+        # across the container boundary). The nest serves its own HTTPS (a
+        # public AP domain forces nest-owned TLS — it refuses plain HTTP), so we
+        # re-encrypt to it: its cert is the self-signed floor, which nginx does
+        # not (and cannot) verify — `proxy_ssl_verify off`. SNI carries the
+        # requested `nest.test` so the nest serves that domain's floor leaf.
+        proxy_pass https://host.docker.internal:__NEST_PORT__;
+        proxy_ssl_verify off;
+        proxy_ssl_server_name on;
+        proxy_ssl_name $host;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}

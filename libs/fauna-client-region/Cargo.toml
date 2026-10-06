@@ -1,0 +1,40 @@
+[package]
+name = "fauna-client-region"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Honours the e2e registry seed (`FAUNA_E2E_REGION_REGISTRY`) in a test-capable
+# build — the same gate as `fauna-anon-client`'s e2e trust seed
+# (`e2e-automation-surface-gating.md`, convention 15). A release build never
+# names the variable.
+e2e-agent = []
+# Exposes `fixtures` — a synthetic registry and signed content policies — to a
+# downstream crate's own test build (tui's render tests), the same shape as
+# `fauna-client-features`' `test-fixtures`.
+test-fixtures = ["dep:ed25519-dalek"]
+
+[dependencies]
+# The relay's typed wire (`fauna.region.artifact.get`) + the `RpcRequester`
+# seam this crate is generic over. `default-features = false` keeps it
+# wasm32-clean, matching `fauna-client-family`.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# The verified-artifact types, the policy document, the rule-set assembler the
+# render fold takes, and the inclusion admit step.
+fauna-core = { path = "../fauna-core", default-features = false }
+# The one shared scorer runner (`fauna_labeler::region`) — a region document's
+# bundled `list`/`wasm` scorers run through it, on-device, exactly as the nest's
+# public render runs them (`region-blocking.md` § The policy document: scorer
+# execution belongs to the consumers that link the labeler).
+fauna-labeler = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+ed25519-dalek = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+ed25519-dalek = { workspace = true }

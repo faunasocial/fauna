@@ -1,0 +1,37 @@
+[package]
+name = "fauna-client-alerts"
+description = "Cross-page critical-alerts registry — the client-side 'something is very wrong' surface (docs/goal/behavior/critical-alerts.md). Keyed post/clear of machine-composed LocalizedText alerts; the shell renders active alerts as a permanent banner on every page."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Turn on UniFFI scaffolding when consumed by fauna-ffi (android/apple/windows).
+# Off by default so the crate stays wasm-clean for web's wasm-bindgen chunk,
+# which reaches this type directly rather than through UniFFI (fauna-wasm-
+# atproto-settings/src/lib.rs). Forwards `fauna-core/uniffi` for `LocalizedText`'s
+# own `uniffi::Record` registration.
+uniffi = ["dep:uniffi", "fauna-core/uniffi"]
+
+[dependencies]
+# `localized::LocalizedText` only. default-features = false drops the native
+# `network` stack so the crate stays wasm-clean (the fauna-client-atproto
+# pattern).
+fauna-core = { path = "../fauna-core", default-features = false }
+# `CriticalAlertRow` derives `Serialize` so a wasm binding hosting a feeder
+# (e.g. `fauna-wasm-atproto-settings`) can hand `active()` to JS as plain JSON
+# — no per-chunk hand-rolled shape.
+serde.workspace = true
+
+uniffi = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+# `wasm_glue`: the JS-observer-shim + registry-cell boilerplate every wasm
+# chunk hosting a `CriticalAlerts` registry hand-copied (fauna-wasm,
+# fauna-wasm-atproto-settings). wasm32-target-gated, never a plain
+# [dependencies] entry, per the fauna-wasm-atproto-settings Cargo.toml
+# comment on why (feature-unification leak into host builds).
+wasm-bindgen.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "fauna-tls-bootstrap"
+description = "The rustls preamble every native TLS dialer needs: process-wide CryptoProvider installation and the bundled WebPKI root store. Data and primitives only — no transport stack — so any crate that dials TLS can take it freely."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rustls = { workspace = true }
+# Bundled Mozilla root certificates — DATA, no code (see the lib.rs module doc's
+# "second dependency" section). Admitting it here let `fauna-ws-substrate` and
+# `fauna-mail` each drop their own copy of this dep, so the workspace graph got
+# smaller.
+webpki-roots = { workspace = true }

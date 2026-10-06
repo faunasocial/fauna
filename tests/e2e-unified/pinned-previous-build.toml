@@ -1,0 +1,35 @@
+# Pinned previous build — the most recent VERIFIED staged build, as a repo constant.
+#
+# Convention owner: docs/goal/architecture/version-compatibility.md § Dimension 6
+# (pinned-previous-build convention, ratified 2026-07-12). Consumed by the tier_3
+# real-binary version-skew + client at-rest upgrade-in-place tests.
+#
+# "Previous build" = the most recent `build-nest-image.yml` (or `restage-nest.yml`)
+# run whose VERIFY gate went green against the staging box (build-system.md § Image
+# tags & channels; the private repository promotes nothing since the 2026-10-02
+# channel map): `commit` is that run's headSha, `nest_image` its immutable ghcr
+# tag. Previous CLIENT binaries are rebuilt from source at `commit` (no client
+# release artifacts exist pre-1.0), cached under /work/tmp/fauna-prev-builds/<commit>/<profile>/ on the Linux dev machine.
+#
+# UPDATE RULE (re-ruled 2026-10-02): the session whose dispatch's verify gate goes
+# green updates this file to that run's headSha in the same session — by hand until
+# `release-verified <headSha>` lands, which then derives it from the feature
+# catalog's release table (version-compatibility.md § Dimension 6). A red verify never
+# moves it. This is test-infrastructure data naming an artifact — not operator
+# configuration.
+#
+# Bumping `commit` DOES need one further edit, in a different file: a bare 40-hex SHA
+# is a high-entropy hex run, so the publish-hygiene gate's `secret_scan` default-denies
+# it until it is allowlisted. Add the new run to the publish gate's approved-secret-
+# fixtures allowlist (`secret_scan.py <tree> --suggest` prints the exact key; the
+# reason column is yours to write) for this file AND for every consumer that hard-codes
+# the same SHA, or the CHECK-tier `publish-heavy-checks` goes red after the merge —
+# merge-gates.md § Publish-hygiene gate.
+#
+# Advancing the pin past a ratified in-place compat break needs NO further edit: the
+# grid's expected-incompatible windows are keyed on this commit's ancestry
+# (helpers/prev_build.py::RATIFIED_INPLACE_BREAKS), so the cells re-assert on their own.
+
+commit = "4baae7484afeb8d2fcac1854ee5d950c5309bcbc"
+nest_image = "ghcr.io/faunasocial/nest:sha-4baae7484afeb8d2fcac1854ee5d950c5309bcbc"
+released = "2026-10-05"

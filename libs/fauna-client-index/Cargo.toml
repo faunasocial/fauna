@@ -1,0 +1,79 @@
+[package]
+name = "fauna-client-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# NATIVE-ONLY BY DESIGN — never add a wasm32 target section here.
+# Tantivy cannot run in a browser, so the web SPA is the declared exception and
+# keeps floor search (`content-index.md` § Where queries run / § Architectural
+# rules 1). A wasm build of this crate would be a fake local index, which
+# § Don't do these forbids outright.
+[dependencies]
+# The index itself: segment format, seal/open, manifest, query primitives, and
+# the tokenizer-pipeline version this builder stamps. This crate adds only
+# orchestration on top — it reimplements none of it (§ Architectural rules 5).
+fauna-index = { path = "../fauna-index" }
+
+# The receive-hook seam (`MessageIndexObserver` / `IndexableMessage`) this
+# crate implements. `fauna-conversations` stays tantivy-free; the dependency
+# runs this way and never back.
+fauna-conversations = { path = "../fauna-conversations" }
+
+# `derive_index_segment_key` — the MSEK-derived mail/calendar wrap key
+# (`key-material-hierarchy.md` § Path B-sibling-4).
+fauna-mls = { path = "../fauna-mls" }
+
+# ── The `__index` rail publisher's transport (`rail_publisher.rs`) ──────────
+#
+# `NestClient` (the `fauna.index.{record,list}` WS-RPC half) + `AuthClient`
+# (the bearer + pooled HTTP client the blob PUT rides). This is the crate's
+# ONLY transport dependency and it is deliberately NOT a sync dependency:
+# the rail is a blob PUT plus a record RPC, so there is no `SyncEngine` here,
+# no worker thread, and nothing `!Sync` (`content-index.md` § Ingest triggers,
+# v1 — the generic `fauna.sync.changes.record` is closed to reserved rails).
+fauna-client = { path = "../fauna-client" }
+# The HTTP edge the blob bytes ride — `NestContentApi::put_bytes` +
+# `paths::blob::by_cid`. Shared with every other client HTTP caller so the
+# bearer attach, the 401-retry and the error mapping are written once.
+fauna-nest-http = { path = "../fauna-nest-http" }
+# The `fauna.index.{record,list}` wire types.
+fauna-protocol = { path = "../fauna-protocol" }
+# `Cid::of_raw` — an index segment is opaque sealed bytes, so it addresses
+# under the raw codec (0x55), never dag-cbor.
+fauna-cbor = { path = "../fauna-cbor" }
+# `hex32::encode` — the same encoder the nest's rail handler decodes with.
+fauna-core = { path = "../fauna-core" }
+# The `LocalSearchIndex` seam this crate implements (`local_search.rs`) plus its
+# engine-free vocabulary (`SearchKindClass`, `SearchNav`, `LocalSearchHit`). The
+# dependency runs THIS way and never back: `fauna-client-search` must stay free
+# of an index engine so the web SPA's wasm graph cannot contain one even by
+# accident (`ui/search.md` § State & data shape — the local arm is off on wasm
+# *structurally*).
+fauna-client-search = { path = "../fauna-client-search" }
+
+# The publisher seam is async: the production implementation uploads over the
+# fauna-sync byte plane and records the path through the sync journal, both of
+# which are async. Same version fauna-conversations declares its rail traits
+# with.
+async-trait = "0.1"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# The flush debounce (`lifecycle.rs`): `Notify` for the stage pulse, `time` for
+# the quiescence window + the periodic backstop, `rt` to spawn the driver.
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+# Ends the debounce driver at logout without waiting out a debounce window —
+# the `segment_backup.rs` shutdown-responsiveness shape.
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+# Drives the async `flush` in tests; the flow test additionally drives the real
+# SMTP rail backend. `test-util` gives the lifecycle tests a paused clock, so a
+# debounce window is asserted through by auto-advancing time rather than slept
+# through (convention 14 — no wall-clock dependency in a test's verdict).
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
+# Builds the `MlsSnapshotPlaintext` fixtures the key-ring tests decode — the
+# grace list is a `Vec<ByteBuf>`, so a test that constructs one needs the same
+# byte wrapper `fauna-mls` declares the field with. Test-only: production takes
+# the snapshot as bytes it never re-encodes.
+serde_bytes = "0.11"

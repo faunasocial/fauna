@@ -1,0 +1,501 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.ProfilePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    Unloaded="Page_Unloaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <Page.Resources>
+        <local:BoolToVisibilityConverter x:Key="BoolToVisibility" />
+    </Page.Resources>
+
+    <!--
+      The Profile page — the canonical per-user SELF detail surface (profile.md),
+      reached via the top-level profile-tab. An identity header (the shared
+      user-header shape: avatar placeholder + handle + actor-id copy + the inert
+      profile-edit forward-pointer) + a tab strip (profile-posts-tab landmark ·
+      profile-tiers-tab). The Tiers tab hosts the subscriptions Slice-A author
+      management (monetization.md § Pillar 1): §1 My tiers, §2 Pending requests,
+      §3 Subscribers — a dumb renderer of ProfileViewModel (FaunaApp.Core) over the
+      INestRpcClient seam. Element IDs match tests/e2e-unified/ui.yaml `profile`
+      exactly. Reference renderers: linux apps/fauna-linux/src/views/profile/{mod,tiers}.rs
+      + apple FaunaKit ProfileView/SubscriptionsVM. Rich identity (display name /
+      avatar / bio) is publish-path-gated, so the header renders the actor_id (the
+      handle fallback). The OTHER-profile offers/follow surface is Slice B (not here).
+      No ConfigureAwait(false) in the handlers (off-thread bound-state mutation
+      throws a silent COMException — reference_windows_vm_configureawait_comexception).
+    -->
+    <ScrollViewer Padding="16" AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileView}">
+        <StackPanel Spacing="12" MaxWidth="760" HorizontalAlignment="Left">
+
+            <!-- ════ Header (user-header) ════
+                 A Grid (not a Horizontal StackPanel): the handle column is * so it
+                 shrinks with ellipsis rather than pushing the primary action button
+                 (edit / follow) off the right edge — the OTHER profile renders the
+                 64-char actor_id until a display_name is published, which a StackPanel
+                 would let overflow the viewport, clipping the follow button offscreen
+                 (reference_windows_is_visible_offscreen). -->
+            <Grid ColumnSpacing="12" VerticalAlignment="Center">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <FontIcon Grid.Column="0" Glyph="&#xE77B;" FontSize="40" Opacity="0.6" VerticalAlignment="Center" />
+                <TextBlock Grid.Column="1" x:Name="HandleText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileHandle}"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                <Button Grid.Column="2" x:Name="CopyActorIdButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileActorIdCopyBtn}"
+                        Click="CopyActorId_Click" VerticalAlignment="Center"
+                        Content="{loc:Localize Key=profile/copy_id}" />
+                <!-- Primary relationship action — branches on is_self: SELF opens the
+                     inline edit form (display-name / bio / links read-modify-write,
+                     profile.md § State & data shape); OTHER follows (subscribe to the
+                     free "followers" tier). ApplyProfileMode toggles their visibility;
+                     edit + follow share column 3 (only one is visible at a time). -->
+                <Button Grid.Column="3" x:Name="EditButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileEditButton}"
+                        VerticalAlignment="Center"
+                        Click="EditProfile_Click"
+                        Content="{loc:Localize Key=profile/edit}" />
+                <Button Grid.Column="3" x:Name="FollowButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileFollowButton}"
+                        VerticalAlignment="Center" Visibility="Collapsed"
+                        Click="Follow_Click" />
+            </Grid>
+
+            <!-- ════ Secondary relationship actions · OTHER only ════
+                 profile.md § Layout & flow: "on another's profile only, secondary
+                 relationship actions". Two are built — start-DM (pure nav glue:
+                 seed the Conversations new-thread composer with this actor + switch
+                 to Conversations; no new kind / persistence) and the Block⇄Unblock
+                 toggle (label flips on the viewed actor's contact_status, over
+                 fauna.knocks.block / fauna.knocks.unblock — the latter the guarded
+                 clear-the-edge; ApplyBlockLabel renders Block ⇄ Unblock).
+                 profile-request-contact-button is parked on the product-wide
+                 knock-send gap, so it is not
+                 rendered (ratified-but-unbuilt). ApplyProfileMode shows this row on
+                 another's profile (is_self=false) only. -->
+            <StackPanel x:Name="SecondaryActions" Orientation="Horizontal" Spacing="8"
+                        Visibility="Collapsed">
+                <Button x:Name="StartDmButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileStartDmButton}"
+                        Click="StartDm_Click"
+                        Content="{loc:Localize Key=profile/start_dm}" />
+                <Button x:Name="BlockButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileBlockButton}"
+                        Click="Block_Click"
+                        Content="{loc:Localize Key=profile/block}" />
+            </StackPanel>
+
+            <!-- ════ Edit form (display-name / bio / repeatable links) ════
+                 The cross-app profile-edit form (profile.md § State & data
+                 shape); a dumb renderer of ProfileViewModel's Edit* fields. The
+                 links two-way-bind via ItemsSource; display-name + bio sync
+                 imperatively (the tier-form pattern). -->
+            <StackPanel x:Name="ProfileEditForm"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileEditForm}"
+                        AutomationProperties.Name="profile-edit-form"
+                        Visibility="Collapsed" Spacing="6" MaxWidth="420">
+                <TextBox x:Name="EditDisplayNameBox"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileEditDisplayName}"
+                         Header="{loc:Localize Key=profile/edit_display_name}" />
+                <TextBox x:Name="EditBioBox"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileEditBio}"
+                         Header="{loc:Localize Key=profile/edit_bio}" />
+
+                <!-- Repeatable links: non-virtualizing ItemsControl so FlaUI
+                     count-all sees every row; each row carries .Name. -->
+                <ItemsControl x:Name="EditLinksList"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileEditLinkList}"
+                              AutomationProperties.Name="profile-edit-link-list">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <!-- Literal ids below — this DataTemplate has no x:DataType, so
+                                 `{x:Bind ids:Ids.…}` silently drops here; see
+                                 Controls/RecipientPicker.xaml. -->
+                            <Grid AutomationProperties.Name="{Binding Label}"
+                                  Padding="0,4" ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBox Grid.Column="0"
+                                         AutomationProperties.AutomationId="profile-edit-link-label"
+                                         Text="{Binding Label, Mode=TwoWay}"
+                                         PlaceholderText="{loc:Localize Key=profile/edit_link_label}" />
+                                <TextBox Grid.Column="1"
+                                         AutomationProperties.AutomationId="profile-edit-link-url"
+                                         Text="{Binding Uri, Mode=TwoWay}"
+                                         PlaceholderText="{loc:Localize Key=profile/edit_link_url}" />
+                                <Button Grid.Column="2"
+                                        AutomationProperties.AutomationId="profile-edit-link-remove-button"
+                                        Tag="{Binding}" Click="RemoveLink_Click"
+                                        Content="{loc:Localize Key=profile/edit_remove_link}" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileEditLinkAddButton}"
+                        HorizontalAlignment="Left"
+                        Click="AddLink_Click"
+                        Content="{loc:Localize Key=profile/edit_add_link}" />
+
+                <!-- Avatar / banner (profile.md § Where logic lives → Field ownership —
+                     the shared build_edited_profile_with_images path every app rides).
+                     Each is a single button: its Content is the localized placeholder
+                     until a file is picked, then the picked absolute path (the literal
+                     text avatar_path_text()/banner_path_text() read back), paired with a
+                     remove button. Rendering the STORED picture is out of scope (no
+                     user-header image ID yet). -->
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="AvatarButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileEditAvatar}"
+                            Click="Avatar_Click"
+                            Content="{loc:Localize Key=profile/edit_avatar}" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileEditAvatarRemoveButton}"
+                            Click="AvatarRemove_Click"
+                            Content="{loc:Localize Key=profile/edit_remove_avatar}" />
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="BannerButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileEditBanner}"
+                            Click="Banner_Click"
+                            Content="{loc:Localize Key=profile/edit_banner}" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileEditBannerRemoveButton}"
+                            Click="BannerRemove_Click"
+                            Content="{loc:Localize Key=profile/edit_remove_banner}" />
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileEditCancelButton}"
+                            Click="CancelEdit_Click"
+                            Content="{loc:Localize Key=profile/edit_cancel}" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileEditSaveButton}"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Click="SaveEdit_Click"
+                            Content="{loc:Localize Key=profile/edit_save}" />
+                </StackPanel>
+            </StackPanel>
+
+            <!-- page-heading mirrors the active tab -->
+            <TextBlock x:Name="PageHeading"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                       Style="{StaticResource SubtitleTextBlockStyle}" />
+
+            <!-- ════ Tab strip ════ -->
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button x:Name="PostsTab" AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfilePostsTab}"
+                        Click="PostsTab_Click" Content="{loc:Localize Key=profile/posts}" />
+                <Button x:Name="TiersTab" AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileTiersTab}"
+                        Click="TiersTab_Click" Content="{loc:Localize Key=profile/tiers}" />
+            </StackPanel>
+
+            <!-- Page-level error surface (shared by the Tiers-tab mint/roster
+                 failures). The CopyableInfoBar paints; the hidden mirror keeps the
+                 error-message ID present for the state-protocol read
+                 (reference_windows_error_read_via_state). -->
+            <controls:CopyableInfoBar x:Name="ErrorBar"
+                     Severity="Error" IsOpen="False" IsClosable="True" />
+            <TextBlock x:Name="ErrorTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+                       AutomationProperties.Name=" " Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+
+            <!-- ════ Posts tab (landmark, content TBD) ════ -->
+            <StackPanel x:Name="PostsPanel">
+                <TextBlock x:Name="NoPostsText" Opacity="0.6"
+                           Text="{loc:Localize Key=profile/no_posts}" />
+            </StackPanel>
+
+            <!-- ════ Tiers tab — SELF author management (§1/§2/§3) OR, on another
+                 actor's profile, the OTHER subscriber-browse offers section ════ -->
+            <StackPanel x:Name="TiersPanel" Visibility="Collapsed" Spacing="20">
+
+                <!-- SELF: author management (hidden on another's profile via
+                     ApplyProfileMode). -->
+                <StackPanel x:Name="SelfAuthorSections" Spacing="20">
+
+                <!-- ── §1 My tiers ── -->
+                <StackPanel AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionTiersSection}"
+                            AutomationProperties.Name="subscription-tiers-section" Spacing="8">
+                    <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                               Text="{loc:Localize Key=subscriptions/my_tiers}" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionTierCreateButton}"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Click="CreateTier_Click" HorizontalAlignment="Left"
+                            Content="{loc:Localize Key=subscriptions/create_tier}" />
+
+                    <!-- Inline create/edit form (one form serves both; the name field
+                         is read-only while editing — the server key). -->
+                    <StackPanel x:Name="TierForm"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionTierForm}"
+                                AutomationProperties.Name="subscription-tier-form"
+                                Visibility="Collapsed" Spacing="6" MaxWidth="420">
+                        <TextBox x:Name="FormNameBox"
+                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionTierFormName}"
+                                 Header="{loc:Localize Key=subscriptions/tier_name}" />
+                        <TextBox x:Name="FormRankBox"
+                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionTierFormRank}"
+                                 Header="{loc:Localize Key=subscriptions/rank}"
+                                 InputScope="Number" />
+                        <TextBox x:Name="FormDescriptionBox"
+                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionTierFormDescription}"
+                                 Header="{loc:Localize Key=subscriptions/description}" />
+                        <TextBox x:Name="FormPriceHintBox"
+                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionTierFormPriceHint}"
+                                 Header="{loc:Localize Key=subscriptions/price_hint}" />
+
+                        <!-- The gated asking-price field (dynamic-features.md section
+                             Platform-family surface excision, "A gated plane's user-facing
+                             INPUTS excise with it"): payments:AskingPriceInput lives in
+                             Views/Payments/ and is hosted through this ContentControl exactly
+                             like PaymentsSectionsHost below, so a store-safe build renders no
+                             price input at all, never a bare TextBox here. Its AutomationId
+                             is set in ProfilePage.xaml.cs's own #if PAYMENTS block, never
+                             spelled here: this comment's own text is compiled into the .xbf,
+                             XAML has no preprocessor to strip it, so the literal id itself
+                             must never appear outside the #if guarded C#, measured
+                             2026-09-06. -->
+                        <ContentControl x:Name="TierAskingPriceHost"
+                                        HorizontalAlignment="Stretch"
+                                        HorizontalContentAlignment="Stretch" />
+
+                        <TextBox x:Name="FormPaymentUrlBox"
+                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionTierFormPaymentUrl}"
+                                 Header="{loc:Localize Key=subscriptions/payment_url}" />
+                        <ToggleSwitch x:Name="FormAutoApproveToggle"
+                                      AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionTierFormAutoApprove}"
+                                      Header="{loc:Localize Key=subscriptions/auto_approve}" />
+                        <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionTierFormCancel}"
+                                    Click="CancelForm_Click"
+                                    Content="{loc:Localize Key=subscriptions/cancel}" />
+                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionTierFormSave}"
+                                    Style="{StaticResource AccentButtonStyle}"
+                                    Click="SaveForm_Click"
+                                    Content="{loc:Localize Key=subscriptions/save}" />
+                        </StackPanel>
+                    </StackPanel>
+
+                    <TextBlock x:Name="NoTiersText" Opacity="0.6"
+                               Text="{loc:Localize Key=subscriptions/no_tiers}" />
+                    <!-- ItemsControl (non-virtualizing) so FlaUI count-all sees every
+                         row; each row carries AutomationProperties.Name. -->
+                    <ItemsControl x:Name="TiersList">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <!-- Literal for the same reason as profile-edit-link-label above. -->
+                                <Grid AutomationProperties.AutomationId="subscription-tier-row"
+                                      AutomationProperties.Name="{Binding Name}"
+                                      Padding="0,4" ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                                               AutomationProperties.AutomationId="subscription-tier-name"
+                                               Text="{Binding Name}" />
+                                    <TextBlock Grid.Column="1" VerticalAlignment="Center"
+                                               AutomationProperties.AutomationId="subscription-tier-rank"
+                                               Text="{Binding Rank}" />
+                                    <TextBlock Grid.Column="2" VerticalAlignment="Center"
+                                               AutomationProperties.AutomationId="subscription-tier-price"
+                                               Text="{Binding PriceHint}" />
+                                    <Button Grid.Column="3"
+                                            AutomationProperties.AutomationId="subscription-tier-edit-button"
+                                            Tag="{Binding}" Click="EditTier_Click"
+                                            Content="{loc:Localize Key=subscriptions/edit}" />
+                                    <Button Grid.Column="4"
+                                            AutomationProperties.AutomationId="subscription-tier-delete-button"
+                                            Tag="{Binding}" Click="DeleteTier_Click"
+                                            Content="{loc:Localize Key=subscriptions/delete}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+
+                <!-- ── §2 Pending requests ── -->
+                <StackPanel AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionRequestsSection}"
+                            AutomationProperties.Name="subscription-requests-section" Spacing="8">
+                    <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                               Text="{loc:Localize Key=subscriptions/pending_requests}" />
+                    <TextBlock x:Name="RequestBusyText" Opacity="0.6" Visibility="Collapsed"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionRequestBusy}"
+                               Text="{loc:Localize Key=subscriptions/approving}" />
+                    <TextBlock x:Name="NoRequestsText" Opacity="0.6"
+                               Text="{loc:Localize Key=subscriptions/no_requests}" />
+                    <ItemsControl x:Name="RequestsList">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <!-- Literal for the same reason as profile-edit-link-label above. -->
+                                <Grid AutomationProperties.AutomationId="subscription-request-row"
+                                      AutomationProperties.Name="{Binding Subscriber}"
+                                      Padding="0,4" ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis"
+                                               AutomationProperties.AutomationId="subscription-request-subscriber"
+                                               Text="{Binding Subscriber}" />
+                                    <TextBlock Grid.Column="1" VerticalAlignment="Center"
+                                               AutomationProperties.AutomationId="subscription-request-tier"
+                                               Text="{Binding TierName}" />
+                                    <TextBlock Grid.Column="2" VerticalAlignment="Center"
+                                               AutomationProperties.AutomationId="subscription-request-kind"
+                                               Text="{Binding Kind}" />
+                                    <!-- monetization.md § Pillar 3 — PendingRequest.payment_entitled: the
+                                         request was paid through a configured payment provider. -->
+                                    <TextBlock Grid.Column="3" VerticalAlignment="Center"
+                                               AutomationProperties.AutomationId="subscription-request-paid-badge"
+                                               Visibility="{Binding PaymentEntitled, Converter={StaticResource BoolToVisibility}}"
+                                               Text="{loc:Localize Key=subscriptions/paid}" />
+                                    <Button Grid.Column="4"
+                                            AutomationProperties.AutomationId="subscription-request-approve-button"
+                                            Style="{StaticResource AccentButtonStyle}"
+                                            Tag="{Binding}" Click="ApproveRequest_Click"
+                                            Content="{loc:Localize Key=subscriptions/approve}" />
+                                    <Button Grid.Column="5"
+                                            AutomationProperties.AutomationId="subscription-request-reject-button"
+                                            Tag="{Binding}" Click="RejectRequest_Click"
+                                            Content="{loc:Localize Key=subscriptions/reject}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+
+                <!-- ── §3 Subscribers roster ── -->
+                <StackPanel AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionSubscribersSection}"
+                            AutomationProperties.Name="subscription-subscribers-section" Spacing="8">
+                    <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                               Text="{loc:Localize Key=subscriptions/subscribers}" />
+                    <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <TextBlock VerticalAlignment="Center"
+                                   Text="{loc:Localize Key=subscriptions/tier_select_label}" />
+                        <ComboBox x:Name="TierSelect"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionSubscribersTierSelect}"
+                                  MinWidth="160" SelectionChanged="TierSelect_SelectionChanged" />
+                    </StackPanel>
+                    <TextBlock x:Name="NoSubscribersText" Opacity="0.6"
+                               Text="{loc:Localize Key=subscriptions/no_subscribers}" />
+                    <ItemsControl x:Name="SubscribersList">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <!-- Literal for the same reason as profile-edit-link-label above. -->
+                                <Grid AutomationProperties.AutomationId="subscription-subscriber-row"
+                                      AutomationProperties.Name="{Binding Handle}"
+                                      Padding="0,4" ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis"
+                                               AutomationProperties.AutomationId="subscription-subscriber-handle"
+                                               Text="{Binding Handle}" />
+                                    <Button Grid.Column="1"
+                                            AutomationProperties.AutomationId="subscription-subscriber-remove-button"
+                                            Tag="{Binding}" Click="RemoveSubscriber_Click"
+                                            Content="{loc:Localize Key=subscriptions/remove}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+
+                <!-- ── §§4-5 Payments: providers + manual claim codes. The markup
+                     lives in Views/Payments/PaymentsAuthorSections.xaml so the whole
+                     plane is ONE removable build item (dynamic-features.md
+                     § Platform-family surface excision) — XAML has no preprocessor, so
+                     an `#if PAYMENTS` here would remove nothing and the ids would ship
+                     in a store-safe artifact anyway.
+
+                     Hosted through a ContentControl rather than named directly: a
+                     `<payments:PaymentsAuthorSections/>` element would make the
+                     store-safe XAML compile fail on a type its own csproj removed.
+                     ProfilePage.xaml.cs fills it under `#if PAYMENTS`; in the excised
+                     flavor the host stays empty and collapses to zero height. ── -->
+                <ContentControl x:Name="PaymentsSectionsHost"
+                                HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Stretch" />
+
+                </StackPanel>
+                <!-- end SelfAuthorSections -->
+
+                <!-- ── OTHER: subscriber-browse offers (another actor's offered tiers,
+                     monetization.md § Pillar 1 surface 2; hidden on own profile) ── -->
+                <StackPanel x:Name="OffersSection"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionOffersSection}"
+                            AutomationProperties.Name="subscription-offers-section"
+                            Visibility="Collapsed" Spacing="8">
+                    <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                               Text="{loc:Localize Key=subscriptions/offers}" />
+                    <TextBlock x:Name="NoOffersText" Opacity="0.6"
+                               Text="{loc:Localize Key=subscriptions/no_offers}" />
+                    <!-- Non-virtualizing ItemsControl so FlaUI count-all sees every
+                         row; each row carries AutomationProperties.Name. -->
+                    <ItemsControl x:Name="OffersList"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionOfferList}"
+                                  AutomationProperties.Name="subscription-offer-list">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <!-- Literal for the same reason as profile-edit-link-label above. -->
+                                <Grid AutomationProperties.AutomationId="subscription-offer-row"
+                                      AutomationProperties.Name="{Binding Name}"
+                                      Padding="0,4" ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                        <TextBlock AutomationProperties.AutomationId="subscription-offer-name"
+                                                   Text="{Binding Name}" />
+                                        <TextBlock AutomationProperties.AutomationId="subscription-offer-price"
+                                                   Opacity="0.7" Text="{Binding PriceHint}" />
+                                        <TextBlock AutomationProperties.AutomationId="subscription-offer-description"
+                                                   Opacity="0.7" TextWrapping="Wrap" Text="{Binding Description}" />
+                                    </StackPanel>
+                                    <Button Grid.Column="1" VerticalAlignment="Center"
+                                            AutomationProperties.AutomationId="subscription-offer-payment-link"
+                                            Visibility="{Binding HasPaymentUrl, Converter={StaticResource BoolToVisibility}}"
+                                            Tag="{Binding}" Click="OfferPaymentLink_Click"
+                                            Content="{loc:Localize Key=subscriptions/payment_url}" />
+                                    <TextBlock Grid.Column="2" VerticalAlignment="Center" Opacity="0.7"
+                                               AutomationProperties.AutomationId="subscription-offer-status"
+                                               Text="{Binding StatusLabel}" />
+                                    <Button Grid.Column="3" VerticalAlignment="Center"
+                                            AutomationProperties.AutomationId="subscription-offer-subscribe-button"
+                                            Style="{StaticResource AccentButtonStyle}"
+                                            Tag="{Binding}" Click="SubscribeOffer_Click"
+                                            Content="{loc:Localize Key=subscriptions/subscribe}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

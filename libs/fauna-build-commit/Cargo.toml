@@ -1,0 +1,11 @@
+[package]
+name = "fauna-build-commit"
+description = "The one build-script derivation of FAUNA_BUILD_COMMIT — the commit a Fauna binary was built from"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# A build-dependency only: no runtime code, no dependencies. Every binary that
+# names its build commit (the nest's `/api/v1/health`, the apps' Status pages)
+# calls `emit()` from its own `build.rs` and reads `option_env!` back.
+[dependencies]

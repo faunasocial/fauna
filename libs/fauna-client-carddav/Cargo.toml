@@ -1,0 +1,63 @@
+[package]
+name = "fauna-client-carddav"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The shared-Rust CardDAV *consumption* crate (carddav-server.md § Independent
+# enablement — "a native 'Address Book' view over list_addressbooks / query_cards,
+# decrypted locally / zero-access"): a Fauna app reads its OWN address books +
+# vCards over the *encrypted* `fauna.bridges.*` CardDAV RPCs against the
+# `bridge_carddav_*` store — the SAME store + sealing scheme the mail-bridge MDA
+# serves to Apple Contacts / DAVx5, so a Fauna app and a CardDAV MUA see the
+# same data.
+#
+# The read/consumption analogue of `fauna-client-caldav` (which does the same for
+# CalDAV calendars/events); it mirrors that crate's transport + seal surface 1:1.
+# Priority #2 — one kind-composition shared by native (UniFFI) + web (wasm) so no
+# client re-implements the query/unseal/parse.
+#
+# FULLY WASM-safe: unlike CalDAV (whose iCalendar parser pulls the native-only
+# `icalendar`/`rrule` crates, so its read path is `cfg(not(wasm))`-gated), the
+# vCard grammar (RFC 6350) is simple line-based text, so the `vcard` parser here
+# is hand-rolled and portable — the whole read path (transport → unseal → parse →
+# typed `DecodedCard`) links on web with no native-only slice.
+
+[dependencies]
+# `RpcRequester` seam + the typed `fauna.bridges.*` (`bridge_routing`) CardDAV
+# wire types (`ListAddressbooksReply` / `QueryCardsReply` / `CardEntry` / …).
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# `content_line::{find_value_colon, split_unquoted}` — the DQUOTE quoting rule
+# RFC 6350 § 3.3 shares with iCalendar's RFC 5545 § 3.1, one home for both
+# parsers. Adds no crate to the build: fauna-core is already transitive here via
+# fauna-protocol and fauna-mls. Pure `&str`, so the WASM-safety note above holds.
+fauna-core = { path = "../fauna-core", default-features = false }
+# `wrapped_blob::{unseal_mail_record_hybrid, MailRecordEnvelope,
+# seal_to_recipient, seal_to_recipient_xwing}` + `derive_recipient_hpke_keypair`
+# / `derive_recipient_xwing_keypair` — the EXACT HPKE seal scheme the MDA's
+# CardDAV PUT uses (mailfauna.EncryptToRecipientHybrid), so MDA-written and
+# client-written card bodies are mutually readable.
+fauna-mls = { path = "../fauna-mls", default-features = false }
+# Derives on the `AddressbookMetadata` cross-language CBOR mirror + the
+# `FaunaCardExt` sidecar, (de)serialized canonically via fauna-protocol's
+# `encode_canonical` / `decode_strict`. WASM-safe.
+serde = { workspace = true, features = ["derive"] }
+# Hex-encodes `addressbook_id`/`card_id` for the display-row projection
+# ([`AddressbookRow`]/[`VCardRow`]) — pure byte formatting, WASM-safe.
+hex = { workspace = true }
+
+# wasm: forward each dep's `js` feature (js-sys time backend for fauna-protocol;
+# `openmls/js` for fauna-mls) so the transitive wasm build resolves — mirrors
+# `libs/fauna-client-caldav`'s own wasm wiring.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# Names the serde bounds `RpcRequester::request` needs, for the wire-contract
+# `RecordingRequester` mock (transport-free, runs on every target incl. wasm).
+serde = { workspace = true }
+# The shared `block_on` single-poll test executor — wasm-clean (see that
+# crate's own docs), so it keeps this crate's dev-deps wasm32-testable.
+fauna-client-testkit = { path = "../fauna-client-testkit" }

@@ -1,0 +1,98 @@
+[package]
+name = "fauna-client-caldav"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The shared-Rust calendar/scheduling crate for the events.md Decision-B path:
+# a Fauna app reads/writes its OWN calendars + events over the *encrypted*
+# `fauna.bridges.*` CalDAV RPCs against the `bridge_caldav_*` store — the SAME
+# store + sealing the mail-bridge MDA serves to Apple Calendar, so a Fauna
+# app and a CalDAV MUA see the same data (caldav-server.md § Event resources).
+#
+# NOT to be confused with `fauna-client-calendars` (plural), the LEGACY
+# `fauna.calendars.*` plaintext-`content`-table façade that Decision B retires.
+#
+# WASM-safe: web links this crate too (the writer + sealing are WASM-safe). The
+# iCalendar *parser* (`fauna_mail::parse_icalendar`) is native-only (icalendar /
+# rrule are not WASM-safe) and is therefore consumed only behind a
+# `cfg(not(target_arch = "wasm32"))` gate (read-side, a later slice); the
+# write/seal/transport surface in this crate stays portable.
+
+[dependencies]
+# `RpcRequester` seam + the typed `fauna.bridges.*` (`bridge_routing`) wire types.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# `DraftsSync`/`DraftsClientError` for `drafts::save_event_draft` — WASM-safe,
+# manager-agnostic (no rail-specific deps of its own), so this one-way edge
+# adds no cycle.
+fauna-client-drafts = { path = "../fauna-client-drafts" }
+# `ical::generate_ical` (the WASM-safe writer, reused — caldav-writer-reuses-fauna-core)
+# + the `interested↔TENTATIVE` projection helpers + `MailConfig.msek`.
+fauna-core = { path = "../fauna-core", default-features = false }
+# `wrapped_blob::{seal_to_recipient, unseal_mail_record, MailRecordEnvelope}` +
+# `derive_recipient_hpke_keypair` — the exact HPKE seal scheme the MDA uses, so
+# MDA-written and client-written event bodies are mutually readable.
+fauna-mls = { path = "../fauna-mls", default-features = false }
+# Hex for the `uid_hash` a refused-change row is keyed by (`caldav-server.md`
+# § Who may mutate an existing event over the inbound rail → *Surfacing*): the
+# at-rest row is a plain-string record, and this is the same encoding
+# `ActorId::to_hex` uses one crate down. WASM-safe, already in this tree.
+hex = { workspace = true }
+# Derives on the sealed `FaunaEventExt` sidecar payload (caldav-server.md
+# § Event resources), (de)serialized canonically via fauna-protocol's
+# `encode_canonical`/`decode_strict`. WASM-safe.
+serde = { workspace = true, features = ["derive"] }
+# `probe::resolve_handle_domain` — the pure domain→base-URL rule anon discovery
+# dials (`AnonDiscovery`), shared with the conversations cross-nest resolve.
+# wasm-clean with default features off (no network).
+fauna-provisioning = { path = "../fauna-provisioning", default-features = false }
+
+# Native-only read-path parser. The `icalendar`/`rrule` crates behind
+# `fauna_mail::icalendar::{parse_icalendar, expand_recurrence}` are NOT WASM-safe
+# (caldav-server.md § iCalendar parsing rules: "this surface is native/MDA-only"),
+# so the read path that turns a sealed event body into a typed VEVENT tree is
+# `cfg(not(target_arch = "wasm32"))`-gated and pulls fauna-mail with its
+# `icalendar` feature (→ icalendar/rrule/chrono; none of the mail stack) plus
+# `parser` (→ mail-parser only) for `extract_text_calendar_part` — the inbound
+# iMIP-`REPLY` MIME extraction the client-driven reply-merge needs
+# (caldav-server.md § The one operation with a cost). Only the `icalendar` half
+# is native-only: `parser` is `dep:mail-parser` alone and is pulled on wasm too
+# (below), because the inbound-apply chain the web SPA drives needs the same MIME
+# extraction. The write/seal/transport surface above was always portable.
+#
+# Anon cross-nest discovery (`AnonAttendeeDiscovery` — the attendee-transport
+# resolver and the inbound-scheduling principal resolver, caldav-server.md
+# § Where logic lives) runs ONE body on every platform; only the anonymous dial
+# differs: `AnonymousNestClient` here, `AnonymousWsRpcClient` (fauna-rpc-wasm)
+# on wasm — the same pair the conversations cross-nest resolve dials.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fauna-mail = { path = "../fauna-mail", default-features = false, features = ["icalendar", "parser", "sender-auth"] }
+fauna-anon-client = { path = "../fauna-anon-client" }
+
+# wasm: forward each dep's `js` feature (js-sys time backend for fauna-core /
+# fauna-protocol; `openmls/js` for fauna-mls) so the transitive wasm build
+# resolves — mirrors `libs/fauna-wasm`'s own fauna-mls/fauna-core wiring.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `parser` ONLY — never `icalendar`. This is `dep:mail-parser`, a pure-Rust MIME
+# walk, and it is what `extract_text_calendar_part` needs so the WASM-safe
+# inbound-scheduling impl in `lib.rs` can pull the `text/calendar` part of an
+# iMIP message. Adding `icalendar` here would drag icalendar/rrule/chrono into
+# the wasm build and break it .
+fauna-mail = { path = "../fauna-mail", default-features = false, features = ["parser", "sender-auth"] }
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"] }
+# The browser's anon dial for `AnonAttendeeDiscovery` (see the native block).
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm" }
+
+[dev-dependencies]
+# Test-only: re-derives blake3 independently so the tests below prove this
+# crate's re-exported `personal_calendar_id`/`uid_hash` really resolve to the
+# documented derivation. Production definitions live in `fauna_protocol::dav_identity`.
+blake3 = { workspace = true }
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# Names the serde bounds `RpcRequester::request` needs, for the wire-contract
+# `RecordingRequester` mock (transport-free, runs on every target incl. wasm).
+serde = { workspace = true }

@@ -1,0 +1,14 @@
+Source: fauna-desktop
+Section: net
+Priority: optional
+Maintainer: Fauna Social <dev@fauna.social>
+Build-Depends: debhelper-compat (= 13), pkg-config, libgtk-4-dev, libadwaita-1-dev
+Standards-Version: 4.6.2
+Homepage: https://fauna.social
+
+Package: fauna-desktop
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, libgtk-4-1, libadwaita-1-0, fuse3
+Description: Fauna - Decentralized social communication
+ End-to-end encrypted messaging, group chat, calendar, file sync,
+ and bridges to Bluesky, Nostr, and ActivityPub.

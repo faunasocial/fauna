@@ -1,0 +1,41 @@
+[package]
+name = "fauna-client-snapshots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# fauna-protocol carries the typed `fauna.filesync.snapshot.*` wire types
+# + the `RpcRequester` seam this crate is generic over. `default-features
+# = false` keeps the crate wasm32-clean (drops native-only features);
+# native workspace builds re-enable them via Cargo feature unification.
+# The path form is required to override `default-features` — Cargo refuses
+# the override on a `workspace = true` entry whose workspace definition
+# doesn't disable defaults. Same pattern as fauna-client-bridges.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+
+# The shared sealed-label read seam: `label_custody::{LabelCustody, render_path}`
+# + `path_crypto`'s render policy, so snapshot browse/diff render names the same
+# way media list and the conflict list do (one seam, no per-surface drift —
+# `docs/goal/behavior/file-sync.md` § Sealed names & paths).
+fauna-core = { path = "../fauna-core", default-features = false }
+
+# wasm: forward fauna-protocol's `js` feature (fauna-core's js-sys time
+# backend) so the transitive wasm build resolves. Off on native.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# The `FolderKeyResolver` trait is anyhow-Result typed; the
+# tag-backfill tests' stub resolver names it.
+anyhow = { workspace = true }
+# Names the serde bounds `RpcRequester::request` requires, for the
+# construction smoke test's mock impl.
+serde = { workspace = true }
+# The `FolderKeyResolver` trait is `async_trait`-declared (fauna-core), so
+# the tag-backfill tests' stub resolver needs the same macro.
+async-trait = "0.1"

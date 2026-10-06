@@ -1,0 +1,41 @@
+# Auto-detect text files and normalize line endings to LF in the repo.
+# Checkout on Windows will convert to CRLF; commit always stores LF.
+* text=auto
+
+# Force LF for files that must stay LF (scripts, configs)
+*.sh      text eol=lf
+*.bash    text eol=lf
+# Extensionless bash scripts — no extension to match the globs above, so they'd
+# otherwise fall under `* text=auto` (heuristic, lets the Windows working tree
+# drift to CRLF). Pin them to LF explicitly, like the *.sh scripts.
+justfile  text eol=lf
+*.toml    text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.json    text eol=lf
+*.md      text eol=lf
+*.rs      text eol=lf
+*.go      text eol=lf
+*.py      text eol=lf
+*.js      text eol=lf
+*.ts      text eol=lf
+*.svelte  text eol=lf
+*.html    text eol=lf
+*.css     text eol=lf
+*.sql     text eol=lf
+
+# Windows files — keep CRLF
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+*.ps1     text eol=crlf
+
+# Binaries — don't touch
+*.png     binary
+*.jpg     binary
+*.gif     binary
+*.ico     binary
+*.wasm    binary
+*.exe     binary
+*.dll     binary
+*.so      binary
+*.dylib   binary

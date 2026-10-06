@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        body {
+            font-family: -apple-system, Helvetica Neue, sans-serif;
+            font-size: 13px;
+            color: #333;
+            padding: 20px;
+        }
+        h1 { font-size: 18px; font-weight: 500; }
+        p { line-height: 1.5; margin: 10px 0; }
+        ul { margin: 10px 0 10px 20px; }
+        li { margin: 4px 0; }
+        .note { color: #666; font-size: 12px; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <h1>Fauna</h1>
+    <p>This installer sets up Fauna on your Mac. Choose which components to
+       install on the next screen:</p>
+    <ul>
+        <li><strong>Fauna Desktop App</strong> — the native macOS client (selected by default)</li>
+        <li><strong>Sync Service</strong> — background file sync (selected by default)</li>
+        <li><strong>Nest Service</strong> — self-host your own Fauna server</li>
+        <li><strong>Bridge Service</strong> — IMAP/CalDAV for standard mail &amp; calendar apps</li>
+    </ul>
+    <p>The most common setup is just the app and sync, connecting to a remote
+       nest. Tick <strong>Nest Service</strong> to run your own server on this Mac.
+       A selected server component starts automatically after install.</p>
+    <p class="note">The app installs to /Applications; services install to
+       /usr/local/bin/. Run <code>sudo fauna-uninstall</code> to remove everything.</p>
+</body>
+</html>

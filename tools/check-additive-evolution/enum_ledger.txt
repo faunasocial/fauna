@@ -1,0 +1,387 @@
+# enum_ledger — the answer `transport.md` § Schema and forward-compat
+# discipline, rule 3 gives every serde-deserializable enum in our own Rust
+# (`libs/fauna-*`, `bins/`, the Rust apps). Owner of the rule, the scope and
+# the meaning of each answer: that section's "Rule 3 in full".
+#
+# One entry per line: `<answer> <key>`, then `#` and the reason.
+#   key    = `<crate>::<module path>::<Enum>` (the file's path under `src/`,
+#            `lib`/`mod`/`main` dropped, then any inline `mod`; an enum
+#            declared inside a function keys at its enclosing module), or
+#            `<crate>::*` (`local` only) for a crate whose enums ALL never
+#            cross a release boundary. A crate that holds any enum on the
+#            wire, at rest or on the IPC lists every enum it has.
+#            `#[cfg(test)]` enums and modules are never scanned and never
+#            listed.
+# `tools/check-additive-evolution` holds this file (owner of the rules:
+# transport.md, "The ledger and the gate"): an unlisted enum, a line naming no
+# enum, an `open` enum with no arm, or a malformed line is red; a removed
+# variant needs a `ratified-breaks.txt` line; a variant added to a
+# closed-consensus/ladder/extension/fixed enum needs this line changed in the
+# same change. `--no-owed` fails on any `owed-` line.
+#   answer = open            an unknown arm exists
+#          | owed-carry      ruled open, the arm keeps what it could not read
+#                            (always the form for an enum with data variants);
+#                            NOT BUILT YET
+#          | owed-collapse   ruled open, a lossy `#[serde(other)]` unit arm
+#                            that is never written back; NOT BUILT YET
+#          | skip            covered by record-level skip in its reader loop
+#          | owed-skip       ruled skip; the loop's behaviour is not yet
+#                            built or not yet pinned by a test
+#          | closed-request | closed-consensus | closed-ladder
+#          | closed-extension | closed-fixed
+#                            closed by design, on the named ground
+#          | locked          a version-locked hop: both ends ship together
+#          | local           never crosses a release boundary
+#          | foreign         a foreign protocol's shape
+# An `owed-` line is a debt: `--no-owed` refuses any, and none may land on main.
+# A row that builds an arm rewrites its line to `open` (or `skip`) in the same
+# commit. Closing an enum, or adding a variant to a closed one, is an edit to
+# this file that names the reason.
+
+
+# fauna-account-store
+skip fauna-account-store::succession_progress::CorpusResealPass  # device-local progress record; undecodable reads as no pass ran and the idempotent pass re-runs
+
+# fauna-archive
+open fauna-archive::model::Platform  # last #[serde(untagged)] Other(String), re-emitted verbatim inside every stored ExternalId; dedup compares it, parse_token never yields it, nothing is authored under it; a marker or state holding one is not resumable by this build
+open fauna-archive::model::EntityKind  # as Platform; belongs to no authored category
+open fauna-archive::model::Category  # last #[serde(untagged)] Other(String), re-emitted verbatim in the import scope, phase and skip list; never in ALL, counts nothing, streams nothing; a state holding one is readable for dedup and not resumable by this build
+open fauna-archive::model::ArchiveAudience  # #[serde(other)] Unknown, mapped to the owner-only tier
+open fauna-archive::model::ReactionKind  # hand-written Deserialize routes an unknown unit tag or data-variant key into the parser's Other { raw: <tag> } fallback (open by construction). Model files are written once from a fresh parse and never rewritten, so the lossy re-encode never reaches a stored file; a reader that ever rewrites one needs a carrying arm instead.
+open fauna-archive::model::Rsvp  # #[serde(other)] Unknown
+open fauna-archive::model::FriendshipKind  # #[serde(other)] Unknown
+open fauna-archive::model::Entity  # last #[serde(untagged)] Unknown(UnknownEntity) (the IPLD value, re-encoded byte for byte); the run counts it as skipped and never fails the model file
+
+# fauna-archive-import-machine
+local fauna-archive-import-machine::snapshot::ArchiveImportStep  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-archive-import-machine::snapshot::ArchiveSourceKind  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-archive-import-machine::snapshot::AudienceMode  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-archive-import-machine::snapshot::ArchiveImportStatus  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-archive-import-machine::snapshot::RunState  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-archive-import-machine::snapshot::ArchiveImportAction  # view model: crosses only FFI or wasm to the same build's UI
+open fauna-archive-import-machine::state::StoredAudienceMode  # last #[serde(untagged)] Other(String), re-emitted verbatim; maps as OnlyMe, never Original; a state holding one is not resumable by this build
+open fauna-archive-import-machine::state::ImportPhase  # last #[serde(untagged)] Unknown(CarriedValue); neither finished nor resumable; hydrate passes over the state and checkpoint refuses to rewrite it (DispatchError::NewerImport)
+open fauna-archive-import-machine::state::ImportTarget  # last #[serde(untagged)] Unknown(CarriedValue); its record's external_id still feeds dedup; a state holding one is not resumable by this build
+
+# fauna-atproto-settings-machine
+locked fauna-atproto-settings-machine::port::Refusal  # two web chunks of one deploy compile the same definition
+local fauna-backups-machine::*  # 4 enums; view model: crosses only FFI or wasm to the same build's UI
+
+# fauna-bridge-activitypub
+foreign fauna-bridge-activitypub::types::OneOrMany  # ActivityStreams single-value-or-array shape
+local fauna-bridge-atproto::*  # 14 enums; in-process verdicts and plans; the wire carries strings
+
+# fauna-calendar
+closed-ladder fauna-calendar::segments::placement::CalPlacementRecord  # nest-only placement journal; the manifest version ladder refuses a newer file first (version-compatibility.md Dimension 1, 2026-08-24); a new record variant raises it
+local fauna-client-admin::*  # 1 enum; view model: crosses only FFI or wasm to the same build's UI
+
+# fauna-client-backup
+open fauna-client-backup::audit::AuditVerdict  # last #[serde(untagged)] Unknown(serde_json::Value) (the audit-state file is JSON), re-emitted as read; renders neutral and is re-audited at once; an unreadable file is never saved over
+closed-fixed fauna-client-backup::audit::Repr  # decode-shape helper inside LedgerPin's hand-written Deserialize
+local fauna-client-capabilities::*  # 5 enums; view model: crosses only FFI or wasm to the same build's UI
+
+# fauna-client-dns
+foreign fauna-client-dns::acme_pure::order::OrderStatus  # RFC 8555 order object
+foreign fauna-client-dns::acme_pure::order::AuthorizationStatus  # RFC 8555 authorization object
+local fauna-client-dns::VerifyStatus  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-client-dns::DnsStatus  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-client-dns::CertHealthState  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-client-dns::DnsAction  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-client-mail-settings::*  # 38 enums; view model: crosses only FFI or wasm to the same build's UI
+local fauna-client-media::*  # 1 enum; view model: crosses only FFI or wasm to the same build's UI
+local fauna-client-moderation::*  # 2 enums; view model: crosses only FFI or wasm to the same build's UI
+local fauna-client-notifications::*  # 1 enum; view model: crosses only FFI or wasm to the same build's UI
+local fauna-client-pair::*  # 11 enums; view model: crosses only FFI or wasm to the same build's UI
+
+# fauna-client-region
+open fauna-client-region::plane::StoredRegionSource  # the record's twin of the closed view type source::RegionSource; last #[serde(untagged)] Other(String), re-emitted verbatim; a pending plane still enforces the region, the view names no source; an unreadable record is never written over
+local fauna-client-search::*  # 2 enums; view model: crosses only FFI or wasm to the same build's UI
+local fauna-client-web::*  # 3 enums; view model: crosses only FFI or wasm to the same build's UI
+
+# fauna-contacts
+closed-ladder fauna-contacts::segments::placement::CardPlacementRecord  # nest-only placement journal; the manifest version ladder refuses a newer file first (version-compatibility.md Dimension 1, 2026-08-24); a new record variant raises it
+
+# fauna-conversations
+local fauna-conversations::address::Rail  # view model: crosses only FFI or wasm to the same build's UI
+open fauna-conversations::address::TypedAddress  # history slice and drafts blob, merged and rewritten by every device; `Unknown { canonical }` carries the value as canonical bytes across FFI too (the apps show it, as `?`); it has no rail, so nothing sends to, resolves or dials it
+local fauna-conversations::backend::MailFeed  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-conversations::capabilities::DeliveryMode  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-conversations::capabilities::ThreadEncryption  # view model: crosses only FFI or wasm to the same build's UI
+open fauna-conversations::compose::ResolveState  # drafts blob; writers store only Idle, so a hand-written decode reads an unknown as Idle (no new variant, so none crosses FFI) and no build re-emits a decoded state
+open fauna-conversations::compose::SendState  # drafts blob; writers store only Idle, so a hand-written decode reads an unknown, unit or data, as Idle; no reader writes the value back, so the arm collapses rather than carries
+local fauna-conversations::message::BodyFormat  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-conversations::room::PrincipalKind  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-conversations::room::RoomClass  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-conversations::room::RoomNotice  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-conversations::room::RoomRole  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-conversations::room::JoinRule  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-conversations::room::HistoryPolicy  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-conversations::room_settings::RoomSettingsEdit  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-conversations::snapshot::GuardianState  # view model: crosses only FFI or wasm to the same build's UI; the wire carries the word, which `from_wire` projects (an unknown word reads as Held)
+local fauna-conversations::snapshot::SortOrder  # view model: crosses only FFI or wasm to the same build's UI
+open fauna-conversations::store::attachments::AttachmentOpeningKey  # history slice; a carried unknown means this attachment cannot be refilled here, and its coordinates are kept, never forgotten
+local fauna-conversations::store::attachments::AttachmentCoordinates  # view model: crosses only FFI or wasm to the same build's UI
+open fauna-conversations::thread::ThreadFlavor  # history slice, merged and re-uploaded; `Unknown { canonical }` crosses FFI; the thread shows with every affordance withheld
+
+# fauna-core
+skip fauna-core::custody_ceremony::CustodyCeremonyMessage  # one channel record; an unknown step waits in history for a capable session (pinned: custody_ceremony::an_unknown_ceremony_step_fails_only_that_payload)
+open fauna-core::custody_grant::CustodyScopeSet  # signed witness read by the custodian and the hosting worker; an unknown set covers no scope while removed_devices is still honoured
+local fauna-core::custody_policy::CustodyBudgetState  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+closed-extension fauna-core::data::PostBody  # Structured { schema, .. } is its open arm: text fallback and media items where an older reader and an older nest read them
+open fauna-core::data::FacetFeature  # inside the signed Post; an unknown facet renders its range as plain text
+open fauna-core::data::BodyHint  # last #[serde(untagged)] Other(String), re-emitted verbatim inside scoring::FilterRule; matches nothing
+open fauna-core::data::Reference  # inside the signed Post; an unknown reference is ignored
+open fauna-core::data::NestRole  # signed Profile, edited and re-signed by the owner's other devices; an unknown role is ignored for routing
+open fauna-core::data::AccountLoadHint  # signed Profile; an unknown hint loads as Full
+open fauna-core::data::Capability  # a DeviceAuthorization cert's capability list, on every wire that carries a cert; hand-written decode keeps an unknown capability as `Other(String)`, never the required one
+open fauna-core::data::InboxMode  # signed Profile; an unknown mode acts as Closed
+open fauna-core::data::MailCredentialKind  # the mail credential row on the `fauna.state.mail` plane, merged per row
+open fauna-core::data::MemberUnattestedReason  # an unattested-member row of the `fauna.state.succession-ledger` plane entry; hand-written decode carries an unknown reason as `Other(String)`
+open fauna-core::data::ParticipantRef  # heartbeat, lease state and the delegation record; an unknown pin means nobody is eligible
+open fauna-core::data::UnattestedVerdict  # a destination mark row of the `fauna.state.backup` plane entry; hand-written decode carries an unknown verdict as `Other(String)`
+open fauna-core::delegation::ParticipantClass  # the nest stores and returns it verbatim; an unknown class is treated as battery-mobile
+local fauna-core::delegation::RunnerStatus  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::delegation::PinOption  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::engagement::AnomalyFlag  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+open fauna-core::feature_gate::GatedFeature  # #[serde(other)] Unknown, never serialized: no reader writes back a feature it did not author; no surface renders it and the nest refuses it in a write
+local fauna-core::feature_gate::QuotaDimension  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::feature_gate::MagnitudeUnit  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::feature_gate::Window  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+open fauna-core::feature_gate::RuleTier  # #[serde(other)] Unknown, never serialized; attribution only, renders as another rule-setter
+open fauna-core::feature_gate::Availability  # last #[serde(untagged)] Other(String), re-emitted verbatim; enforces as Deny; the nest refuses it in a write
+local fauna-core::feed::ContentAddress  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::feed::UnifiedIdentity  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::feed::SourceTag  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::feed::PostReferenceType  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::fleet_removal::FleetRemovalRefusal  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::fleet_removal::NestDeletion  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+closed-consensus fauna-core::folder_key_rows::SetIdentity  # key-bearing folder-keys row, deny_unknown_fields by design: a newer row is refused and left for a later build, never stripped
+local fauna-core::format::ConflictPolicy  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::format::BackupAuditAlertReason  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+closed-consensus fauna-core::generation::DeviceSetRecord  # account-plane lattice record, signed over bytes rebuilt from decoded fields; replicas must rank it alike
+closed-consensus fauna-core::generation::GenerationMintRecord  # account-plane lattice record, signed over bytes rebuilt from decoded fields; replicas must rank it alike
+closed-consensus fauna-core::generation::GenerationWrapRecordV2  # account-plane lattice record, signed over bytes rebuilt from decoded fields; replicas must rank it alike
+closed-consensus fauna-core::generation::GenerationUnkeyableRecord  # account-plane lattice record, signed over bytes rebuilt from decoded fields; replicas must rank it alike
+closed-consensus fauna-core::grant_event::GrantEventKind  # signed over the re-encoded struct and terminal by presence: readers must agree on liveness
+closed-request fauna-core::group_ceremony::GroupCeremonyMessage  # peer request and reply, refused typed per frame
+closed-consensus fauna-core::group_generation::GroupGenerationMintRecord  # account-plane lattice record, signed over bytes rebuilt from decoded fields; replicas must rank it alike
+closed-consensus fauna-core::group_generation::GroupTopupRecord  # account-plane lattice record, signed over bytes rebuilt from decoded fields; replicas must rank it alike
+closed-consensus fauna-core::group_generation::GroupUnkeyableRecord  # account-plane lattice record, signed over bytes rebuilt from decoded fields; replicas must rank it alike
+closed-consensus fauna-core::group_scope::GroupRosterRecord  # account-plane lattice record, signed over bytes rebuilt from decoded fields; replicas must rank it alike
+closed-consensus fauna-core::group_scope::AuthorityRevocationRecord  # account-plane lattice record, signed over bytes rebuilt from decoded fields; replicas must rank it alike
+local fauna-core::label::ContentRef  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::label::MechanismType  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::label::Attestation  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+locked fauna-core::mail_auth::DkimVerdict  # in-image mail bridge -> nest ingest (deny_unknown_fields container), flattened to strings before storage
+locked fauna-core::mail_auth::SpfVerdict  # in-image mail bridge -> nest ingest (deny_unknown_fields container), flattened to strings before storage
+locked fauna-core::mail_auth::DmarcPolicy  # in-image mail bridge -> nest ingest (deny_unknown_fields container), flattened to strings before storage
+locked fauna-core::mail_auth::DmarcVerdict  # in-image mail bridge -> nest ingest (deny_unknown_fields container), flattened to strings before storage
+locked fauna-core::mail_auth::ArcVerdict  # in-image mail bridge -> nest ingest (deny_unknown_fields container), flattened to strings before storage
+locked fauna-core::mail_scan::ClamavVerdict  # in-image mail bridge -> nest ingest (deny_unknown_fields container), flattened to strings before storage
+local fauna-core::markdown::MdDecorationKind  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+locked fauna-core::nat_mode::NodeMode  # serde only in nest.toml; the wire fields are strings. config/default.toml seeds `mode = "public"` at first run and /data/nest.toml outlives an image downgrade, so a default that seeds any other variant needs a restrictive fallback first (no image writes an enum into an existing nest.toml; checked 2026-10-02)
+local fauna-core::notes::BlockKind  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::notes::NoteLineRole  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::notes::StructuralGesture  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::notes::BlockEdit  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::obligation::ObligationAction  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::obligation::AttestationLevel  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+open fauna-core::obligation::ContentFloor  # #[serde(other)] Unknown, never serialized, enforced as block; the nest refuses to store it
+open fauna-core::notification_type::NotifType  # the notifications row and push frame, re-emitted by the nest from its own table; Other(String) carries a type this build does not name verbatim (no destination, the neutral icon)
+closed-ladder fauna-core::region_policy::ContentVerdict  # signed region policy; GRAMMAR_VERSION is peeked first and a newer grammar reads as inert
+closed-ladder fauna-core::region_policy::ScorerKind  # as ContentVerdict
+local fauna-core::region_policy::PolicyDefect  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::region_policy::PolicyStatus  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::render::RenderBlock  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::render::Inline  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::render::PreviewState  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::render::VerificationStatus  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::render::AuthoringOriginStatus  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::rsvp::RsvpState  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::rsvp::RsvpResponse  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+open fauna-core::scoring::FilterRule  # last #[serde(untagged)] Unknown(fauna_cbor::Value), re-emitted byte for byte; never matches, discovery skips the feed, the nest stores one only as an echo
+closed-ladder fauna-core::scoring::LabelSource  # labeler module output in positional BARE; the stamp is the module's signed AlgorithmLabeler.output_schema.label_abi, read by the runner before the BARE decode (content-moderation-and-ranking.md, Tier-3, the output half of the label() ABI); a new variant raises LABEL_ABI_CURRENT in the same commit (ruled 2026-10-02)
+local fauna-core::scoring::MutedKeywordLevel  # never crosses a release boundary: the stored record is the weight; the level is its projection, crossing only FFI or wasm to the same build's UI
+local fauna-core::source_glyph::SourceGlyph  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+local fauna-core::structured::StructuredView  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
+open fauna-core::subscription::types::KemSuiteId  # KeyBlob entry suite; an unknown suite makes that one entry unopenable, never the blob
+open fauna-core::subscription::types::KeyAccess  # signed key-access record; hand-written decode carries an unknown arm whole as `Unknown { kind, payload }`
+
+# fauna-feed
+open fauna-feed::cues::CueVerdict  # sealed cue rollup, re-sealed whole by every device; `Other(String)` trains no example, is never contributed, counts no completion
+local fauna-feed::SourceKind  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-feed::personalization::TrainVerb  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-feed::personalization::TrainResult  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-feed::snapshot::FeedStatus  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-feed::snapshot::ReplyAudience  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-feed::snapshot::PostResolution  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-feed::snapshot::PlaybackSource  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-folders-machine::*  # 3 enums; view model: crosses only FFI or wasm to the same build's UI
+
+# fauna-index
+closed-ladder fauna-index::types::ContentKind  # sealed index manifest under the two-number format stamp; a new kind raises min_reader
+closed-ladder fauna-index::types::KindClass  # the manifest's seal class; as ContentKind
+local fauna-index::types::FieldKind  # crosses only FFI or wasm in-process
+
+# fauna-ipc
+closed-request fauna-ipc::sync::RequestMethod  # app -> agent verb; an unknown verb is refused typed for that request id
+closed-fixed fauna-ipc::sync::ResponseResult  # the Ok/Err envelope
+skip fauna-ipc::sync::ResponsePayload  # one reply frame; an undecodable reply fails its one call at once, typed; pinned by an_unreadable_reply_fails_its_call_at_once_typed_and_the_connection_survives
+open fauna-ipc::sync::CustodianReseedState  # carrying; unknown state reads as failed, never running
+open fauna-ipc::sync::CustodianReseedSetOutcome  # carrying; unknown outcome reads as refused
+skip fauna-ipc::sync::EventKind  # one event frame, skipped by the reader loop; pinned by an_event_of_an_unknown_kind_is_skipped_with_the_connection_intact
+open fauna-ipc::sync::LocationStatus  # carrying; unknown status renders as an error state, never Synced
+open fauna-ipc::sync::FileStatus  # collapsing; unknown status shows no badge and no menu
+open fauna-ipc::sync::ConnectionState  # collapsing; unknown state reads as Disconnected
+open fauna-ipc::sync::CorpusResealInfo  # carrying; unknown info renders nothing and never fails the engines reply
+local fauna-launch-machine::*  # 5 enums; view model; the stored slots hold only strings and numbers
+
+# fauna-mail
+local fauna-mail::domain_rename::RenameState  # in-process value; the wire and stored forms are strings
+local fauna-mail::export::ExportFormat  # in-process value; the wire and stored forms are strings
+local fauna-mail::scan::ClamavAction  # in-process value; the wire and stored forms are strings
+local fauna-mail::scan::ScanAction  # in-process value; the wire and stored forms are strings
+closed-ladder fauna-mail::segments::placement::MailPlacementRecord  # nest-only placement journal; the manifest version ladder refuses a newer file first (version-compatibility.md Dimension 1, 2026-08-24); a new record variant raises it
+local fauna-mail::spam::SpamDisposition  # in-process value; the wire and stored forms are strings
+
+# fauna-media
+closed-request fauna-media::audience::AudienceClass  # upload sidecar the nest checks and refuses per request
+
+# fauna-mls
+closed-consensus fauna-mls::room_policy::RoomRole  # signed RoomInvite.role, granted by the nest and the invitee; an unknown role cannot be granted
+closed-consensus fauna-mls::room_policy::JoinRule  # every member and the floor must enforce it alike; a new value ships behind the MLS extension-type negotiation (room_policy module doc, point 3)
+closed-consensus fauna-mls::room_policy::HistoryPolicy  # every member and the floor must enforce it alike; a new value ships behind the MLS extension-type negotiation (room_policy module doc, point 3)
+skip fauna-mls::types::ChannelMessageBody  # MLS application payload; poll_inbound_conv skips one undecodable record (version-compatibility.md, MLS application-message payloads; pinned: an_unknown_top_level_body_skips_only_its_record_in_the_inbound_walk)
+open fauna-mls::types::ReactionOp  # skip-covered as a message, but also merged at rest in the history slice's reaction log; `Other(String)` ranks as a retraction and never counts as an add
+skip fauna-mls::types::DeviceSyncMessage  # inside ChannelMessageBody
+skip fauna-mls::types::GroupMetaMessage  # inside ChannelMessageBody; pinned by an_unknown_group_meta_variant_fails_only_that_records_decode
+closed-ladder fauna-mls::wrapped_blob::format::SerKdfParams  # KDF selector under the blob's format version; check_stamp_before_decode reads the version before the strict decode, so a newer blob refuses as UnsupportedVersion
+
+# fauna-nest
+locked fauna-nest::config::SubmissionPolicy  # nest.toml; no image seeds or writes it (absent → Open), so only a hand edit could carry a value an older image cannot parse
+locked fauna-nest::config::AcmeMode  # nest.toml; no image seeds or writes it (absent → Http01, its one variant)
+closed-request fauna-nest::nest_link::protocol::ProxyCommand  # dormant: the storage worker has no production caller; re-rule before one ships
+skip fauna-nest::nest_link::protocol::WorkerMessage  # dormant, as ProxyCommand; the proxy read loop already skips an undecodable message
+closed-request fauna-nest::nest_link::protocol::PayloadKind  # dormant, inside ProxyCommand
+foreign fauna-nest::oauth_as_token::Wire  # JWT aud string-or-array shape (RFC 7519)
+
+# fauna-onboarding-machine
+local fauna-onboarding-machine::nest_api::types::ProbeError  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::nest_api::types::ClaimAdminError  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::nest_api::types::InviteRequestError  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::nest_api::types::InviteCodeError  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::nest_api::types::AgeNonceError  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::nest_api::types::RegisterError  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::nest_api::types::NatModeError  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::nest_api::types::RestoreSeedError  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::outcome::WizardOutcome  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::retire::RetirePhase  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::retire::TransferCodeState  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::retire::RetireStep  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::retire::StepState  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::retire::LeftoverKind  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::snapshots::awaiting_manual_dns::AwaitingDnsState  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::snapshots::claim_code::ClaimCodeState  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::snapshots::handle_check::HandleCheckPhase  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::snapshots::handle_check::HandleCheckOutcome  # view model or in-process error value; no reply decodes it
+skip fauna-onboarding-machine::snapshots::invite_request::ErrorContext  # inside InviteRequestState
+skip fauna-onboarding-machine::snapshots::invite_request::InviteRequestState  # pending-invite slot; an undecodable stored state falls back to PendingReview and the next poll settles it (pinned)
+local fauna-onboarding-machine::snapshots::invite_request::OobCodeState  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::snapshots::nat_mode::NatModeState  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::state::OnboardingStep  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::state::BoxRecoveryEntry  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::state::IdentityOrigin  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::state::ProviderStatus  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::state::CredentialForm  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::state::HostedAuthState  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::state::FieldTypePlain  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::state::CapabilityPlain  # view model or in-process error value; no reply decodes it
+local fauna-peer::*  # 4 enums; in-process only; stored forms are hand-mapped strings
+
+# fauna-protocol
+open fauna-protocol::admin::AdminLogLevel  # #[serde(other, skip_serializing)] Unknown; nest->app logs reply, read as the least severe level (Trace), so it shows only in the most inclusive view
+open fauna-protocol::bluesky::BlueskyFacetType  # #[serde(untagged)] Unknown(CarriedValue); nest->app thread reply, renders its span as plain text
+closed-request fauna-protocol::bluesky::BlueskyThreadRequest  # executed by the nest handler only
+locked fauna-protocol::bridge_routing::ValidateRecipientReply  # decoded only by the in-image bridge (rule 4's who-decodes split)
+locked fauna-protocol::bridge_routing::ResolveRecipientReply  # decoded only by the in-image bridge (rule 4's who-decodes split)
+open fauna-protocol::bridge_routing::ImportAliasStatus  # #[serde(other, skip_serializing)] Unknown; app-decoded reply, an unknown status counts as not created and shows the reason
+locked fauna-protocol::bridge_routing::ForwardCopyMode  # decoded only by the in-image bridge (rule 4's who-decodes split)
+closed-request fauna-protocol::bridge_routing::RoleAddressKind  # app->nest request, stored as a string key
+closed-fixed fauna-protocol::bridge_routing::DmarcMode  # RFC 7489's closed value set, in the stored override JSON and the admin-mail row; the nest projects an undecodable stored set as no override, so the wire only carries values it read
+closed-fixed fauna-protocol::bridge_routing::DmarcAlignment  # RFC 7489's closed value set, in the stored override JSON and the admin-mail row; the nest projects an undecodable stored set as no override, so the wire only carries values it read
+closed-fixed fauna-protocol::bridge_routing::DmarcForensicOptions  # RFC 7489's closed value set, in the stored override JSON and the admin-mail row; the nest projects an undecodable stored set as no override, so the wire only carries values it read
+locked fauna-protocol::bridge_routing::CheckSubmissionQuotaReply  # decoded only by the in-image bridge (rule 4's who-decodes split)
+locked fauna-protocol::bridge_routing::SpamDisposition  # decoded only by the in-image bridge (rule 4's who-decodes split)
+locked fauna-protocol::bridge_routing::FetchMessageCiphertextReply  # decoded only by the in-image bridge (rule 4's who-decodes split)
+locked fauna-protocol::bridge_routing::SelectMailboxReply  # decoded only by the in-image bridge (rule 4's who-decodes split)
+locked fauna-protocol::bridge_routing::StoreFlagsOp  # decoded only by the in-image bridge (rule 4's who-decodes split)
+open fauna-protocol::bridge_routing::ImportMessageOutcome  # #[serde(other, skip_serializing)] Unknown; app-decoded batch reply, an unknown outcome counts as errored
+locked fauna-protocol::bridge_routing::HeaderField  # decoded only by the in-image bridge (rule 4's who-decodes split)
+locked fauna-protocol::bridge_routing::SearchTerm  # decoded only by the in-image bridge (rule 4's who-decodes split)
+open fauna-protocol::bridge_routing::SpamLabel  # #[serde(other, skip_serializing)] Unknown; app-decoded history page, an unknown label shows a neutral badge and the client refuses the undo; the nest reads an unstored label as Unknown and never stores one
+open fauna-protocol::bridge_routing::TrainingSource  # #[serde(other, skip_serializing)] Unknown; app-decoded history page, an unknown source shows a neutral badge
+closed-request fauna-protocol::bridge_routing::SpamHistoryOp  # rides the atomic put_spam_model: a new op needs a capability advert
+locked fauna-protocol::bridge_routing::CreateMailboxReply  # decoded only by the in-image bridge (rule 4's who-decodes split)
+locked fauna-protocol::bridge_routing::DeleteMailboxReply  # decoded only by the in-image bridge (rule 4's who-decodes split)
+locked fauna-protocol::bridge_routing::RenameMailboxReply  # decoded only by the in-image bridge (rule 4's who-decodes split)
+locked fauna-protocol::bridge_routing::SubscribeMailboxReply  # decoded only by the in-image bridge (rule 4's who-decodes split)
+locked fauna-protocol::bridge_routing::UnsubscribeMailboxReply  # decoded only by the in-image bridge (rule 4's who-decodes split)
+locked fauna-protocol::bridge_routing::SubscribeMailboxStateReply  # decoded only by the in-image bridge (rule 4's who-decodes split)
+locked fauna-protocol::bridge_routing::MailboxStateEvent  # decoded only by the in-image bridge (rule 4's who-decodes split)
+locked fauna-protocol::bridge_routing::MoveSide  # decoded only by the in-image bridge (rule 4's who-decodes split)
+open fauna-protocol::bridge_routing::PutEventCiphertextReply  # #[serde(other, skip_serializing)] Unknown; app-decoded, an unknown outcome means written, state unknown: re-read
+locked fauna-protocol::bridge_routing::PlaceInboundInviteReply  # decoded only by the in-image bridge (rule 4's who-decodes split); carries #[serde(other)] Unknown
+open fauna-protocol::bridge_routing::ProvisionCalendarReply  # #[serde(other, skip_serializing)] Unknown; app-decoded, an unknown outcome: re-list
+open fauna-protocol::bridge_routing::QueryEventsReply  # #[serde(other, skip_serializing)] Unknown; app-decoded page, an unknown outcome is an error, never calendar-not-found
+open fauna-protocol::bridge_routing::SyncCalendarSinceReply  # #[serde(other, skip_serializing)] Unknown; app-decoded delta, an unknown outcome means a full re-read
+open fauna-protocol::bridge_routing::DeleteEventReply  # #[serde(other, skip_serializing)] Unknown; app-decoded, an unknown outcome: re-read
+locked fauna-protocol::bridge_routing::PutCardCiphertextReply  # decoded only by the in-image bridge (rule 4's who-decodes split)
+locked fauna-protocol::bridge_routing::ProvisionAddressbookReply  # decoded only by the in-image bridge (rule 4's who-decodes split)
+open fauna-protocol::bridge_routing::QueryCardsReply  # #[serde(other, skip_serializing)] Unknown; app-decoded page, an unknown outcome is an error, never empty
+open fauna-protocol::bridge_routing::SyncAddressbookSinceReply  # #[serde(other, skip_serializing)] Unknown; app-decoded delta, an unknown outcome means a full re-read
+locked fauna-protocol::bridge_routing::DeleteCardReply  # decoded only by the in-image bridge (rule 4's who-decodes split)
+locked fauna-protocol::bridge_routing::DeleteAddressbookReply  # decoded only by the in-image bridge (rule 4's who-decodes split)
+skip fauna-protocol::conversations::ChannelEnvelope  # channel-log record; the fetch walk skips an undecodable envelope; pinned by a_build_that_predates_the_floor_delete_variant_fails_its_decode
+closed-request fauna-protocol::conversations::WelcomeKind  # decoded by the nest, which projects it to a string for push and federation
+open fauna-protocol::conversations::RoomSearchHitKind  # #[serde(other)] Unknown
+open fauna-protocol::email::EmailFilterRule  # #[serde(untagged)] Unknown(CarriedValue), FFI Unknown { cbor }; stored and echoed whole on update; never matches (the Go MTA leaves it out); an undecodable stored rule list reads as one
+open fauna-protocol::email::EmailFilterAction  # #[serde(untagged)] Unknown(CarriedValue), FFI Unknown { cbor }; an unrecognised stored action string is carried as that string and written back; does nothing, never Discard; burns at succession
+open fauna-protocol::inbox::InboxKind  # #[serde(other)] Unknown; the reader leaves an unknown item un-acked
+open fauna-protocol::linkpreview::LinkPreviewResolveReply  # #[serde(other, skip_serializing)] Unknown, read as Failed
+closed-request fauna-protocol::mls_replica::ReplicaBase  # optimistic-concurrency precondition the nest evaluates and discards
+open fauna-protocol::kind_manifest::BridgeCapabilityValue  # last #[serde(untagged)] Other(CarriedValue): a value of the declared capability vector that is neither a flag nor a string; the nest re-serves the stored block, so it is carried whole in the roster row's JSON and on the wire; reads as no flag and no mode (the capability is not offered); the manifest parse refuses an unnamed member, so no build authors one
+open fauna-protocol::moderation::AbuseReportSubject  # #[serde(untagged)] Unknown(CarriedValue), FFI Unknown { cbor }; the nest re-emits a stored subject in the own-reports and queue replies, an unknown stored kind carried, never rebuilt as an actor; refused on submit and on a forwarded report
+open fauna-protocol::moderation::AbuseReportReason  # #[serde(other)] Other, a real reason: the one deliberate lossy relay, so a report with a newer reason still lands
+open fauna-protocol::moderation::AbuseReportStatus  # #[serde(other)] Unknown
+open fauna-protocol::moderation::AbuseReportOutcome  # #[serde(other)] Unknown; refused on resolve and on federation
+skip fauna-protocol::push_events::SegmentChange  # push frame; an undecodable payload becomes PushEvent::Unknown and the backstop poll covers it
+open fauna-protocol::stats::StatsGetReply  # #[serde(other, skip_serializing)] Unknown, renders as stats unavailable
+closed-request fauna-protocol::subscriptions::TierClearableField  # executed by the nest, never stored
+open fauna-protocol::subscriptions::SubscribeReply  # #[serde(other, skip_serializing)] Unknown: sent, state unknown, re-read the status
+open fauna-protocol::subscriptions::UnsubscribeReply  # as SubscribeReply
+open fauna-protocol::tls::CertHealthState  # #[serde(other, skip_serializing)] Unknown; the client projection reads it as OnFloorRenewNeeded (needs attention), so no app gains a case
+closed-request fauna-protocol::web_app_origin::WebAppOrigin  # typed only in the admin set request (the reply carries a string); an unknown mode fails that one request's decode and is refused; pinned by an_unknown_mode_is_refused_at_decode
+locked fauna-protocol::wrapped_blob::BulkByteAccess  # decoded only by the in-image bridge (rule 4's who-decodes split)
+locked fauna-protocol::wrapped_blob::BulkByteMintPurpose  # decoded only by the in-image bridge (rule 4's who-decodes split)
+open fauna-protocol::wrapped_blob::PutSpamModelOutcome  # #[serde(other, skip_serializing)] Unknown, read as not written: the writer discards its mutation
+
+# fauna-provisioning
+foreign fauna-provisioning::bundled_api::IdRepr  # third-party provider API id, string or number
+local fauna-provisioning::cloud_init::UpdateChannel  # the provisioning wizard's own choice, held in-process; it leaves the app only as an image tag string
+local fauna-provisioning::probe::DomainStatus  # built in-process from provider replies; ids cross as strings
+local fauna-provisioning::progress::ProvisionStep  # built in-process from provider replies; ids cross as strings
+local fauna-provisioning::progress::OverallStatus  # built in-process from provider replies; ids cross as strings
+local fauna-provisioning::progress::StepStatus  # built in-process from provider replies; ids cross as strings
+local fauna-provisioning::progress::SubstepKey  # built in-process from provider replies; ids cross as strings
+local fauna-provisioning::progress::SkipReason  # built in-process from provider replies; ids cross as strings
+local fauna-provisioning::providers_generated::ProviderId  # built in-process from provider replies; ids cross as strings
+local fauna-provisioning::registrar::RegistrarAvailability  # built in-process from provider replies; ids cross as strings
+
+# fauna-sync-agent
+open fauna-sync-agent::config::LocationMode  # last #[serde(untagged)] Other(String), re-emitted verbatim; no engine runs for it; save_config refuses to replace a config.toml it cannot read
+
+# fauna-text-model
+open fauna-text-model::topic::ExampleLabel  # sealed topic model, re-sealed whole; `Other(String)` cannot be inverted, so its marker is kept untouched, renders no toggle and teaches no corpus
+
+# fauna-tui
+open fauna-tui::settings::ExternalMediaMode  # last #[serde(untagged)] Other(String), re-emitted verbatim; launches nothing and paints as never; an unreadable prefs.json is never saved over

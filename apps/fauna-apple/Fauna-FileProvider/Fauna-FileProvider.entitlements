@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- File Provider extensions run sandboxed. -->
+  <key>com.apple.security.app-sandbox</key>
+  <true/>
+  <!-- The app-dead host opens its own bearer-authenticated nest connection
+       (WS-RPC changes.list + HTTP chunk/manifest fetch); a sandboxed extension
+       needs the outbound-network entitlement or every connect fails closed. -->
+  <key>com.apple.security.network.client</key>
+  <true/>
+  <!-- The app group whose container holds the domain's on-disk replica
+       (NSExtensionFileProviderDocumentGroup) and, in M2+, the per-set
+       fs-<set>.db / device.db the extension and app share. -->
+  <key>com.apple.security.application-groups</key>
+  <array>
+    <string>7457N3M72H.group.social.fauna.shared</string>
+  </array>
+</dict>
+</plist>

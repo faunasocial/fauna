@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Fauna sparse ("external location") package — grants PACKAGE IDENTITY to the
+  otherwise-unpackaged Fauna shell extension, which is the ONLY way to land the Fauna
+  submenu in the Windows 11 DEFAULT context menu. An HKCR verb (ShellExt.wxs) surfaces
+  only in the legacy "Show more options" menu; both registrations coexist, each owning
+  its own menu surface. Design + rationale:
+  docs/goal/architecture/installers/windows.md § Context-menu registration.
+
+  THIS IS A TEMPLATE. The dedicated sparse-package build script substitutes the three
+  double-at-delimited tokens below and packs the result. Each is a build-time parameter
+  for a reason (and the packer hard-fails if any survives substitution):
+
+    @@Publisher@@      MSIX requires Identity/@Publisher to equal the signing
+                       certificate's Subject DN *exactly*. Hard-coding a DN would weld
+                       the package to one certificate. A dev build self-signs with the
+                       dev DN whose one build-time home is installer/PackageIdentity.props
+                       (FaunaApp.exe's embedded manifest is generated from the same
+                       value); the shipping build will use the production "Fauna
+                       Social" cert's DN, handed to both. Swapping them is a parameter
+                       change, NOT a code change — which is precisely why this track was
+                       never blocked on code-signing (the cert gates distribution, not
+                       authoring). NOTE: Publisher also feeds the PackageFamilyName hash,
+                       so a dev-signed package is a DIFFERENT identity than a
+                       production-signed one — Remove-AppxPackage the dev one, never
+                       expect an in-place upgrade across the cert swap.
+    @@PackageVersion@@ 4-part MSIX version, derived from the MSI ProductVersion.
+                       Re-registering an unchanged version fails 0x80073CF9 — the dev
+                       loop must remove-then-add, or bump.
+    @@ShellDllName@@   The Path-1 VERSION-STAMPED shell DLL (fauna_shell_<ver>.dll). The
+                       installed DLL is never the bare build-output name, so this must
+                       stay coupled to ShellExt.wxs's $(var.ShellDllName). Pinned by
+                       tests/e2e-unified/tests/platform/windows/test_sparse_package.py.
+
+  The shell DLL lives OUTSIDE the package (uap10:AllowExternalContent + the installer's
+  `Add-AppxPackage -ExternalLocation <INSTALLFOLDER>`); com:Class/@Path and the app
+  Executable both resolve inside that external directory. The Assets/*.png below are
+  packed INTO the .msix, so they resolve package-internally.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  IgnorableNamespaces="uap uap10 rescap desktop4 desktop5 com">
+
+  <Identity Name="FaunaSocial.Fauna"
+            Publisher="@@Publisher@@"
+            Version="@@PackageVersion@@"
+            ProcessorArchitecture="neutral" />
+
+  <Properties>
+    <DisplayName>Fauna</DisplayName>
+    <PublisherDisplayName>Fauna Social</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <!-- The payload (the shell DLL, the app exe) lives outside the package. -->
+    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
+  </Properties>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Dependencies>
+    <!-- 10.0.19041 = the packaging-with-external-location floor (Windows 10 2004).
+         The Win11 default menu itself only renders from 22000; below that the HKCR
+         verb in ShellExt.wxs remains the (only, and correct) surface. -->
+    <TargetDeviceFamily Name="Windows.Desktop"
+                        MinVersion="10.0.19041.0"
+                        MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+  </Capabilities>
+
+  <Applications>
+    <!-- AppListEntry="none": this package exists to carry identity for the shell
+         extension and for FaunaApp.exe, not to publish a second Start-menu entry — the
+         MSI already installs the real FaunaApp shortcut.
+
+         Id="FaunaApp" (renamed from FaunaShellExt 2026-09-26) — the SAME Application
+         Id the Store package declares, so the two channels share one AUMID suffix
+         and the app's embedded manifest (FaunaApp/app.manifest.in, its msix element)
+         names one applicationId for both. That element is what lets FaunaApp.exe,
+         launched from the external location, run WITH this package's identity —
+         which the taskbar badge (apps/windows.md § Home-screen widget) needs. -->
+    <Application Id="FaunaApp"
+                 Executable="App\FaunaApp.exe"
+                 uap10:TrustLevel="mediumIL"
+                 uap10:RuntimeBehavior="win32App">
+      <uap:VisualElements AppListEntry="none"
+                          DisplayName="Fauna"
+                          Description="Fauna — your files, your nest."
+                          BackgroundColor="transparent"
+                          Square150x150Logo="Assets\Square150x150Logo.png"
+                          Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <!-- The Win11 default context menu. Clsid is the EXISTING root
+             IExplorerCommand CLSID (FaunaContextMenu) that ShellExt.wxs already
+             registers as *\shell\Fauna's ExplorerCommandHandler — this is a second
+             REGISTRATION SURFACE for one implementation, never a 9th COM class. The
+             submenu's children come from the handler's EnumSubCommands, so only the
+             root verb is named here. -->
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <desktop5:ItemType Type="*">
+              <desktop5:Verb Id="Fauna" Clsid="4A7B8C10-F1E2-4D3A-B5C6-D7E8F9A0B1C2" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type="Directory">
+              <desktop5:Verb Id="Fauna" Clsid="4A7B8C10-F1E2-4D3A-B5C6-D7E8F9A0B1C2" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type="Directory\Background">
+              <desktop5:Verb Id="Fauna" Clsid="4A7B8C10-F1E2-4D3A-B5C6-D7E8F9A0B1C2" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+
+        <!-- Registers the CLSID in the MANIFEST instead of the registry. Explorer
+             activates it out-of-process via the COM surrogate (dllhost.exe), which is
+             what carries package identity into the handler.
+             ⚠ The surrogate HOLDS A HANDLE on the DLL — uninstall/upgrade must
+             deregister the package (and, if needed, stop the surrogate) before the file
+             can be touched. This is the packaged twin of the known explorer.exe lock on
+             fauna_shell.dll; Path 1 (Permanent + version-stamped @Name) already makes
+             the file untouchable by the installer, so the lock is survivable, but the
+             stale package registration must still be removed on uninstall or it points
+             at a deleted external location. -->
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:SurrogateServer DisplayName="Fauna Shell Extension">
+              <com:Class Id="4A7B8C10-F1E2-4D3A-B5C6-D7E8F9A0B1C2"
+                         Path="@@ShellDllName@@"
+                         ThreadingModel="STA" />
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+</Package>

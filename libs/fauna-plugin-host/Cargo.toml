@@ -1,0 +1,34 @@
+[package]
+name = "fauna-plugin-host"
+description = "The nest-hosted WASM plugin runner: the component-model sandbox, its capability imports and its caps (third-party.md § Execution forms → WASM components)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The in-repo fixture builder: a core module in text, componentized against
+# this crate's own WIT. Test-only — no production path ever builds a component,
+# and no third-party plugin code exists anywhere in the tree.
+test-helpers = ["dep:wat", "dep:wit-component", "dep:wit-parser"]
+
+[dependencies]
+wasmtime.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# `unseal_capability` + the X25519 keypair mint — the holder's half of the
+# capability-grant substrate, so a hosted principal opens its grants with the
+# exact function every other holder uses. `default-features = false`: the
+# runner needs none of the MLS engine's storage.
+fauna-mls = { path = "../fauna-mls", default-features = false }
+# Re-deriving a stored secret's public half, so a rebuilt `HolderKey` can
+# never pair a secret with a public key it does not own.
+x25519-dalek.workspace = true
+wat = { workspace = true, optional = true }
+wit-component = { workspace = true, optional = true }
+wit-parser = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
+# The crate's own tests drive the fixture builder behind `test-helpers`.
+fauna-plugin-host = { path = ".", features = ["test-helpers"] }

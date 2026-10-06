@@ -1,0 +1,19 @@
+[package]
+name = "fauna-acme-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The `instant_acme::Order` handle this crate's `finalize_order_and_fetch_certificate`
+# drives (order.finalize()/order.certificate()) — the same account/order machinery
+# `fauna-acme-http01` and `fauna-client-dns::acme_order` each construct independently
+# (native-only, `ring`/`aws-lc-rs`-backed; neither browser-WASM-safe, hence this
+# crate has no wasm target either).
+instant-acme = { workspace = true }
+# CSR + cert keypair generation for the finalize step. Same 0.13 pin both consumer
+# crates already carry.
+rcgen = "0.13"
+thiserror = { workspace = true }
+# `tokio::time::sleep` for the certificate poll loop.
+tokio = { workspace = true }

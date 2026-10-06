@@ -1,0 +1,198 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.AdminSettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+      admin-settings (admin.md § 3 Settings — renamed "Tiers" per the per-page-
+      services redesign, 2026-06-04) — a dumb renderer of the shared
+      AdminSettingsViewModel (FaunaApp.Core, over the INestRpcClient WS-RPC seam →
+      FfiAdminClient; no /admin/api/* twins). Tier *definitions* only: the
+      admin-settings-tiers-section / -tier-item in-place cap editor over
+      fauna.admin.tiers.{list,update} (policy, distinct from the admission controls
+      on admin-users). The Factory Reset danger zone moved to the new admin-nest
+      page (admin.md § N Nest, which also carried the storage-mode indicator until
+      it was retired entirely with the no-modes cutover, Phase-4 S8.7); invite-code
+      minting moved to admin-users (§ 2); email-domain management moved to
+      admin-dns (§ 3). Mirrors linux build_settings_page. The tiers list uses a non-virtualizing
+      StackPanel item panel with AutomationProperties.Name row anchors so the e2e
+      driver can count every indexed admin-settings-tier-item row.
+    -->
+
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="24" MaxWidth="600" HorizontalAlignment="Left">
+
+            <!-- Error bar -->
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="False"
+                IsClosable="True" />
+
+            <!-- Header -->
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=admin/settings_page/title}" />
+
+            <!-- Loading -->
+            <ProgressRing
+                x:Name="LoadProgress"
+                IsActive="False"
+                Visibility="Collapsed"
+                HorizontalAlignment="Left" />
+
+            <!-- Tier definitions (admin-settings-tiers-section + -tier-item):
+                 one row per defined tier with the read-only tier name (it
+                 identifies the row) + an editable raw-i64 input per AdminTier cap
+                 (admin-settings-tier-cap-*, two-way bound, pre-filled with the
+                 persisted value) + an admin-settings-tier-save-button firing
+                 fauna.admin.tiers.update (the tier IS the quota — admin.md § 3,
+                 in-place tier-cap editing). Raw integers (bytes for byte caps,
+                 counts otherwise); UpdateSourceTrigger=PropertyChanged so a set
+                 from the e2e driver lands without a focus change. Mirrors linux
+                 build_tier_definition_row. -->
+            <StackPanel Spacing="8">
+                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsTiersSection}"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/settings_page/tiers}" />
+
+                <ItemsControl x:Name="TiersList">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Spacing="4" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:AdminTierRow">
+                            <StackPanel Padding="4,8" Spacing="6"
+                                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsTierItem}"
+                                        AutomationProperties.Name="{x:Bind Name}">
+                                <TextBlock Text="{x:Bind Name}" FontWeight="SemiBold" />
+                                <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsTierCapInbox}"
+                                         Header="{x:Bind local:AdminSettingsPage.CapInboxLabel}"
+                                         Text="{Binding MaxInboxBytesText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsTierCapStorage}"
+                                         Header="{x:Bind local:AdminSettingsPage.CapStorageLabel}"
+                                         Text="{Binding MaxStorageBytesText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsTierCapDevices}"
+                                         Header="{x:Bind local:AdminSettingsPage.CapDevicesLabel}"
+                                         Text="{Binding MaxDevicesText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsTierCapBlobSize}"
+                                         Header="{x:Bind local:AdminSettingsPage.CapBlobSizeLabel}"
+                                         Text="{Binding MaxBlobSizeText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsTierCapFeeds}"
+                                         Header="{x:Bind local:AdminSettingsPage.CapFeedsLabel}"
+                                         Text="{Binding MaxFeedsText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsTierSaveButton}"
+                                        Content="{x:Bind local:AdminSettingsPage.SaveTierLabel}"
+                                        Click="SaveTier_Click"
+                                        HorizontalAlignment="Left" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- Empty state -->
+                <TextBlock x:Name="NoTiersText" Visibility="Collapsed" Opacity="0.5"
+                           Text="{loc:Localize Key=admin/settings_page/no_tiers}" />
+            </StackPanel>
+
+            <!-- Membership designations (admin-settings-membership-section + -item,
+                 monetization.md § Pillar 4). A LINK editor between the admin's own
+                 subscription tiers (their payee-side creator machinery) and this
+                 page's quota tiers — never a third tier list. One row per OWNED
+                 subscription tier, designated or not, so the section doubles as the
+                 list of what could be designated; an empty row set is the normal
+                 out-of-the-box state (nothing monetized), rendered as a pointer at
+                 the Tiers tab rather than an error.
+
+                 Three FlaUI constraints shape the markup:
+                 (1) the row root carries AutomationProperties.Name as well as the
+                     AutomationId, or WinUI marks the DataTemplate peer raw and
+                     FindAllDescendants skips it (count/is_visible would read 0);
+                 (2) the selects are non-editable ComboBoxes bound to plain strings,
+                     because driver.select matches ListItem.Name EXACTLY and
+                     get_text reads the Selection pattern's selected item;
+                 (3) Clear stays ENABLED on an undesignated row — a disabled WinUI
+                     button cannot be driven by InvokePattern, so the guard lives in
+                     the VM (linux desensitizes its button instead).
+                 Mirrors linux build_membership_row / apple MembershipDesignationRow. -->
+            <StackPanel Spacing="8">
+                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsMembershipSection}"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/settings_page/membership_section}" />
+
+                <ItemsControl x:Name="MembershipList">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Spacing="4" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:MembershipTierRow">
+                            <StackPanel Padding="4,8" Spacing="6"
+                                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsMembershipItem}"
+                                        AutomationProperties.Name="{x:Bind TierName}">
+                                <!-- Which owned subscription tier this row designates.
+                                     Day to day a display, but a real select per the
+                                     approved shape, so a mis-set row can be re-pointed
+                                     without deleting it; Save reads the current pick. -->
+                                <ComboBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsMembershipTierSelect}"
+                                          ItemsSource="{x:Bind OwnTierNames}"
+                                          SelectedItem="{Binding SelectedTierName, Mode=TwoWay}"
+                                          MinWidth="160" />
+                                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                    <TextBlock VerticalAlignment="Center" Width="90"
+                                               Text="{x:Bind local:AdminSettingsPage.MembershipAdmitsAtLabel}" />
+                                    <ComboBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsMembershipAdminTierSelect}"
+                                              ItemsSource="{x:Bind QuotaTierNames}"
+                                              SelectedItem="{Binding AdminTier, Mode=TwoWay}"
+                                              MinWidth="160" />
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                    <TextBlock VerticalAlignment="Center" Width="90"
+                                               Text="{x:Bind local:AdminSettingsPage.MembershipLapsesToLabel}" />
+                                    <ComboBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsMembershipLapseTierSelect}"
+                                              ItemsSource="{x:Bind QuotaTierNames}"
+                                              SelectedItem="{Binding LapseTier, Mode=TwoWay}"
+                                              MinWidth="160" />
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsMembershipSaveButton}"
+                                            Content="{x:Bind local:AdminSettingsPage.MembershipSaveLabel}"
+                                            Click="SaveMembership_Click" />
+                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsMembershipClearButton}"
+                                            Content="{x:Bind local:AdminSettingsPage.MembershipClearLabel}"
+                                            Click="ClearMembership_Click" />
+                                </StackPanel>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- Empty state: no subscription tiers yet ⇒ point at the Tiers tab,
+                     which is where tiers are minted (designating creates neither kind). -->
+                <TextBlock x:Name="NoMembershipTiersText" Visibility="Collapsed" Opacity="0.5"
+                           TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/settings_page/no_membership_tiers}" />
+            </StackPanel>
+
+            <!-- TextBlock mirrors for E2E -->
+            <TextBlock x:Name="ErrorTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+                       AutomationProperties.Name=" "
+                       Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+            <TextBlock x:Name="WarningTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.WarningMessage}"
+                       AutomationProperties.Name=" "
+                       Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

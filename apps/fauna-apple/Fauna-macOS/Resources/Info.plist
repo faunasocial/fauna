@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>social.fauna.fauna</string>
+  <key>CFBundleName</key>
+  <string>Fauna</string>
+  <key>CFBundleDisplayName</key>
+  <string>Fauna</string>
+  <!-- Literal (not $(EXECUTABLE_NAME)): this plist is consumed by TWO build
+       worlds — `just mac-app` copies it raw (no variable expansion; it used to
+       plutil-inject this exact value) and the Fauna.xcodeproj app target
+       processes it as INFOPLIST_FILE. Both name the binary Fauna. -->
+  <key>CFBundleExecutable</key>
+  <string>Fauna</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <!-- CFBundleShortVersionString is the product version — must equal the root
+       Cargo.toml [workspace.package] version (product-version.md; the
+       version-lockstep merge gate holds all surfaces equal). CFBundleVersion
+       is PINNED at 1: a store re-upload mints a new product patch version
+       instead of a new build number (product-version.md § Reships), so each
+       version train has exactly one build. -->
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.2</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <!-- App icon (2026-07-20): Fauna's one brand mark (sites/fauna-social/public/
+       favicon.svg — previously only rendered for the web favicon + the Windows
+       MSIX logos) now also fills the launcher's question-mark fallback here, via a dedicated
+       icon-rendering script. `mac-app` copies AppIcon.icns into
+       Contents/Resources/. -->
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <!-- Package.swift pins .macOS(.v15); declaring less lets a Sonoma launch crash. -->
+  <key>LSMinimumSystemVersion</key>
+  <string>15.0</string>
+  <key>NSPrincipalClass</key>
+  <string>NSApplication</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+
+  <!-- Sparkle auto-update -->
+  <key>SUFeedURL</key>
+  <string>https://fauna.social/appcast.xml</string>
+  <key>SUPublicEDKey</key>
+  <string>6lnpmCLfr2Rl60Sf1VL8oIOn8Djl2gRw/Cwmh0wxP+s=</string>
+  <key>SUEnableAutomaticChecks</key>
+  <true/>
+
+  <!-- Photo library access -->
+  <key>NSPhotoLibraryUsageDescription</key>
+  <string>Fauna backs up your photos and videos to your personal nest.</string>
+
+  <!-- Export compliance: Fauna ships its own encryption (MLS, sealed-at-rest),
+       not merely OS-provided facilities, so ITSAppUsesNonExemptEncryption is
+       YES under Apple's own exemption test. Posture ratified 2026-08-23,
+       publicly-available-source route (no BIS filing owed) —
+       docs/goal/architecture/export-compliance.md § What each store form
+       answers; effective-date stamp pending publication (§ Implementation
+       status today). This app is not Mac-App-Store-distributed today
+       (Sparkle/DMG/pkg), so the key has no live ASC effect yet, but is set
+       here for documentary consistency should that ever change. -->
+  <key>ITSAppUsesNonExemptEncryption</key>
+  <true/>
+
+  <!-- URL scheme for deep links -->
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>fauna</string>
+      </array>
+      <key>CFBundleURLName</key>
+      <string>social.fauna.fauna</string>
+    </dict>
+  </array>
+</dict>
+</plist>

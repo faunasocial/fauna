@@ -1,0 +1,105 @@
+[package]
+name = "fauna-iroh-relay"
+description = "Self-hosted iroh-relay sidecar — the nest's own P2P relay (no n0 third party)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# OFF by default — mirrors `fauna-iroh`'s `quic` feature. With no feature
+# this binary is an empty shell: none of the
+# iroh-relay server tree compiles, so the default workspace build stays free of
+# it. The released nest image builds the binary in a cargo step of its own
+# (`-p fauna-iroh-relay --features relay`). Building and running it are
+# artifact decisions (`behavior/p2p.md` § The relay); it is NEVER a human
+# config knob.
+default = []
+relay = [
+    "dep:iroh-relay",
+    "dep:iroh-base",
+    "dep:tokio",
+    "dep:rustls",
+    "dep:clap",
+    "dep:anyhow",
+    "dep:thiserror",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "dep:arc-swap",
+    "dep:fauna-core",
+    "dep:fauna-protocol",
+    "dep:fauna-sidecar-client",
+    "dep:fauna-mls",
+]
+
+[dependencies]
+# The relay SERVER half. `server` exports `iroh_relay::server::{Server,
+# ServerConfig, RelayConfig, TlsConfig, CertConfig}` (what `Server::spawn`
+# needs); `default-features = false` keeps it on the ring TLS discipline (no
+# aws-lc-rs C build), same as `iroh`/`fauna-iroh`. Already in `Cargo.lock` (it is
+# `iroh`'s transitive client dep and `fauna-iroh`'s dev-dep, the latter already
+# enabling `server`), so this widens no versions.
+iroh-relay = { workspace = true, features = ["server"], optional = true }
+# Named only for `PublicKey` in the access hook's signature (`on_disconnect`):
+# `iroh-relay` takes the type there and does not re-export it. Its own
+# dependency, same version — nothing new in `Cargo.lock`.
+iroh-base = { version = "1", default-features = false, features = ["key"], optional = true }
+tokio = { workspace = true, features = ["full"], optional = true }
+# Build the relay's HTTPS `rustls::ServerConfig`. The cert is fetched from nest as
+# an HPKE-sealed blob (NOT a PEM file — the relay never reads `/data/acme`,
+# `security.md` § UID isolation); `rustls::pki_types::pem` parses the UNSEALED PEM into a
+# `CertifiedKey`. ring provider, matching the whole iroh tree; PQ is the separate
+# §7.3 aws-lc-rs swap. `arc-swap` hot-swaps the cert on refresh without restarting
+# the relay (mirrors the nest's `MultiDomainCertResolver`).
+rustls = { workspace = true, optional = true }
+arc-swap = { workspace = true, optional = true }
+# CLI is the artifact-set IPC surface (bind addrs + nest URL + key dir). `env`
+# lets the s6 run-script pass them as env vars, like the other sidecars; the
+# sidecar token rides `FAUNA_SIDECAR_TOKEN` (read in `run`).
+clap = { workspace = true, features = ["env"], optional = true }
+anyhow = { workspace = true, optional = true }
+# `RelayCertError`: the cert fetch's two arms — a dial/handshake failure (which may
+# implicate our sidecar token) versus a failure over an already-authenticated
+# channel (which proves it good). The split is what `CredentialVerdict` reads.
+thiserror = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+# The sidecar dial: the shared `fauna-sidecar-client` (connect + the
+# `fauna.sidecar.hello` token handshake — the ONE lean sidecar dialer, here
+# attesting the relay's X25519). Shared crates only — NOT
+# `fauna-nest` — so the binary stays lean: `fauna-sidecar-client` (the dialer, which
+# pulls `fauna-ws-substrate`'s WS adapter + loopback-self-signed TLS transitively),
+# `fauna-protocol` (the dispatcher + the `fauna.relay.*` wire types), `fauna-mls`
+# (X25519 keygen + `unseal_tls_cert`), `fauna-core` (the canonical `hex32`/`format`
+# hex helpers, replacing a hand-rolled `hex` crate use). All already in
+# `Cargo.lock` — `fauna-core` is already pulled in transitively via the other
+# three, so this widens no versions either.
+fauna-core = { path = "../../libs/fauna-core", default-features = false, optional = true }
+fauna-protocol = { workspace = true, optional = true }
+fauna-sidecar-client = { workspace = true, optional = true }
+fauna-mls = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Drive the resolver-backed `build_server_config` + `spawn_relay` with a real
+# self-signed cert and prove two relay-only iroh endpoints round-trip through our
+# own relay — the durable, binary-level form of the 2026-06-28 relay-sovereignty
+# proof. All dev-only: never compiled into the binary or the image. rcgen 0.14 +
+# iroh + tempfile are already in `Cargo.lock` (iroh-relay's own dep / fauna-iroh's
+# dev-dep), so this adds no new versions. (The dial+fetch path is proven by the
+# tier_4 test against a live nest, not here.)
+iroh = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+anyhow = { workspace = true }
+rustls = { workspace = true }
+tempfile = { workspace = true }
+rcgen = "0.14"
+# The NAT path probe (`examples/nat_probe.rs`, `behavior/p2p.md` § NAT hole
+# punching): the production peer-leg endpoint (`fauna-iroh` `quic`) dialing
+# through this crate's own relay. Workspace crates only — no new versions.
+fauna-iroh = { workspace = true, features = ["quic"] }
+fauna-transport = { workspace = true }
+futures-util = { workspace = true }
+
+[[example]]
+name = "nat_probe"
+required-features = ["relay"]

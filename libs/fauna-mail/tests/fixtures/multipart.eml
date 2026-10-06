@@ -1,0 +1,25 @@
+From: alice@example.com
+To: bob@example.com
+Subject: Multipart message
+Date: Wed, 7 May 2026 12:00:00 +0000
+Message-ID: <multipart-001@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="boundary-1"
+
+--boundary-1
+Content-Type: text/plain; charset=utf-8
+
+This is the plain text part.
+
+--boundary-1
+Content-Type: text/html; charset=utf-8
+
+<html><body>This is the HTML part.</body></html>
+
+--boundary-1
+Content-Type: application/pdf; name="report.pdf"
+Content-Disposition: attachment; filename="report.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJeLjz9MKMSAwIG9iago8PC9UeXBlL0NhdGFsb2c+PgplbmRvYmoK
+--boundary-1--

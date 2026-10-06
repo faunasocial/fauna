@@ -1,0 +1,45 @@
+[package]
+name = "fauna-client-drafts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Convention 15's opt-in for a RELEASE-profile e2e build. This crate's only
+# test-only surface is the autosave-window seam (`sync::E2E_AUTOSAVE_DEBOUNCE_ENV`
+# + `sync::e2e_autosave_debounce_override`), whose gate is
+# `any(test, debug_assertions, feature = "test-helpers")` — a debug build reaches
+# it through `debug_assertions`, so this feature exists only so a release-profile
+# e2e flavor can too. Empty on purpose: it turns on no dep and no other feature,
+# it only flips this crate's own `cfg`. Same shape, and the same reasons, as
+# `fauna-mail`'s.
+#
+# ⚠ NEVER name this on a `[dependencies]` line — cargo would turn it on
+# unconditionally for every artifact that crate builds, including shipped ones.
+# Consumers forward it from their own `e2e-agent`/`test-helpers` feature.
+test-helpers = []
+
+[dependencies]
+# default-features = false on fauna-core to keep the `network` default (redb,
+# tokio, hickory-resolver) out of wasm builds via Cargo feature unification —
+# mirrors fauna-client-config. Path form (not `workspace = true`) is required to
+# override defaults.
+fauna-core = { path = "../fauna-core", default-features = false }
+# The WS-RPC transport seam (`RpcRequester`) + the `fauna.drafts.{get,put}` wire
+# types. `default-features = false` drops fauna-protocol's `p2p` default
+# (native-only wireguard → tokio net) so this crate is wasm-clean; the `js` time
+# backend is forwarded on wasm below. Mirrors fauna-client-config.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+serde = { workspace = true }
+serde_bytes = "0.11"
+thiserror = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Forward fauna-protocol's `js` (fauna-core's js-sys time backend) on wasm.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The shared `block_on` single-poll executor + `FailingRequester` test doubles
+# — wasm-clean (see that crate's own docs), so it keeps this crate's dev-deps
+# wasm32-testable.
+fauna-client-testkit = { path = "../fauna-client-testkit" }

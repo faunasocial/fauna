@@ -1,0 +1,547 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.ConversationsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:models="using:FaunaApp.Core.Models"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    Unloaded="Page_Unloaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="320" />
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <!-- Left pane: thread list -->
+        <Grid Grid.Column="0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Grid Grid.Row="0" Padding="16,16,16,8" ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <TextBlock
+                    Grid.Column="0"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                    Style="{StaticResource SubtitleTextBlockStyle}"
+                    Text="{loc:Localize Key=conversations/list/title}" />
+
+                <Button
+                    Grid.Column="1"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.NewConversationButton}"
+                    Content="&#xE109;"
+                    FontFamily="Segoe MDL2 Assets"
+                    Click="NewConversationButton_Click"
+                    ToolTipService.ToolTip="{loc:Localize Key=conversations/list/new_conversation}"
+                    Padding="8" />
+
+                <Button
+                    Grid.Column="2"
+                    x:Name="SortButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ConversationSort}"
+                    Content="&#xE8CB;"
+                    FontFamily="Segoe MDL2 Assets"
+                    Padding="8"
+                    Click="SortButton_Click" />
+            </Grid>
+
+            <AutoSuggestBox
+                Grid.Row="1"
+                x:Name="ConversationSearchBox"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.ConversationSearchBox}"
+                QueryIcon="Find"
+                Margin="16,0,16,4"
+                PlaceholderText="{loc:Localize Key=conversations/list/search_placeholder}"
+                TextChanged="ConversationSearchBox_TextChanged" />
+
+            <ListView
+                Grid.Row="2"
+                x:Name="ConversationsList"
+                SelectionChanged="ConversationsList_SelectionChanged"
+                ContainerContentChanging="ConversationsList_ContainerContentChanging"
+                Padding="8,0">
+                <ListView.ItemTemplate>
+                    <DataTemplate x:DataType="local:ThreadRow">
+                        <Grid Padding="8" ColumnSpacing="12">
+                            <!--
+                                The Grid had AutomationProperties.AutomationId="conversation-item"
+                                but WinUI's UIA tree collapses the Grid (no AutomationPeer of
+                                its own) into the parent ListViewItem, dropping the
+                                AutomationId on the floor. The id is now applied to the
+                                ListViewItem container itself in ConversationsList_ContainerContentChanging.
+                            -->
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+
+                            <!--
+                                A TextBlock glyph, not a shape: dumping the live UIA tree
+                                (`driver.debug_tree(raw=True)`, which walks FlaUI's RAW view
+                                walker — no view filtering at all) showed neither an Ellipse nor a
+                                Border ever gets an AutomationPeer here, at ANY view, even with
+                                AccessibilityView="Control" and Visibility hardcoded to "Visible" —
+                                same as this DataTemplate's own StackPanel (Timestamp+ProtocolIcon),
+                                which is likewise absent from the tree while its TextBlock children
+                                surface directly under the row. Only a non-root TextBlock reliably
+                                gets a peer here (label/protocol-icon/dm-subject all do), so the dot
+                                is a Unicode glyph, matching every other indexed element in this row.
+                            -->
+                            <TextBlock
+                                Grid.Row="0" Grid.Column="0" Grid.RowSpan="2"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.DmUnreadIndicator}"
+                                Text="&#x25CF;"
+                                FontSize="8"
+                                Foreground="{ThemeResource SystemAccentColorLight1}"
+                                Visibility="{x:Bind UnreadVis}"
+                                VerticalAlignment="Center" />
+
+                            <TextBlock
+                                Grid.Row="0" Grid.Column="1"
+                                Text="{x:Bind Label}"
+                                Style="{StaticResource BodyStrongTextBlockStyle}" />
+
+                            <!-- Top-right: shared contextual last-activity timestamp
+                                 (conversations.md § Layout) then the protocol rail glyph. -->
+                            <StackPanel
+                                Grid.Row="0" Grid.Column="2"
+                                Orientation="Horizontal"
+                                Spacing="6"
+                                VerticalAlignment="Center">
+                                <TextBlock
+                                    Text="{x:Bind Timestamp}"
+                                    FontSize="11"
+                                    Opacity="0.6"
+                                    VerticalAlignment="Center" />
+                                <!-- protocol-icon: the source-concept glyph as an emoji
+                                     (render-model.md § D5). No Segoe MDL2 Assets — that
+                                     symbol font has no emoji; the default font's Segoe UI
+                                     Emoji fallback renders 🦊/✉️/🦋/⚡/🌐/📡 in color. -->
+                                <TextBlock
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ProtocolIcon}"
+                                    Text="{x:Bind ProtocolGlyph}"
+                                    FontSize="11"
+                                    Opacity="0.7"
+                                    VerticalAlignment="Center" />
+                            </StackPanel>
+
+                            <TextBlock
+                                Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.DmSubject}"
+                                Text="{x:Bind Snippet}"
+                                Opacity="0.6"
+                                TextTrimming="CharacterEllipsis"
+                                MaxLines="1" />
+                        </Grid>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+        </Grid>
+
+        <!-- Divider -->
+        <Border Grid.Column="1" Width="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+        <!-- Right pane: detail / new-thread / empty -->
+        <Grid Grid.Column="2" x:Name="DetailPanel">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- Empty state -->
+            <TextBlock
+                x:Name="EmptyHint"
+                Padding="32"
+                Opacity="0.6"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Text="{loc:Localize Key=conversations/list/select_conversation_short}" />
+
+            <!-- Detail view (existing thread) -->
+            <Grid x:Name="DetailView" Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <controls:ThreadHeader Grid.Row="0" x:Name="DetailThreadHeader" />
+
+                <ScrollViewer Grid.Row="1" Padding="16,0">
+                    <StackPanel x:Name="MessagesList" Spacing="6" />
+                </ScrollViewer>
+
+                <controls:DmComposeBar Grid.Row="2" x:Name="DetailComposeBar"
+                                       Margin="16,0" />
+            </Grid>
+
+            <!-- New-thread compose view -->
+            <Grid x:Name="NewThreadView" Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <!-- Header: new-thread title + Cancel/discard affordance. Cancel calls
+                     ConversationsViewModel.CancelNewConversation() -> the shared manager
+                     clears new_thread_compose (conversations.md § Persistence: only an
+                     explicit cancel/discard or a successful send clears the new-thread
+                     draft); the snapshot observer then collapses this view. -->
+                <Grid Grid.Row="0" Margin="16,16,16,0" ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock
+                        Grid.Column="0"
+                        Style="{StaticResource SubtitleTextBlockStyle}"
+                        VerticalAlignment="Center"
+                        Text="{loc:Localize Key=conversations/compose/new_message}" />
+                    <Button
+                        Grid.Column="1"
+                        x:Name="NewThreadCancelButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.NewConversationCancel}"
+                        AutomationProperties.Name="{loc:Localize Key=common/cancel}"
+                        Content="{loc:Localize Key=common/cancel}"
+                        Click="NewConversationCancel_Click" />
+                </Grid>
+
+                <controls:RecipientPicker Grid.Row="1" x:Name="NewThreadPicker" Margin="16,16,16,0" />
+
+                <TextBlock
+                    Grid.Row="2"
+                    x:Name="GroupConversationHint"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.GroupConversationHint}"
+                    Margin="16,4,16,0"
+                    Opacity="0.7"
+                    FontSize="12"
+                    Visibility="Collapsed"
+                    Text="{loc:Localize Key=conversations/unified/group_conversation_hint}" />
+
+                <!-- Spacer -->
+                <Border Grid.Row="3" />
+
+                <controls:DmComposeBar
+                    Grid.Row="4"
+                    x:Name="NewThreadComposeBar"
+                    Margin="16,8,16,4" />
+            </Grid>
+
+            <!-- Page-level error surface (Row 1): a failed compose-send renders the
+                 shared ComposeState.send_state Failed { reason } here, visible over
+                 whichever sub-view is active (conversations.md § Errors & edge cases).
+                 One page-level error-message element — mirrors linux's page-level
+                 error label in views/conversations/detail.rs render().
+                 Named ErrorBar like every other page's (it was the lone
+                 `ConversationsError` outlier, which is why MainPage's
+                 UpdateTestMessages — a FindName("ErrorBar") lookup — could never
+                 reach it). -->
+            <controls:CopyableInfoBar
+                Grid.Row="1"
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="False"
+                IsClosable="True"
+                Margin="16,4" />
+        </Grid>
+
+        <!-- Image Lightbox Dialog -->
+        <ContentDialog
+            x:Name="ImageLightboxDialog"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.ImageLightbox}"
+            CloseButtonText="{loc:Localize Key=common/close}"
+            FullSizeDesired="True">
+            <ScrollViewer ZoomMode="Enabled" MinZoomFactor="0.5" MaxZoomFactor="5"
+                          HorizontalScrollBarVisibility="Auto"
+                          VerticalScrollBarVisibility="Auto">
+                <Image x:Name="LightboxImage" Stretch="Uniform" MaxHeight="800" MaxWidth="1200" />
+            </ScrollViewer>
+        </ContentDialog>
+
+        <!-- Inline rename overlay (visible when rename is initiated from ThreadHeader) -->
+        <Border x:Name="RenameOverlay"
+                Grid.ColumnSpan="3"
+                Visibility="Collapsed"
+                Background="{ThemeResource SystemControlAcrylicWindowBrush}">
+            <Grid Padding="32" HorizontalAlignment="Center" VerticalAlignment="Center"
+                  RowSpacing="8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" Text="{loc:Localize Key=conversations/unified/thread_rename}" Style="{StaticResource SubtitleTextBlockStyle}" />
+                <TextBox Grid.Row="1"
+                         x:Name="RenameInput"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ThreadRenameField}"
+                         PlaceholderText="{loc:Localize Key=conversations/unified/thread_rename_placeholder}"
+                         MinWidth="280"
+                         KeyDown="RenameInput_KeyDown" />
+                <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button Content="{loc:Localize Key=common/cancel}" Click="RenameCancel_Click" />
+                    <Button Style="{StaticResource AccentButtonStyle}"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ThreadRenameConfirm}"
+                            Content="{loc:Localize Key=common/save}" Click="RenameConfirm_Click" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Inline add-participant overlay. Uses a RecipientPicker so the
+             unified action layer (recipient-picker-input + accept_chip) works
+             unchanged; dm-send-button confirms the add. The overlay is only
+             visible when the new-thread compose isn't, so the duplicate IDs
+             are mutually exclusive in the live UIA tree (matches the
+             ui.yaml sub_pages model). -->
+        <Border x:Name="AddParticipantOverlay"
+                Grid.ColumnSpan="3"
+                Visibility="Collapsed"
+                Background="{ThemeResource SystemControlAcrylicWindowBrush}">
+            <Grid Padding="32" HorizontalAlignment="Center" VerticalAlignment="Center"
+                  RowSpacing="8" MinWidth="360">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" Text="{loc:Localize Key=conversations/unified/thread_add_participant}" Style="{StaticResource SubtitleTextBlockStyle}" />
+                <controls:RecipientPicker Grid.Row="1" x:Name="AddParticipantPicker" />
+                <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button Content="{loc:Localize Key=common/cancel}" Click="AddParticipantCancel_Click" />
+                    <!--
+                        Distinct id from the compose bar's dm-send-button.
+                        DetailView's DmComposeBar is still in the UIA tree
+                        when this overlay opens, so reusing "dm-send-button"
+                        produced two indistinguishable buttons and the test
+                        bridge picked the wrong one.
+                    -->
+                    <Button Style="{StaticResource AccentButtonStyle}"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AddParticipantConfirm}"
+                            Content="{loc:Localize Key=common/add}" Click="AddParticipantConfirm_Click" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!--
+            The room policy editor — ui.yaml `conversations.sub_pages.room_settings`,
+            opened by `thread-room-settings-button`.
+
+            **Nothing here decides anything.** The staged state, which rows either
+            control may act on, the at-most-one-staged hand-over rule and the diff
+            back to commits are all `fauna_conversations::RoomSettingsDraft`'s, and
+            Save is one `ConversationsManager::apply_room_settings` call — so this
+            is a painter and the seven apps cannot drift on the policy rules
+            (priority #2; `conversation-rooms.md` § Roles and authorization).
+
+            **The door is live for every member; the greying is per control in
+            here** (`ui/conversations.md` § Element IDs): the two selects and Save
+            off `capabilities.can_set_policy`, the walk-out off `can_leave_room`
+            (both in ConversationsPage.PaintRoomEditorGates), each participant row's
+            two controls off their own capability (RestageRoomMemberRows). A plain
+            member opens this read-only with only the walk-out live.
+
+            A Visibility overlay, the same shape as RenameOverlay and
+            AddParticipantOverlay above, chosen for the reason linux had to leave
+            its own dialog idiom behind: this editor must OUTLIVE its own Save —
+            it "closes only when all landed" and otherwise stays open with the
+            refused value still staged. A ContentDialog closes itself on a primary
+            button click, so it is the wrong container; an overlay whose collapse
+            this page decides is the right one, and it is already this page's
+            house style.
+
+            Esc cancels (`ui/conversations.md` § Element IDs — no cancel id), and
+            there is a Cancel button beside Save carrying no AutomationId, exactly
+            as the rename overlay's does.
+        -->
+        <Border x:Name="RoomSettingsOverlay"
+                Grid.ColumnSpan="3"
+                Visibility="Collapsed"
+                IsTabStop="True"
+                KeyDown="RoomSettings_KeyDown"
+                Background="{ThemeResource SystemControlAcrylicWindowBrush}">
+            <Grid Padding="32" HorizontalAlignment="Center" VerticalAlignment="Center"
+                  RowSpacing="8" MinWidth="420">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0"
+                           Text="{loc:Localize Key=conversations/unified/thread_room_settings}"
+                           Style="{StaticResource SubtitleTextBlockStyle}" />
+
+                <!--
+                    The two token pickers, built the `event-detail-reminder-select`
+                    way (EventDetailPage.xaml): each ComboBoxItem's Content is the
+                    localized sentence while its AutomationProperties.Name — and
+                    its Tag — is the driver-facing TOKEN, because `select` matches
+                    on Name and `get_text` reads the selected item's Name back. So
+                    the token round-trips and the human never sees it.
+                -->
+                <Grid Grid.Row="1" ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                               Text="{loc:Localize Key=conversations/unified/room_join_rule_label}" />
+                    <ComboBox Grid.Column="1" x:Name="RoomJoinRuleSelect"
+                              MinWidth="180"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.RoomJoinRuleSelect}" />
+                </Grid>
+
+                <Grid Grid.Row="2" ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                               Text="{loc:Localize Key=conversations/unified/room_history_policy_label}" />
+                    <ComboBox Grid.Column="1" x:Name="RoomHistoryPolicySelect"
+                              MinWidth="180"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.RoomHistoryPolicySelect}" />
+                </Grid>
+
+                <!--
+                    One row per member, indexed like the chips. Both controls are
+                    painted for EVERY member and merely greyed where the viewer's
+                    capability or the row's own eligibility says no — never hidden,
+                    and never live on the owner's own row (§ Architectural rules 5;
+                    the eligibility itself is the shared draft's `is_eligible`).
+                    The rows are rebuilt off the draft after every staging gesture,
+                    so the `checked` attributes and the at-most-one-staged
+                    hand-over rule are always read straight from it rather than
+                    tracked per widget.
+                -->
+                <ItemsControl Grid.Row="3" x:Name="RoomMembersList">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Grid ColumnSpacing="8" Margin="0,2">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                                           Text="{Binding Display}" />
+                                <ToggleButton Grid.Column="1"
+                                              AutomationProperties.AutomationId="room-admin-toggle"
+                                              AutomationProperties.HelpText="{Binding AdminChecked}"
+                                              IsChecked="{Binding AdminStaged}"
+                                              IsEnabled="{Binding AdminEnabled}"
+                                              Content="{Binding AdminLabel}"
+                                              Tag="{Binding Index}"
+                                              Click="RoomAdminToggle_Click" />
+                                <ToggleButton Grid.Column="2"
+                                              AutomationProperties.AutomationId="room-owner-transfer-button"
+                                              AutomationProperties.HelpText="{Binding TransferChecked}"
+                                              IsChecked="{Binding TransferStaged}"
+                                              IsEnabled="{Binding TransferEnabled}"
+                                              Content="{Binding TransferLabel}"
+                                              Tag="{Binding Index}"
+                                              Click="RoomOwnerTransfer_Click" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!--
+                    The editor's own `error-message` (ui.yaml lists it among this
+                    sub-page's elements). While this overlay is open the page's
+                    ErrorBar is held closed — an InfoBar with IsOpen=false
+                    collapses, taking its own `error-message` id out of the UIA
+                    tree — so exactly one element ever carries that id at a time.
+                    The refusal still publishes to App.CurrentErrorMessage, which
+                    is the state channel `error_text()`/`has_error()` actually read.
+                -->
+                <TextBlock Grid.Row="4" x:Name="RoomSettingsError"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+                           Visibility="Collapsed"
+                           Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                           TextWrapping="Wrap" MaxWidth="400" />
+
+                <StackPanel Grid.Row="5" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button Content="{loc:Localize Key=common/cancel}" Click="RoomSettingsCancel_Click" />
+                    <Button x:Name="RoomSettingsSaveButton"
+                            Style="{StaticResource AccentButtonStyle}"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.RoomSettingsSaveButton}"
+                            Content="{loc:Localize Key=common/save}" Click="RoomSettingsSave_Click" />
+                </StackPanel>
+
+                <!--
+                    The walk-out (`ui/conversations.md` § Element IDs → *The walk-out*):
+                    BELOW Save and OUTSIDE its staged set, because leaving is an
+                    immediate act, not a policy edit — it must never route through
+                    `RoomSettingsSave_Click`. Painted for EVERY member and greyed, never
+                    hidden, off `capabilities.can_leave_room` (the owner sees it dead and
+                    hands the room over first); ConversationsPage.PaintRoomEditorGates
+                    sets that. It opens `RoomLeaveConfirmOverlay` below.
+                -->
+                <Button Grid.Row="6" x:Name="RoomLeaveButton"
+                        HorizontalAlignment="Right"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.RoomLeaveButton}"
+                        Content="{loc:Localize Key=conversations/unified/room_leave}"
+                        Click="RoomLeave_Click" />
+            </Grid>
+        </Border>
+
+        <!--
+            `room-leave-confirm` — the departure's confirm, the RenameOverlay /
+            AddParticipantOverlay shape. Declared AFTER the room editor so it stacks
+            above it. Confirming acts IMMEDIATELY: it closes the editor (whatever was
+            staged there belongs to a room this account is walking out of) and calls
+            the shared `ConversationsManager::leave_room`, which picks the door by the
+            room's class — no app branches on it. A refusal lands on the page's own
+            `error-message`, and the thread stays in the leaver's list.
+        -->
+        <Border x:Name="RoomLeaveConfirmOverlay"
+                Grid.ColumnSpan="3"
+                Visibility="Collapsed"
+                IsTabStop="True"
+                KeyDown="RoomLeaveConfirm_KeyDown"
+                Background="{ThemeResource SystemControlAcrylicWindowBrush}">
+            <Grid Padding="32" HorizontalAlignment="Center" VerticalAlignment="Center"
+                  RowSpacing="8" MinWidth="320">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0"
+                           Text="{loc:Localize Key=conversations/unified/room_leave}"
+                           Style="{StaticResource SubtitleTextBlockStyle}" />
+                <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button Content="{loc:Localize Key=common/cancel}" Click="RoomLeaveCancel_Click" />
+                    <Button x:Name="RoomLeaveConfirmButton"
+                            Style="{StaticResource AccentButtonStyle}"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.RoomLeaveConfirm}"
+                            Content="{loc:Localize Key=common/leave}" Click="RoomLeaveConfirm_Click" />
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Page>

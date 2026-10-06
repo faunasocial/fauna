@@ -1,0 +1,15 @@
+# Built artifacts — release builds land in $CARGO_TARGET_DIR/release/
+# per the `mail-bridge-release` justfile recipe; local `go build` may
+# produce the binary in this directory.
+/fauna-mail-bridge
+# ATProto PDS bridge (built by the `atproto-bridge-build` just recipe; CGO-free).
+/fauna-atproto-bridge
+/fauna-atproto-bridge.exe
+# E2E flavor of the same binary (`atproto-bridge-build-e2e`, -tags
+# fauna_e2e_seize,fauna_e2e_fixtures) — a distinct path so it can never stand
+# in for the production one. Never a deployment artifact.
+/fauna-atproto-bridge-e2e
+/fauna-atproto-bridge-e2e.exe
+# TEST-ONLY seal-helper (built by the `seal-helper-build` just recipe;
+# invoked only from tests/e2e-unified — never a deployment artifact).
+/seal-helper-testonly

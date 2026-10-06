@@ -1,0 +1,76 @@
+#!/bin/bash
+# Postinstall for the Fauna Nest component (machine-service LaunchDaemon).
+# Runs as root after the .pkg payload installs binaries.
+#
+# Installs the social.fauna.nest LaunchDaemon that runs `fauna-nest-daemon` (the
+# macOS nest service shell) as the dedicated hidden `_fauna` service user, serving
+# the privileged :443 via launchd socket activation. Boot-started + headless (no
+# GUI login required) — the macOS-native always-on-server shape, converging up to
+# Windows machine-service parity (decision 2026-06-24, installers/macos.md).
+# Installed ENABLED + auto-started — but only when the nest component is SELECTED
+# in the .pkg installer (this postinstall runs only for a selected component). The
+# opt-in is the component selection (default-unselected in distribution.xml), NOT a
+# post-install enable step; there is no in-app toggle and no runtime privilege
+# escalation (the already-elevated installer did it). Decision 2026-06-26,
+# installers/macos.md § launchd jobs → Default state, matching Windows
+# "Nest Service default OFF, auto-starts when ticked".
+#
+# The daemon builds its own private-mode NestConfig and seeds the claim code on
+# first boot (fauna_nest::desktop_serve::run_serve_loop) — it reads no config.toml
+# and takes no --config; the only wiring is FAUNA_DATA_DIR (the system data dir).
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/common.sh"
+
+# 1. The dedicated hidden service user that owns the daemon + its data dir.
+ensure_service_user _fauna "Fauna Nest Service"
+
+# 2. The system data dir (FAUNA_DATA_DIR), owned by _fauna. The daemon writes its
+#    own size-capped log under it (logs/fauna.log.<date>); the plist redirects
+#    nothing (observability.md § Persistence & privacy).
+setup_system_data_dir _fauna
+
+# 3. The social.fauna.nest LaunchDaemon. ProgramArguments runs fauna-nest-daemon (the
+#    socket-activation + shared-serve-loop shell), UserName drops it to _fauna, the
+#    Sockets dict names the `FaunaNest` socket (root launchd pre-binds :443 and
+#    hands _fauna the fd — launch_activate_socket("FaunaNest") in the daemon), and
+#    FAUNA_DATA_DIR points it at the system data dir.
+PLIST_CONTENT=$(cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>social.fauna.nest</string>
+    <key>UserName</key>
+    <string>_fauna</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/fauna-nest-daemon</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>FAUNA_DATA_DIR</key>
+        <string>${FAUNA_SYSTEM_DATA_DIR}</string>
+    </dict>
+    <key>Sockets</key>
+    <dict>
+        <key>FaunaNest</key>
+        <dict>
+            <key>SockServiceName</key>
+            <string>443</string>
+            <key>SockType</key>
+            <string>stream</string>
+        </dict>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+EOF
+)
+
+install_launchdaemon "social.fauna.nest" "$PLIST_CONTENT"

@@ -1,0 +1,46 @@
+[package]
+name = "fauna-pq-kem"
+description = "Fauna post-quantum hybrid KEM — X-Wing (ML-KEM-768 ∥ X25519)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# ML-KEM-768 half: Cryspen's formally-verified (hax/F*) implementation. Pinned
+# exactly — it is a 0.0.x crate whose API is not yet stable; re-verify the
+# `mlkem768::{generate_key_pair, encapsulate, decapsulate}` signatures and the
+# 64/32 seed-size constants on any bump (see this crate's module docs), and the
+# `pinned_vectors_survive_libcrux_bumps` test must stay green across the bump
+# (derived bytes feed persisted envelopes — version-compatibility.md).
+# 0.0.10 (clearing RUSTSEC-2026-0212, aarch64 const-time select) since
+# 2026-10-05, moved together with openmls 0.9 / hpke-rs 0.7: both sides of
+# the workspace must agree on one hax-lib 0.3.x (0.3.7 here), so this pin and
+# the openmls stack move in lockstep. History:
+# dependency-verification-log.md → Update (2026-07-30c) and (2026-10-05).
+# Already present in the workspace tree transitively (hpke-rs-libcrux),
+# formally verified, and confirmed to compile for `wasm32-unknown-unknown`
+# (portable backend; SIMD is arch-gated in its build.rs, so wasm takes
+# neither branch).
+libcrux-ml-kem = "=0.0.10"
+# X25519 half: only the bare RFC 7748 `x25519()` scalar-mult primitive is used
+# (no RNG, no StaticSecret). `default-features = false` deliberately drops the
+# `getrandom` feature the workspace dep carries, so this crate has NO getrandom
+# dependency and builds for `wasm32-unknown-unknown` with no backend cfg — the
+# RNG is always supplied by the caller (see `encapsulate`). This is the one
+# place we deviate from `x25519-dalek.workspace = true`; the comment is the why.
+x25519-dalek = { version = "2", default-features = false }
+# X-Wing combiner hash (draft-connolly-cfrg-xwing-kem §5.3) — SHA3-256.
+sha3 = "0.10"
+# ML-KEM-from-seed derivation: HKDF-SHA-256 expand to the 64-byte FIPS 203
+# KeyGen seed (`d ∥ z`).
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+# `RngCore` / `CryptoRng` traits only (the caller's CSPRNG). `default-features
+# = false` keeps `os_rng`/getrandom out of this crate.
+rand_core = { version = "0.9", default-features = false }
+zeroize = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# The probe test needs the same `RngCore`/`CryptoRng` traits `encapsulate` takes.
+rand_core = { version = "0.9", default-features = false }

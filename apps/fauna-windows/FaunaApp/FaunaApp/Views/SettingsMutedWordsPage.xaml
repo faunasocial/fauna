@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.SettingsMutedWordsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="16" MaxWidth="600" HorizontalAlignment="Left">
+
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="False"
+                IsClosable="True" />
+
+            <!-- ui.yaml's muted-words page uses its own id as the page landmark
+                 (no separate page-heading, unlike most other settings sub-pages
+                 — mirrors linux's set_test_id(&page, "muted-words") on the page
+                 root). -->
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MutedWords}" Style="{StaticResource TitleTextBlockStyle}" Text="{loc:Localize Key=muted_words/title}" />
+            <TextBlock Opacity="0.7" TextWrapping="Wrap" Text="{loc:Localize Key=muted_words/description}" />
+
+            <!-- Grid (star input + auto button), not a fixed-Width TextBox in a
+                 horizontal StackPanel: a hardcoded Width can push the button past
+                 the ScrollViewer's clipped viewport on a narrow settings-shell
+                 content column, realized (count=1) but never visible — mirrors
+                 the established input+button row pattern (e.g. AdminDnsPage.xaml). -->
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBox x:Name="InputBox"
+                         Grid.Column="0"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.MutedWordInput}"
+                         PlaceholderText="{loc:Localize Key=muted_words/input_placeholder}"
+                         KeyDown="InputBox_KeyDown" />
+                <Button x:Name="AddButton"
+                        Grid.Column="1"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MutedWordAddButton}"
+                        Content="{loc:Localize Key=muted_words/add}"
+                        Click="AddButton_Click" />
+            </Grid>
+
+            <!-- A Border (not a bare container) carries the list test id with a
+                 non-empty Name — a container without one prunes from the UIA
+                 tree along with its children (the bare-id-root prune trap;
+                 mirrors MailAliasesPanel's ListBorder). -->
+            <Border x:Name="ListBorder"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.MutedWordList}"
+                    AutomationProperties.Name="{loc:Localize Key=muted_words/title}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="12">
+                <StackPanel Spacing="4">
+                    <TextBlock x:Name="EmptyText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.MutedWordEmpty}"
+                               Opacity="0.5" TextWrapping="Wrap"
+                               Visibility="Collapsed"
+                               Text="{loc:Localize Key=muted_words/empty}" />
+                    <StackPanel x:Name="WordsContainer" Spacing="6" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

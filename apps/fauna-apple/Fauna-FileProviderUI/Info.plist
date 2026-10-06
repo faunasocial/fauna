@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- File Provider UI action extension: the custom context actions Finder /
+       Files show for items in a Fauna domain. Action identifiers MUST match
+       FaunaDeepLink's FileProviderAction raw values (pinned by FaunaKitTests);
+       names match the windows shell-submenu vocabulary (windows.md § Shell
+       Extension) — one context-menu vocabulary on both desktop shells.
+       The versions activation rule mirrors FileProviderAction.hiddenForFolder:
+       a single selected non-folder item; Share is unconditional (a set is the
+       natural share target, folders included). -->
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>Fauna File Provider Actions</string>
+  <key>CFBundleExecutable</key>
+  <string>$(EXECUTABLE_NAME)</string>
+  <key>CFBundleIdentifier</key>
+  <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>$(PRODUCT_NAME)</string>
+  <key>CFBundlePackageType</key>
+  <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+  <key>NSExtension</key>
+  <dict>
+    <key>NSExtensionPointIdentifier</key>
+    <string>com.apple.fileprovider-actionsui</string>
+    <key>NSExtensionPrincipalClass</key>
+    <string>$(PRODUCT_MODULE_NAME).ActionViewController</string>
+    <key>NSExtensionFileProviderActions</key>
+    <array>
+      <dict>
+        <key>NSExtensionFileProviderActionIdentifier</key>
+        <string>social.fauna.fp.action.share</string>
+        <key>NSExtensionFileProviderActionName</key>
+        <string>Share</string>
+        <key>NSExtensionFileProviderActionActivationRule</key>
+        <string>TRUEPREDICATE</string>
+      </dict>
+      <dict>
+        <key>NSExtensionFileProviderActionIdentifier</key>
+        <string>social.fauna.fp.action.versions</string>
+        <key>NSExtensionFileProviderActionName</key>
+        <string>Version history</string>
+        <key>NSExtensionFileProviderActionActivationRule</key>
+        <string>SUBQUERY(fileproviderItems, $item, $item.contentType.identifier == "public.folder").@count == 0 AND fileproviderItems.@count == 1</string>
+      </dict>
+    </array>
+  </dict>
+</dict>
+</plist>

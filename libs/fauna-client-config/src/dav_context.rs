@@ -1,0 +1,111 @@
+//! The **DAV-store context chokepoint** — `(actor_id, msek)`, the two inputs
+//! every encrypted CalDAV/CardDAV op needs (both surfaces read/write the SAME
+//! MSEK-keyed store, priority #2 — one msek gate, not two copies).
+//!
+//! Independent copies of this exact sequence — rebuild the actor keypair,
+//! load the actor's mail material, take the MSEK — existed before this
+//! module: `fauna-ffi`'s internal `dav_store_context` (serving both
+//! `FfiCaldavClient` and `FfiCarddavClient`), tui's `events::caldav_context`,
+//! and linux's `client::caldav_context`. All three now delegate here
+//! (priority #4: resolve drift toward the richest existing pattern — `fauna-ffi`'s
+//! name and doc framing, since it already served two callers). A fourth copy,
+//! tui's `address_book::carddav_context` — written after this consolidation
+//! for the CardDAV-specific page and never updated to call in — was found and
+//! lifted the same way 2026-09-02.
+//!
+//! The MSEK is read from the account's mail custody (`fauna.state.mail`,
+//! through [`MailStore`]).
+
+use crate::store_seam::MailStore;
+
+/// `(actor_id, msek)` for an encrypted CalDAV/CardDAV op, or `None` when
+/// mail/CalDAV-CardDAV is not enabled yet (no MSEK minted —
+/// `MailSettingsMachine::enable_mail`) or the custody read failed. A read
+/// failure logs and degrades the same way as the legitimate disabled state
+/// (empty calendar/address-book list) rather than erroring the caller — the
+/// secret is fine, only the store read didn't complete.
+pub async fn dav_store_context(
+    mail: &dyn MailStore,
+    actor_id: [u8; 32],
+) -> Option<([u8; 32], [u8; 32])> {
+    let mail = match mail.load().await {
+        Ok(mail) => mail,
+        Err(e) => {
+            tracing::error!("dav_store_context: mail custody read failed: {e}");
+            return None;
+        }
+    };
+    Some((actor_id, mail.msek?.to_array()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::FakeMailStore;
+    use crate::test_nest::block_on;
+    use fauna_core::data::MailConfig;
+
+    /// No `msek` minted yet (mail/CalDAV never enabled) — `None`, the
+    /// legitimate disabled state, not an error.
+    #[test]
+    fn no_msek_reads_none() {
+        let ctx = block_on(dav_store_context(&FakeMailStore::empty(), [7; 32]));
+        assert_eq!(ctx, None);
+    }
+
+    /// Once `enable_mail` mints an `msek`, the context carries the caller's
+    /// `actor_id` and the SAME `msek` bytes stored — the round-trip a real
+    /// CalDAV/CardDAV op depends on.
+    #[test]
+    fn minted_msek_round_trips_actor_id_and_msek() {
+        let mail = FakeMailStore::with(&MailConfig {
+            msek: Some([0x99; 32].into()),
+            ..MailConfig::default()
+        });
+        let (actor_id, msek) = block_on(dav_store_context(&mail, [8; 32])).expect("context");
+        assert_eq!(actor_id, [8; 32]);
+        assert_eq!(msek, [0x99; 32]);
+    }
+
+    /// A custody the runtime cannot read degrades to `None`, like the
+    /// disabled state — never a panic, never a stale MSEK.
+    #[test]
+    fn an_unreadable_custody_reads_none() {
+        struct Broken;
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        impl MailStore for Broken {
+            async fn load(&self) -> Result<MailConfig, crate::StoreError> {
+                Err(crate::StoreError::Load("no runtime".into()))
+            }
+            async fn load_rows(
+                &self,
+            ) -> Result<fauna_core::mail_rows::MailRows, crate::StoreError> {
+                Err(crate::StoreError::Load("no runtime".into()))
+            }
+            async fn write_state(
+                &self,
+                _: fauna_core::mail_rows::MailStateRow,
+            ) -> Result<bool, crate::StoreError> {
+                unreachable!()
+            }
+            async fn put_credential(
+                &self,
+                _: fauna_core::data::MailCredential,
+            ) -> Result<bool, crate::StoreError> {
+                unreachable!()
+            }
+            async fn mark_wrapped(
+                &self,
+                _: String,
+                _: fauna_core::data::MsekFingerprint,
+            ) -> Result<bool, crate::StoreError> {
+                unreachable!()
+            }
+            async fn revoke(&self, _: String) -> Result<bool, crate::StoreError> {
+                unreachable!()
+            }
+        }
+        assert_eq!(block_on(dav_store_context(&Broken, [9; 32])), None);
+    }
+}

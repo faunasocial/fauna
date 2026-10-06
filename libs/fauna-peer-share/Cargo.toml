@@ -1,0 +1,53 @@
+[package]
+name = "fauna-peer-share"
+description = "The cross-user share leg (W8 (account-data-plane.md § Workstreams) share twin): the M2-membership witness verifier behind a roster-consult seam, producing the admission seam's verdict for the fauna.peer.share.* plane. The whole crate IS the p2p-share registry feature's client data plane — consumers gate their dep on their own p2p-share feature (the excision spine's forwarding rule), never take it unconditionally."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fauna-core = { workspace = true }
+# The peer channel this plane's kinds are served on: the handler map + the base
+# `fauna.peer.node_info` serve set every richer set starts from. This crate maps
+# the share kinds onto it; it deliberately builds NO listener (no bind door
+# until the rule-7 capability brake exists — see `server`'s module doc).
+fauna-peer-channel = { workspace = true }
+# `EndpointKey` — the channel-proven peer identity every admission and quota
+# decision is keyed by (PT-1b).
+fauna-transport = { workspace = true }
+# The p2p-share feature is this plane's own kind family — this crate is the
+# plane, so it names the feature on its dep line (the "plane's own crates
+# forward it" arm of dynamic-features.md § The cargo feature spine).
+fauna-protocol = { workspace = true, features = ["p2p-share"] }
+# The admission seam's verdict vocabulary (AdmissionVerdict) — one engine,
+# witness-shaped; this crate supplies the third witness kind's adaptor. Also the
+# home of the rule-8 `QuotaLedger` and the peer-channel `RpcRequester`, both
+# reused verbatim: they are transport-level, so a share-plane copy would be pure
+# divergence.
+fauna-peer-sync = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true }
+# The `BlobFetcher` + `ShareStore` seams are `dyn`-shaped async traits, so they
+# take the boxing arm (AFIT cannot be `dyn`) — the same dual-arm pattern
+# `fauna_core::file_download::BlobFetcher` itself uses for native + wasm.
+async-trait = "0.1"
+serde = { workspace = true }
+serde_bytes = "0.11"
+# `CeremonyRefusal` — the ceremony seam's typed refusal (maps onto the two
+# wire error codes in the serve handlers).
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Test-only: the group-membership witness fixtures mint an authority device
+# keypair. The crate itself verifies through `fauna_core::group_scope` and
+# holds no signing primitive of its own.
+ed25519-dalek = { workspace = true }
+# The serve-side suite drives the handlers, which are `async`. The clock stays
+# injected, so every assertion is latency-independent (e2e convention 14 applied
+# at tier 1) — no test here waits on wall time.
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+# `MemTransport` — the in-memory seam double the two-node channel test runs the
+# leg over (`tests/share_leg_over_the_channel.rs`), so the pull side is proven
+# against the real serve side without a QUIC stack.
+fauna-transport = { workspace = true, features = ["test-helpers"] }

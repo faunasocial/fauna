@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FaunaApp.Views.Onboarding.IdentityChoiceView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:controls="using:FaunaApp.Controls"
+    xmlns:loc="using:FaunaApp.Markup"
+    mc:Ignorable="d"
+    xmlns:ids="using:FaunaApp.UiIds">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <Grid Padding="48" HorizontalAlignment="Center" MaxWidth="600">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <StackPanel Grid.Row="0">
+                <!-- Error display -->
+                <controls:CopyableInfoBar
+                    x:Name="ErrorBar"
+                    Severity="Error"
+                    IsOpen="{Binding HasError, Mode=OneWay}"
+                    Message="{Binding ErrorMessage, Mode=OneWay}"
+                    IsClosable="True"
+                    Margin="0,0,0,16" />
+
+                <!-- The sign-out residue surface (account-scoping.md § Erasure
+                     follows scope → the residue surface): what a sign-out's erase
+                     could NOT remove from this device, with Remove Again beside the
+                     line that names it. Painted by code-behind from
+                     OnboardingViewModel.SignOutResidueMessage — state the wizard's
+                     machine does not own, so no observer tick wipes it. Collapsed
+                     (and thus out of the UIA tree, uncounted) while nothing is owed:
+                     a clean sign-out says nothing. The Border + Name idiom is what
+                     realizes a non-Control container for UIA (AdminDnsPage's
+                     RenameBanner). The message carries AutomationId only — a static
+                     Name would shadow the text the e2e driver reads. The button
+                     stays enabled: presses are serialized in the view-model, never
+                     dropped. -->
+                <Border x:Name="SignOutResidueView"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.SignOutResidue}"
+                        AutomationProperties.Name="Sign-out residue"
+                        Visibility="Collapsed"
+                        Background="{ThemeResource SystemFillColorCautionBackgroundBrush}"
+                        CornerRadius="4" Padding="12" Margin="0,0,0,16">
+                    <StackPanel Spacing="8">
+                        <TextBlock x:Name="SignOutResidueMessage"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.SignOutResidueMessage}"
+                                   TextWrapping="Wrap" />
+                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.SignOutResidueRetryButton}"
+                                Content="{loc:Localize Key=settings/sign_out_residue_retry}"
+                                Click="OnRemoveAgainClick" />
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+
+            <StackPanel Grid.Row="1"
+                        Spacing="16"
+                        VerticalAlignment="Center"
+                        HorizontalAlignment="Stretch">
+                <TextBlock Text="{loc:Localize Key=onboarding/identity_choice/title}"
+                           Style="{StaticResource TitleTextBlockStyle}"
+                           HorizontalAlignment="Center" />
+                <TextBlock Text="{loc:Localize Key=onboarding/identity_choice/subtitle}"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           HorizontalAlignment="Center"
+                           Opacity="0.7"
+                           TextWrapping="Wrap"
+                           TextAlignment="Center" />
+                <Button
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.CreateIdentityButton}"
+                    Content="{loc:Localize Key=onboarding/identity_choice/create_new}"
+                    Style="{StaticResource AccentButtonStyle}"
+                    Command="{Binding BeginCreateIdentityCommand}"
+                    HorizontalAlignment="Stretch"
+                    Margin="0,16,0,0" />
+                <Button
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ImportIdentityButton}"
+                    Content="{loc:Localize Key=onboarding/identity_choice/import_existing}"
+                    Command="{Binding BeginImportIdentityCommand}"
+                    HorizontalAlignment="Stretch" />
+                <!-- The phrase-only IDENTITY restore (onboarding.md § 1 Identity) —
+                     distinct from the lost-box NEST recovery below it. -->
+                <Button
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreFromRecoveryKitButton}"
+                    Content="{loc:Localize Key=onboarding/identity_choice/restore_from_recovery_kit}"
+                    Command="{Binding BeginRecoveryEntryCommand}"
+                    HorizontalAlignment="Stretch" />
+                <!-- Box-recovery step-4 entry (Task E): routes through
+                     identity_import with recovery intent, then to nest_recovery.
+                     Per box-recovery.md § Recovery UI (step 4). -->
+                <Button
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoverLostBoxButton}"
+                    Content="{loc:Localize Key=onboarding/identity_choice/recover_lost_box}"
+                    Command="{Binding BeginRecoverLostBoxCommand}"
+                    HorizontalAlignment="Stretch" />
+                <!-- Append-mode ("Add account") escape hatch. Windows has no window
+                     to close (onboarding is frame-hosted, unlike linux/apple's native
+                     window/sheet dismissal) — user-approved 2026-07-20. Visibility is
+                     set once in code-behind from ViewModel.IsAppendMode; never shown
+                     during fresh onboarding. Every other stage's Back-button chain
+                     already retreats here, so only identity_choice needs it. -->
+                <Button
+                    x:Name="CancelButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.OnboardingCancelButton}"
+                    Content="{loc:Localize Key=onboarding/add_account/cancel}"
+                    Click="OnCancelClick"
+                    Visibility="Collapsed"
+                    HorizontalAlignment="Stretch" />
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</UserControl>

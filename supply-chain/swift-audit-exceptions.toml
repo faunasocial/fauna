@@ -1,0 +1,19 @@
+# Recorded exceptions for the `dep-swift-audit` check — the known-vulnerability
+# check over every tracked SwiftPM Package.resolved (OSV.dev, ecosystem SwiftURL).
+# Owner: docs/goal/architecture/release-integrity.md § Dependency verification →
+# *Swift packages*.
+#
+# An advisory is closed by moving the pin to a fixed version. An entry here is for
+# an advisory that cannot be fixed yet AND whose vulnerable code is shown not to run
+# in anything this project ships or builds. `reason` states that showing, in our own
+# words — never the advisory's text pasted in.
+#
+# One entry per (Package.resolved, advisory id, package); every field is required.
+# An entry that matches no reported advisory fails the check: remove it.
+#
+# [[exception]]
+# resolved = "apps/fauna-apple/Package.resolved"
+# id = "GHSA-xxxx-xxxx-xxxx"
+# package = "github.com/owner/Repo"     # the pin's location, scheme and .git dropped
+# reason = "..."
+# recorded = "YYYY-MM-DD"

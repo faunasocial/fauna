@@ -1,0 +1,48 @@
+# cargo-audit's exception list (release-integrity.md § Dependency verification).
+#
+# Every entry is an advisory the owner approved individually, with our own
+# reasoning and the track that will remove it — never the advisory's text.
+# `cargo audit --deny warnings` (the CI job, and the daily merge-gate check) then
+# fails only on an advisory not listed here. An entry whose crate leaves
+# Cargo.lock is deleted in the commit that removes the crate.
+
+[advisories]
+ignore = [
+    # rsa 0.9.10 — Marvin timing side channel; no fixed release exists. The
+    # oracle's main surface, PKCS#1 v1.5 decryption, is absent: our RSA use is
+    # key generation, parsing, and PKCS#1 v1.5 signing/verification
+    # (ActivityPub signatures, DKIM, content credentials). Residual: remote
+    # timing of signing. Re-check when rsa ships a constant-time release.
+    # Approved 2026-10-05.
+    "RUSTSEC-2023-0071",
+
+    # lru 0.16.4 — use-after-free if a key or value panics (hash, compare, drop)
+    # inside LruCache::pop; fixed only in 0.18.2. Shipped builds unwind (UniFFI
+    # needs it), so the build settings do not rule it out. Our own direct use is
+    # on 0.18 since 2026-10-05, and so is aws-sdk-s3 since its move to 1.152 the
+    # same day; lru 0.12.5 left the tree with tantivy 0.26 (bump round 1), and
+    # tantivy 0.26 and atrium-common, even at their newest, require 0.16.x.
+    # Removed when both accept 0.18.
+    # Approved 2026-10-05.
+    "RUSTSEC-2026-0253",
+
+    # proc-macro-error 1.0.4 — unmaintained, no known vulnerability. A
+    # compile-time proc-macro helper (via iref-core's grammar macro, whose
+    # newest release still uses it): runs only while compiling, ships nothing.
+    # Approved 2026-10-05.
+    "RUSTSEC-2024-0370",
+
+    # proc-macro-error2 2.0.1 — unmaintained, no known vulnerability. A
+    # compile-time proc-macro helper via hax-lib-macros 0.3 in the libcrux
+    # stack (still 0.3.7 after the openmls 0.9 move); hax-lib-macros 0.4 drops
+    # it, so it leaves when libcrux moves to hax-lib 0.4. Approved 2026-10-05.
+    "RUSTSEC-2026-0173",
+
+    # --- Temporary: each has a fix in hand, and its entry is deleted in the
+    # commit that lands the fix. All approved individually 2026-10-05. ---
+
+    # paste — unmaintained compile-time macro helper; ships nothing. Via
+    # iroh's netlink crates only; leaves with iroh's bump. The vendored C#
+    # bindgen's direct use and ratatui 0.29's were removed on 2026-10-05.
+    "RUSTSEC-2024-0436",
+]

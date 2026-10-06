@@ -1,0 +1,153 @@
+[package]
+name = "fauna-core"
+description = "Core library for Fauna — open-source software for social communication"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["network"]
+network = ["dep:redb", "dep:tokio", "dep:tokio-stream", "dep:hickory-resolver", "dep:tokio-util"]
+## Enable js-sys-based time helpers when compiling for wasm32.
+js = ["dep:js-sys"]
+format_text = []
+## QR module-matrix generation (`qr_matrix`). Off by default so the nest / provisioning
+## builds don't carry a QR encoder they never render; the client-facing faces
+## (fauna-ffi, fauna-wasm) turn it on.
+qr_render = ["dep:qrcode"]
+## Enable UniFFI scaffolding for types that cross the FFI boundary
+## (e.g. EncryptionMode). Off by default so wasm / server / provisioning
+## builds stay UniFFI-free.
+uniffi = ["dep:uniffi"]
+## Native-only local clock + locale glue: absolute local-timestamp rendering
+## (`format::format_unix_local`) and the locale week-start probe
+## (`caltime::locale_week_start`, which reads `LC_ALL`/`LC_TIME`/`LANG`).
+## Off the WASM-safe default surface on purpose: chrono::Local needs the OS
+## timezone database, which wasm32-unknown-unknown can't reach without a
+## JS-interop bridge fauna_core doesn't otherwise carry, and the web SPA reads
+## `Intl` for its locale rather than a POSIX environment it does not have.
+## Opt in from a native app's own Cargo.toml (linux, tui); fauna-ffi
+## forwards it for windows. The pure classification the probe feeds into
+## (`caltime::week_start_for_locale`) stays on the default WASM-safe surface.
+local-clock = ["dep:chrono"]
+## Native-only: the shared `schema_meta` single-row SQLite persistence
+## (`sqlite_schema_meta::{read_schema_meta, record_schema_meta}`) behind the
+## two-number at-rest schema-version scheme (`version-compatibility.md` §
+## 2.2) — the exact SQL every native SQLite-backed store composing the
+## scheme shares (`fauna-mls`'s `mls.db`, the nest's cache DB), while each
+## store's own version constants and `SchemaVerdict`/`check_schema_compatibility`
+## stay independently mirrored per that doc's own design. Off the WASM-safe
+## default surface on purpose: rusqlite needs a native SQLite build.
+sqlite-schema-meta = ["dep:rusqlite"]
+## The wasm leg of `file_download::BlobFetcher` (`WasmPublicChunkFetcher`) — GET
+## the nest's public content-addressed blob routes over `gloo-net`. The one
+## binding `fauna-wasm` (Backups per-file download, the mail client-feed
+## reference leg) and `fauna-media-machine`'s wasm build (the Media page) share.
+## wasm32-only; the dep is target-gated below so this is a no-op on native.
+blob-fetch-wasm = ["dep:gloo-net"]
+## Marker only (no deps) — lets `screen_time::ScreenLockCore`'s test-clock-skew
+## field/methods build into a release binary that still wants convention-14's
+## fake clock. Off by default; a consumer's own `e2e-agent` feature forwards
+## this one, same pattern as `fauna-client-backup`.
+e2e-agent = []
+## Exposes `authoritative_dns::spawn_responder`, the in-process fake
+## authoritative DNS server this crate's own unit tests use, to a dev-dep
+## consumer's tests too (`fauna-client-dns::resolvability`'s unit tests, via
+## its own `test-helpers`-gated dev-dep line). Implies `network` — the module
+## it lives in is gated on it. Mirrors `fauna-client-accounts`/`fauna-anon-client`.
+test-helpers = ["network"]
+
+[dependencies]
+# Always (WASM-safe)
+aes-gcm.workspace = true
+argon2.workspace = true
+chacha20poly1305.workspace = true
+rand.workspace = true
+# Post-quantum hybrid KEM (X-Wing) for the subscription KeyBlob wrap (surface B,
+# slice S4). getrandom-free + wasm-buildable (web mints KeyBlobs client-side).
+fauna-pq-kem = { path = "../fauna-pq-kem" }
+# `rand_core` 0.9 `OsRng` (`TryRngCore`) for `fauna_pq_kem::encapsulate` — the
+# same RNG the mail X-Wing seal uses (`fauna-mls` xwing_envelope).
+rand_core_09.workspace = true
+sha2.workspace = true
+# The optimization barrier behind `secret::constant_time_eq`. Not a new
+# supply-chain edge — the dalek/aead stack below already pulls subtle 2.6.1 in
+# (and it carries a safe-to-deploy entry in supply-chain/config.toml); this only
+# makes the dependency direct so the barrier can be named in code. no_std-capable
+# with no platform deps, so it builds for wasm32 like the rest of this crate.
+subtle = "2.6"
+ed25519-dalek.workspace = true
+x25519-dalek.workspace = true
+blake3.workspace = true
+fastcdc.workspace = true
+fauna-cbor.workspace = true
+zstd.workspace = true
+serde.workspace = true
+# Promoted from dev-dependencies by path-sealing S6-c: `label_custody`'s
+# selective-sync path-list seal encodes its plaintext as the *same* JSON string
+# array the nest stores in `folders.include_paths`, so the sealed and plaintext
+# halves describe one value in one shape rather than each end inventing its own.
+# No new supply-chain edge — already a workspace-pinned dep of this crate's own
+# dev-deps and of the consumers that call the funnel (fauna-wasm,
+# fauna-devices-machine, fauna-nest) — and WASM-safe like the rest of this crate.
+serde_json.workspace = true
+serde_bytes = "0.11"
+bytes.workspace = true
+getrandom.workspace = true
+zeroize.workspace = true
+anyhow.workspace = true
+# The `BlobFetcher` seam on `file_download` (the shared client-side file-download
+# walk). Same direct-version form + dual native/`?Send` arm as the sibling
+# `fauna-media-machine::MediaBlobFetcher`; a proc-macro, so it costs no runtime
+# and compiles for wasm32 like the rest of this crate.
+async-trait = "0.1"
+base64.workspace = true
+hex.workspace = true
+semver.workspace = true
+# `data::shared_media_proxy_url` — the one home of the nest-relative proxied-media
+# path form (bridges.md § Unified feed ingestion ruling 4). Not a new supply-chain
+# edge (already workspace-pinned for the nest and two bridge crates); pure Rust,
+# WASM-safe like the rest of this crate.
+urlencoding.workspace = true
+similar = { workspace = true }
+thiserror.workspace = true
+tracing.workspace = true
+
+# WASM-only (optional)
+js-sys = { workspace = true, optional = true }
+
+# UniFFI (optional) — only when `feature = "uniffi"` is requested by a
+# consumer such as fauna-onboarding-machine (via fauna-ffi).
+uniffi = { workspace = true, optional = true }
+
+# QR encoding (optional) — `feature = "qr_render"`, for `qr_matrix`.
+qrcode = { workspace = true, optional = true }
+
+# Native-only (optional) — `feature = "local-clock"`, for `format::format_unix_local`.
+chrono = { workspace = true, optional = true }
+
+# Native-only (optional) — `feature = "sqlite-schema-meta"`, for `sqlite_schema_meta`.
+rusqlite = { workspace = true, optional = true }
+
+# Network-only (optional)
+redb = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true }
+hickory-resolver = { workspace = true, optional = true }
+# `debounce::absorb_burst`'s `CancellationToken` — no new weight, tokio itself
+# is already `features = ["full"]` behind this same feature.
+tokio-util = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `blob-fetch-wasm`: the browser fetch `WasmPublicChunkFetcher` rides. Optional
+# + target-gated (mirrors `fauna-wasm`'s own direct use of the same crate for
+# the same purpose, pre-consolidation) so it never links into a native build.
+gloo-net = { version = "0.6", default-features = false, features = ["http"], optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true
+serde_json.workspace = true
+# QR *decoder*, tests only — `qr_matrix` asserts its output actually scans back to the
+# payload, which is the only check that catches an orientation/masking regression.
+rqrr = { version = "0.10", default-features = false }

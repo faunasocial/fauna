@@ -1,0 +1,42 @@
+# CORS proxy behind the fauna.social front door — loopback-only unit
+# (front-door.md § Security architecture; forwarding semantics owned by
+# registry.md § CORS proxy). Binary at /usr/local/bin/fauna-cors-proxy.
+[Unit]
+Description=fauna CORS proxy (loopback, behind the front door)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/fauna-cors-proxy
+# Artifact-set wiring (no human config surface): loopback bind, the port the
+# door's PROXY_UPSTREAM constant expects.
+Environment=PORT=8402
+Environment=BIND_ADDR=127.0.0.1
+DynamicUser=yes
+Restart=always
+RestartSec=2
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# Outbound HTTPS to the fixed provider set + the loopback listener.
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+MemoryMax=256M
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target

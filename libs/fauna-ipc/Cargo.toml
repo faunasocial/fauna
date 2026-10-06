@@ -1,0 +1,77 @@
+[package]
+name = "fauna-ipc"
+description = "Shared IPC message types and named pipe client for Fauna Windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Compile the harness pipe-name override (`FAUNA_E2E_SYNC_PIPE`) into the build.
+# Off, a plain `--release` artifact resolves ONLY the per-SID production pipe —
+# a runtime env gate alone would let whoever controls a released windows
+# app's environment name the pipe it treats as its sync agent, and the client
+# pushes its owner `BackupKey`, per-folder content keys and a renewable nest
+# bearer down that pipe (`ProvisionCapability`/`RefreshBearer`, `src/sync.rs`).
+# Debug builds keep the override through the `debug_assertions` arm; consumers
+# forward this from their own e2e feature (`fauna-client-sync`'s `test-helpers`,
+# which linux/tui `e2e-agent` and fauna-ffi `test-helpers` already forward),
+# never on the dep line (e2e-conventions.md convention 15 rule (b); the
+# 2026-08-02 seam-witness ruling's conclusion (3) names this read).
+test-helpers = []
+
+[dependencies]
+serde.workspace = true
+fauna-cbor.workspace = true
+thiserror.workspace = true
+toml = "0.8"
+serde_bytes = "0.11"
+zeroize = { workspace = true }
+tracing = { workspace = true }
+# The sign-out marker's at-rest record framing (`SignedOutMarker::encode_record`)
+# — hex over canonical dag-cbor, the same framing the capability record uses.
+# It lives here because both the writing app and the reading agent must frame it
+# identically; see `sync.rs` § The signed-out reconcile.
+hex = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# Tokio-based unix-domain-socket transport (unix_transport.rs) — the non-Windows
+# sibling of the Windows named-pipe server, and the async runtime the shared
+# provisioning convergence loop (convergence.rs) ticks on. Mirrors the existing
+# cfg(windows) tokio dep below; the workspace spec is features=["full"], so
+# net/io-util/time/sync/rt/macros are all present. There is no unix shell-ext, so
+# this never bloats the deliberately tokio-lean Windows shell extension (which links
+# only the cfg(windows) tokio and never starts a runtime).
+tokio = { workspace = true }
+# Home resolution for the macOS socket path. NOT `env::var_os("HOME")`: a
+# LaunchAgent bootstrapped from the installer's root session can start with HOME
+# unset, and the agent then cannot bind its socket at all. `dirs` falls back to
+# the passwd database (getpwuid), which is always populated under launchd.
+dirs = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+tokio = { workspace = true }
+anyhow = { workspace = true }
+# The SCM registration/status-transition ceremony `scm_service` shares between
+# FaunaNest and FaunaBridge — same crate the two binaries already depend on
+# for it themselves.
+windows-service = { workspace = true }
+# Overlapped (async) pipe I/O for the blocking SyncPipeClient: a synchronous
+# duplex pipe handle serialises a pending read against a concurrent write
+# (deadlock — see sync_pipe_client::overlapped), so the client opens the pipe
+# FILE_FLAG_OVERLAPPED and drives each direction with its own OVERLAPPED + event.
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    # `CreateNamedPipeW` + the PIPE_* create flags, for the server half
+    # (pipe_transport.rs). The client half only ever opens an existing pipe via
+    # `CreateFileW`, which is why this was absent until the servers moved here.
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+# The unix_transport round-trip test binds the agent socket in a throwaway dir.
+tempfile.workspace = true

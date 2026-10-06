@@ -1,0 +1,523 @@
+name: Release
+
+# Server/CLI binaries (four Rust targets), the terminal app's Linux and
+# Windows archives (fauna-tui + fauna-sync-agent; the macOS ones are
+# release-macos.yml's, which holds the signing credentials) and the Windows MSI
+# installer (x64 + ARM64) are built HERE -- from this repository's tag, on
+# GitHub-hosted runners -- and every published file is cosign-signed with this workflow's own
+# Sigstore identity, so anyone can check that a download is the exact output of
+# this source and this workflow (the verification recipe ships in the release
+# notes below). Design: docs/goal/architecture/release-integrity.md § Release
+# signing -> When a release workflow publishes.
+#
+# When it publishes: on a `v*` TAG ref, and on nothing else -- every other ref
+# is a dry run. A branch dispatch builds all four Rust targets and both Windows
+# arches and publishes nothing (`github.ref` is `refs/heads/...`, so the
+# `release` job's guard is false); a `v*` tag push -- or a dispatch naming the
+# tag as its ref, which produces the same `github.ref` -- publishes. Same rule
+# as `release-macos.yml`, expressed against the ref alone.
+#
+# Trust split, same shape as `release-macos.yml`: the build jobs hold no
+# credentials and only a read token; the `release` job alone can write, and it
+# runs inside the `release` Environment (required reviewer + `v*` tags only),
+# so nothing is published without a human approving that specific run.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Gate: supply chain must be clean
+  supply-chain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
+        with:
+          rustflags: ""
+          cache: false
+      - name: Install cargo-vet
+        run: cargo install cargo-vet --locked
+      - name: Verify supply chain
+        run: cargo vet --locked
+
+  # Build Rust server/CLI binaries (all 4 targets)
+  build-rust:
+    needs: supply-chain
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
+        with:
+          target: ${{ matrix.target }}
+          rustflags: ""
+          cache: false
+
+      - name: Install cross-compilation tools (Linux aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Install GTK4/libadwaita dev packages (for fauna-linux)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
+
+      # The nest a release ships is the image's flavor: the same feature set
+      # the Dockerfile's nest build line enables (pinned by the publish
+      # tooling's workflow-shape tests), so a downloaded binary and the image
+      # are one server.
+      - name: Build the nest (the image's flavor)
+        run: cargo build --locked -p fauna-nest --features bluesky,nostr,activitypub --release --target ${{ matrix.target }}
+
+      - name: Build server binaries
+        run: |
+          for crate in fauna-push-relay fauna-cors-proxy fauna-front-door; do
+            cargo build --locked -p "$crate" --release --target ${{ matrix.target }}
+          done
+
+      - name: Build fauna-linux (x86_64 Linux only)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo build --locked -p fauna-linux --release --target ${{ matrix.target }}
+
+      # The terminal app's channel (docs/goal/architecture/installers/tui.md
+      # § The ratified channel): one archive per Linux target carrying
+      # fauna-tui + fauna-sync-agent + install.sh, assembled by the one script
+      # the install-then-drive witness runs too. The full default-feature
+      # flavor (a direct download, not a store). The macOS pair is NOT built
+      # here: its archive must be Developer ID-signed and notarized before it
+      # is published, so it is built and signed by release-macos.yml, whose
+      # `sign` job holds those credentials.
+      - name: Build fauna-tui + fauna-sync-agent (Linux)
+        if: contains(matrix.target, 'linux')
+        run: cargo build --locked -p fauna-tui -p fauna-sync-agent --release --target ${{ matrix.target }}
+
+      - name: Collect and rename binaries
+        run: |
+          mkdir -p artifacts
+          target=${{ matrix.target }}
+          case "$target" in
+            x86_64-unknown-linux-gnu)   suffix="x86_64-linux" ;;
+            aarch64-unknown-linux-gnu)  suffix="aarch64-linux" ;;
+            x86_64-apple-darwin)        suffix="x86_64-darwin" ;;
+            aarch64-apple-darwin)       suffix="aarch64-darwin" ;;
+          esac
+
+          # collect <bin> <asset>: a binary the build did not produce fails the
+          # job — a release missing an asset must not publish quietly.
+          collect() {
+            src="target/${target}/release/$1"
+            if [ ! -f "$src" ]; then
+              echo "::error::the build produced no ${src} (asset $2-${suffix})"
+              exit 1
+            fi
+            cp "$src" "artifacts/$2-${suffix}"
+          }
+
+          for crate in fauna-nest fauna-push-relay fauna-cors-proxy fauna-front-door; do
+            collect "$crate" "$crate"
+          done
+
+          # The linux desktop app: package fauna-linux, binary fauna-desktop.
+          if [ "$target" = x86_64-unknown-linux-gnu ]; then
+            collect fauna-desktop fauna-linux
+          fi
+
+          # The terminal app's archive: fauna-tui-<suffix>.tar.gz (Linux targets).
+          if [[ "$target" == *linux* ]]; then
+            bash apps/fauna-tui/packaging/assemble-archive.sh \
+              --bin-dir "target/${target}/release" --out artifacts --suffix "$suffix"
+            rm -rf "artifacts/fauna-tui-${suffix}"
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: rust-${{ matrix.target }}
+          path: artifacts/
+
+  # Build Windows MSI installer (x64 + ARM64)
+  build-windows:
+    needs: supply-chain
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            rust_target: x86_64-pc-windows-msvc
+            rust_target_gnullvm: x86_64-pc-windows-gnullvm
+            go_arch: amd64
+            mingw_cc: x86_64-w64-mingw32-clang
+            dotnet_rid: win-x64
+          - arch: arm64
+            rust_target: aarch64-pc-windows-msvc
+            rust_target_gnullvm: aarch64-pc-windows-gnullvm
+            go_arch: arm64
+            mingw_cc: aarch64-w64-mingw32-clang
+            dotnet_rid: win-arm64
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
+        with:
+          target: ${{ matrix.rust_target }}
+          rustflags: ""
+          cache: false
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9  # v4.3.1
+        with:
+          dotnet-version: '10.0.204'  # = global.json; moves only in a bump round
+
+      # Go toolchain for the cgo fauna-mail-bridge MDA (the IMAP/CalDAV server the
+      # FaunaBridge service supervises). Version pinned via the module's go.mod.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version-file: bins/fauna-bridges/go.mod
+
+      # MinGW (LLVM) cross-compiler for the cgo MDA. Go's cgo does NOT support MSVC
+      # cl.exe, so the MDA links a dedicated gnullvm fauna_ffi.dll built with
+      # llvm-mingw. The x86_64-host build bundles BOTH the x86_64-w64-mingw32 and
+      # aarch64-w64-mingw32 cross-compilers, so this ONE install on the x64 runner
+      # serves both matrix arches. Version-pinned and checksum-verified; the
+      # expected value is the sha256 content digest of the public release asset.
+      - name: Install llvm-mingw (cgo cross-compiler for the Go MDA)
+        shell: pwsh
+        run: |
+          $ver = "20260616"
+          $digest = "sha256:b9b68a4d276e16fa25802aaba458e4638f64b3884c290aaccdc2d87083b6ca35"
+          $sha = $digest.Substring(7)
+          $zip = "$env:RUNNER_TEMP\llvm-mingw.zip"
+          Invoke-WebRequest "https://github.com/mstorsjo/llvm-mingw/releases/download/$ver/llvm-mingw-$ver-ucrt-x86_64.zip" -OutFile $zip
+          $got = (Get-FileHash -Algorithm SHA256 $zip).Hash
+          if ($got -ine $sha) { throw "llvm-mingw checksum mismatch: expected $sha got $got" }
+          Expand-Archive $zip -DestinationPath C:\ -Force
+          "C:\llvm-mingw-$ver-ucrt-x86_64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Install WiX
+        run: |
+          dotnet tool install --global wix
+          wix extension add WixToolset.Util.wixext/6.0.2
+          wix extension add WixToolset.UI.wixext/6.0.2
+          wix extension add WixToolset.Firewall.wixext/6.0.2
+
+      # Build fauna-ffi, generate the C# UniFFI bindings, and stage the native
+      # dll into the app's runtimes/ -- all BEFORE the .NET build, because
+      # FaunaApp.Core consumes Generated/uniffi/*.cs and the app packs
+      # runtimes/<rid>/native/fauna_ffi.dll (both gitignored). This is the
+      # `just windows-ffi` recipe arch-parameterized for CI: that recipe is
+      # hardcoded to a native aarch64 host, but this x64 runner builds BOTH
+      # arches via the matrix, so it invokes cargo with --target directly. The
+      # bindgen tool builds for the host (x64) and reads metadata from the
+      # target-arch dll -- uniffi metadata is arch-independent. It builds the
+      # PRODUCTION flavor -- NO `--features test-helpers` -- so the shipped MSI
+      # carries no test seam (docs/goal/architecture/testing.md's automation
+      # surface rule; the app's own automation code is `#if DEBUG`-gated and
+      # this is a Release build). crt-static is applied automatically to
+      # fauna_ffi.dll via .cargo/config.toml. `--lib --crate-type cdylib` links
+      # only the .dll this step consumes, not the unused staticlib crate-type
+      # also declared in Cargo.toml.
+      - name: Build FFI + generate C# bindings + stage native dll
+        shell: bash
+        run: |
+          cargo rustc --locked -p fauna-ffi --lib --crate-type cdylib --release --target ${{ matrix.rust_target }}
+          cargo run -p uniffi-bindgen-cs-fauna --bin uniffi-bindgen-cs --release -- \
+            --library target/${{ matrix.rust_target }}/release/fauna_ffi.dll \
+            --out-dir apps/fauna-windows/FaunaApp/FaunaApp.Core/Generated/uniffi/
+          mkdir -p apps/fauna-windows/FaunaApp/FaunaApp/runtimes/${{ matrix.dotnet_rid }}/native
+          cp target/${{ matrix.rust_target }}/release/fauna_ffi.dll \
+             apps/fauna-windows/FaunaApp/FaunaApp/runtimes/${{ matrix.dotnet_rid }}/native/fauna_ffi.dll
+
+      - name: Build Rust binaries (Windows service crates)
+        # The installer ships the sync agent + two machine-service exes (FaunaNest,
+        # FaunaBridge -- one per virtual account) plus the shell-ext cdylib.
+        # fauna-nest-service path-depends on bins/fauna-nest, so there is no
+        # separate fauna-nest build to stage. These crates are
+        # root-workspace members, so they build from the repo root against the
+        # one committed Cargo.lock and `--locked` holds for real. The sync agent
+        # is the cross-platform fauna-sync-agent package itself, and each crate
+        # is its own cargo invocation ON PURPOSE: one invocation naming several
+        # packages unifies their features, and the shipped agent must carry only
+        # the feature set it asks for.
+        run: |
+          cargo build --locked --release -p fauna-sync-agent     --target ${{ matrix.rust_target }}
+          cargo build --locked --release -p fauna-nest-service   --target ${{ matrix.rust_target }}
+          cargo build --locked --release -p fauna-bridge-service --target ${{ matrix.rust_target }}
+          cargo build --locked --release -p fauna-shell-ext      --target ${{ matrix.rust_target }}
+
+      # The terminal app (installers/tui.md § The ratified channel): the MSI's
+      # TerminalApp feature carries fauna-tui.exe beside fauna-sync-agent.exe
+      # (TerminalApp.wxs), and the same binary ships as the per-arch zip
+      # archive with the agent — the headless-box download. The Store MSIX does
+      # NOT carry it (user ruling 2026-09-26). Full default-feature flavor.
+      - name: Build fauna-tui (terminal app)
+        run: cargo build --locked --release -p fauna-tui --target ${{ matrix.rust_target }}
+
+      # Cross-compile the Go fauna-mail-bridge MDA (the runner has Git Bash but
+      # not `just`, so the recipe is inlined + matrix-parameterized). Builds a
+      # SEPARATE gnullvm fauna_ffi.dll -- whose toolchain IS llvm-mingw, so cgo
+      # links its GNU import lib (libfauna_ffi.dll.a) natively, sidestepping the
+      # MSVC<->MinGW seam; the C# app keeps its own crt-static MSVC fauna_ffi.dll
+      # (different target dir, never mixed). Stages fauna-mail-bridge.exe + the
+      # gnullvm fauna_ffi.dll + libunwind.dll (the gnullvm dll's one non-OS
+      # runtime dep) into target/ for the MSI step. --no-default-features
+      # matches the committed bindings' symbol set.
+      - name: Build Go mail-bridge MDA (cgo, gnullvm)
+        shell: bash
+        run: |
+          rustup target add ${{ matrix.rust_target_gnullvm }}
+          cargo build --locked -p fauna-ffi --release --no-default-features --target ${{ matrix.rust_target_gnullvm }}
+          REL="$PWD/target/${{ matrix.rust_target_gnullvm }}/release"
+          INCLUDES=""
+          for d in libs/fauna-mail-go/*/; do INCLUDES="$INCLUDES -I$PWD/$d"; done
+          export GOOS=windows GOARCH=${{ matrix.go_arch }} CGO_ENABLED=1
+          export CC=${{ matrix.mingw_cc }}
+          export CGO_CFLAGS="$INCLUDES"
+          export CGO_LDFLAGS="-L$REL -lfauna_ffi"
+          go -C bins/fauna-bridges build -o "$PWD/target/fauna-mail-bridge.exe" ./cmd/fauna-mail-bridge
+          cp "$REL/fauna_ffi.dll" "$PWD/target/"
+          cp "$(dirname "$(command -v ${{ matrix.mingw_cc }})")/libunwind.dll" "$PWD/target/"
+
+      # Publish self-contained so the MSI runs on a bare VM with no .NET 10 /
+      # Windows App SDK runtime install (the works-out-of-the-box invariant).
+      # dotnet publish is correct in CI even for the arm64 leg: this runner is
+      # native x64 cross-targeting arm64, so the XAML tooling runs natively.
+      - name: Build .NET app
+        run: >
+          dotnet publish
+          apps/fauna-windows/FaunaApp/FaunaApp/FaunaApp.csproj
+          -c Release -r ${{ matrix.dotnet_rid }}
+          -p:SelfContained=true -p:WindowsAppSDKSelfContained=true
+
+      - name: Stage binaries
+        shell: bash
+        run: |
+          mkdir -p stage/${{ matrix.arch }}/icons stage/${{ matrix.arch }}/app
+          rel=target/${{ matrix.rust_target }}/release
+          cp "$rel/fauna-sync-agent.exe"       stage/${{ matrix.arch }}/
+          cp "$rel/fauna-tui.exe"        stage/${{ matrix.arch }}/
+          cp "$rel/fauna-nest-svc.exe"   stage/${{ matrix.arch }}/
+          cp "$rel/fauna-bridge-svc.exe" stage/${{ matrix.arch }}/
+          # The shell-ext crate sets [lib] name = "fauna_shell", so the cdylib emits
+          # fauna_shell.dll DIRECTLY (the name the .wxs + CLSID InprocServer32 expect) — no rename.
+          cp "$rel/fauna_shell.dll"      stage/${{ matrix.arch }}/fauna_shell.dll
+          # The Go MDA + its gnullvm runtime DLLs. These land in the target/ ROOT
+          # (no --target triple subdir), not in $rel. These ship beside
+          # fauna-bridge-svc.exe in INSTALLFOLDER; the WinUI app's own MSVC
+          # fauna_ffi.dll lands under app/ (a different MSI dir), so the two
+          # same-named dlls never collide.
+          cp target/fauna-mail-bridge.exe stage/${{ matrix.arch }}/
+          cp target/fauna_ffi.dll         stage/${{ matrix.arch }}/
+          cp target/libunwind.dll         stage/${{ matrix.arch }}/
+          cp apps/fauna-windows/shell-ext/src/icons/*.ico stage/${{ matrix.arch }}/icons/
+          cp -r apps/fauna-windows/FaunaApp/FaunaApp/bin/Release/*/publish/* stage/${{ matrix.arch }}/app/ || \
+          cp -r apps/fauna-windows/FaunaApp/FaunaApp/bin/Release/*/*/publish/* stage/${{ matrix.arch }}/app/
+
+      # Every -d path MUST be absolute. WiX resolves App.wxs's
+      # <Files Include="$(var.AppDir)**"> harvest relative to the .wxs file's
+      # directory (apps/fauna-windows/installer/), NOT the working dir — a
+      # relative AppDir silently harvests ZERO app files and ships an app-less MSI
+      # that still "builds successfully". ${{ github.workspace }} is the checkout
+      # root (= the cwd staging wrote into), so it anchors all vars absolutely.
+      - name: Build MSI
+        run: >
+          wix build -arch ${{ matrix.arch }}
+          -ext WixToolset.Util.wixext
+          -ext WixToolset.UI.wixext
+          -ext WixToolset.Firewall.wixext
+          -o Fauna-Setup-${{ matrix.arch }}.msi
+          apps/fauna-windows/installer/*.wxs
+          -d SyncBin=${{ github.workspace }}/stage/${{ matrix.arch }}/fauna-sync-agent.exe
+          -d TuiBin=${{ github.workspace }}/stage/${{ matrix.arch }}/fauna-tui.exe
+          -d NestBin=${{ github.workspace }}/stage/${{ matrix.arch }}/fauna-nest-svc.exe
+          -d BridgeBin=${{ github.workspace }}/stage/${{ matrix.arch }}/fauna-bridge-svc.exe
+          -d MailBridgeBin=${{ github.workspace }}/stage/${{ matrix.arch }}/fauna-mail-bridge.exe
+          -d MailBridgeFfiDll=${{ github.workspace }}/stage/${{ matrix.arch }}/fauna_ffi.dll
+          -d MailBridgeLibunwindDll=${{ github.workspace }}/stage/${{ matrix.arch }}/libunwind.dll
+          -d ShellDll=${{ github.workspace }}/stage/${{ matrix.arch }}/fauna_shell.dll
+          -d IconDir=${{ github.workspace }}/stage/${{ matrix.arch }}/icons/
+          -d AppDir=${{ github.workspace }}/stage/${{ matrix.arch }}/app/
+
+      # The terminal app's Windows archive: fauna-tui.exe + fauna-sync-agent.exe
+      # in one zip per arch (no install script on Windows — the user unpacks it
+      # into a directory on PATH; installers/tui.md). Staged by the same
+      # assemble-archive.sh the Linux legs use, so the payload is defined once.
+      - name: Assemble the fauna-tui archive
+        shell: bash
+        run: |
+          bash apps/fauna-tui/packaging/assemble-archive.sh \
+            --bin-dir "target/${{ matrix.rust_target }}/release" \
+            --out tui-archive --suffix "${{ matrix.arch }}-windows" --exe
+
+      - name: Zip the fauna-tui archive
+        shell: pwsh
+        run: Compress-Archive -Path "tui-archive/fauna-tui-${{ matrix.arch }}-windows/*" -DestinationPath "fauna-tui-${{ matrix.arch }}-windows.zip"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: windows-${{ matrix.arch }}
+          path: |
+            Fauna-Setup-${{ matrix.arch }}.msi
+            fauna-tui-${{ matrix.arch }}-windows.zip
+
+      # Real msiexec install/uninstall smoke test of the REMOVE_USER_DATA data-removal
+      # path (the one installer behaviour that source/MSI-table verification cannot prove
+      # — only a real install exercises the util:RemoveFolderEx custom action + the DataDir
+      # RegistrySearch at uninstall time). Runs ONLY on the x64 leg: windows-latest is an
+      # x64 runner and cannot install an ARM64-targeted MSI ("not supported by this
+      # processor type"). The removal logic lives in arch-independent WiX authoring
+      # (UI.wxs RemoveFolderEx + the HKLM DataDir RegistrySearch built from the same .wxs
+      # for both packages), so the x64 run validates the behaviour for both; an ARM64
+      # runtime install-smoke would need a windows-11-arm runner. The feature-tree
+      # constraints (Sync non-deselectable, Bridge requires Nest) are UI-interactive and
+      # already verified at the MSI-table level — not re-checked here. Safe to run in CI:
+      # this is an ephemeral runner, so the perMachine service install/uninstall
+      # disrupts nothing.
+      - name: Smoke-test install/uninstall (REMOVE_USER_DATA data removal)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi  = "Fauna-Setup-x64.msi"
+          $data = Join-Path $env:ProgramData 'Fauna'
+
+          function Invoke-Msi {
+            param([string]$Op, [string]$Log, [string]$What, [string[]]$Props = @())
+            # Properties go LAST on the msiexec command line, after the switches.
+            $argv = @($Op, $msi, '/qn', '/norestart', '/l*v', $Log) + $Props
+            Write-Host "==> msiexec $($argv -join ' ')"
+            $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList $argv -Wait -PassThru
+            # 0 = success; 3010 = success, reboot required (services).
+            if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
+              Write-Host "----- $Log (tail) -----"
+              if (Test-Path $Log) { Get-Content $Log -Tail 100 }
+              throw "$What FAILED: msiexec exit $($p.ExitCode)"
+            }
+            Write-Host "$What OK (exit $($p.ExitCode))"
+          }
+
+          # Case 1 — a plain uninstall PRESERVES %ProgramData%\Fauna\.
+          Invoke-Msi -Op '/i' -Log 'install-1.log'   -What 'install (case 1)'
+          New-Item -ItemType Directory -Force -Path $data | Out-Null
+          Set-Content -LiteralPath (Join-Path $data 'user-data.sentinel') -Value 'preserve me'
+          Invoke-Msi -Op '/x' -Log 'uninstall-1.log' -What 'uninstall (case 1, no flag)'
+          if (-not (Test-Path $data)) {
+            throw "REGRESSION: a plain uninstall deleted $data; it must be preserved without REMOVE_USER_DATA=1"
+          }
+          Write-Host "Case 1 PASS: plain uninstall preserved $data"
+
+          # Case 2 — REMOVE_USER_DATA=1 DELETES %ProgramData%\Fauna\.
+          Invoke-Msi -Op '/i' -Log 'install-2.log'   -What 'install (case 2)'
+          New-Item -ItemType Directory -Force -Path $data | Out-Null
+          Set-Content -LiteralPath (Join-Path $data 'user-data.sentinel') -Value 'delete me'
+          Invoke-Msi -Op '/x' -Log 'uninstall-2.log' -What 'uninstall (case 2, REMOVE_USER_DATA=1)' -Props @('REMOVE_USER_DATA=1')
+          if (Test-Path $data) {
+            Write-Host "Still present under $data :"
+            Get-ChildItem -Recurse -Force $data | ForEach-Object { Write-Host "  $($_.FullName)" }
+            throw "REGRESSION: REMOVE_USER_DATA=1 left $data behind; it must be deleted"
+          }
+          Write-Host "Case 2 PASS: REMOVE_USER_DATA=1 deleted $data"
+          Write-Host "Installer install/uninstall smoke test PASSED."
+
+      - name: Upload installer smoke logs
+        if: ${{ always() && matrix.arch == 'x64' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: windows-installer-smoke-logs
+          path: '*.log'
+          if-no-files-found: ignore
+
+  # NOTE: there is no standalone Go release artifact. The Go mail-bridge
+  # (bins/fauna-bridges) is cgo — it links libfauna_ffi.so — so it cannot be
+  # CGO_ENABLED=0 cross-compiled. Per docs/goal/architecture/installers/
+  # {docker,linux-nest}.md the bridge ships built-from-source: the docker image
+  # (recommended deploy) builds it in a cgo build stage, and the bare-metal
+  # path builds it via `just mail-bridge-build`. Neither consumes a prebuilt
+  # release binary.
+
+  # Sign all binaries and create the GitHub Release. Publishes only on a `v*`
+  # tag ref (a branch dispatch skips this job — the dry run), and only after a
+  # maintainer approves the run into the `release` Environment.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-rust, build-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write        # upload the release assets
+      id-token: write        # the Sigstore keyless identity behind the signatures
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          path: all-artifacts
+          merge-multiple: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Generate SHA256SUMS
+        working-directory: all-artifacts
+        run: sha256sum * > SHA256SUMS
+
+      - name: Sign all artifacts with cosign
+        working-directory: all-artifacts
+        run: |
+          for file in *; do
+            case "$file" in *.bundle) continue ;; esac
+            cosign sign-blob --yes --bundle "${file}.bundle" "$file"
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
+        with:
+          files: all-artifacts/*
+          generate_release_notes: true
+          body: |
+            ## Verify Downloads
+
+            Every file was signed by this repository's `Release` workflow with
+            its Sigstore identity (the regex below is anchored to this
+            repository, so a signature from anywhere else fails). Install
+            [cosign](https://docs.sigstore.dev/cosign/system_config/installation/), then:
+
+            ```bash
+            # Verify a specific binary
+            cosign verify-blob \
+              --certificate-identity-regexp='^https://github\.com/faunasocial/fauna/' \
+              --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+              --bundle <binary>.bundle \
+              <binary>
+
+            # Or verify all at once via checksums
+            cosign verify-blob \
+              --certificate-identity-regexp='^https://github\.com/faunasocial/fauna/' \
+              --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+              --bundle SHA256SUMS.bundle \
+              SHA256SUMS
+            sha256sum --check SHA256SUMS   # macOS: shasum -a 256 --check SHA256SUMS
+            ```

@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  Fauna Bridge Service — IMAP/SMTP/CalDAV bridge supervision.
+
+  Registers FaunaBridge as a Windows service running under a virtual
+  service account (NT SERVICE\FaunaBridge).  Auto-start on boot.
+  Failure actions: restart with a flat 5 s delay for all three
+  attempts; failure count resets after 24 h.
+
+  The Rust fauna-bridge-svc.exe is the *supervisor shell*; it spawns the
+  Go fauna-mail-bridge.exe (the MDA — IMAP + CalDAV) as a monitored child
+  when the admin enables mail and/or CalDAV. So the Bridge feature ships
+  THREE more files beside the service exe, all in INSTALLFOLDER next to it
+  (where the Go exe's default DLL search finds its own fauna_ffi.dll):
+    - fauna-mail-bridge.exe : the Go MDA
+    - fauna_ffi.dll         : the MDA's gnullvm-built FFI dll (distinct from
+                              the WinUI app's MSVC fauna_ffi.dll under App\;
+                              the name MUST stay fauna_ffi.dll — cgo loads it
+                              by that name — and directory separation avoids
+                              any collision)
+    - libunwind.dll         : the gnullvm dll's one non-OS runtime dependency
+-->
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Fragment>
+    <ComponentGroup Id="BridgeService" Directory="INSTALLFOLDER">
+
+      <!-- fauna-bridge-svc.exe -->
+      <Component Id="FaunaBridgeSvcExe" Guid="4a7b8c00-0042-4d3a-b5c6-d7e8f9a0b1c2">
+        <File Id="FaunaBridgeSvcExe"
+              Source="$(var.BridgeBin)"
+              KeyPath="yes"
+              Name="fauna-bridge-svc.exe" />
+
+        <ServiceInstall
+          Id="InstallFaunaBridge"
+          Name="FaunaBridge"
+          DisplayName="Fauna Bridge Service"
+          Description="IMAP/SMTP bridge for accessing Fauna messages from standard email clients."
+          Type="ownProcess"
+          Start="auto"
+          Account="NT SERVICE\FaunaBridge"
+          ErrorControl="normal"
+          Arguments="--service" />
+
+        <ServiceControl
+          Id="ControlFaunaBridge"
+          Name="FaunaBridge"
+          Stop="both"
+          Remove="uninstall"
+          Start="install"
+          Wait="yes" />
+
+        <!-- Failure actions: restart with a flat 5 s delay (all 3 attempts), reset after 24 h -->
+        <util:ServiceConfig
+          ServiceName="FaunaBridge"
+          FirstFailureActionType="restart"
+          SecondFailureActionType="restart"
+          ThirdFailureActionType="restart"
+          RestartServiceDelayInSeconds="5"
+          ResetPeriodInDays="1" />
+      </Component>
+
+      <!-- fauna-mail-bridge.exe — the Go MDA the service supervises as a child -->
+      <Component Id="FaunaMailBridgeExe" Guid="4a7b8c00-0043-4d3a-b5c6-d7e8f9a0b1c2">
+        <File Id="FaunaMailBridgeExe"
+              Source="$(var.MailBridgeBin)"
+              KeyPath="yes"
+              Name="fauna-mail-bridge.exe" />
+      </Component>
+
+      <!-- fauna_ffi.dll — the MDA's gnullvm FFI dll (loaded by name from this dir) -->
+      <Component Id="FaunaMailBridgeFfiDll" Guid="4a7b8c00-0044-4d3a-b5c6-d7e8f9a0b1c2">
+        <File Id="FaunaMailBridgeFfiDll"
+              Source="$(var.MailBridgeFfiDll)"
+              KeyPath="yes"
+              Name="fauna_ffi.dll" />
+      </Component>
+
+      <!-- libunwind.dll — the gnullvm dll's one non-OS runtime dependency -->
+      <Component Id="FaunaMailBridgeLibunwindDll" Guid="4a7b8c00-0045-4d3a-b5c6-d7e8f9a0b1c2">
+        <File Id="FaunaMailBridgeLibunwindDll"
+              Source="$(var.MailBridgeLibunwindDll)"
+              KeyPath="yes"
+              Name="libunwind.dll" />
+      </Component>
+
+    </ComponentGroup>
+  </Fragment>
+
+</Wix>

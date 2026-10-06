@@ -1,0 +1,44 @@
+[package]
+name = "fauna-payments"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# `ActorId` appears in the `Buyer` half of the `PaymentEntitlement` narrow
+# waist (docs/goal/behavior/monetization.md § Pillar 3). Same
+# default-features handling as the other shared client crates so the crate
+# stays wasm32-clean (pure verification logic, no tokio/net).
+fauna-core = { path = "../fauna-core", default-features = false }
+# The wire layer owns the msat tokens (`subscriptions::{UNIT_MSAT,
+# MSATS_PER_SAT}`) and the sats→wire constructor, because a build that excises
+# THIS crate must still round-trip a priced tier
+# (`docs/goal/architecture/dynamic-features.md` § Wire-compat posture).
+# `default-features = false` for the same wasm32 reason as fauna-core above:
+# it drops the native-only `p2p` feature. It does NOT name `payments` — that
+# feature is this crate's own plane, and naming it on a dep line is what rule
+# (b) of the two-halves spine forbids; nothing here needs it, since only the
+# ungated `subscriptions` module is used.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# Webhook signature verification (HMAC-SHA256) — the one cryptographic
+# capability the adapter trait's `verify` needs. Mirrors
+# fauna-mail/src/lists/token.rs (the unsubscribe-token generator).
+hmac = { workspace = true }
+sha2 = { workspace = true }
+# Provider signatures ride hex on the wire (Stripe `v1=<hex>`; the fake
+# test provider mirrors it).
+hex = { workspace = true }
+# Provider webhook bodies are provider-defined JSON — parsed inside the
+# adapter modules only; nothing JSON-shaped escapes the adapter boundary
+# (the normalized `VerifiedPaymentEvent` is plain Rust).
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# wasm: forward the `js` features (js-sys time backend) so the transitive wasm
+# build resolves. Same shape as fauna-client-payments, which carries this crate
+# into the web SPA.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+
+[dev-dependencies]

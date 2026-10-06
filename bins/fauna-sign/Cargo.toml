@@ -1,0 +1,12 @@
+[package]
+name = "fauna-sign"
+description = "Sign release artifacts with Ed25519"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ed25519-dalek.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+hex.workspace = true

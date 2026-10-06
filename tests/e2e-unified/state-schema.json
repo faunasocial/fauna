@@ -1,0 +1,248 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Fauna Unified Test State",
+  "description": "Canonical app state format for E2E test state injection and inspection across all 7 apps.\n\nNULL CONVENTION: Each section under 'data' MUST be null if the client has not implemented serialization for that section. An empty array [] means 'implemented but no data'. This distinction lets the test framework skip unimplemented sections (null) vs fail on missing data ([]).\n\nCOMPOSE (write-only): set_state({\"compose\": {\"file\": \"/path\"}}) tells the test agent to attach a file via upload_blob(), bypassing native file pickers. Web overrides this with Playwright's set_input_files(). All native clients must implement this handler.",
+  "type": "object",
+  "properties": {
+    "session": {
+      "type": "object",
+      "description": "Authentication and identity state. Write: inject credentials to log in. Read: verify auth status.",
+      "properties": {
+        "authenticated": {"type": "boolean"},
+        "node_url": {"type": ["string", "null"]},
+        "actor_id": {"type": ["string", "null"]},
+        "secret_hex": {"type": ["string", "null"]},
+        "handle": {"type": ["string", "null"]},
+        "domain": {"type": ["string", "null"]},
+        "device_id": {"type": ["string", "null"]}
+      },
+      "required": ["authenticated"]
+    },
+    "nav": {
+      "type": "object",
+      "description": "Navigation state. Write: set_state({nav: {stack: [{view: 'feed'}]}}) to navigate. Read: verify current page.",
+      "properties": {
+        "stack": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "view": {"type": "string"},
+              "id": {"type": "string"}
+            },
+            "required": ["view"]
+          }
+        },
+        "modal": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "properties": {
+                "view": {"type": "string"},
+                "id": {"type": "string"}
+              },
+              "required": ["view"]
+            }
+          ]
+        }
+      },
+      "required": ["stack"]
+    },
+    "settings": {
+      "type": "object",
+      "description": "User settings. Read: verify current inbox mode, spam threshold, etc.",
+      "properties": {
+        "inbox_mode": {"type": "string", "enum": ["open", "confirm", "closed", "restricted"]},
+        "spam_threshold": {"type": "number"}
+      }
+    },
+    "messages": {
+      "type": "object",
+      "description": "Transient UI messages. Write: inject error/warning/info for testing. Read: verify displayed messages. Messages clear on navigation.",
+      "properties": {
+        "error": {"type": ["string", "null"]},
+        "warning": {"type": ["string", "null"]},
+        "info": {"type": ["string", "null"]}
+      }
+    },
+    "compose": {
+      "type": "object",
+      "description": "WRITE-ONLY. Injected during set_state to trigger test agent actions. Not returned by get_state.\n\nFull compose.file flow: set_state({compose: {file: '/path'}}) → test agent calls upload_blob(path) → receives blob hash → stores hash in compose context → next post submission includes the hash as an attachment. Web clients use Playwright set_input_files() instead.\n\ncompose.post: creates a post programmatically, bypassing compose UI. Essential for platforms where compose-text-field is inaccessible (macOS detail pane). The test agent calls the feed post creation API directly.",
+      "properties": {
+        "file": {
+          "type": "string",
+          "description": "Absolute path to a file. The test agent calls upload_blob() and attaches the result to the current compose context. Web clients use Playwright set_input_files() instead."
+        },
+        "post": {
+          "type": "object",
+          "description": "Create a post programmatically without UI interaction. The test agent calls the feed API directly. Use this on platforms where compose-text-field is inaccessible (macOS). Web clients may also use this to avoid WASM timing issues in honesty checks.",
+          "properties": {
+            "body": {"type": "string", "description": "Post body text."},
+            "tags": {"type": "array", "items": {"type": "string"}, "description": "Tag strings WITHOUT # prefix. The UI adds # for display; state and API store raw strings."}
+          },
+          "required": ["body"]
+        }
+      }
+    },
+    "data": {
+      "type": "object",
+      "description": "App data sections. Each section is null if not implemented by the client, or contains real data if implemented. NEVER use empty arrays/objects for unimplemented sections — use null.",
+      "properties": {
+        "conversations": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "post_id": {"type": "string"},
+                  "from": {"type": "string"},
+                  "to": {"type": "string"},
+                  "subject": {"type": "string"},
+                  "body": {"type": "string"},
+                  "timestamp": {"type": "integer"},
+                  "encrypted": {"type": "boolean"},
+                  "read": {"type": "boolean"},
+                  "attachments": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "hash": {"type": "string"},
+                        "media_type": {"type": "string"},
+                        "size_bytes": {"type": "integer"}
+                      },
+                      "required": ["hash", "media_type", "size_bytes"]
+                    }
+                  }
+                },
+                "required": ["post_id", "from", "to", "body", "timestamp"]
+              }
+            }
+          ]
+        },
+        "contacts": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "peer_id": {"type": "string"},
+                  "status": {"type": "string", "enum": ["pending", "accepted", "confirmed", "blocked"]},
+                  "handle": {"type": ["string", "null"]},
+                  "node_url": {"type": ["string", "null"]}
+                },
+                "required": ["peer_id", "status"]
+              }
+            }
+          ]
+        },
+        "knocks": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "sender": {"type": "string"},
+                  "sender_node": {"type": "string"},
+                  "summary": {"type": "string"},
+                  "timestamp": {"type": "integer"}
+                },
+                "required": ["sender", "sender_node", "timestamp"]
+              }
+            }
+          ]
+        },
+        "feed": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "properties": {
+                "posts": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "post_id": {"type": "string"},
+                      "author": {"type": "string"},
+                      "body": {"type": "string"},
+                      "timestamp": {"type": "integer", "description": "Milliseconds since epoch. Mapped from API field 'created_at'. The state protocol field is 'timestamp' (not 'created_at') for all data sections."},
+                      "tags": {"type": "array", "items": {"type": "string"}, "description": "Tag strings WITHOUT # prefix (e.g. 'rust', not '#rust'). The UI displays tags with # prefix. The action layer normalizes to #-prefixed when returning tags to tests. State and API always store raw strings."},
+                      "has_media": {"type": "boolean"},
+                      "is_reply": {"type": "boolean"},
+                      "verification": {"type": "string", "enum": ["Unchecked", "Verified", "Failed"], "description": "Whether THIS client cryptographically verified the post's signed envelope (security.md § App display of unverified content; mapped from PostSummary.verification). 'Failed' drives the unverified-source-badge; 'Unchecked' (default — a trusted nest-index list card with no envelope) and 'Verified' render none. Optional: clients that haven't serialized it omit it."},
+                      "authoring_origin": {"type": "string", "enum": ["Unknown", "Direct", "Delegated"], "description": "Whether an EXTERNAL APP authored this post as the account, via a delegated authoring sub-key (atproto-pds-full.md § D10 → Audit; mapped from PostSummary.authoring_origin). 'Delegated' drives the delegated-origin-badge; 'Direct' (the account signed it itself) and 'Unknown' render none. 'Unknown' is BOTH the undecoded nest-index card AND the verification-failed case, deliberately — an unverified wire's cert is exactly what nothing authenticated, so its origin claim is never rendered. Orthogonal to 'verification': the two answer independent questions. Optional: clients that haven't serialized it omit it."}
+                    },
+                    "required": ["post_id", "author", "timestamp"]
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "events": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {"type": "string"},
+                  "summary": {"type": "string"},
+                  "start": {"type": "integer"},
+                  "end": {"type": "integer"},
+                  "location": {"type": ["string", "null"]},
+                  "description": {"type": ["string", "null"]},
+                  "rsvp_status": {"type": ["string", "null"]}
+                },
+                "required": ["id", "summary", "start"]
+              }
+            }
+          ]
+        },
+        "notifications": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "properties": {
+                "unread_count": {"type": "integer"}
+              }
+            }
+          ]
+        },
+        "sync": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "properties": {
+                "files": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {"type": "string"},
+                      "folder": {"type": "string"},
+                      "size_bytes": {"type": "integer"},
+                      "state": {"type": "string", "enum": ["synced", "local_only", "remote_only", "uploading", "downloading", "conflict"]}
+                    },
+                    "required": ["path", "folder", "state"]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

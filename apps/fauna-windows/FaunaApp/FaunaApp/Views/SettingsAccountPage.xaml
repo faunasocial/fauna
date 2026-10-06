@@ -1,0 +1,626 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.SettingsAccountPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="24" MaxWidth="600" HorizontalAlignment="Left">
+
+            <!-- Error bar + hidden FlaUI mirror (same shape as ProfilePage /
+                 AdminCalendarPage / SubscriptionsPage). The CopyableInfoBar paints;
+                 the 1px TextBlock keeps the error-message AutomationId realized even
+                 when the bar is collapsed, and is what test_handle_change_validation
+                 reads directly (settings.md § Errors & edge cases — handle-change
+                 format errors surface here). -->
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="False"
+                IsClosable="True" />
+            <TextBlock x:Name="ErrorTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+                       AutomationProperties.Name=" " Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+
+            <!-- Header -->
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}" Style="{StaticResource TitleTextBlockStyle}" Text="{loc:Localize Key=common/account}" />
+
+            <!-- Multi-account switcher (long-term-store.md § Multi-account evolution).
+                 Renders INLINE here on every desktop shell (linux/web/macos/windows);
+                 the compact `account-switcher-button` reveal is mobile-only, so windows
+                 does not render it. Rows come from the shared AccountRegistry; the row
+                 title is the SHARED fauna_core::format::account_display_label via
+                 FaunaFfiMethods.AccountDisplayLabel — never a hand-rolled
+                 handle-else-short-id fallback (six other clients already consume it).
+
+                 Three WinUI/FlaUI shapes here are load-bearing, each already paid for
+                 by a prior windows session:
+                   * the row DataTemplate root is a **Button** — a bare Grid/StackPanel
+                     counts and reads fine but exposes NO UIA invoke pattern, so the
+                     e2e could never click it;
+                   * the row Button carries AutomationProperties.Name, without which
+                     FlaUI counts the DataTemplate rows as 0;
+                   * account-item-handle carries an AutomationId ONLY (no static Name),
+                     or get_text returns the Name instead of the bound Text.
+                 ItemsStackPanel is left non-virtualizing (small, bounded list) so a
+                 count-all assertion sees every row. -->
+            <StackPanel Spacing="12">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=settings/account_page/accounts}" />
+                <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                           Opacity="0.7" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=settings/account_page/accounts_subtitle}" />
+
+                <!-- ItemsSource is assigned in code-behind (OnNavigatedTo) rather than
+                     x:Bind: the VM is built there from the credential registry, so an
+                     x:Bind evaluated at InitializeComponent time would see null and
+                     would need page-level change notification to ever recover. The
+                     ObservableCollection then drives every later update directly,
+                     which is what makes `remove` refresh the list IN PLACE with no
+                     re-navigation (the e2e asserts exactly that). -->
+                <!-- AutomationProperties.Name is REQUIRED here, not decorative: without
+                     it FlaUI reports this container as count=0 / visible=False and the
+                     e2e cannot find `account-switcher-list` at all (the same rule that
+                     applies to DataTemplate roots and standalone container Borders).
+                     Diagnosed on the first e2e run: nav landed and no exception was
+                     raised, yet the element was simply absent from the UIA tree. -->
+                <ItemsControl x:Name="AccountSwitcherList"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountSwitcherList}"
+                              AutomationProperties.Name="{loc:Localize Key=settings/account_page/accounts}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:AccountRowVm">
+                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountSwitcherItem}"
+                                    AutomationProperties.Name="{x:Bind DisplayLabel}"
+                                    HorizontalAlignment="Stretch"
+                                    HorizontalContentAlignment="Stretch"
+                                    Margin="0,0,0,4"
+                                    Click="AccountRow_Click"
+                                    Tag="{x:Bind ActorId}">
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock Grid.Column="0"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountItemHandle}"
+                                               VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis"
+                                               Text="{x:Bind DisplayLabel}" />
+
+                                    <!-- Stage-2 per-account "require re-auth to activate"
+                                         toggle (long-term-store.md § Per-account re-auth).
+                                         Rendered on EVERY row, the active one included — the
+                                         natural target is the user's admin identity, usually
+                                         the account you are already on (and the one the admin
+                                         auto-default flags). Setting the flag never prompts;
+                                         only ACTIVATING a flagged account does (the VM's
+                                         Windows Hello gate). Labels hidden (compact per-row
+                                         switch) — the meaning rides AutomationProperties.Name
+                                         + the tooltip, matching apple's labelsHidden toggle.
+                                         Name is also REQUIRED for FlaUI to see it, same rule
+                                         as the DataTemplate root and the container list. -->
+                                    <ToggleSwitch Grid.Column="1"
+                                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountRequireConfirmToggle}"
+                                                  AutomationProperties.Name="{loc:Localize Key=settings/account_page/require_confirm_toggle}"
+                                                  ToolTipService.ToolTip="{loc:Localize Key=settings/account_page/require_confirm_toggle}"
+                                                  VerticalAlignment="Center"
+                                                  MinWidth="0"
+                                                  OnContent=""
+                                                  OffContent=""
+                                                  IsOn="{x:Bind RequireConfirmToActivate}"
+                                                  Toggled="RequireConfirm_Toggled"
+                                                  Tag="{x:Bind ActorId}" />
+
+                                    <!-- Marks the active row. Rendered ONLY on the active
+                                         account, so a count of this id is how the e2e
+                                         asserts "exactly one active". -->
+                                    <TextBlock Grid.Column="2"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountItemActiveIndicator}"
+                                               VerticalAlignment="Center"
+                                               Visibility="{x:Bind local:SettingsAccountPage.BoolToVisibility(IsActive)}"
+                                               Text="{loc:Localize Key=common/active}" />
+
+                                    <!-- "Open in new window" — the running instance's
+                                         concurrent-instances affordance (account-scoping.md
+                                         § Concurrent instances → the running instance's
+                                         surface). EVERY row, the active one included:
+                                         windows retired its same-account refusal onto a
+                                         SHARED lock (W5.6 (account-data-plane.md § Workstreams), 2026-08-24), so a spawn for the
+                                         account this instance already serves is now an
+                                         ordinary bound launch rather than the guaranteed
+                                         failure that used to justify hiding it here.
+                                         The child owns its whole binding outcome — nothing
+                                         is pre-checked here, which is what keeps one gate
+                                         instead of two that can drift. -->
+                                    <Button Grid.Column="3"
+                                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountOpenNewInstanceButton}"
+                                            AutomationProperties.Name="{loc:Localize Key=settings/account_page/open_new_instance}"
+                                            ToolTipService.ToolTip="{loc:Localize Key=settings/account_page/open_new_instance}"
+                                            Click="AccountOpenNewInstance_Click"
+                                            Tag="{x:Bind ActorId}"
+                                            Content="{loc:Localize Key=settings/account_page/open_new_instance}" />
+
+                                    <!-- Non-active rows only: removing the ACTIVE account
+                                         would strand the session (long-term-store.md). -->
+                                    <Button Grid.Column="4"
+                                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountRemoveButton}"
+                                            AutomationProperties.Name="{loc:Localize Key=common/remove}"
+                                            Visibility="{x:Bind local:SettingsAccountPage.BoolToVisibility(CanRemove)}"
+                                            Click="AccountRemove_Click"
+                                            Tag="{x:Bind ActorId}"
+                                            Content="{loc:Localize Key=common/remove}" />
+                                </Grid>
+                            </Button>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountAddButton}"
+                        Click="AccountAdd_Click"
+                        Content="{loc:Localize Key=settings/account_page/add_account}" />
+            </StackPanel>
+
+            <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+            <!-- Identity section (handle + nest-url; the actor-id + quota live on
+                 the Status sub-page, settings.md § Navigation model). -->
+            <StackPanel Spacing="12">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountSettingsLink}"
+                           Text="{loc:Localize Key=common/identity}" />
+
+                <Grid RowSpacing="8">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="120" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Opacity="0.7"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.SettingsHandleLabel}"
+                               Text="{loc:Localize Key=common/handle}" />
+                    <TextBlock
+                        Grid.Row="0" Grid.Column="1"
+                        x:Name="HandleText"
+                        Text="--" />
+
+                    <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Opacity="0.7" Text="{loc:Localize Key=settings/nest_url}" />
+                    <TextBlock
+                        Grid.Row="1" Grid.Column="1"
+                        x:Name="NestUrlText"
+                        Text="--"
+                        IsTextSelectionEnabled="True" />
+                </Grid>
+
+                <!-- Identity export (settings.md § Identity export) — the QR a second
+                     device scans to import this identity. Hidden until shown: the QR
+                     carries the full Ed25519 secret. Placed before Change handle
+                     (mirrors the shipped apple/linux/web order). Pure view state —
+                     nothing persisted, no server call. -->
+                <StackPanel AutomationProperties.AutomationId="{x:Bind ids:Ids.IdentityExportSection}"
+                            AutomationProperties.Name="Identity export" Spacing="8">
+                    <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                               Text="{loc:Localize Key=settings/identity_export/title}" />
+                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.IdentityExportDescription}"
+                               Opacity="0.7" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=settings/identity_export/desc}" />
+                    <TextBlock x:Name="IdentityExportWarning"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.IdentityExportWarning}"
+                               Visibility="Collapsed" Foreground="Red" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=settings/identity_export/warning}" />
+                    <!-- Dark-on-light explicitly (Background="White", modules Fill="Black")
+                         rather than theme brushes — a theme-inverted QR does not scan; the
+                         one place this page deliberately ignores dark mode. -->
+                    <!-- AutomationProperties.Name is required, not just AutomationId: a bare
+                         container with no text content (here, only dynamically-added
+                         Rectangle children) is otherwise pruned from the UIA tree — FlaUI
+                         count/is_visible = 0 (reference_winui_flaui_datatemplate_name;
+                         mirrors mail-aliases-list's Name="Aliases"). -->
+                    <Canvas x:Name="IdentityExportQrCanvas"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.IdentityExportQr}"
+                            AutomationProperties.Name="Identity QR code"
+                            Visibility="Collapsed"
+                            Width="220" Height="220" Background="White"
+                            HorizontalAlignment="Left" />
+                    <Button x:Name="IdentityExportShowQrButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.IdentityExportShowQrButton}"
+                            Click="IdentityExportShowQrButton_Click"
+                            Content="{loc:Localize Key=settings/identity_export/show_qr}" />
+                </StackPanel>
+
+                <!-- Recovery kit (settings.md § Recovery kit) — the RecoveryKey's
+                     Settings home, placed IMMEDIATELY after Identity export because the
+                     two are siblings: each reveals a root secret once, as 64-hex + QR,
+                     with a warning beside it, and neither persists anything. Ratified
+                     2026-08-01 as a section on THIS page, not a new rail entry.
+
+                     Every decision here comes from shared Rust — the status line's
+                     state, which actions it enables, and what a succession did all
+                     arrive already decided through RecoveryKitViewModel →
+                     INestRpcClient → libs/fauna-ffi/src/recovery.rs.
+                     ⚠ Nothing here may re-derive enablement from status.kind:
+                     allowsStolen is unconditionally true (theft is exactly the no-kit
+                     case) and allowsReplace stays true DURING a pending window.
+
+                     The two state-gated actions (escrow re-seal, veto) and the minted
+                     kit trio are Collapsed when they do not apply — Collapsed elements
+                     are not counted by FlaUI, which is exactly what optional_elements
+                     asks for. -->
+                <StackPanel x:Name="RecoveryKitSection"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitSection}"
+                            AutomationProperties.Name="Recovery kit" Spacing="8">
+                    <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                               Text="{loc:Localize Key=settings/recovery_kit/title}" />
+
+                    <!-- The post-succession group sweep's own lines, at the TOP of the
+                         section — tui's order (settings.md § Recovery kit → The sweep's
+                         own lines). ID-less prose, like tui's chrome: the ceremony's
+                         central claim is asserted as STATE (data.succession_sweep), never
+                         read off the screen, and there is deliberately no ui.yaml id for
+                         either line or for the header/status pair above them either.
+                         Collapsed (not counted by FlaUI) when there is nothing to show —
+                         an ordinary sign-in that did not just run a ceremony, or a
+                         succession over zero groups. -->
+                    <StackPanel x:Name="SweepChromePanel" Visibility="Collapsed" Spacing="4">
+                        <TextBlock x:Name="SweepOutcomeText" Visibility="Collapsed"
+                                   TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+                        <TextBlock x:Name="SweepUnattestedText" Visibility="Collapsed"
+                                   TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+                        <!-- Gated on owesWork, deliberately NOT on whether this device can
+                             retry — hiding it where the retry cannot run would leave the
+                             two lines above naming a control that is not on screen, the
+                             exact dishonesty the gate exists to prevent. Every press
+                             answers in words on error-message. -->
+                        <Button x:Name="RecoveryKitSweepRetryButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitSweepRetryButton}"
+                                Content="{loc:Localize Key=settings/recovery_kit/sweep_retry}"
+                                Click="RecoveryKitSweepRetryButton_Click"
+                                Visibility="Collapsed" HorizontalAlignment="Left" />
+                    </StackPanel>
+
+                    <!-- The post-succession aftermath's progress lines (settings.md
+                         § Recovery kit → The post-succession aftermath's progress
+                         lines), one per leg in the order the legs run — leg 7 (drafts)
+                         ABOVE leg 6 (the burn, the only leg that takes something away)
+                         — and ABOVE the status line, tui/linux/web/apple's order. Each
+                         paints a shared projection's already-resolved text from
+                         AftermathProgress and is Collapsed (absent) while its leg has
+                         nothing to say, which is always for an ordinary account. Leg 5
+                         (recovery-kit-corpus-reseal-status) reports from the sync
+                         agent into no FFI app's sink, so it is not rendered here, as
+                         on apple. AutomationId only, no static Name (get_text reads
+                         the Text). -->
+                    <TextBlock x:Name="AftermathBackupRegrantText" Visibility="Collapsed"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitBackupRegrantStatus}"
+                               TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+                    <TextBlock x:Name="AftermathMlsResealText" Visibility="Collapsed"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitMlsResealStatus}"
+                               TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+                    <TextBlock x:Name="AftermathGrantRemintText" Visibility="Collapsed"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitGrantRemintStatus}"
+                               TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+                    <TextBlock x:Name="AftermathDraftsResealText" Visibility="Collapsed"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitDraftsResealStatus}"
+                               TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+                    <TextBlock x:Name="AftermathMailBurnText" Visibility="Collapsed"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitMailBurnStatus}"
+                               TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+                    <!-- The inherited email-filter backlog (succession-aftermath.md
+                         § Adjudicating what the aftermath carries across): the count
+                         of rules still awaiting a verdict and where to answer them,
+                         from the same InheritedFilterMarks cache the Email Filters
+                         list marks from. Collapsed at zero. -->
+                    <TextBlock x:Name="InheritedFiltersText" Visibility="Collapsed"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitInheritedFiltersStatus}"
+                               TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+
+                    <!-- AutomationId ONLY, no static Name: a get_text target with both
+                         returns the Name instead of the bound Text
+                         (reference_windows_flaui_gettext_dynamic_label_no_name). Paints
+                         status_loading before the chain read resolves — the section
+                         still owes the user a reason for the dead buttons (ui/README.md
+                         rule 5) — which the driver reads back as "". -->
+                    <TextBlock x:Name="RecoveryKitStatusText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitStatus}"
+                               TextWrapping="Wrap"
+                               Text="{loc:Localize Key=settings/recovery_kit/status_loading}" />
+
+                    <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=settings/recovery_kit/desc}" />
+
+                    <!-- The shown-once kit a ceremony just minted, rendered through the
+                         ONBOARDING recovery_kit screen's own ids rather than
+                         settings-specific twins — it is the same artifact (priority #3,
+                         ratified 2026-08-01). There is deliberately no path that shows
+                         it again and there can never be one: the secret is offline-only,
+                         so nothing on the device holds it after this panel closes. -->
+                    <StackPanel x:Name="MintedKitPanel" Visibility="Collapsed" Spacing="8">
+                        <TextBlock x:Name="MintedSecretText"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitSecretDisplay}"
+                                   FontFamily="Consolas" TextWrapping="Wrap"
+                                   IsTextSelectionEnabled="True" Text="" />
+                        <Button x:Name="MintedSecretCopyButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitSecretCopyBtn}"
+                                Click="MintedSecretCopyButton_Click"
+                                Content="{loc:Localize Key=common/copy}" />
+                        <!-- Dark-on-light explicitly, and AutomationProperties.Name is
+                             required rather than optional: a container whose only
+                             children are dynamically-added Rectangles is otherwise
+                             pruned from the UIA tree (identity-export-qr's own note). -->
+                        <Canvas x:Name="MintedKitQrCanvas"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitQr}"
+                                AutomationProperties.Name="Recovery kit QR code"
+                                Width="220" Height="220" Background="White"
+                                HorizontalAlignment="Left" />
+                        <!-- ⚠ NOT an error, and never rendered as one: the registration
+                             has already landed, so the secret above is live and is the
+                             only copy in existence. Say the kit works AND that phrase
+                             recovery is not yet armed. -->
+                        <TextBlock x:Name="MintedNoEscrowWarning" Visibility="Collapsed"
+                                   Foreground="Orange" TextWrapping="Wrap"
+                                   Text="{loc:Localize Key=settings/recovery_kit/status_registered_no_escrow}" />
+                    </StackPanel>
+
+                    <!-- Kit-in-hand entry: the ONBOARDING recovery_entry screen's own
+                         input, reused inline (user-approved 2026-08-01) — a pasted
+                         phrase is the same artifact as a displayed one. Feeds replace,
+                         stolen, veto and the no-escrow re-seal; Collapsed until one of
+                         them is reachable. -->
+                    <TextBox x:Name="RecoveryPhraseBox"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryEntryPhraseField}"
+                             Visibility="Collapsed"
+                             PlaceholderText="{loc:Localize Key=settings/recovery_kit/kit_phrase_placeholder}" />
+
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="RecoveryCreateButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitCreateButton}"
+                                IsEnabled="False"
+                                Click="RecoveryCreateButton_Click"
+                                Content="{loc:Localize Key=settings/recovery_kit/create}" />
+                        <Button x:Name="RecoveryReplaceButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitReplaceButton}"
+                                IsEnabled="False"
+                                Click="RecoveryReplaceButton_Click"
+                                Content="{loc:Localize Key=settings/recovery_kit/replace}" />
+                        <Button x:Name="RecoveryLostButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitLostButton}"
+                                IsEnabled="False"
+                                Click="RecoveryLostButton_Click"
+                                Content="{loc:Localize Key=settings/recovery_kit/lost}" />
+                    </StackPanel>
+
+                    <!-- Renders ONLY in the registered-no-escrow state: the kit-in-hand
+                         re-put that restores phrase recovery WITHOUT retiring the held
+                         kit (deliberately not a create, which would retire a key the
+                         user may have just spent 30 days landing). -->
+                    <Button x:Name="RecoveryEscrowResealButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitEscrowResealButton}"
+                            Visibility="Collapsed"
+                            Click="RecoveryEscrowResealButton_Click"
+                            Content="{loc:Localize Key=settings/recovery_kit/escrow_reseal}" />
+
+                    <!-- Renders ONLY while a seed-alone replacement is in its window.
+                         The LOUD half of that condition is the every-page critical-alerts
+                         banner, which is text-only and so cannot carry this action. -->
+                    <Button x:Name="RecoveryPendingVetoButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryPendingVetoButton}"
+                            Visibility="Collapsed"
+                            Click="RecoveryPendingVetoButton_Click"
+                            Content="{loc:Localize Key=settings/recovery_kit/veto}" />
+
+                    <!-- The succession trigger and its type-to-confirm gate — the same
+                         idiom account deletion uses, for the same reason: this is
+                         irreversible and re-points the whole account, so a bare click
+                         must not reach it. The token is the literal SUCCEED and is
+                         NEVER localized; only its prompt is. The gate is a SECOND
+                         condition, not a replacement for the status one, and both are
+                         re-checked in the handler (a disabled control emits no gesture,
+                         but a test agent driving the id reaches it). -->
+                    <StackPanel x:Name="StolenActionPanel" Visibility="Collapsed" Spacing="8">
+                        <TextBlock Foreground="Orange" TextWrapping="Wrap"
+                                   Text="{loc:Localize Key=settings/recovery_kit/stolen_warning}" />
+                        <TextBox x:Name="StolenConfirmBox"
+                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.IdentityStolenConfirmField}"
+                                 TextChanged="StolenConfirmBox_TextChanged"
+                                 PlaceholderText="{loc:Localize Key=settings/recovery_kit/stolen_confirm_placeholder}" />
+                        <Button x:Name="IdentityStolenButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.IdentityStolenButton}"
+                                IsEnabled="False"
+                                Background="#C42B1C"
+                                Foreground="White"
+                                Click="IdentityStolenButton_Click"
+                                Content="{loc:Localize Key=settings/recovery_kit/stolen}" />
+                    </StackPanel>
+                </StackPanel>
+
+                <!-- Separator -->
+                <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+                <!-- Change handle — "Change Handle" section header (account_page/change_handle)
+                     + a terse "Change" button (common/change), matching web/linux/apple/android,
+                     which all render the header text on the section and "Change" on the button. -->
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=settings/account_page/change_handle}" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBox x:Name="NewHandleBox"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.NewHandle}"
+                             MinWidth="200"
+                             Header="{loc:Localize Key=settings/account_page/new_handle}"
+                             PlaceholderText="{loc:Localize Key=settings/account_page/new_handle_placeholder}" />
+                    <Button x:Name="ChangeHandleButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ChangeHandle}"
+                            Click="ChangeHandleButton_Click"
+                            Content="{loc:Localize Key=common/change}" />
+                </StackPanel>
+            </StackPanel>
+
+            <!-- Separator -->
+            <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+            <!-- Data export (settings.md § Data export; account-data-plane.md §
+                 Nest-side requirements item 1, Payload stores decision (5) — the
+                 full archive is the DEFAULT and there is no toggle). Placed here,
+                 before Sign out / Danger Zone, mirroring linux's Data group
+                 (apps/fauna-linux/src/settings/account.rs — after Bridges, before
+                 Session). windows is the last of 7 apps to build this button. -->
+            <StackPanel Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=settings/account_page/data_export}" />
+                <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=settings/account_page/export_subtitle}" />
+                <Button
+                    x:Name="ExportDataButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.SettingsExportDataButton}"
+                    Click="ExportDataButton_Click"
+                    Content="{loc:Localize Key=settings/account_page/export_my_data}" />
+            </StackPanel>
+
+            <!-- Separator -->
+            <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+            <!-- Sign out (clears local credentials + state, returns to onboarding;
+                 settings.md § Account, line 51). Lifts the linux account.rs
+                 sign-out into the uniform inline-confirm shape (mirrors the
+                 admin-factory-reset confirm). -->
+            <StackPanel Spacing="8">
+                <Button
+                    x:Name="SignOutButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.SignOutButton}"
+                    Click="SignOutButton_Click"
+                    Content="{loc:Localize Key=settings/sign_out}" />
+
+                <!-- Inline destructive confirm: Collapsed-when-closed so the
+                     sign-out-confirm-button id only surfaces in UIA while open
+                     (the windows inline-confirm idiom; sidesteps the
+                     ContentDialog primary-button AutomationId problem). -->
+                <StackPanel x:Name="SignOutConfirmPanel" Visibility="Collapsed" Spacing="8">
+                    <TextBlock TextWrapping="Wrap" Opacity="0.85"
+                               Text="{loc:Localize Key=settings/sign_out_confirm}" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button
+                            x:Name="SignOutConfirmButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.SignOutConfirmButton}"
+                            Click="SignOutConfirmButton_Click"
+                            Background="#C42B1C"
+                            Foreground="White"
+                            Content="{loc:Localize Key=settings/sign_out}" />
+                        <Button
+                            x:Name="SignOutCancelButton"
+                            Click="SignOutCancelButton_Click"
+                            Content="{loc:Localize Key=common/cancel}" />
+                    </StackPanel>
+                </StackPanel>
+            </StackPanel>
+
+            <!-- Separator -->
+            <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+            <!-- Danger Zone. Inline type-to-confirm (mirrors web/tui, settings.md §
+                 User actions: settings-delete-account-button stays disabled until the
+                 confirm field reads exactly "DELETE") — NOT the sign-out reveal-panel
+                 idiom above, since the other apps show the field immediately with no
+                 reveal click. Replaces the former ContentDialog shape, whose
+                 dynamically-created Primary button carried no AutomationId and was
+                 unreachable from FlaUI. -->
+            <StackPanel Spacing="12">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Foreground="Red" Text="{loc:Localize Key=common/danger_zone}" />
+                <TextBlock Opacity="0.7" TextWrapping="Wrap" Text="{loc:Localize Key=settings/danger_zone_desc}" />
+
+                <TextBox
+                    x:Name="DeleteConfirmBox"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.SettingsDeleteConfirmField}"
+                    MaxWidth="280"
+                    HorizontalAlignment="Left"
+                    PlaceholderText="{loc:Localize Key=settings/delete_confirm_placeholder}"
+                    TextChanged="DeleteConfirmBox_TextChanged" />
+
+                <Button
+                    x:Name="DeleteAccountButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.SettingsDeleteAccountButton}"
+                    Click="DeleteAccountButton_Click"
+                    IsEnabled="False"
+                    Background="#C42B1C"
+                    Foreground="White"
+                    Content="{loc:Localize Key=settings/account_page/delete_account}" />
+            </StackPanel>
+
+            <!-- Separator -->
+            <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+            <!-- Pending actions (settings.md § Pending actions) — a STANDING
+                 section, always present (never conditionally rendered — the
+                 affordance must be findable exactly when a mis-clicker goes
+                 looking for it), sitting below the two delayed verbs this page
+                 hosts (change-handle above, delete-account in the Danger Zone
+                 above). The header answers honestly in all three states — bare
+                 title while un-hydrated, the empty-state line once loaded with
+                 nothing scheduled, the counted title with rows — mirroring
+                 tui's `pending_actions_elements` / linux's
+                 `build_pending_actions_group` / web's `+page.svelte` exactly.
+                 windows is the last of 7 apps to build this section.
+
+                 No AutomationProperties.Name on the header: the dynamic
+                 three-state text IS the queryable content (get_text with both
+                 set returns the Name instead of the bound Text —
+                 RecoveryKitStatusText's identical shape). Each row's Grid root
+                 DOES need one — a bare container with no static Name is
+                 pruned from the UIA tree (EmailFilterPanel's filter-item /
+                 the account-switcher rows above, same rule). -->
+            <StackPanel Spacing="8">
+                <TextBlock x:Name="PendingActionsTitleText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.PendingActionsSection}"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           TextWrapping="Wrap"
+                           Text="{loc:Localize Key=settings/pending_actions/title}" />
+
+                <ItemsControl x:Name="PendingActionsList">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:PendingActionRowVm">
+                            <Grid ColumnSpacing="8" Padding="0,4"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.PendingActionItem}"
+                                  AutomationProperties.Name="{x:Bind Description}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+
+                                <TextBlock Grid.Column="0"
+                                           AutomationProperties.AutomationId="{x:Bind ids:Ids.PendingActionDescription}"
+                                           VerticalAlignment="Center"
+                                           TextWrapping="Wrap"
+                                           Text="{x:Bind Description}" />
+
+                                <TextBlock Grid.Column="1"
+                                           AutomationProperties.AutomationId="{x:Bind ids:Ids.PendingActionExecuteAfter}"
+                                           VerticalAlignment="Center"
+                                           Opacity="0.7"
+                                           Margin="8,0"
+                                           Text="{x:Bind ExecuteAfterText}" />
+
+                                <Button Grid.Column="2"
+                                        AutomationProperties.AutomationId="{x:Bind ids:Ids.PendingActionCancelButton}"
+                                        Click="CancelPendingAction_Click"
+                                        Tag="{x:Bind Id}"
+                                        Content="{loc:Localize Key=settings/pending_actions/cancel}" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

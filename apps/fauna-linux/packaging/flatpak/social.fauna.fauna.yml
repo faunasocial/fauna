@@ -1,0 +1,106 @@
+app-id: social.fauna.fauna
+runtime: org.gnome.Platform
+# Track the current supported GNOME runtime — 46 went EOL 2025-04 (flatpak
+# warns loudly at install time) and the toolchain no longer couples this
+# manifest to any SDK branch (see below). Floor: GTK 4.12 / libadwaita 1.5.
+runtime-version: '50'
+sdk: org.gnome.Sdk
+# Toolchain: rustup inside a network-enabled build step, honoring the repo's
+# `rust-toolchain.toml` pin — deliberately NOT an SDK rust extension
+# (decided 2026-07-14; see `docs/goal/architecture/installers/linux-desktop.md`
+# § Flatpak for the rationale). Two facts drove it: (1) no GNOME SDK pins an
+# extension-point version for `rust-stable`, so the extension route
+# structurally cannot reach a toolchain new enough for the workspace
+# (rustc >=1.91); (2) this manifest's `dir` source already requires sandbox
+# network for `cargo build`'s crates.io fetch, so rustup adds no new build
+# requirement. The rustup route also builds with the EXACT pinned nightly
+# every dev machine and CI use, instead of an unrelated stable.
+# ⚠ Flathub would reject a network-during-build manifest — if publishing
+# there ever becomes a goal, that track needs vendored cargo sources
+# (flatpak-cargo-generator) and a revisit of the toolchain source.
+command: fauna-desktop
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --share=network
+  - --device=dri
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.kde.StatusNotifierWatcher
+  # The launcher badge (linux.md § Home-screen widget): the unread count is a
+  # `com.canonical.Unity.LauncherEntry.Update` broadcast, and this is the grant
+  # Flathub manifests carry for it (the sandbox proxy admits the broadcast
+  # under a talk grant for the interface's name prefix).
+  - --talk-name=com.canonical.Unity
+  # Credential storage: the client keeps the identity trio + per-actor slots
+  # in the Secret Service (libsecret). Without this grant every keyring call
+  # fails ServiceUnknown inside the sandbox and sign-in cannot persist.
+  - --talk-name=org.freedesktop.secrets
+  # ⚠ NO session-bus name grants here, and that is deliberate — do not "fix"
+  # a bus-name problem by adding one back (linux-desktop.md § Flatpak).
+  #
+  # Until 2026-08-22 this manifest carried three: `--own-name=` the app id,
+  # plus an `--own-name=`/`--talk-name=` wildcard pair for the per-(OS login,
+  # account) raise channel (account-scoping.md § Concurrent instances). All
+  # three existed for ONE reason — the GtkApplication id was spelled
+  # `social.fauna.desktop`, a different string from this app-id, so the sandbox
+  # D-Bus proxy refused `g_application_register()` and every per-account name
+  # without being told.
+  #
+  # `APP_ID` is now this very string, and Flatpak's default session-bus policy
+  # already admits `$FLATPAK_ID` *and its subnames*, which covers both the
+  # app-wide name and `social.fauna.fauna.a<token>` — a subname by
+  # construction. A grant reappearing here means the two ids have drifted
+  # apart again: fix the id, not the manifest.
+  # Pinned by `packaging_identity_test.rs`.
+  - --filesystem=xdg-config/fauna:create
+  - --filesystem=xdg-data/fauna:create
+  # The always-on sync-agent seam (linux-desktop.md § Flatpak): the app writes
+  # a HOST systemd user unit exec'ing `flatpak run --command=fauna-sync-agent`
+  # through this grant, and enables/starts it over the user manager's D-Bus
+  # API below — `systemctl` binary calls don't cross the sandbox. Without
+  # either grant the app falls back to running the bundled agent as a direct
+  # child (app-lifetime residency, the pre-seam interim).
+  - --filesystem=xdg-config/systemd/user:create
+  - --talk-name=org.freedesktop.systemd1
+modules:
+  - name: fauna-linux
+    buildsystem: simple
+    build-options:
+      # rustup installs the toolchain into the module build dir; its cargo
+      # shim reads the repo's rust-toolchain.toml and auto-installs the pin.
+      append-path: /run/build/fauna-linux/cargo/bin
+      env:
+        CARGO_HOME: /run/build/fauna-linux/cargo
+        RUSTUP_HOME: /run/build/fauna-linux/rustup
+        # Conservative cap, not NCPU — a full from-scratch workspace release
+        # build inside the sandbox shouldn't saturate a shared build host.
+        CARGO_BUILD_JOBS: '8'
+      build-args:
+        # Needed twice over: rustup's toolchain download AND cargo's
+        # crates.io fetch (the dir source vendors nothing). See the header
+        # comment for the Flathub caveat this carries.
+        - --share=network
+    build-commands:
+      - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain none
+      - cargo build --release -p fauna-linux -p fauna-sync-agent
+      - install -Dm755 target/release/fauna-desktop /app/bin/fauna-desktop
+      # The per-user sync agent ships beside the app on every channel
+      # (linux-desktop.md § Installation Files). The app keeps it always-on
+      # via a host systemd user unit exec'ing
+      # `flatpak run --command=fauna-sync-agent` (the finish-args grants
+      # above), falling back to a direct app child when the grants are
+      # missing — see linux-desktop.md § Flatpak.
+      - install -Dm755 target/release/fauna-sync-agent /app/bin/fauna-sync-agent
+      - install -Dm644 apps/fauna-linux/packaging/social.fauna.fauna.desktop /app/share/applications/social.fauna.fauna.desktop
+      - install -Dm644 apps/fauna-linux/packaging/social.fauna.fauna.metainfo.xml /app/share/metainfo/social.fauna.fauna.metainfo.xml
+      # Flatpak only exports icons named after the app-id ("fauna.svg" is
+      # skipped as a non-allowed export filename), so this channel installs the
+      # icon under the app-id name and rewrites the shared desktop entry's
+      # Icon= to match — a per-channel rendering of the one shared entry, kept
+      # in the manifest so the deb/install.sh copies stay `Icon=fauna`.
+      - install -Dm644 apps/fauna-linux/fauna.svg /app/share/icons/hicolor/scalable/apps/social.fauna.fauna.svg
+      - sed -i 's/^Icon=fauna$/Icon=social.fauna.fauna/' /app/share/applications/social.fauna.fauna.desktop
+    sources:
+      - type: dir
+        path: ../../../..

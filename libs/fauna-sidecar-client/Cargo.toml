@@ -1,0 +1,33 @@
+[package]
+name = "fauna-sidecar-client"
+description = "The lean one-shot WS-RPC sidecar dialer: connect to a nest internal sidecar route and run the fauna.sidecar.hello token handshake. One audited copy, used by the fauna-iroh-relay server binary."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The `http_to_ws` scheme-rewrite primitive (`web` module, pure/WASM-safe, no
+# other fauna-core surface pulled in here — this crate stays the lean one-shot
+# dialer its own doc comment describes).
+fauna-core = { workspace = true }
+# The L3 dispatcher + the `fauna.sidecar.hello` wire types (`SidecarHello`,
+# `KIND_SIDECAR_HELLO`) the handshake originates, plus the canonical-CBOR codec
+# helpers re-exported at the crate root.
+fauna-protocol = { workspace = true }
+# The substrate-neutral mechanism this crate's protocol glue sits on: the
+# tungstenite `Bytes` adapter, keepalive constants, and the capturing TLS verifier
+# for the loopback self-signed hop. This crate adds the sidecar-channel *protocol*
+# (route URL + token handshake) one layer above it — keeping `fauna-ws-substrate`
+# free of any specific channel protocol, exactly as the federation hello lives in
+# its own consumer, not in the substrate.
+fauna-ws-substrate = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+# The shared dial-retry policy's own log lines (`retry_while_reaching_nest` /
+# `serve_while_reaching_nest`). Both consumers already install a
+# `tracing_subscriber`, so the retry story reads on the sidecar's own stderr —
+# and in `docker logs` — exactly as it did when each binary owned its loop.
+tracing = { workspace = true }
+serde = { workspace = true }
+getrandom = { workspace = true }
+thiserror = { workspace = true }

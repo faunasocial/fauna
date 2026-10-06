@@ -1,0 +1,42 @@
+[package]
+name = "fauna-account-port"
+description = "The account port's shared transport — how a web wasm chunk other than the core chunk reaches the tab's account runtime: the transport trait, the fault type, the encode/decode helpers every seam's `port` module uses, the JS binding over the SPA's `SharedAccountPort`, and a loopback for native tests (docs/goal/architecture/account-client-lifecycle.md § The client-side lifecycle → The account port, decision (c)). Names neither the plane nor any seam, so a consumer chunk links no store code."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# The loopback transport a seam's native tests wire forwarder → `serve`
+# through, with no browser.
+test-helpers = []
+
+[dependencies]
+# `encode_canonical` / `decode_strict` — what crosses is canonical DAG-CBOR
+# both ways (decision (a)). `default-features = false` drops the native-only
+# `p2p` stack.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# `MaybeSendSync` — the transport trait's supertrait, `Send + Sync` natively
+# and nothing on wasm32, the split every injected seam uses.
+fauna-core = { path = "../fauna-core", default-features = false }
+serde = { workspace = true }
+async-trait = "0.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `js` forwards fauna-core's js-sys time backend for the wasm build.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = "0.4"
+js-sys = { workspace = true }
+# fauna-core's crypto stack pulls getrandom 0.3 and, transitively, 0.2; both
+# need their wasm backend for this crate to build on its own for wasm32
+# (`just wasm-chunk-check`), as `fauna-rpc-wasm` declares them.
+getrandom = { workspace = true, features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test.workspace = true

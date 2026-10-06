@@ -1,0 +1,178 @@
+[package]
+name = "fauna-client-recovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The twelve `fauna.recovery.*` request/reply types (`fauna_protocol::recovery`),
+# the `RpcRequester` transport seam this crate is generic over, and the
+# `RpcErrorClass` / `RpcError` pair the error taxonomy reads refusal codes from
+# (`fauna.auth.superseded` and friends). `default-features = false` drops
+# fauna-protocol's native-only `p2p` default (wireguard → tokio net) so the
+# crate compiles to wasm32 for the web SPA; native workspace builds re-enable it
+# through Cargo feature unification. Path form (not `workspace = true`) is
+# required to override default-features. Mirrors fauna-client-pair.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# The recovery primitives this crate composes into ceremonies: `RecoveryKey`,
+# `RecoveryKeyRegistration`, `IdentitySuccession`, `EscrowChallenge`,
+# `ReplacementVeto`, `ChainHead`, the `fauna://recovery` kit codec, and
+# `ActorKeypair` (the ceremony signs with the identity seed). Plus
+# `canonical_encode`/`canonical_decode` for the embed-as-bytes records.
+fauna-core = { path = "../fauna-core", default-features = false }
+# `seal_seed_escrow` / `unseal_seed_escrow` / `SeedEscrowBlob` — the shared
+# container all 7 apps seal and open the same bytes with
+# (`identity-succession.md` § Seed escrow). `default-features = false` drops the
+# native-only `rusqlite` default → wasm-clean; `js` forwarded below.
+fauna-mls = { path = "../fauna-mls", default-features = false }
+# Ceremony CSPRNG is `RecoveryKey::generate()` inside fauna-core, so this crate
+# mints no randomness of its own — but the successor identity does
+# (`ActorKeypair::generate`), which routes through fauna-core the same way.
+# The cross-page critical-alerts registry (`critical-alerts.md`) the pending-
+# replacement window raises its standing banner through — see `alerts`. Already
+# wasm-clean (its only dep is fauna-core's `localized`), so it adds no native
+# surface to this crate's wasm32 build.
+fauna-client-alerts = { path = "../fauna-client-alerts" }
+# The own-profile read-prove-record (`ceremony::read_own_profile_learning_link`
+# and the edit form's `ceremony::load_profile_edit_base`): the proof is
+# `fauna_client_profile::fetch_own_profile_base`, the record
+# `AccountRegistry::record_predecessors`. Both crates are wasm-clean and already
+# in every consumer's graph (web's `fauna-wasm` included), so the root carries
+# them and web's sign-in hop and edit form run the same body as the native apps
+# (profile.md § After an identity succession → the linkless bullet). The native
+# wrappers around them (`mirror_recovery_head`, `learn_succession_link`) stay
+# native: they derive the home-nest entry from `NestClient` +
+# `fauna-anon-client`'s TOFU pin, neither of which exists on wasm32.
+fauna-client-accounts = { path = "../fauna-client-accounts" }
+fauna-client-profile = { path = "../fauna-client-profile" }
+# `recovery_chain` — the registration-chain reconcile between two of the
+# identity's nests, re-exported here as `chain_reconcile`. The body rests in
+# `fauna-client-core` because both of its callers (`fauna-client-pair`'s link
+# action, `fauna-account-plane`'s secondary leg) sit below this crate.
+fauna-client-core = { path = "../fauna-client-core", default-features = false }
+serde = { workspace = true }
+# `PendingCeremony`'s codec only — the aftermath context the web SPA parks in
+# `sessionStorage` across its account-switch document swap. JSON because the
+# store it crosses is string-typed and browser-local; this is not a wire format
+# and never reaches the nest.
+serde_json = { workspace = true }
+# `RecoveryError`'s `Display` renders through the `errors.recovery_*` strings
+# this crate mints — zero-cost dependency edge (fauna-i18n has none of its
+# own), matching fauna-client/fauna-anon-client/fauna-rpc-wasm's identical fix
+# ().
+fauna-i18n = { path = "../fauna-i18n" }
+# The restored identity seed and the escrow secret never rest un-zeroized: both
+# ceremonies hand back `Zeroizing<[u8; 32]>`.
+zeroize = { workspace = true }
+# Ceremony-step logging (which leg of a multi-call ceremony failed) — the
+# observability rule's "log on the event". wasm-safe: a no-op without a
+# subscriber, and web installs `RingLayer` at boot.
+tracing = { workspace = true }
+# `SuccessionAnchors` / `AnonymousNestConnector` are dyn-dispatched seams the
+# app layer implements, so they box their futures (the `RpcRequester` AFIT
+# shape is static-dispatch-only and cannot).
+async-trait = "0.1"
+# OPTIONAL — the in-group succession **witness** (`witness` module) only.
+# `fauna-conversations` declares the `SuccessionWitness` seam and stays
+# recovery-free by design (priority #2), so the impl has to live on this side of
+# the boundary; gating it keeps the conversations/MLS stack off the two
+# consumers that want ceremonies without threads (`fauna-onboarding-machine`,
+# `fauna-client-alert-sweep`). Enabled today by tui alone; the other app layers
+# take it with their own witness legs.
+fauna-conversations = { path = "../fauna-conversations", optional = true }
+# OPTIONAL — the `aftermath` module's account-store legs only (the witness's
+# durable anchors moved to the account plane, `fauna.state.peer-anchors`,
+# reached through `fauna-conversations`' `PeerAnchorStore` seam). Deliberately
+# NOT a blanket dep: this crate depends on `fauna-mls`, and the account-store seams have
+# no business in openmls' neighbour graph for the two consumers that want
+# ceremonies without an aftermath.
+fauna-client-config = { path = "../fauna-client-config", optional = true }
+# OPTIONAL — the `aftermath` module's legs only (the ordered pass a successor's
+# first session runs; see that module's own doc for why the ORDER is the thing
+# being shared). All four are already wasm-clean and already in the graph of
+# both drivers (tui, and the web SPA's `fauna-wasm`), so the feature adds no
+# build to a consumer that did not have them; gating them keeps the
+# mail/drafts/capability stacks off the two consumers that want ceremonies
+# without an aftermath (`fauna-onboarding-machine`, `fauna-client-alert-sweep`).
+fauna-client-capabilities = { path = "../fauna-client-capabilities", optional = true }
+fauna-client-drafts = { path = "../fauna-client-drafts", optional = true }
+fauna-client-mail-settings = { path = "../fauna-client-mail-settings", optional = true }
+# The inherited-filter raise's own read (`fauna.email.filters.list`) — called
+# rather than re-issued by hand, so the RPC name has one caller.
+fauna-client-email = { path = "../fauna-client-email", optional = true }
+# The tier period-key rotation leg — the successor-side half of the tier
+# re-key, whose custody and mint orchestration this crate drives rather than
+# re-implements (the lifecycle owner is `SubscriptionsAuthor`).
+fauna-client-subscriptions = { path = "../fauna-client-subscriptions", optional = true }
+
+[features]
+default = []
+# The `witness` module: `ChainWitness`, `SuccessionAnchors`,
+# `AnonymousNestConnector`, `ThreadParticipantAnchors`.
+conversations-witness = ["dep:fauna-conversations"]
+
+# The `aftermath` module: `run_succession_aftermath`, `AftermathSink`,
+# `AftermathInputs`, `AftermathCeremony` — the post-succession pass every app
+# drives at a successor's first authenticated session. Wasm-clean on purpose
+# (web is one of its two drivers today), so it carries no target gate the way
+# `ceremony` does.
+aftermath = [
+  "dep:fauna-client-config",
+  "dep:fauna-client-capabilities",
+  "dep:fauna-client-drafts",
+  "dep:fauna-client-mail-settings",
+  "dep:fauna-client-email",
+  "dep:fauna-client-subscriptions",
+]
+
+# NATIVE-ONLY — the `ceremony` module (the app-side succession orchestration
+# extracted from tui). Target-gated so
+# the crate root stays wasm-clean for the web SPA (`fauna-anon-client` is
+# native-only by its own doc comment; `fauna-client` and the on-disk
+# `fauna-mls` engine likewise). The module carries the matching
+# `#[cfg(not(target_arch = "wasm32"))]` in lib.rs.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fauna-anon-client = { path = "../fauna-anon-client" }
+fauna-client = { path = "../fauna-client" }
+# The engine the sweep opens over the successor's scoped store: needs the
+# `native` (rusqlite) side, which the wasm-clean root dep deliberately drops.
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["native"] }
+# The two native drivers this crate owns for its app layers: the witness's
+# `NativeSuccessionChainSource` (a `timeout` around the anonymous dial) and
+# `harvest::spawn_peer_anchor_harvest_sweep` (the roster sweep's own task).
+# Native-only on purpose — web's dialer is its own wasm one and web runs no
+# spawned sweep, so the crate root stays runtime-free for the SPA.
+tokio = { workspace = true }
+
+# Forward the `js` time/rand backends on wasm for the three fauna crates
+# (fauna-core's js-sys clock, fauna-mls's openmls/js). Mirrors
+# fauna-client-capabilities / fauna-client-pair.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"] }
+fauna-client-core = { path = "../fauna-client-core", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The in-memory `FakeNest` requester the ceremony tests drive: it needs the
+# serde bounds `RpcRequester::request` names, and re-encodes replies through the
+# same canonical codec the wire uses.
+tokio = { workspace = true }
+# ⚠ A dev-dependency on THIS crate, with the feature on: an integration test is
+# its own crate and does not inherit the lib's features, so a `#[cfg(feature)]`
+# gate there is simply always false. This makes the witness's durable-anchor
+# tests run under the bare `cargo test -p fauna-client-recovery` instead of only
+# under an `--features` invocation nobody remembers to type — the
+# feature-gated-tests-silently-skipped shape. The lib still *builds* featureless
+# for the two consumers that want ceremonies without threads.
+fauna-client-recovery = { path = ".", features = ["conversations-witness", "aftermath"] }
+# The shared `RecordingRequester` / `block_on` double the aftermath's ordering
+# tests drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# The post-store-ready pass's tests: the shared `FakeSuccessionLedgerStore` and an
+# in-memory registry to park into.
+fauna-client-config = { path = "../fauna-client-config", features = ["test-helpers"] }
+fauna-client-accounts = { path = "../fauna-client-accounts", features = ["test-helpers"] }
+# Leg 8's machine over the door-exact in-memory period-key store.
+fauna-client-subscriptions = { path = "../fauna-client-subscriptions", features = ["test-helpers"] }
+async-trait = "0.1"

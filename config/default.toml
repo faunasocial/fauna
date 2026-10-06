@@ -1,0 +1,38 @@
+# Canonical default nest configuration.
+#
+# This is the single source of truth for how a nest starts with zero
+# user-provided configuration. Docker, desktop installers, and E2E tests
+# all derive their config from this file.
+#
+# The only field that should be overridden per-deployment is `listen`
+# (via the --bind CLI flag) to set the port.
+#
+# Paths use /data/ (Docker convention). Other platforms rewrite these:
+#   macOS:   ~/Library/Application Support/Fauna/
+#   Linux:   /var/lib/fauna/
+#   Windows: %PROGRAMDATA%\Fauna\
+#   Tests:   {tmp_dir}/
+
+[nest]
+mode = "public"
+listen = "0.0.0.0:3000"
+db_path = "/data/nest.db"
+blob_dir = "/data/blobs"
+
+# No `registration_mode` seed here on purpose: a nest that boots before its admin
+# has picked a posture resolves to `closed` and admits nobody. The admin sets the
+# real posture from their client (`fauna.admin.set_registration_mode`), which
+# persists it in nest state — it is an admin choice, so it is never a config knob
+# or a CLI flag. The seed exists only for pre-claim deployments that must come up
+# already-open.
+
+[acme]
+# Directory the nest's TLS listener reads `fullchain.pem` + `privkey.pem`
+# from, and where the storage trait's `store_acme_material` writes the
+# on-disk PEM copy. Bridges get the wrapped/sealed `TlsCertBlob` via
+# `fauna.bridges.fetch_tls_cert_blob` instead; this directory is the
+# nest's own listener-side material. Production deployments override via
+# the platform installer (Linux /var/lib/fauna/acme, etc.); the /data/
+# default lines up with Docker convention and is rewritten to
+# `{tmp_dir}/acme` by the e2e config-loader.
+dir = "/data/acme"

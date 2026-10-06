@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FaunaApp.Controls.MailListsPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Controls"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Loaded="Panel_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- User-facing mail-lists page (docs/goal/behavior/mail-mass-mailing.md § mail-lists
+         page UX): where a person runs their own mailing lists (a list is a sixth alias
+         kind) — create / edit / delete a list on one of their owned domains, with an
+         optional description, List-Help / List-Archive URLs, and a per-send recipient
+         cap. Dumb renderer of the shared fauna_client_mail_settings::MailListsMachine
+         (exposed by build_mail_lists_machine) — no business logic here (priority #2).
+         Lifts apps/fauna-linux/src/settings/mail_lists.rs and mirrors MailAliasesPanel:
+         embedded in SettingsPage, sharing its page-heading + error-message (via
+         ErrorChanged). The add/edit sheet + the per-row delete confirm are inline reveals.
+
+         The per-row "Members" button opens the mail-list-members page in the full app;
+         inert in the embedded settings seed (no inter-page routing yet). UI precedes
+         backend, surfaced never faked (mail-mass-mailing.md § Implementation status today). -->
+    <StackPanel Spacing="12">
+
+        <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                   Text="{loc:Localize Key=mail_lists/title}" />
+        <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                   Text="{loc:Localize Key=mail_lists/description}" />
+
+        <ProgressRing x:Name="LoadingRing"
+                      IsActive="False" Visibility="Collapsed"
+                      HorizontalAlignment="Left" />
+
+        <Button x:Name="AddButton"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsAddButton}"
+                Style="{StaticResource AccentButtonStyle}"
+                Content="{loc:Localize Key=mail_lists/add_button}"
+                Click="Add_Click" />
+
+        <!-- ── Add/edit inline sheet (mail-lists-add-sheet-*; collapsed) ── -->
+        <StackPanel x:Name="AddSheet" Spacing="8" Visibility="Collapsed">
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=mail_lists/form_title}" />
+            <TextBox x:Name="NameInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsAddSheetNameInput}"
+                     PlaceholderText="{loc:Localize Key=mail_lists/name_placeholder}" />
+            <TextBox x:Name="LocalPartInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsAddSheetLocalPartInput}"
+                     PlaceholderText="{loc:Localize Key=mail_lists/local_part_placeholder}" />
+            <!-- mail-lists-add-sheet-domain-picker — the user's owned domains (driver.select). -->
+            <ComboBox x:Name="DomainPicker"
+                      AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsAddSheetDomainPicker}"
+                      AutomationProperties.Name="Domain" />
+            <TextBox x:Name="DescriptionInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsAddSheetDescriptionInput}"
+                     PlaceholderText="{loc:Localize Key=mail_lists/description_placeholder}" />
+            <TextBox x:Name="ListHelpInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsAddSheetListHelpUrlInput}"
+                     PlaceholderText="{loc:Localize Key=mail_lists/list_help_placeholder}" />
+            <TextBox x:Name="ListArchiveInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsAddSheetListArchiveUrlInput}"
+                     PlaceholderText="{loc:Localize Key=mail_lists/list_archive_placeholder}" />
+            <TextBox x:Name="PerSendInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsAddSheetPerSendCapInput}"
+                     PlaceholderText="{loc:Localize Key=mail_lists/per_send_placeholder}" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button x:Name="SubmitButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsAddSheetSubmitButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Content="{loc:Localize Key=mail_lists/submit}"
+                        Click="Submit_Click" />
+                <Button x:Name="CancelButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsAddSheetCancelButton}"
+                        Content="{loc:Localize Key=mail_lists/cancel}"
+                        Click="Cancel_Click" />
+            </StackPanel>
+        </StackPanel>
+
+        <!-- ── Lists (mail-lists-list) — Border-wrapped + non-virtualizing, like
+             MailAliasesPanel (reference_winui_flaui_datatemplate_name). ── -->
+        <Border x:Name="ListBorder"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsList}"
+                AutomationProperties.Name="Lists"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1" CornerRadius="6" Padding="12">
+            <StackPanel Spacing="4">
+                <TextBlock x:Name="ListEmpty" Opacity="0.5" TextWrapping="Wrap"
+                           Visibility="Collapsed"
+                           Text="{loc:Localize Key=mail_lists/empty}" />
+                <ItemsControl x:Name="ListsList">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Vertical" Spacing="8" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:MailListRow">
+                            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsListItem}"
+                                    AutomationProperties.Name="{x:Bind Address}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1" CornerRadius="6"
+                                    Padding="12" Margin="0,4">
+                                <Grid ColumnSpacing="8" RowSpacing="2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" Spacing="2">
+                                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsListItemName}"
+                                                   Text="{x:Bind NameLine}"
+                                                   Style="{StaticResource BodyStrongTextBlockStyle}"
+                                                   IsTextSelectionEnabled="True" />
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsListItemMemberCount}"
+                                                       Text="{x:Bind MemberCount}"
+                                                       Opacity="0.7" FontSize="12" />
+                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsListItemLastSend}"
+                                                       Text="{x:Bind LastSend}"
+                                                       Opacity="0.7" FontSize="12" />
+                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsListItemQuota}"
+                                                       Text="{x:Bind Quota}"
+                                                       Opacity="0.7" FontSize="12" />
+                                        </StackPanel>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal"
+                                                Spacing="4" VerticalAlignment="Center">
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsListItemEditButton}"
+                                                Content="{x:Bind EditLabel}"
+                                                Tag="{x:Bind ListIdHex}"
+                                                Click="Edit_Click" />
+                                        <!-- Opens the mail-list-members settings sub-page scoped to
+                                             this row's list (MailListsPanel.Members_Click). -->
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsListItemMembersButton}"
+                                                Content="{x:Bind MembersLabel}"
+                                                Tag="{x:Bind ListIdHex}"
+                                                Click="Members_Click" />
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListsListItemDeleteButton}"
+                                                Content="{x:Bind DeleteLabel}"
+                                                Tag="{x:Bind ListIdHex}"
+                                                Click="Delete_Click" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </Border>
+    </StackPanel>
+</UserControl>

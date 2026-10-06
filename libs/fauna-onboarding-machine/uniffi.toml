@@ -1,0 +1,13 @@
+[bindings.kotlin]
+# Sub-package keeps the generated common-helper objects (FfiConverterString,
+# FfiConverterBoolean, RustBuffer, etc.) namespaced away from sibling
+# crates' generated files. Without this, all three FFI crates emit those
+# helpers into `com.fauna.ffi` and Kotlin rejects the redeclarations.
+package_name = "com.fauna.ffi.onboarding"
+
+# Swift bindings deliberately omit `module_name` here. Setting all three
+# namespaces (fauna_ffi, fauna_provisioning, fauna_onboarding_machine) to
+# the same `module_name` makes the bindgen overwrite a single output file
+# (last namespace wins). Default to `fauna_onboarding_machine.swift` per
+# namespace; clients add `import fauna_onboarding_machine` alongside their
+# existing `import FaunaFFI`.

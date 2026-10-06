@@ -1,0 +1,483 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.AdminMailPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+      The flat admin-mail policy page (admin.md § 6 Mail; mail-policy-config.md
+      § Policy catalog Tier 2; ui.yaml admin-mail). A dumb renderer of the shared
+      fauna_client_mail_settings::MailPolicyMachine through the testable
+      AdminMailViewModel (FaunaApp.Core), consumed over the UniFFI IMailPolicyMachine
+      seam (machine-as-seam). The VM owns all projection / validation / WS-RPC
+      sequencing (priority #2): the get_mail_config hydrate + the seven put_* twins,
+      the out-of-order spam-threshold rejection, and the alias read/write twins; this
+      page renders the snapshot into named controls (NOT heavy x:Bind) and forwards
+      each group's full-PUT Save gesture + the deployment-wide mail-enable toggle.
+      Static labels localize in XAML via the {loc:Localize Key=...} markup extension
+      (xmlns:loc); label-only TextBlocks drop their x:Name (no code-behind reference).
+      No ConfigureAwait(false) in these handlers (off-thread bound-state mutation
+      throws a silent COMException). The admin-nav-back affordance lives in the shared
+      AdminShell header, NOT on this page. Lifts the flat linux reference
+      apps/fauna-linux/src/settings/admin_mail.rs; mirrors AdminAliasesPage (machine
+      build over an FfiNestClient) + MailSpamPanel (named-control RenderState + _syncing
+      guard). Save buttons gather the whole *PolicyValues from the widgets, starting
+      from the persisted snapshot so a blank/unparseable integer falls back to the
+      persisted value (never silently zeroes a knob).
+    -->
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="16" MaxWidth="640" HorizontalAlignment="Left">
+
+            <!-- App-wide error surface (also mirrored below for the state protocol) -->
+            <controls:CopyableInfoBar x:Name="ErrorBar"
+                     Severity="Error" IsOpen="False" IsClosable="True" />
+
+            <!-- Header (page-heading per ui.yaml; the shared page-title element id) -->
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=admin/mail_page/title}" />
+            <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=admin/mail_page/description}" />
+
+            <ProgressRing x:Name="LoadProgress" IsActive="False"
+                          Visibility="Collapsed" HorizontalAlignment="Left" />
+
+            <!-- Hidden mirrors keep the app-wide IDs present for infra (state-protocol read). -->
+            <TextBlock x:Name="ErrorTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+                       AutomationProperties.Name=" " Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+            <TextBlock x:Name="WarningTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.WarningMessage}"
+                       AutomationProperties.Name=" " Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+
+            <!-- ════ Mail-enable master toggle (set_mail_enabled) ════ -->
+            <StackPanel Spacing="2">
+                <ToggleSwitch x:Name="EnabledToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailEnabledToggle}"
+                              Toggled="EnabledToggle_Toggled"
+                              Header="{loc:Localize Key=admin/mail_page/enabled_label}" />
+                <TextBlock Opacity="0.6" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/mail_page/enabled_subtitle}" />
+            </StackPanel>
+
+            <!-- Auto-enable mail for new users (set_auto_enable_mail_for_new_users;
+                 read back via fauna.setup.status). Default-on deployment policy that
+                 makes a new user's client auto-provision its mailbox on first setup;
+                 dispatches immediately on change (non-optimistic, re-reads persisted). -->
+            <StackPanel Spacing="2">
+                <ToggleSwitch x:Name="AutoEnableNewUsersToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailAutoEnableNewUsersToggle}"
+                              Toggled="AutoEnableNewUsersToggle_Toggled"
+                              Header="{loc:Localize Key=admin/mail_page/auto_enable_new_users_label}" />
+                <TextBlock Opacity="0.6" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/mail_page/auto_enable_new_users_subtitle}" />
+            </StackPanel>
+
+            <!-- ════ Spam / inbound perimeter (put_spam_policy) ════ -->
+            <StackPanel Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/mail_page/spam_group_title}" />
+                <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/mail_page/spam_group_desc}" />
+
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/threshold_junk_label}" />
+                    <TextBox x:Name="ThresholdJunkInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailSpamThresholdJunk}"
+                             Width="120" HorizontalAlignment="Left" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/threshold_junk_subtitle}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/threshold_reject_label}" />
+                    <TextBox x:Name="ThresholdRejectInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailSpamThresholdReject}"
+                             Width="120" HorizontalAlignment="Left" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/threshold_reject_subtitle}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/dnsbl_label}" />
+                    <TextBox x:Name="DnsblInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailDnsblServers}"
+                             AcceptsReturn="True" TextWrapping="Wrap" Height="80"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/dnsbl_subtitle}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <ToggleSwitch x:Name="RejectNoRdnsToggle"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailRejectNoRdnsToggle}"
+                                  Header="{loc:Localize Key=admin/mail_page/reject_no_rdns_label}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <ToggleSwitch x:Name="GreylistEnabledToggle"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailGreylistEnabledToggle}"
+                                  Header="{loc:Localize Key=admin/mail_page/greylist_enabled_label}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/greylist_delay_label}" />
+                    <TextBox x:Name="GreylistDelayInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailGreylistDelayInput}"
+                             Width="120" HorizontalAlignment="Left" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/max_conn_per_min_label}" />
+                    <TextBox x:Name="MaxConnPerMinInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailMaxConnPerMinInput}"
+                             Width="120" HorizontalAlignment="Left" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/fcrdns_mode_label}" />
+                    <!-- Items populated in code-behind from the shared
+                         FcrdnsModeOptions() catalog (PopulateSelect) — the
+                         value set has ONE owner (mail-policy-config.md § An
+                         enumerated knob's value set has ONE owner), never a
+                         hand-typed, position-addressed list here. -->
+                    <ComboBox x:Name="FcrdnsModeSelect"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailFcrdnsModeSelect}"
+                              HorizontalAlignment="Left" MinWidth="180" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <ToggleSwitch x:Name="HeloIdentityRequiredToggle"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailHeloIdentityRequiredToggle}"
+                                  Header="{loc:Localize Key=admin/mail_page/helo_identity_label}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <ToggleSwitch x:Name="RejectFcrdnsFailToggle"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailRejectFcrdnsFailToggle}"
+                                  Header="{loc:Localize Key=admin/mail_page/reject_fcrdns_fail_label}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/max_message_bytes_label}" />
+                    <TextBox x:Name="MaxMessageBytesInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailMaxMessageBytesInput}"
+                             Width="180" HorizontalAlignment="Left" />
+                </StackPanel>
+                <!-- ════ Per-user training (Tier-2 combined-score knobs; same put_spam_policy) ════ -->
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/bayesian_weight_label}" />
+                    <TextBox x:Name="BayesianWeightInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailSpamBayesianWeight}"
+                             Width="180" HorizontalAlignment="Left" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/bayesian_min_samples_label}" />
+                    <TextBox x:Name="BayesianMinSamplesInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailSpamBayesianMinSamples}"
+                             Width="180" HorizontalAlignment="Left" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/bayesian_full_confidence_samples_label}" />
+                    <TextBox x:Name="BayesianFullConfidenceSamplesInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailSpamBayesianFullConfidenceSamples}"
+                             Width="180" HorizontalAlignment="Left" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/training_history_retention_label}" />
+                    <TextBox x:Name="TrainingHistoryRetentionInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailSpamTrainingHistoryRetention}"
+                             Width="180" HorizontalAlignment="Left" />
+                </StackPanel>
+                <!-- Recipient-whitelist unlisted-recipient penalty (points; 0 = off, default);
+                     added to a catch-all recipient's combined score. mail-spam.md § Unlisted-
+                     recipient penalty. Same put_spam_policy full-PUT as the other spam knobs. -->
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/unlisted_recipient_penalty_label}" />
+                    <TextBox x:Name="UnlistedRecipientPenaltyInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailUnlistedRecipientPenalty}"
+                             Width="180" HorizontalAlignment="Left" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/unlisted_recipient_penalty_subtitle}" />
+                </StackPanel>
+                <Button x:Name="SpamSaveButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailSpamSaveButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="SpamSaveButton_Click"
+                        HorizontalAlignment="Left"
+                        Content="{loc:Localize Key=admin/mail_page/spam_save}" />
+
+                <!-- ════ Deployment baseline (admin opt-in aggregate; publish_spam_baseline) ════ -->
+                <Button x:Name="PublishSpamBaselineButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailPublishSpamBaselineButton}"
+                        Click="PublishSpamBaselineButton_Click"
+                        HorizontalAlignment="Left"
+                        Content="{loc:Localize Key=admin/mail_page/publish_spam_baseline_button}" />
+                <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/mail_page/publish_spam_baseline_subtitle}" />
+                <TextBlock x:Name="PublishSpamBaselineResult"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailPublishSpamBaselineResult}"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+
+            <!-- ════ Inbound authentication enforcement (put_auth_policy) ════ -->
+            <StackPanel Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/mail_page/auth_group_title}" />
+                <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/mail_page/auth_group_desc}" />
+
+                <ToggleSwitch x:Name="EnforceDmarcToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailAuthEnforceDmarcToggle}"
+                              Header="{loc:Localize Key=admin/mail_page/enforce_dmarc_label}" />
+                <ToggleSwitch x:Name="EnforceDmarcQuarantineToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailAuthEnforceDmarcQuarantineToggle}"
+                              Header="{loc:Localize Key=admin/mail_page/enforce_dmarc_quarantine_label}" />
+                <ToggleSwitch x:Name="EnforceSpfHardfailToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailAuthEnforceSpfHardfailToggle}"
+                              Header="{loc:Localize Key=admin/mail_page/enforce_spf_hardfail_label}" />
+                <ToggleSwitch x:Name="EnforceDkimToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailAuthEnforceDkimToggle}"
+                              Header="{loc:Localize Key=admin/mail_page/enforce_dkim_label}" />
+                <ToggleSwitch x:Name="LogOnlyToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailAuthLogOnlyToggle}"
+                              Header="{loc:Localize Key=admin/mail_page/log_only_label}" />
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/max_failures_label}" />
+                    <TextBox x:Name="MaxFailuresInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailAuthMaxFailuresInput}"
+                             Width="120" HorizontalAlignment="Left" />
+                </StackPanel>
+                <!-- Per-IP concurrent-connection cap (AuthPolicy.max_conn_per_ip; 0 = off),
+                     the seventh put_auth_policy field — mail-policy-config.md § Policy catalog. -->
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/max_conn_per_ip_label}" />
+                    <TextBox x:Name="MaxConnPerIpInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailAuthMaxConnPerIpInput}"
+                             Width="120" HorizontalAlignment="Left" />
+                </StackPanel>
+                <Button x:Name="AuthSaveButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailAuthSaveButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="AuthSaveButton_Click"
+                        HorizontalAlignment="Left"
+                        Content="{loc:Localize Key=admin/mail_page/auth_save}" />
+            </StackPanel>
+
+            <!-- ════ Submission quotas (put_submission_policy) ════ -->
+            <StackPanel Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/mail_page/submission_group_title}" />
+                <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/mail_page/submission_group_desc}" />
+
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/submission_max_per_day_label}" />
+                    <TextBox x:Name="SubmissionMaxPerDayInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailSubmissionMaxPerDayInput}"
+                             Width="120" HorizontalAlignment="Left" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/submission_max_per_day_subtitle}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/submission_max_recipients_label}" />
+                    <TextBox x:Name="SubmissionMaxRecipientsInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailSubmissionMaxRecipientsInput}"
+                             Width="120" HorizontalAlignment="Left" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/submission_max_recipients_subtitle}" />
+                </StackPanel>
+                <Button x:Name="SubmissionSaveButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailSubmissionSaveButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="SubmissionSaveButton_Click"
+                        HorizontalAlignment="Left"
+                        Content="{loc:Localize Key=admin/mail_page/submission_save}" />
+            </StackPanel>
+
+            <!-- ════ IMAP server policy (put_imap_policy) ════ -->
+            <StackPanel Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/mail_page/imap_group_title}" />
+                <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/mail_page/imap_group_desc}" />
+
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/imap_idle_timeout_label}" />
+                    <TextBox x:Name="ImapIdleTimeoutInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailImapIdleTimeoutInput}"
+                             Width="120" HorizontalAlignment="Left" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/imap_idle_timeout_subtitle}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/imap_tombstone_retention_label}" />
+                    <TextBox x:Name="ImapTombstoneRetentionInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailImapTombstoneRetentionInput}"
+                             Width="120" HorizontalAlignment="Left" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/imap_tombstone_retention_subtitle}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/imap_delete_nonempty_label}" />
+                    <!-- Items populated in code-behind from the shared
+                         ImapDeleteNonemptyOptions() catalog (PopulateSelect) —
+                         see the fcrdns select above for why. -->
+                    <ComboBox x:Name="ImapDeleteNonemptySelect"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailImapDeleteNonemptySelect}"
+                              HorizontalAlignment="Left" MinWidth="180" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/imap_bodystructure_cache_label}" />
+                    <TextBox x:Name="ImapBodystructureCacheInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailImapBodystructureCacheInput}"
+                             Width="120" HorizontalAlignment="Left" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/imap_bodystructure_cache_subtitle}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/imap_storage_bytes_label}" />
+                    <TextBox x:Name="ImapStorageBytesInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailImapStorageBytesInput}"
+                             Width="180" HorizontalAlignment="Left" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/imap_storage_bytes_subtitle}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/imap_message_count_label}" />
+                    <TextBox x:Name="ImapMessageCountInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailImapMessageCountInput}"
+                             Width="120" HorizontalAlignment="Left" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/imap_message_count_subtitle}" />
+                </StackPanel>
+                <Button x:Name="ImapSaveButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailImapSaveButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="ImapSaveButton_Click"
+                        HorizontalAlignment="Left"
+                        Content="{loc:Localize Key=admin/mail_page/imap_save}" />
+            </StackPanel>
+
+            <!-- ════ Outbound delivery (put_outbound_policy) ════ -->
+            <StackPanel Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/mail_page/outbound_group_title}" />
+                <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/mail_page/outbound_group_desc}" />
+
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/outbound_retry_schedule_label}" />
+                    <TextBox x:Name="OutboundRetryScheduleInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailOutboundRetrySchedule}"
+                             AcceptsReturn="True" TextWrapping="Wrap" Height="80"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/outbound_retry_schedule_subtitle}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/outbound_permfail_timeout_label}" />
+                    <TextBox x:Name="OutboundPermfailTimeoutInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailOutboundPermfailTimeoutInput}"
+                             Width="120" HorizontalAlignment="Left" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/outbound_permfail_timeout_subtitle}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/outbound_delay_warning_label}" />
+                    <TextBox x:Name="OutboundDelayWarningInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailOutboundDelayWarningInput}"
+                             Width="120" HorizontalAlignment="Left" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/outbound_delay_warning_subtitle}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/outbound_ndr_rate_limit_label}" />
+                    <TextBox x:Name="OutboundNdrRateLimitInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailOutboundNdrRateLimitInput}"
+                             Width="120" HorizontalAlignment="Left" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/outbound_ndr_rate_limit_subtitle}" />
+                </StackPanel>
+                <ToggleSwitch x:Name="OutboundSuppressNdrSpfToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailOutboundSuppressNdrSpfToggle}"
+                              Header="{loc:Localize Key=admin/mail_page/outbound_suppress_ndr_spf_label}" />
+                <ToggleSwitch x:Name="OutboundSuppressNdrDmarcToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailOutboundSuppressNdrDmarcToggle}"
+                              Header="{loc:Localize Key=admin/mail_page/outbound_suppress_ndr_dmarc_label}" />
+                <!-- postmaster CC — project policy never CC; rendered read-only (disabled). -->
+                <StackPanel Spacing="2">
+                    <ToggleSwitch x:Name="OutboundPostmasterCcToggle"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailOutboundPostmasterCcToggle}"
+                                  IsEnabled="False"
+                                  Header="{loc:Localize Key=admin/mail_page/outbound_postmaster_cc_label}" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/outbound_postmaster_cc_subtitle}" />
+                </StackPanel>
+                <ToggleSwitch x:Name="OutboundTlsrptSendToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailOutboundTlsrptSendToggle}"
+                              Header="{loc:Localize Key=admin/mail_page/outbound_tlsrpt_send_label}" />
+                <ToggleSwitch x:Name="OutboundIpv6Toggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailOutboundIpv6Toggle}"
+                              Header="{loc:Localize Key=admin/mail_page/outbound_ipv6_label}" />
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/outbound_treat_5xx_label}" />
+                    <TextBox x:Name="OutboundTreat5xxInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailOutboundTreat5xxTransient}"
+                             AcceptsReturn="True" TextWrapping="Wrap" Height="80"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/outbound_treat_5xx_subtitle}" />
+                </StackPanel>
+                <Button x:Name="OutboundSaveButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailOutboundSaveButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="OutboundSaveButton_Click"
+                        HorizontalAlignment="Left"
+                        Content="{loc:Localize Key=admin/mail_page/outbound_save}" />
+            </StackPanel>
+
+            <!-- ════ Aliases (put_alias_policy; nest-side, separate get_alias_policy twin) ════ -->
+            <StackPanel Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/mail_page/alias_group_title}" />
+                <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/mail_page/alias_group_desc}" />
+
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/alias_exact_max_label}" />
+                    <TextBox x:Name="AliasExactMaxInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailAliasExactMaxInput}"
+                             Width="120" HorizontalAlignment="Left" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/alias_exact_max_subtitle}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/alias_reserved_label}" />
+                    <TextBox x:Name="AliasReservedInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailAliasReservedLocalParts}"
+                             AcceptsReturn="True" TextWrapping="Wrap" Height="80"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/alias_reserved_subtitle}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <ToggleSwitch x:Name="AliasSubaddressingToggle"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailAliasSubaddressingToggle}"
+                                  Header="{loc:Localize Key=admin/mail_page/alias_subaddressing_label}" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/alias_subaddressing_subtitle}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <ToggleSwitch x:Name="AliasWildcardPrefixToggle"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailAliasWildcardPrefixToggle}"
+                                  Header="{loc:Localize Key=admin/mail_page/alias_wildcard_prefix_label}" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/alias_wildcard_prefix_subtitle}" />
+                </StackPanel>
+                <Button x:Name="AliasSaveButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailAliasSaveButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="AliasSaveButton_Click"
+                        HorizontalAlignment="Left"
+                        Content="{loc:Localize Key=admin/mail_page/alias_save}" />
+            </StackPanel>
+
+        </StackPanel>
+    </ScrollViewer>
+</Page>

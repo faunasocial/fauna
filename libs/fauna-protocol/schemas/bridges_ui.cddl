@@ -1,0 +1,308 @@
+; libs/fauna-protocol/schemas/bridges_ui.cddl
+;
+; Layer-3 Bridge Management user-facing WS-RPC payloads — what end-user
+; clients call from the bridges page. Distinct from `wrapped_blob.cddl`,
+; which is the daemon-internal MTA/MDA plane on the same namespace;
+; caller-class scoping (in `bridge_method_allowlist::is_permitted`)
+; partitions the two.
+;
+; Authority for behavior: `docs/goal/behavior/bridges.md`.
+; Migration plan tracked internally.
+;
+; Rust types: `libs/fauna-protocol/src/bridges_ui.rs`.
+
+; ---------------------------------------------------------------------------
+; fauna.bridges.list — snapshot of every configured bridge for the calling actor.
+; ---------------------------------------------------------------------------
+
+ListBridgesRequest = {}
+
+ListBridgesReply = {
+  "bridges": [* BridgeStatus],
+}
+
+BridgeStatus = {
+  "id":               tstr,
+  "name":             tstr,
+  "available":        bool,
+  "linked":           bool,
+  "identity":         BridgeIdentity / null,
+  "mode":             tstr / null,
+  "settings":         [* BridgeSetting],
+  "supports_follows": bool,
+  ; The bridge's network lets an account decide who follows it, so the card
+  ; lists waiting requests.
+  "supports_follow_requests": bool,
+  "link_modes":       [* BridgeLinkMode] / null,
+  ; `error` is set when `provider.status(...)` errored — the rest of
+  ; the snapshot falls back to the "available=true, linked=false,
+  ; settings=[], link_modes=null" shape the HTTP twin emits.
+  "error":            tstr / null,
+}
+
+BridgeIdentity = {
+  "label":   tstr,
+  "value":   tstr,
+  "display": tstr,
+}
+
+BridgeSetting = {
+  "key":     tstr,
+  "label":   tstr,
+  "type":    tstr,
+  ; Dynamic per-bridge value. Typed `CborValue` on the wire so providers
+  ; (Bluesky / ActivityPub / mail / …) don't have to pre-flatten to
+  ; strings. Boundary conversion from the HTTP route's
+  ; `serde_json::Value` lives in `bins/fauna-nest/src/bridges_ui_handlers.rs`.
+  "value":   any,
+  "options": [* BridgeSettingOption] / null,
+}
+
+BridgeSettingOption = {
+  "value": any,
+  "label": tstr,
+}
+
+BridgeLinkMode = {
+  "mode":          tstr,
+  "label":         tstr,
+  "client_action": tstr / null,
+  "platform":      tstr / null,
+  "fields":        [* BridgeLinkField],
+}
+
+BridgeLinkField = {
+  "key":         tstr,
+  "label":       tstr,
+  "type":        tstr,
+  "placeholder": tstr / null,
+}
+
+; ---------------------------------------------------------------------------
+; fauna.bridges.link — start the OAuth or credential flow for a bridge.
+; `forbid_replay=true` on the wire (KindRegistry::register_bridges_ui_kinds);
+; double-invocation on retry can corrupt provider-side pending flow state.
+; The reply (`LinkReply`) is the typed `BridgeProvider::link` return —
+; `linked` plus optional `identity` and `redirect_url`.
+; ---------------------------------------------------------------------------
+
+LinkRequest = {
+  "bridge_id": tstr,
+  "mode":      tstr,
+  ; Per-mode parameters (OAuth handle, credential fields, …). Typed
+  ; `CborValue` so each provider picks the keys it cares about; converted
+  ; to `serde_json::Value` at the `BridgeProvider::link` boundary.
+  "params":    any,
+}
+
+LinkReply = {
+  "linked":       bool,
+  "identity":     BridgeIdentity / null,
+  "redirect_url": tstr / null,
+}
+
+; ---------------------------------------------------------------------------
+; fauna.bridges.link_challenge — a proof-of-possession challenge an external
+; signer must sign before `link` in that mode writes a row (Nostr `nip07`:
+; `window.nostr.signEvent`). Replay-safe: a re-issue supersedes the last
+; challenge. Modes that hold no external identity refuse.
+; ---------------------------------------------------------------------------
+
+LinkChallengeRequest = {
+  "bridge_id": tstr,
+  "mode":      tstr,
+}
+
+LinkChallengeReply = {
+  ; The nest-minted nonce; one outstanding per (actor, bridge).
+  "challenge":  tstr,
+  ; Unix seconds after which `link` refuses it.
+  "expires_at": int,
+  ; Provider-shaped object to sign (Nostr: the unsigned kind-22242 event
+  ; `{kind, created_at, tags, content}`), typed like `LinkRequest.params`.
+  "payload":    any,
+}
+
+; ---------------------------------------------------------------------------
+; fauna.bridges.unlink — disconnect a bridge for the calling actor.
+; Idempotent (already-unlinked is a no-op); replay-safe.
+; ---------------------------------------------------------------------------
+
+UnlinkRequest = {
+  "bridge_id": tstr,
+}
+
+UnlinkReply = {
+  "ok": bool,
+}
+
+; ---------------------------------------------------------------------------
+; fauna.bridges.set_settings — overwrite the per-bridge settings object.
+; Idempotent PUT semantics: replay-safe; the typed reply carries `ok: true`
+; on success, errors surface as `RpcError`.
+; ---------------------------------------------------------------------------
+
+SetSettingsRequest = {
+  "bridge_id": tstr,
+  ; Free-form per-bridge config. Self-describing via `CborValue` so
+  ; providers don't have to pre-flatten; converted back to
+  ; `serde_json::Value` at the `BridgeProvider::update_settings` boundary.
+  "settings":  any,
+}
+
+SetSettingsReply = {
+  "ok": bool,
+}
+
+; ---------------------------------------------------------------------------
+; fauna.bridges.list_follows — per-bridge follow list for the calling actor.
+; Replay-safe pure read.
+; ---------------------------------------------------------------------------
+
+ListFollowsRequest = {
+  "bridge_id": tstr,
+}
+
+ListFollowsReply = {
+  "follows": [* BridgeFollow],
+}
+
+BridgeFollow = {
+  "id":         tstr,
+  "petname":    tstr / null,
+  "created_at": int / null,
+  ; Provider-specific extra metadata. Unlike the HTTP twin's omit-on-None
+  ; shape, the typed wire keeps the slot present (carrying `null` when
+  ; absent) so the CBOR map's key set stays stable across bridges.
+  "extra":      any / null,
+}
+
+; ---------------------------------------------------------------------------
+; fauna.bridges.add_follow — add an external account to the per-bridge
+; follow list for the calling actor. `forbid_replay=true` on the wire
+; (KindRegistry::register_bridges_ui_kinds): the duplicate-follow
+; constraint is server-enforced, and the auto-retry path would surface
+; the conflict as a spurious error.
+; ---------------------------------------------------------------------------
+
+AddFollowRequest = {
+  "bridge_id": tstr,
+  "id":        tstr,
+  "petname":   tstr / null,
+  ; Provider-specific extra metadata. `null` here maps to "omitted at
+  ; the provider boundary" (matching the HTTP twin's
+  ; #[serde(skip_serializing_if = "Option::is_none")] shape), not to a
+  ; JSON `null` value.
+  "extra":     any / null,
+}
+
+AddFollowReply = {
+  "ok": bool,
+}
+
+; ---------------------------------------------------------------------------
+; fauna.bridges.remove_follow — remove an entry from the per-bridge
+; follow list for the calling actor. Idempotent (already-removed is a
+; no-op); replay-safe.
+; ---------------------------------------------------------------------------
+
+RemoveFollowRequest = {
+  "bridge_id": tstr,
+  "follow_id": tstr,
+}
+
+RemoveFollowReply = {
+  "ok": bool,
+}
+
+; ---------------------------------------------------------------------------
+; fauna.bridges.list_follow_requests — the follow requests waiting on the
+; calling actor's account on a bridge whose BridgeStatus declares
+; `supports_follow_requests`. Replay-safe pure read.
+; ---------------------------------------------------------------------------
+
+ListFollowRequestsRequest = {
+  "bridge_id": tstr,
+}
+
+ListFollowRequestsReply = {
+  "requests": [* BridgeFollowRequest],
+}
+
+BridgeFollowRequest = {
+  ; The requester, in the form BridgeFollow's `id` uses on this bridge.
+  "id":           tstr,
+  ; The requester's display name, when the nest knows it.
+  "name":         tstr / null,
+  ; Unix seconds the request arrived.
+  "requested_at": int / null,
+  ; Provider-specific extra metadata, slot always present. One shared key:
+  ; `handle`, the requester's address as a person types it (`@user@host`).
+  "extra":        any / null,
+}
+
+; ---------------------------------------------------------------------------
+; fauna.bridges.resolve_follow_request — approve or refuse one waiting
+; request. Idempotent (a request already gone succeeds); replay-safe.
+; ---------------------------------------------------------------------------
+
+ResolveFollowRequestRequest = {
+  "bridge_id": tstr,
+  "id":        tstr,
+  "approve":   bool,
+}
+
+ResolveFollowRequestReply = {
+  "ok": bool,
+}
+
+; ---------------------------------------------------------------------------
+; fauna.bridges.feeds.* — cross-bridge feed-subscription surface.
+;
+; Distinct from `add_follow` / `remove_follow` which manage per-bridge
+; follow lists. These manage cross-bridge feed subscriptions (e.g. a
+; Bluesky custom feed `at://…/app.bsky.feed.generator/whats-hot`).
+; Backed by the `bridge_feed_subscriptions` table directly, not the
+; `BridgeProvider` trait.
+; ---------------------------------------------------------------------------
+
+FeedSubscription = {
+  "id":         int,
+  "bridge":     tstr,
+  "feed_uri":   tstr,
+  "name":       tstr,
+  ; Creation epoch in milliseconds — matches the DB column and the HTTP
+  ; twin's JSON shape.
+  "created_at": int,
+}
+
+ListFeedsRequest = {}
+
+ListFeedsReply = {
+  "subscriptions": [* FeedSubscription],
+}
+
+CreateFeedRequest = {
+  "bridge":   tstr,
+  "feed_uri": tstr,
+  "name":     tstr,
+}
+
+; Reply carries the server-assigned row id. INSERT OR IGNORE + the
+; UNIQUE(actor_id, bridge, feed_uri) constraint makes duplicate-create
+; idempotent: the same id is returned on retry, so the kind is
+; replay-safe (forbid_replay=false on the wire).
+CreateFeedReply = {
+  "id": int,
+}
+
+DeleteFeedRequest = {
+  "id": int,
+}
+
+; Idempotent at the wire level: the not_found surface fires when no row
+; matches (id, calling actor); the reply is reserved for the
+; row-deleted case.
+DeleteFeedReply = {
+  "ok": bool,
+}

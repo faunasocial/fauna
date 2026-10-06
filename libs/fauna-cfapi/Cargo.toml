@@ -1,0 +1,43 @@
+[package]
+name = "fauna-cfapi"
+description = "Safe Rust wrappers around the Windows Cloud Files API (cfapi / cldapi.dll)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+anyhow = { workspace = true }
+tracing = { workspace = true }
+# `win_token::current_user_sid_string` — the shared, alignment-safe,
+# handle-closing SID-resolution primitive. Adds no
+# transitive weight: this crate's sole consumer, `fauna-sync-agent`, already
+# depends on `fauna-ipc`.
+fauna-ipc = { workspace = true }
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_CloudFilters",
+    "Win32_Storage_FileSystem",
+    "Win32_System_CorrelationVector",
+    "Win32_System_IO",
+    # WinRT shell registration (register_sync_root_with_shell): Explorer's cloud
+    # verbs / status column are gated on StorageProviderSyncRootManager, not on
+    # CfRegisterSyncRoot (measured 2026-07-16 — SyncRootManager stays empty
+    # under the bare Win32 registration).
+    "Foundation",
+    "Storage",
+    "Storage_Provider",
+    "Storage_Search",
+    "Storage_Streams",
+    # Current-user SID for the shell registration's mandated Id format.
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+    # SyncRootManager enumeration (list_shell_sync_roots) reads the registry —
+    # the WinRT read surface is measurably dead for unpackaged processes (see
+    # SYNC_ROOT_MANAGER_KEY's doc + tests/shell_enumeration_probe.rs).
+    "Win32_System_Registry",
+] }
+
+# The live cfapi harness (tests/live_population.rs) needs a scratch sync root.
+[target.'cfg(windows)'.dev-dependencies]
+tempfile = { workspace = true }

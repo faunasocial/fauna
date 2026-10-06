@@ -1,0 +1,1625 @@
+[package]
+name = "fauna-ffi"
+description = "UniFFI bindings for Fauna iOS and Android apps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The full client face = everything a store-safe build keeps, PLUS the
+# controversial-class planes a build flavor may excise. Splitting it this way
+# means the excised flavor is `--no-default-features --features store-safe`
+# with NO second copy of the list to keep in sync: a new client surface is
+# added to `store-safe` once and is in `default` by construction. (The
+# alternative — spelling the ~40-entry complement on the recipe's command line
+# — rots the first time someone adds a feature and forgets the other list,
+# which is precisely how an escape hatch is found broken on the day it is
+# needed. `dynamic-features.md` § The App-Store escape hatch.)
+default = ["store-safe", "payments", "zaps", "p2p-share"]
+# (`account-runtime` rides `store-safe` below — it is an app surface, not a
+# gated-feature-registry member.)
+# The KIDS flavor's complement — every app surface the `kids` build of the
+# android/ios apps keeps (`family-safety.md` § The account age band → the
+# kids-app bullet, item (4); `dynamic-features.md` § Compile-time excision).
+# It is the store-safe set minus the planes the kids app excises, nested
+# INSIDE `store-safe` below so there is still exactly one list: a new surface
+# lands here (kept by the kids app) or in `store-safe`'s own tail (excised),
+# never in a second copy. The kids build is
+# `--no-default-features --features kids-safe,kids-floor`.
+kids-safe = ["accounts-registry", "pairing", "value-format", "moderation-badge", "mime", "render", "folders", "folders-author", "logs", "conversations-session", "markdown-authoring", "backup-destinations", "backup-audit", "task-delegation", "deployment-seed", "host-address", "muted-keywords", "sync-prefs", "member-review", "contact-overlays", "recovery-ceremony", "recovery-aftermath", "filter-marks", "spam-threshold-override", "custody", "snapshots-immediate-delete", "profile-client", "nest-trust", "drafts", "labeler", "qr-render", "personalization", "sync-engine-host", "sync-agent-provisioning", "push-subscription", "account-runtime"]
+# Every app surface that is NOT a gated-feature-registry member. This is the
+# App-Store escape-hatch flavor's feature set: the kids complement plus the
+# planes the kids flavor excises — the feed and posting (`feed-badge`,
+# `feed-rules`, `feed-manager`, the feed's source-badge `search`), discovery
+# (`search-manager`), every bridge (`mail-admin`, `mail-import`,
+# `atproto-settings`, `nostr-npub-confirm`), web publishing (`web-content`),
+# monetization (`subscriptions-author`) and third-party anything
+# (`connected-apps`, `labeler-catalog`).
+store-safe = ["kids-safe", "feed-badge", "feed-rules", "feed-manager", "search", "search-manager", "mail-admin", "mail-import", "atproto-settings", "nostr-npub-confirm", "web-content", "subscriptions-author", "connected-apps", "labeler-catalog"]
+# The kids flavor's compiled-in content floor (`family-safety.md` § The account
+# age band → the kids-app bullet, item (4)): composes
+# `fauna_core::obligation::KIDS_CONTENT_FLOOR` — the four guardian categories at
+# `block` — strictest-wins into every render face's guardian input
+# (src/family.rs `render_guardian_policy`). Off everywhere but the kids build:
+# it is an ADDITION a flavor asks for, not an excision, so it sits in no
+# `default`. Guardian Notify is deliberately not floored. Pure cfg gate — the
+# constant is ungated data in fauna-core, so no dep is forwarded.
+kids-floor = []
+# The community-labeler WASM executor FFI (src/labeler.rs — `run_wasm_labeler`
+# over the shared fauna-labeler runtime; labeler-registry design §6). Default-on
+# so native-client FFI (Apple/Android) can self-serve labels over their own
+# decrypted content (`content-moderation-and-ranking.md` § Tier-3, frame line 72),
+# AND — unlike the other client-only default features — the Go mail-bridge build
+# **explicitly re-enables it** (`just mail-bridge-ffi` adds `--features labeler`
+# to its `--no-default-features` build) because the standalone content-processor
+# holder is a role of that binary and IS the executor's server-side consumer.
+# Gating `dep:fauna-labeler` keeps the wasmi interpreter out of a
+# `--no-default-features` build that wants neither surface.
+# ── the `payments` registry feature (dynamic-features.md) ────────────────────
+# The money plane: payment-provider config, claim mint/redeem and tips
+# (src/payments_client.rs over fauna-client-payments' `fauna.payments.*` +
+# `fauna.tips.*` kinds). Default-ON — excision is what a build FLAVOR asks for,
+# never the default posture — and gated so an App-Store escape-hatch build
+# (`just apple-ffi-store-safe`) ships an artifact that provably cannot reach a
+# real-money flow: no UI surface, no wire senders, no re-enable path
+# (`docs/goal/architecture/dynamic-features.md` § What "completely compiled
+# away" means).
+#
+# Rule (b) of the two-halves spine: this forwards `fauna-protocol/payments`
+# from its OWN feature rather than naming it on the dep line, so
+# `--no-default-features` genuinely drops the plane instead of re-acquiring it
+# through cargo's unconditional dep-line features — the exact shape that rode
+# 12 automation seams into five release artifacts before 2026-08-01
+# (convention 15, `tests/e2e-unified/tests/test_ffi_flavor_split.py`).
+#
+# `fauna-feed/payments` gates ONE thing there: `FeedManager::resolve_post_tips`,
+# the only caller of the `fauna.tips.list` kind (tips are a named buy-side gate
+# surface — dynamic-features.md § Charter members). The `PostSummary::tips`
+# field and its `TipView` record stay ungated and inert, so the snapshot record
+# shape — and every binding generated from it — is identical in both flavors.
+#
+# NOT forwarded on purpose: `fauna-client-subscriptions` carries no payments
+# plane — a priced tier's `TierAskingPrice` is ungated wire, so composing and
+# reading one survives excision as inert metadata.
+payments = [
+    "dep:fauna-client-payments",
+    "fauna-protocol/payments",
+    "fauna-feed/payments",
+]
+# ── the `zaps` registry feature (dynamic-features.md § Charter members) ──────
+# The NIP-57 half: the `fauna.nostr.zap_signers.*` trust root
+# (src/nostr_client.rs' FfiNostrZapSignerClient + FfiZapSignerEntry) and the
+# `FfiNestClient::nostr_zap_signers()` accessor.
+#
+# **A SUBSET MEMBER: it requires `payments`.** Excising `payments` excises this
+# with it; excising `zaps` alone leaves provider-rail payments intact — the
+# "Damus flavor", and the finer-grained hatch the Damus precedent shows a store
+# actually demands (Apple forced the zap button off posts while the rest of the
+# app stayed). The relation lives in fauna-protocol's manifest, once, and is
+# inherited here rather than re-declared per crate.
+#
+# Default-ON for the same reason as `payments`: excision is a build FLAVOR's
+# choice, never the default posture. Rule (b): both halves forwarded from this
+# feature — the client face AND the wire plane — because forwarding only the
+# client crate leaves the `fauna.nostr.zap_signers.*` kind strings in the
+# artifact, a half-excision that reads green to a symbol-level check.
+zaps = ["payments", "fauna-protocol/zaps", "fauna-client-nostr/zaps"]
+# The Python e2e harness's NETWORKED seed exports (`src/cabi/harness.rs`:
+# `fauna_harness_create_set` / `_record_change` / `_report_conflict` — a set
+# born custody-first and its change records signed through the shared funnels,
+# `mls-group-key-material.md` § M2 → *Writer-signed change records*). Test
+# surface, so compiled out of release artifacts (e2e convention 15,
+# `e2e-automation-surface-gating.md`): only `just e2e-ffi` turns it on (and
+# `test-helpers` forwards it, for the windows harness's flavor). Implies
+# `sync-engine-host`: `fauna_harness_sync_pass`, the harness's signed file
+# writer, builds the apps' own in-process engine host (`src/sync_engine_host.rs`)
+# rather than a second engine assembly. Names the credential store itself:
+# `fauna_harness_create_set` hosts the account store for the call, and its
+# writer-key slot is a file-backed store under a temp dir — the minimal
+# `--no-default-features` flavor `just e2e-ffi` builds pulls it from nowhere
+# else. Names `fauna-client-capabilities` for the same reason: the `ext.*`
+# grant builder and the principal's row sealer run its mint and its open.
+# Names `fauna-bridge-nostr` for `fauna_harness_nostr_gift_wrap_dm`: the far
+# Nostr user's gift wrap is built by the in-tree `nip17::wrap_dm`, and no app
+# flavor links that crate (the nest holds the custodial key, not the app).
+# Names `fauna-client-share` for `fauna_harness_create_private_link`: the private
+# share link a viewer journey opens is minted and registered by the shared
+# `ShareClient`, which no app flavor names directly yet.
+e2e-harness = ["sync-engine-host", "dep:fauna-credential-store", "dep:fauna-client-capabilities", "dep:fauna-bridge-nostr", "dep:fauna-client-share"]
+labeler = ["dep:fauna-labeler", "dep:serde_bare", "fauna-mail/parser"]
+# The personalization surface's community-labeler-catalog page FFI
+# (src/labeler_catalog.rs — the `LabelerCatalogMachine` browse /
+# inspect-before-subscribe / (un)subscribe over `fauna.labelers.*`).
+# Default-on so the Apple/Android/Windows app FFI exports it (all 7
+# apps reach parity, content-moderation-and-ranking.md § Tier-3), but
+# gated so the Go mail-bridge `--no-default-features` build drops it — the
+# bridge is a server with no catalog-browsing UI, and its native `rpc-glue`
+# seam pulls the client crates uniffi-bindgen-go can't emit (same
+# Go-incompatibility reason as `folders`/`devices`). Distinct from `labeler`
+# (the WASM label() executor the bridge DOES need) — a different surface.
+# Pulls `account-runtime`: the per-labeler grant mint reads the account's
+# mail custody (`fauna.state.mail`) through the seat's account-store handle.
+labeler-catalog = ["dep:fauna-labeler-catalog-machine", "account-runtime"]
+# The ATProto settings page's login-plane FFI
+# (src/atproto_settings.rs — `AtprotoSettingsMachine`: app-credential
+# mint/list/reveal/revoke, connected-app sessions, and the per-account
+# external-apps kill-switch over `fauna.bridges.atproto.*`;
+# atproto-pds-full.md § App surface). Default-on so the Apple/Android/Windows
+# app FFI exports it (all 7 apps reach parity), but gated so the Go
+# mail-bridge `--no-default-features` build drops it — the bridge is a server
+# with no settings UI, and its native `rpc-glue` seam pulls the client crates
+# uniffi-bindgen-go can't emit (same Go-incompatibility reason as
+# `labeler-catalog`/`folders`/`devices`).
+atproto-settings = ["dep:fauna-atproto-settings-machine", "dep:fauna-client-alerts", "dep:fauna-client-alert-sweep", "dep:fauna-client-atproto"]
+# The connected-apps page FFI (src/connected_apps.rs — `ConnectedAppsMachine`:
+# the one roster over every third-party principal, the Requests tray, the
+# typed-code Connect-an-app start and per-client blocks; ui/connected-apps.md).
+# Default-on so the Apple/Android/Windows app FFI exports it (all 7 apps), gated
+# for the Go mail-bridge `--no-default-features` build exactly like
+# `atproto-settings`, whose `ConsentCardRow` the snapshot carries (so it implies it).
+# Implies `mail-admin` too: the mail app passwords are roster rows, read through
+# the session's `MailSettingsMachine`, which `build_connected_apps_machine` takes.
+connected-apps = ["dep:fauna-client-connected-apps", "atproto-settings", "mail-admin"]
+# The multi-account registry seam (src/accounts_registry.rs — FfiSecretStore
+# callback interface + FfiAccountRegistry + the RegistryLaunchPersistence
+# handle for LaunchMachine::new; long-term-store.md § Multi-account evolution
+# → Shared seam). Default-on so the Apple/Android/Windows app FFI exports
+# it (their switcher + launch wiring consume it), but gated so the Go
+# mail-bridge `--no-default-features` build drops it — the bridge is a server
+# with no accounts, and the `Arc<dyn LaunchPersistence>` handle would drag the
+# fauna_launch_machine namespace into uniffi-bindgen-go output as a Go package
+# the module doesn't carry (same Go-incompatibility class as `value-format`).
+# Carries `fauna-core/uniffi` since 2026-09-09: `FfiSignOutResidue::line` hands a
+# `LocalizedText` across the boundary (the sign-out residue line), and that type
+# is only a `uniffi::Record` under fauna-core's own `uniffi` feature — the same
+# registration `task-delegation` declares below. In a `store-safe`/`default`
+# build it was already on transitively; naming it here is what makes
+# `--features accounts-registry` alone compile. `tracing` logs a residue record
+# that could not be written (src/sign_out_residue.rs).
+accounts-registry = ["fauna-core/uniffi", "dep:fauna-client-accounts", "dep:fauna-credential-store", "dep:fauna-i18n", "dep:tracing"]
+# The user-facing profile READ/WRITE RPC face (src/profile_client.rs — the
+# FfiProfileClient over the shared fauna-client-profile ProfileClient).
+# Default-on so the Apple/Android/Windows app FFI exports it for the profile
+# edit form (the shared sign/decode logic every app lifts onto — the
+# `fauna-client-profile::build_profile` sign_and_pack step — profile.md
+# § Where logic lives), but
+# gated so the Go mail-bridge `--no-default-features` build drops it — the bridge
+# is a server with no profile-edit UI (same dead-code rationale as
+# `markdown-authoring` / `subscriptions-author`). fauna-client-profile is a
+# non-optional dep (only built-in types cross its FFI boundary), so this gates
+# only the module's compilation, not a dep.
+#
+# NOT gated (since 2026-08-03): the pure half in src/profile.rs — the record
+# mirrors, decode_profile_display, and build_edited_profile{,_with_images}.
+# Composing and decoding a `Profile` needs no nest connection, so it follows
+# post.rs/posts_client.rs rather than bundling both halves under one flag; the Go
+# atproto bridge's projection tests build real profile bytes with those builders
+# instead of inventing a fixture (atproto-pds-full.md § F2 detail).
+#
+# Pulls `recovery-ceremony` in: the edit form's base load
+# (`FfiProfileClient::load_edit_base`) is the shared read-prove-record
+# (`fauna_client_recovery::ceremony::load_profile_edit_base`), which records a
+# succession link the base needs through `FfiAccountRegistry` (profile.md § After
+# an identity succession → the linkless bullet). Both ride `store-safe` already.
+profile-client = ["recovery-ceremony"]
+# The backup-destination management FFI (src/backup_destinations.rs — config read +
+# add/edit/remove-and-save over the shared account-store + mutate helpers, plus the
+# enroll-time resolve the add/edit dialogs call). Default-on so the Apple/Android/
+# Windows app FFI exports it for the backups-page destination CRUD (the 5-client
+# lift), but gated so the Go mail-bridge `--no-default-features` build drops it — the
+# bridge is a server with no destination-management UI (same dead-code rationale as
+# `folders`). fauna-client-config / fauna-sync-engine are already non-optional deps,
+# so this gates only the module's compilation, not a dep.
+# Pulls `account-runtime`: the destination list and its marks live in the account
+# plane's `fauna.state.backup`, read and written through this process's
+# account-store handle (`crate::backup_seam`); and `deployment-seed` for the
+# bound-nest-id resolution every read/write keys that list by. Every flavor that
+# ships the surface already hosts both (all three sit in `store-safe`).
+backup-destinations = ["dep:uuid", "dep:fauna-client-backup", "account-runtime", "deployment-seed"]
+# The client-side backup **audit** FFI (src/backup_destinations.rs — the one
+# encapsulating `backup_audit_run_pass` + the `backup_audit_observe` feed).
+# Default-on so the four UniFFI shells (windows/macos/ios/android) can render the
+# audit-alert surface at all — `docs/goal/ui/backups.md` § Audit-alert surface names
+# this face as their single shared prerequisite, linux/tui/web reaching the same
+# shared loop as library code instead. Gated out of the Go mail-bridge
+# `--no-default-features` build for the same reason as `backup-destinations`: the
+# bridge is a server with no backups page. Unlike its sibling this DOES pull deps —
+# `fauna-client-backup` for the pass itself and `fauna-client-pair` for the native
+# connector/inclusion seams — plus `fauna-core/uniffi` so `BackupAuditAlertReason`
+# gets its `uniffi::Enum` registration cross-crate (the row carries the alert reason,
+# never the raw verdict).
+# Pulls `backup-destinations` because the audit face lives *inside* that module —
+# enabling this alone would otherwise compile to nothing at all, silently.
+backup-audit = [
+    "backup-destinations",
+    "dep:fauna-client-backup",
+    "dep:fauna-client-pair",
+    "fauna-core/uniffi",
+]
+# (The `backup-lease` feature — the lease wiring for the in-app segment-backup
+# upload driver — was removed 2026-08-17: the driver it gated was deleted with
+# the slice-5 flip, leaving the feature gating no code. `backup-upload` is a
+# nest-run kind; the fauna-client-delegation dep survives via `task-delegation`
+# below.)
+# The Task-delegation Settings surface FFI (src/task_delegation.rs — the Ffi*
+# mirrors of the shared `fauna_core::delegation` view-model enums + the
+# FfiTaskDelegationView Object over `fauna_client_delegation::TaskDelegationView`
+# + FfiNestClient::task_delegation_view_for_device). Default-on so the Apple/Android/Windows
+# app FFI exports it for the `task-delegation` page (the 6-client lift onto one
+# shared async view-model, participants.md § Task delegation), but gated so the Go
+# mail-bridge `--no-default-features` build drops it: the bridge is a server with
+# no Settings UI, and — like `render` / `feed-badge` / `moderation-badge` — the
+# row's `name: FfiTaskDelegationRow.name` return is a `fauna_core` `LocalizedText`
+# (a `uniffi::Record` gated behind `fauna-core/uniffi`), for which uniffi-bindgen-go
+# emits an uncompilable bare `fauna_core` cross-namespace import. So this forwards
+# **`"fauna-core/uniffi"`** for the `LocalizedText` registration AND pulls
+# **`"dep:fauna-client-delegation"`** (the shared async view; the optional dep's
+# only remaining enabler, so a featureless build drops the crate entirely).
+# Pulls `account-runtime`: the surface reads and saves through the shared
+# `fauna_sync_engine::preference_surfaces` gestures, which take this
+# process's account-store handle (config-dissolution.md § The `__config`
+# dissolution schedule → *The closure order* steps (1) and (5)); every flavor that ships
+# the surface already hosts the runtime (both sit in `store-safe`).
+task-delegation = ["fauna-core/uniffi", "dep:fauna-client-delegation", "account-runtime"]
+# The deployment-seed custody-map FFI (src/deployment_seed.rs — the recovery
+# reads over the account plane's `fauna.state.deployment-seeds` kind, the
+# custody leg's post-auth entry and the plane rotation drive; the native twin of
+# tui/linux's `fauna_client_account_runtime::deployment_seeds` seam).
+# Default-on so the Apple/Android/Windows app FFI exports it, but gated so the
+# Go mail-bridge `--no-default-features` build drops it — the bridge is a
+# server with no onboarding/recovery surface (same dead-code rationale as
+# `backup-destinations`). Pulls `fauna-client-pair` for the bound-nest-id
+# comparand and `account-runtime` for the account-store handle the custody leg
+# and the rotation drive write through. `box-recovery.md` § The plane-era
+# recovery floor.
+deployment-seed = ["dep:fauna-client-pair", "account-runtime"]
+# The client host-address reporting FFI (src/host_address.rs — the native twin of
+# linux's direct drive + the web `reportHostAddress` binding: classify the
+# dial-address, never publish a private/LAN one, report the public IP via
+# `fauna.dns.set_host_address`). Default-on so the Apple/Android/Windows app FFI
+# exports it for the onboarding + post-auth host-address report, but gated so the
+# Go mail-bridge `--no-default-features` build drops it — the bridge is a server
+# with no onboarding surface (same dead-code rationale as `deployment-seed`), and
+# its fn calls the gated `FfiNestClient::nest_arc()` accessor. Pulls
+# `fauna-client-dns` (the shared `host_address` decision + `NativeHostAddressProbe`);
+# already an optional dep behind `mail-admin`. `domains-and-tls-bootstrap.md`.
+host-address = ["dep:fauna-client-dns"]
+# The tier-1 muted-keywords FFI (src/muted_keywords.rs — the `muted-words`
+# Settings sub-page's read/set/add/remove over the shared
+# preference_surfaces gestures, plus the
+# matches_muted_keywords sync wrapper over the shared
+# fauna_core::keyword::body_excludes_matches the conversation collapse render
+# calls). Default-on so the Apple/Android/Windows app FFI exports it for the
+# muted-words page + conversation apply (the 5-client lift onto one shared
+# matcher, content-moderation-and-ranking.md § Q3), but gated so the Go
+# mail-bridge `--no-default-features` build drops it — the bridge is a server
+# with no muted-words UI, its read/set fns call the gated `FfiNestClient::nest_arc()`
+# accessor (like `backup-destinations` / `subscriptions-author`), and gating the
+# built-in-typed matcher too keeps the checked-in Go bindings byte-identical
+# (same off-win-regen rationale as `nest-trust` / `mime`). fauna-client-config /
+# fauna-core are already non-optional deps, so this gates only the module's
+# compilation, not a dep. Forwards `fauna-client-config/uniffi` for the
+# `MutedWordsSnapshot` record (the page's rows + `loaded` bit) — behind THIS
+# feature so the bridge build still registers nothing and the Go bindings stay
+# byte-identical.
+# Pulls `account-runtime`: the surface reads and saves through the shared
+# `fauna_sync_engine::preference_surfaces` gestures, which take this
+# process's account-store handle (config-dissolution.md § The `__config`
+# dissolution schedule → *The closure order* steps (1) and (5)); every flavor that ships
+# the surface already hosts the runtime (both sit in `store-safe`).
+muted-keywords = ["fauna-client-config/uniffi", "account-runtime"]
+# The sync-preferences FFI (src/sync_prefs.rs — the Folders page's "Sync
+# defaults" section read/set over the shared preference_surfaces
+# gestures).
+# Same shape + gating rationale as `muted-keywords`: fauna-client-config and
+# fauna-core are already non-optional deps, so this gates only the module's
+# compilation, not a dep. Default-on; the Go mail-bridge --no-default-features
+# build drops it (no sync-settings UI on the bridge).
+# Pulls `account-runtime`: the surface reads and saves through the shared
+# `fauna_sync_engine::preference_surfaces` gestures, which take this
+# process's account-store handle (config-dissolution.md § The `__config`
+# dissolution schedule → *The closure order* steps (1) and (5)); every flavor that ships
+# the surface already hosts the runtime (both sit in `store-safe`).
+sync-prefs = ["account-runtime"]
+# The unattested-member review FFI (src/member_review.rs — the Settings
+# Recovery Kit's ephemeral pass + the permanent `member_review` page: roster
+# read, row-text formatting, Keep/Remove verdict persistence over the shared
+# fauna_client_config::{load_member_reviews,decide_member_review} seam).
+# `ConversationsManager::evict_person_everywhere`/`::handle_for_person` need
+# no feature of their own — they're exported directly on the manager object,
+# always compiled in. Same shape + gating rationale as `muted-keywords`:
+# fauna-client-config / fauna-core / fauna-conversations are already
+# non-optional deps, so this gates only the module's compilation, not a dep.
+# Default-on; the Go mail-bridge --no-default-features build drops it (no
+# settings UI on the bridge). The review ROWS rest on the succession ledger,
+# read through the account-store handle, hence `account-runtime`.
+member-review = ["account-runtime"]
+# The private contact overlay's FFI face (src/contact_overlays.rs —
+# `contacts.md` § The private overlay: the projection's reads, the private
+# section's staged editor and its Save), built once for android, windows,
+# macOS and iOS. Same shape + gating rationale as `member-review`: default-on,
+# dropped by the Go mail-bridge --no-default-features build (no contacts UI on
+# the bridge, and its `fauna_core` record returns are what uniffi-bindgen-go
+# cannot import). The Save writes through the account-store handle, hence
+# `account-runtime`.
+contact-overlays = ["account-runtime", "value-format"]
+# The stolen-identity succession ceremony FFI (src/recovery.rs —
+# identity-succession.md § Implementation status today: "The three remaining apps
+# (windows, macOS, iOS) still owe the native leg: trigger UI + a `db_path_for`
+# resolver + an `FfiError` variant, compiled where their consumers live").
+# Unlike `member-review`'s shape this DOES gate a dep — `fauna-client-recovery`
+# was not reachable from this crate at all before — which is why the dep is
+# `optional = true`. Default-on via `store-safe`; the Go mail-bridge
+# --no-default-features build drops it (no settings UI, no identity to succeed)
+# and keeps the checked-in Go bindings byte-identical.
+# Pulls `accounts-registry` in rather than assuming it: the ceremony persists the
+# successor seed, reads it back, and records the succession link, all through
+# `FfiAccountRegistry` — so this module cannot compile without it, and a feature
+# combination that omitted it would fail at build time rather than degrade.
+recovery-ceremony = ["dep:fauna-client-recovery", "accounts-registry"]
+# The post-succession aftermath FFI (src/succession_aftermath.rs —
+# succession-aftermath.md § Re-key scope's `BackupKey` corpus row). The
+# ceremony's sibling half, so it pulls `recovery-ceremony` in rather than
+# assuming it: the two are one user-visible act, and an app that can hand its
+# account to a successor but never re-seal the corpus is the exact half-built
+# state this pair exists to prevent.
+#
+# It turns on `fauna-client-recovery/aftermath` — which is what gates the shared
+# driver's own optional deps — plus the three crates whose progress projections
+# this module's `AftermathSink` impl names by type. Those three are already
+# optional deps here; a feature combination that omitted one would fail at build
+# time rather than degrade, which is the same reason `recovery-ceremony` pulls
+# `accounts-registry`.
+#
+# Default-on via `store-safe`; the Go mail-bridge --no-default-features build
+# drops it (no identity to succeed on the bridge) and keeps the checked-in Go
+# bindings byte-identical.
+recovery-aftermath = [
+  "recovery-ceremony",
+  # The post-store-ready pass runs over the account-store handle.
+  "account-runtime",
+  # ...and resolves the bound nest id its backup re-grant (leg 2) keys the
+  # destination list by (`fauna_client_pair::resolve_this_nest_id`).
+  "dep:fauna-client-pair",
+  "fauna-client-recovery/aftermath",
+  "dep:fauna-client-capabilities",
+  "dep:fauna-client-drafts",
+  "dep:fauna-client-mail-settings",
+]
+# The Nostr succession-aftermath npub-confirm banner FFI (src/nostr_npub_confirm.rs
+# — nostr.md § Key succession and rotation leg 3) over the
+# shared fauna_client_config::npub_confirmation_owed_for read, the stamp itself
+# on the account plane (`fauna.state.nostr-confirmation`) through the seat's
+# account-store handle — hence `account-runtime`. Its two fns call the gated
+# `FfiNestClient::nest_arc()` accessor (in that cfg(any(...)) list alongside
+# `member-review`'s siblings). Default-on; the Go mail-bridge
+# --no-default-features build drops it (the bridge has no Nostr settings UI) and
+# keeps the checked-in Go bindings byte-identical.
+nostr-npub-confirm = ["account-runtime"]
+# The per-account spam-threshold override FFI (src/spam_threshold_override.rs
+# — the `mail-spam` page's `mail-spam-threshold-override-input`;
+# mail-policy-config.md § Tier 3) over the shared
+# fauna_client_bridges::MailAccountClient::{get,set}_spam_threshold_override
+# RPCs. Same gating rationale as `nostr-npub-confirm`: its two fns call the
+# gated `FfiNestClient::nest_arc()` accessor (added to that cfg(any(...))
+# list). Default-on; the Go mail-bridge --no-default-features build drops it
+# (the bridge has no settings UI) and keeps the checked-in Go bindings
+# byte-identical.
+spam-threshold-override = []
+# The email-filter succession review FFI (src/filter_marks.rs — the twin
+# plane of member_review.rs: the Privacy filter list's unattested-mark render +
+# Keep verdict, and the post-succession raise, over the shared
+# fauna_client_config::{load_filter_marks,decide_filter_mark,
+# raise_succession_filter_marks} seam). Same shape + gating rationale as
+# member-review: fauna-client-config is already a non-optional dep, so this
+# gates only the module's compilation, not a dep. Default-on; the Go
+# mail-bridge --no-default-features build drops it (no settings UI on the
+# bridge). The marks rest on the succession ledger, read through the
+# account-store handle, hence `account-runtime`.
+filter-marks = ["account-runtime"]
+# The T16 custody facet FFI (src/custody.rs — the boundary the android / macOS /
+# iOS / windows `custody-holder-*` legs render from: the FFI projection of
+# `fauna_client_capabilities::view_model`'s three-family fold, the owner-side
+# revoke, and the ceremony drive pass; `ui/devices.md` § Custody facet).
+#
+# Unlike its `muted-keywords`/`sync-prefs` siblings this one gates a real DEP,
+# and that is the point: `fauna-client-custody` enables
+# `fauna-sync-engine/account-runtime`, which is default-OFF there precisely so
+# the lean deployments (windows' sync service and this crate's
+# own Go mail-bridge `--no-default-features` build) do not pay for the account
+# store. Naming the dep behind this feature is what keeps that promise — the
+# same two-halves discipline `payments` documents at the top of this file.
+#
+# Default-on: the excised flavor is what a build FLAVOR asks for, never the
+# default posture. The Go mail-bridge build drops it (no settings UI on a
+# server), which also keeps the checked-in Go binding byte-identical.
+custody = [
+    "dep:fauna-client-custody",
+    "dep:fauna-client-capabilities",
+    # Turns on the `custody_view` boundary rows' `uniffi::Record` derives. The
+    # rows themselves are shared with web (serde, feature off) — ONE projection
+    # of the fold, two faces, so the four native apps and web cannot drift.
+    "fauna-client-capabilities/uniffi",
+]
+# The offline co-present share ceremony FFI (src/offline_share.rs — the
+# boundary the android / macOS / iOS / windows offline-share-* legs render
+# from and act through; `docs/goal/behavior/p2p.md` § Offline share
+# initiation). tui and linux reach
+# `fauna_client_capabilities::group_ceremony_{node,view}` directly (Rust,
+# no boundary needed); this is the SAME shared crate, crossed for the first
+# time by a non-Rust-native app.
+#
+# `dep:fauna-client-capabilities` + its `p2p-share` feature for the ceremony
+# node/peer/view modules (gated there behind that crate's own `p2p-share`,
+# `lib.rs:28-33` — the same iroh-cleanliness bargain `fauna-iroh`'s own
+# Cargo.toml documents); `fauna-client-capabilities/uniffi` turns on
+# `group_ceremony_view`'s boundary-row derives, the same one-projection-two-faces
+# split `custody` above uses; `dep:fauna-iroh` for `peer_leg_transport` (the
+# assembler that binds the actor-keyed transport and hands back the bound
+# addresses the compare code's addressing half needs — group_ceremony_node.rs's
+# own module docs); `account-runtime` because `initiate`/`consent` both need
+# this app's `AccountStoreHandle` (android is NOT yet a consumer of
+# `account-runtime` — 
+# so its leg of this feature stays unreachable until that lands, same as every
+# other `account-runtime`-gated surface here); `fauna-sync-engine/p2p-share`
+# (2026-08-25) so `src/offline_share.rs` can call the shared crate's
+# `flush`/`spawn_config_persist`/`now_fn`/`now_secs`/`write_through` directly
+# instead of holding its own copy (`fauna_sync_engine::offline_share`'s own
+# module gate is `all(p2p-share, account-runtime)`, and this feature already
+# carries `account-runtime` below).
+#
+# Default-on ONLY through `p2p-share` below, never through `store-safe`: the
+# ceremony is the `p2p-share` registry member's other half (its
+# `offline-share-*` / `offline-receive-*` surface — ui.yaml's
+# `gated_features.p2p-share`), so the App-Store flavor excises it with the
+# plane (`dynamic-features.md` § The App-Store escape hatch). It stays a
+# feature of its own because the ceremony has no dependency on the plane's
+# host. The Go mail-bridge `--no-default-features` build drops it too.
+# The cross-user share PLANE's host (src/share_plane.rs — the one host the
+# four native apps share: `fauna_sync_engine::share_glue`'s driver over
+# `fauna_client_share_host::ShareHostSeams`, binding through the SAME
+# per-session ceremony seat as `offline-share`; `docs/goal/behavior/p2p.md`
+# § Cross-user shared-set transfer). tui and linux run the same driver
+# natively. Named for the `p2p-share` gated-registry member it is
+# (`dynamic-features.md` § Charter members), so it rides `default` and NEVER
+# `store-safe`: the App-Store flavor excises the plane (§ The App-Store escape
+# hatch), as tui's store-safe build excises its `share-transfer-*` /
+# `share-serve-*` surface. It carries `offline-share` (the ceremony face, the
+# same member's other half), which is therefore in no other feature's closure
+# — `test_payments_excision_spine.py` computes `store-safe`'s closure and goes
+# red if any `<dep>/p2p-share` forward re-enters it under another name.
+p2p-share = [
+    "offline-share",
+    "conversations-session",
+    "sync-agent-provisioning",
+    "dep:fauna-client-share-host",
+    "dep:fauna-peer-share",
+]
+offline-share = [
+    "dep:fauna-client-capabilities",
+    "fauna-client-capabilities/p2p-share",
+    "fauna-client-capabilities/uniffi",
+    "fauna-sync-engine/p2p-share",
+    "dep:fauna-iroh",
+    "dep:fauna-client-features",
+    "account-runtime",
+]
+# The generic push-stream FFI (src/nest_client.rs — FfiPushSubscription +
+# FfiPushEvent + FfiNestClient::subscribe_pushes). The UniFFI twin of linux's
+# central push dispatch (`app.rs`: `WsEvent::Push(e) => match e { … }`) over the
+# shared `NestClient::subscribe_pushes` broadcast, so windows/apple/android react
+# to `fauna.notification` (and the other client-actionable kinds) instead of being
+# blind to every push but knocks (transport.md § Push events and `seq` numbering).
+# Default-on so the Apple/Android/Windows app FFI exports it for their live
+# surfaces (the 3-client lift onto ONE decode, priority #2 — the kinds are decoded
+# in Rust and cross as a flat `FfiPushEvent`, never as raw bytes a client parses).
+# Its records cross only built-in types, so uniffi-bindgen-go COULD emit them —
+# but the Go mail-bridge `--no-default-features` build has no live-surface UI, so
+# gating keeps the checked-in Go bindings byte-identical and avoids an off-win Go
+# regen (same rationale as `nest-trust` / `mime` / `drafts` /
+# `snapshots-immediate-delete`). Pure cfg gate — fauna-client / fauna-protocol are
+# non-optional deps, so this gates only the module's compilation, not a dep.
+push-subscription = []
+# The trained-topic lifecycle FFI (src/personalization.rs — the Personalization
+# home's Trained-topics facet CRUD over the shared
+# fauna_client_personalization::topics::TrainedTopics service;
+# topic-factors.md § Authoring surface & picker). Same shape + gating rationale
+# as `muted-keywords` / `sync-prefs`: fauna-client-personalization is already a
+# non-optional dep, so this gates only the module's compilation. Default-on;
+# the Go mail-bridge --no-default-features build drops it (no Personalization
+# UI on the bridge). The per-post train gestures themselves
+# (train_post/untrain_post/is_muted/…) live ungated on FfiFeedManager
+# (src/feed_manager.rs), itself gated behind `feed-manager`.
+# Pulls `account-runtime`: the surface reads and saves through the shared
+# `fauna_sync_engine::preference_surfaces` gestures, which take this
+# process's account-store handle (config-dissolution.md § The `__config`
+# dissolution schedule → *The closure order* steps (1) and (5)); every flavor that ships
+# the surface already hosts the runtime (both sit in `store-safe`).
+personalization = ["account-runtime"]
+# The owner-only immediate-delete snapshot surface (src/snapshots_client.rs —
+# the gated `FfiSnapshotsClient::snapshot_delete_immediate` method over the
+# shared SnapshotsClient::delete_immediate, plus the `immediate_delete_ack_text`
+# free fn the Backups immediate-delete modal displays + validates against). The
+# rest of FfiSnapshotsClient is UNgated (built-in types, Go-emittable), so the
+# struct is already in the checked-in Go bindings; this method + free fn cross
+# only built-in types too (and so COULD emit), but the Go mail-bridge
+# `--no-default-features` build has no Backups immediate-delete UI, so gating
+# them keeps the checked-in Go bindings byte-identical and avoids an off-win Go
+# regen (same rationale as `nest-trust` / `drafts` / `mime`; memory
+# reference_ffi_gate_conversations_session_excludes_go). Default-on so the
+# Apple/Android/Windows app FFI exports them for the modal (the 6-client lift
+# onto the shared delete; the shared SnapshotsClient::delete_immediate stays
+# unconditional, priority #2). Pure cfg gate — no extra dep.
+snapshots-immediate-delete = []
+# The encrypted-mode author-side subscription mint orchestration FFI
+# (src/subscriptions_author.rs — the create_tier / approve_subscriber /
+# remove_subscriber high-level calls over the shared SubscriptionsAuthor +
+# the account-store seam). Default-on so the Apple/Android/Windows app FFI exports it
+# for the profile Tiers-tab SELF author management (the 5-client subscriptions
+# lift, monetization.md § Pillar 1 — "never re-implement the crypto dance per
+# client"), but gated so the Go mail-bridge `--no-default-features` build drops
+# it — the bridge is a server with no author subscription UI, and (like
+# backup-destinations) these free fns call the gated `FfiNestClient::nest_arc()`
+# accessor, which a featureless build wouldn't compile. fauna-client-config /
+# fauna-client-subscriptions are already non-optional deps, so this gates only
+# the module's compilation, not a dep.
+subscriptions-author = []
+# The post-source badge classifier FFI (src/feed.rs — classify_sources →
+# FfiSourceBadge { id, label, glyph }). Default-on so the Apple/Android/Windows
+# app FFI exports it for the feed badge, but gated out of the Go mail-bridge
+# `--no-default-features` build because FfiSourceBadge.glyph is a `fauna_core`
+# SourceGlyph (the shared source-icon concept the conversations rail also uses —
+# render-model.md § Deltas → D5; a client keys ONE `SourceGlyph → asset` map off
+# both surfaces), for which uniffi-bindgen-go emits an uncompilable bare `fauna_core`
+# cross-namespace import (same Go-incompatibility reason as `render`/`value-format`/
+# `search`). The bridge has no feed-badge surface, so dropping it is harmless.
+# Forwards `fauna-core/uniffi` so SourceGlyph gets its `uniffi::Enum` registration
+# (also on via the non-optional `fauna-conversations`/uniffi dep, but stated here for
+# self-containment, like `render`).
+feed-badge = ["fauna-core/uniffi"]
+# The create-feed rule-builder *presentation* FFI (src/feed_rules.rs — the
+# 11-type picker catalog + input-kind classification, the added-rule summary
+# chip, the required/excluded toggle label). Default-on so the Apple / Windows /
+# Android forms can drop their hand-rolled rule-type maps, `isToggle` /
+# `isLabelRule` predicates, and raw-`rule_type` chips (feed.md § Where logic
+# lives), but gated out of the Go mail-bridge `--no-default-features` build for
+# the SAME reason as `feed-badge` / `value-format` / `search`: every export
+# returns a `fauna_core` LocalizedText, for which uniffi-bindgen-go emits an
+# uncompilable bare `fauna_core` cross-namespace import. The bridge has no
+# create-feed surface. Note the *encoding* half (`encode_filter_rule` /
+# `normalize_filter_rules`, src/feed_client.rs) stays UNGATED and does cross to Go —
+# it returns only built-in types. fauna-client-feed is already a non-optional
+# dep, so this gates only the module's compilation.
+feed-rules = ["fauna-core/uniffi"]
+# The shared stateful Feed-page manager façade (src/feed_manager.rs — FfiFeedManager
+# over fauna_feed::FeedManager<Arc<NestClient>> + FfiNestClient::feed_manager). Default-on
+# so the Apple/Android/Windows app FFI exports it for the Feed page (the 5-client lift
+# onto the shared snapshot, feed.md § State & data shape), but gated so the Go mail-bridge
+# `--no-default-features` build drops it — the bridge has no Feed UI, and the façade's
+# snapshot returns cross-crate `fauna_feed` types (FeedSnapshot/PostSummary/QuotedPostView)
+# + the SnapshotObserver foreign trait, for which uniffi-bindgen-go emits uncompilable bare
+# `fauna_feed` cross-namespace imports (same Go-incompatibility reason as `logs` /
+# `value-format` / `web-content` / `conversations-session`). Enables `fauna-feed/uniffi` so
+# the snapshot types get their `uniffi::Record`/`Enum` registration (it transitively enables
+# `fauna-core/uniffi` for the embedded `LocalizedText`); `fauna-feed` itself stays a plain
+# (non-uniffi) dep for src/feed.rs's gate-free `classifySources` badge export.
+feed-manager = ["fauna-feed/uniffi"]
+# The shared, stateful Search page (src/search_manager.rs — the FfiSearchManager
+# façade over fauna_client_search::SearchManager<Arc<NestClient>> +
+# FfiNestClient::search_manager). Default-on so the Apple/Android/Windows app FFI
+# exports it for the Search page (the 5-leg lift onto the shared snapshot,
+# search.md § State & data shape — those legs are gated on exactly this façade,
+# because the generic SearchManager<R> can't be `#[uniffi::export]`ed). Gated so the
+# Go mail-bridge `--no-default-features` build drops it — the bridge is a server with
+# no Search UI, and the façade's snapshot returns cross-crate `fauna_client_search`
+# types (SearchSnapshot/SearchResultRow/SearchSource/SearchNav) + the
+# SearchSnapshotObserver foreign trait, for which uniffi-bindgen-go emits uncompilable
+# bare `fauna_client_search` cross-namespace imports (identical Go-incompatibility
+# reason to `feed-manager`). Enables `fauna-client-search/uniffi` so those types get
+# their `uniffi::Record`/`Enum` registration (it transitively enables
+# `fauna-core/uniffi` for the embedded `LocalizedText`); `fauna-client-search` itself
+# stays a plain (non-uniffi) dep for src/search.rs's gate-free render + paging faces
+# and src/search_client.rs's FfiSearchClient, both of which the un-migrated legs
+# still depend on.
+search-manager = ["fauna-client-search/uniffi"]
+# The markdown authoring-toolbar helper (src/markdown.rs `wrap_markdown_selection`):
+# wraps a selection in `*`/`**`/`` ` `` markers, keeping edge whitespace OUTSIDE the
+# markers. Default-on so the Apple/Android/Windows app FFI exports it for their
+# compose toolbars; gated out of the Go mail-bridge `--no-default-features` build —
+# the bridge is a server with no authoring toolbar, and (unlike ungated `parse_markdown`,
+# which renders) its export would otherwise force a Go-binding regen that the Windows
+# dev machine can't run (no Go). The shared render-side `parse_markdown` stays ungated.
+markdown-authoring = []
+# Web-content authoring client (src/web_content.rs — the FfiWebClient over the
+# fauna.web.* kinds + the re-exported SubdomainView / ApexView / SubdomainDisabledReason
+# view types). Default-on so the Apple/Android/Windows app FFI exports it for the
+# web-settings + admin-web pages, but gated so the Go mail-bridge `--no-default-features`
+# build drops it — the bridge has no use for the client web machine, and re-exporting
+# fauna-client-web's uniffi view types makes uniffi-bindgen-go emit uncompilable bare
+# cross-namespace imports (same Go-incompatibility reason as `mail-admin` / `pairing`).
+web-content = ["dep:fauna-client-web"]
+# The Devices-page folder creation wizard machine (src/folders.rs). Default-on
+# so the Apple/Android/Windows app FFI exports it, but gated so the Go
+# mail-bridge `--no-default-features` build drops it — the bridge has no use for
+# the wizard, and its WS-RPC `rpc-glue` seam pulls the native `fauna-client` /
+# `fauna-client-folders` client crates uniffi-bindgen-go can't emit (same
+# Go-incompatibility reason as `mail-admin` / `pairing`).
+#
+# `dep:tracing`: the on-demand prefs store (src/on_demand_presence.rs) logs an
+# unreadable prefs file unconditionally.
+folders = [
+    "dep:fauna-folders-machine",
+    "dep:fauna-devices-machine",
+    "dep:fauna-backups-machine",
+    "dep:fauna-media-machine",
+    "dep:tracing",
+]
+# The in-process file-sync engine host (src/sync_engine_host.rs) — the apple
+# apps' byte-sync deployment (`file-sync.md` § Apple apps — convergence
+# design). Flips on `fauna-sync-engine/engine-lifecycle`, the shared build-and-drive
+# lifecycle (fail-closed content-key binding, seal roots, drive cadence) that linux
+# also consumes, so the security-critical binding decision has ONE implementation.
+# Default-on so the Apple (and, when they converge, Android/Windows) client FFI
+# exports it; gated so the Go mail-bridge's `--no-default-features` build drops it —
+# the bridge has no file-sync surface, and the lifecycle's `fauna-client-folders/mls`
+# custody resolution pulls the conversations/MLS graph uniffi-bindgen-go can't emit.
+# `dep:tracing` because `sync_engine_host.rs` logs unconditionally — the default
+# build gets `tracing` via `logs`, but a trimmed `--no-default-features
+# --features sync-engine-host` build must pull its own, or the module fails to
+# compile (E0433 on `tracing`). `file-provider-host` below implies this feature,
+# so its module (which also logs unconditionally) inherits the same dep.
+sync-engine-host = ["fauna-sync-engine/engine-lifecycle", "dep:tracing", "account-runtime"]
+# The W3 (account-data-plane.md § Workstreams) account-store runtime this app hosts (src/account_runtime.rs) — the
+# third consumer of the shared `fauna-client-account-runtime` assembly after
+# tui and linux, and what gives windows/macOS/iOS an account plane of their
+# own instead of only the app-dead agent's (`account-data-plane.md` § The
+# account store → *The client-side lifecycle*).
+#
+# Its own feature rather than a rider on `sync-engine-host`: that one is the
+# FILE-sync engine, a different plane an app can host without this one (and
+# vice versa). Default-on through `store-safe` — every native app hosts the
+# account plane — and dropped by the Go mail-bridge's `--no-default-features`
+# build, which holds no user identity and cannot emit the `fauna-client*`
+# namespaces uniffi-bindgen-go chokes on (same reason as `sync-engine-host`).
+# `dep:tracing` for the same reason it does: the module logs unconditionally,
+# so a trimmed build without `logs` must pull its own or fail E0433.
+# `accounts-registry`: `start_account_runtime` takes the app's `FfiAccountRegistry`
+# and resolves the attested predecessors off it in Rust (their delegable
+# schedules derive from seeds, which never cross the per-app call).
+# `fauna-core/local-clock`: the let-go door (src/generation_let_go.rs) dates the
+# unreadable-generations line with `format_unix_local_date_ms`, and a trimmed
+# build without `value-format` must pull the clock itself or fail E0425.
+account-runtime = ["dep:fauna-client-account-runtime", "dep:tracing", "accounts-registry", "fauna-core/local-clock"]
+# The control-inverted on-demand host (src/file_provider_host.rs) — the
+# hydration host apple's `NSFileProviderReplicatedExtension` calls
+# (`on-demand-files.md` § Apple File Provider binding) and, through its
+# owned-tree constructor `app_dead_owned_tree`, android's SAF
+# `DocumentsProvider` (§ Android SAF DocumentsProvider binding). Its own
+# default-OFF feature rather than a rider on `sync-engine-host`'s default-on
+# gate because windows has no use for it (its own cfapi path runs in the
+# sync agent) and shouldn't pay to compile it (build-system.md § UniFFI
+# cdylib rebuild cost (win) → Monolith-split verdict). Requires
+# `sync-engine-host` because it reuses the byte-sync host's `HostContext`
+# (and inherits its `dep:tracing`). The apple recipes (`apple-ffi`,
+# `apple-ffi-host`, `apple-ffi-construction-check`) and every android flavor
+# (`_android-ffi-flavor`) enable it explicitly — FaunaKit's
+# `FileProviderHost.swift` calls `FfiFileProviderHost.appDead(...)` and
+# android's `FaunaDocumentsProvider.kt` calls `appDeadOwnedTree(...)`, so
+# every build that compiles either needs this feature on.
+# The nest's `conformance_file_provider_client.rs` dev-dep (`bins/fauna-nest
+# /Cargo.toml`) also needs it directly — that test drives `FfiFileProviderHost`
+# itself, not just the shared `HostContext` `sync-engine-host` alone provides.
+# The host signs every record with the machine principal
+# (`mls-group-key-material.md` § M2 → *Writer-signed change records* (1)), and
+# an IN-PROCESS host (android's SAF provider) reads that principal straight out
+# of the T10 slot (`SlotChangeSigner` over `principal_bundle`), so the feature
+# carries the slot module and the credential store it reads.
+file-provider-host = [
+    "sync-engine-host",
+    "fauna-sync-engine/account-runtime",
+    "dep:fauna-credential-store",
+]
+# The desktop sync-agent provisioning loop FFI (src/sync_agent_provisioning.rs —
+# the FaunaKit driver that runs the shared `fauna_ipc::convergence` loop over the
+# per-user unix socket, mints + registers the RenewBearer device grant, and pushes
+# ProvisionCapability/UnprovisionCapability so file sync + backup survive the app
+# closing; `sync-agent.md` § Control plane split + § Credential model, milestone
+# A4). Pulls `dep:fauna-ipc` (the local IPC seam + the shared convergence loop) and
+# `dep:tracing` (the module logs the grant-degrade path unconditionally, like
+# `sync-engine-host`). Default-on so the Apple app FFI exports it (the module
+# itself is `#[cfg(unix)]`, so it is dead code on iOS/watchOS/android and absent
+# from the windows C# build — only macOS drives it), but gated so the Go mail-bridge
+# `--no-default-features` build drops the native-socket crate entirely.
+# `accounts-registry`: the provisioner takes the app's `FfiAccountRegistry` and
+# resolves the paired predecessor keys in Rust (`sync_agent_provisioner`).
+sync-agent-provisioning = ["dep:fauna-ipc", "dep:tracing", "accounts-registry"]
+# The owner-side shared-folder content-key orchestration FFI
+# (src/folders_author.rs — the share_set / remove_member /
+# resume_pending_removals high-level calls over the shared FoldersAuthor +
+# the account-store seam + the conversations rail's reused MlsEngine). Flips on
+# `fauna-client-folders/mls` (the real `FolderGroupCrypto` adapter on
+# `Arc<MlsEngine>` + the `share_set` flow over the shared conversations client),
+# both of whose transitive deps (fauna-mls, fauna-client-conversations) are
+# already non-optional fauna-ffi deps — so this adds no new crate, only compiles
+# the `mls`-gated adapter module. Implies `conversations-session` because the free
+# fns take the live `ConversationsSession` (reusing its one per-actor `MlsEngine`
+# over the one `mls_state.db`, never a second engine racing on the SQLite file) —
+# a client must have built one to call these. Default-on so the Apple/Android/
+# Windows app FFI exports it for the folders Sharing UI (the 5-client lift,
+# folders.md § Sharing — "Share / remove orchestration — ✅ shared Rust"), but
+# gated so the Go mail-bridge `--no-default-features` build drops it: the bridge
+# is a server with no share UI, and (like conversations-session) the fns take the
+# cross-crate `ConversationsSession` Object + call the gated nest_arc() accessor,
+# which a featureless build would not compile. Also implies `dep:fauna-devices-machine`
+# (otherwise only pulled by `folders`) for `wire_devices_mls_query`'s
+# `DevicesMachine`/`MlsQuery` adapter (src/folders_author.rs) — both features are
+# default-on together, but this keeps `--features folders-author` alone
+# (without `folders`) a valid, compiling combination. Pulls `account-runtime`:
+# the follow / unfollow / list faces read and write the account's
+# `fauna.state.follows` rows through the handle (`follows_seam` in src/lib.rs),
+# and the shared-folder content-key custody is the `fauna.state.folder-keys`
+# kind, read and written through the seat's store
+# (`account_runtime::folder_key_store`).
+folders-author = ["fauna-client-folders/mls", "conversations-session", "dep:fauna-devices-machine", "account-runtime"]
+# Shared value formatting (src/value_format.rs — relative time / byte sizes /
+# durations). Default-on for the Apple/Android/Windows app FFI; gated out of
+# the Go mail-bridge `--no-default-features` build because its `LocalizedText` /
+# `RelativeTimeDisplay` returns are `fauna_core` types and uniffi-bindgen-go emits
+# an uncompilable bare `fauna_core` cross-namespace import for them (same
+# Go-incompatibility reason as `mail-admin` / `pairing`). The bridge is a server
+# with no value-formatting surface, so dropping it is harmless. Forwards
+# `fauna-core/local-clock` for `format_unix_local` — plain-`String` return
+# (not a `fauna_core` type), so it carries none of this feature's own
+# Go-incompatibility; harmless to bundle since the Go build already turns the
+# whole feature off.
+value-format = ["fauna-core/local-clock", "dep:fauna-client-features", "dep:fauna-client-region", "dep:fauna-client-status"]
+# Shared search-result card formatters (src/search.rs — content_type_badge +
+# clean_snippet over fauna_client_search::render). Default-on for the
+# Apple/Android/Windows app FFI; gated out of the Go mail-bridge
+# `--no-default-features` build for the same reason as `value-format`
+# (`search_content_type_badge` returns a `fauna_core` LocalizedText →
+# uniffi-bindgen-go cross-namespace import). The bridge has no search surface.
+search = []
+# Shared content-label badge presentation (src/content_category.rs —
+# content_label_style over fauna_core::content_category). Default-on for the
+# Apple/Android/Windows app FFI (replaces the per-app category→label/icon/
+# colour maps in `ContentLabelBadge.{kt,svelte,...}`); gated out of the Go
+# mail-bridge `--no-default-features` build for the same reason as `render`
+# (the export returns a `fauna_core` `ContentLabelStyle` embedding a
+# `LocalizedText` → uniffi-bindgen-go cross-namespace import). Forwards
+# `fauna-core/uniffi` so `ContentLabelStyle` gets its `uniffi::Record`
+# registration cross-crate. The bridge has no moderation surface.
+moderation-badge = ["fauna-core/uniffi"]
+# Shared MIME-type detection (src/mime.rs — content_type_for_filename over the
+# fauna_core::share extension→MIME catalog). Default-on for the Apple/Android/
+# Windows app FFI (replaces per-app hand-rolled maps, e.g. the windows
+# MimeDetect image-only map); gated out of the Go mail-bridge
+# `--no-default-features` build to keep this free fn over built-in types off the
+# checked-in Go bindings and avoid an off-win Go regen (same rationale as
+# `nest-trust`: uniffi-bindgen-go COULD emit it, but the bridge has no
+# client-filename MIME surface). Pure cfg gate — fauna-core is non-optional.
+mime = []
+# Shared render-model plaintext flattener (src/render.rs —
+# render_document_to_plaintext over RenderDocument::to_plaintext). Default-on for
+# the Apple/Android/Windows app FFI; gated out of the Go mail-bridge
+# `--no-default-features` build for the same reason as `value-format`/`search`
+# (the export takes a `fauna_core` RenderDocument → uniffi-bindgen-go
+# cross-namespace import). Forwards `fauna-core/uniffi` so RenderDocument gets
+# its `uniffi::Record` registration cross-crate (render-model.md § Implementation
+# status — direct embed). The bridge has no render surface.
+render = ["fauna-core/uniffi"]
+# Shared QR module-matrix encoder (src/qr.rs — qr_matrix / qr_quiet_zone_modules over
+# `fauna_core::qr_matrix`), which the Settings identity-export section draws on
+# Apple/Android/Windows (settings.md § Identity export). Default-on for the client FFI,
+# gated out of the Go mail-bridge `--no-default-features` build for the same reason as
+# `render`/`value-format` (the bridge has no QR surface, and the export returns a
+# `fauna_core` QrMatrix → uniffi-bindgen-go cross-namespace import). Forwards
+# `fauna-core/uniffi` so QrMatrix gets its `uniffi::Record` registration cross-crate, and
+# `fauna-core/qr_render` for the encoder itself (off by default there — the nest never
+# renders a QR).
+qr-render = ["fauna-core/qr_render", "fauna-core/uniffi"]
+# The client residual-HTTP TLS-pin query accessors (src/trust.rs:
+# spki_sha256_of_cert_der / pinned_spki_for_host / authority_of) the windows C#
+# DirectNestClient's cert-validation callback uses to trust a self-signed nest the
+# same way the Rust stack does (the shared pinned SPKI). All three are free fns
+# over built-in types, so uniffi-bindgen-go CAN emit them — but the Go mail-bridge
+# has no client HTTP-pin surface, so gating them out of the `--no-default-features`
+# build keeps them off the checked-in Go bindings and avoids an off-win Go regen
+# (memory reference_ffi_gate_conversations_session_excludes_go). The sibling
+# install_nest_identity_pin_store stays ungated (already in the Go bindings).
+# Pure cfg gate — needs no extra dep (fauna-client / fauna-protocol are non-optional).
+nest-trust = []
+# The four admin mail machines (src/mail_admin.rs). Default-on so the
+# Apple/Android/Windows app FFI exports them, but gated so the Go mail-bridge
+# FFI build (`uniffi-bindgen-go` over a `--no-default-features` .so) drops them —
+# the Go bridge has no use for client admin machines, and uniffi-bindgen-go emits
+# uncompilable bare cross-namespace imports for the fauna-client-{dns,mail-settings}
+# packages they pull in (the same Go-incompatibility reason the other
+# client-crate features are gated). See
+# `justfile` `mail-bridge-ffi` + `docs/goal/architecture/build-system.md`.
+# `account-runtime`: the credentialed DNS machine reads and writes the
+# account's `fauna.state.dns` row through the seat's account-store handle.
+mail-admin = ["dep:fauna-client-dns", "dep:fauna-client-mail-settings", "account-runtime", "fauna-client-folders/mail-settings"]
+# The user-settings Linked-nests machine (src/pairing.rs). Default-on for the
+# Apple/Android/Windows app FFI, gated out of the Go mail-bridge
+# `--no-default-features` build for the same cross-namespace-import reason as
+# `mail-admin` (the Go bridge has no use for the client linked-nests machine).
+# Pulls `account-runtime`: the trust facet mints from the account's mail
+# custody (`fauna.state.mail`) through the seat's account-store handle, and
+# `fauna-client-folders/mls` for the folder-custody set names the facet names a
+# paywall grant's folder from (`CustodyOwnedSetNames`).
+pairing = ["dep:fauna-client-pair", "account-runtime", "fauna-client-folders/mls"]
+# The shared log-ring exposure (src/logs.rs + FfiAdminClient::logs). Default-on
+# for the Apple/Android/Windows app FFI's Settings → Logs page, gated out of
+# the Go mail-bridge `--no-default-features` build for the same
+# cross-namespace-import reason as `value-format` (its `LogEntry` / `LogLevel`
+# returns are `fauna_log` types; the Go bridge has no Logs surface). Pulls
+# `fauna-log` with its `uniffi` feature so the owned types cross the boundary.
+logs = ["dep:fauna-log", "dep:tracing"]
+# The native-client FaunaMls conversations *receive* session
+# (src/nest_client.rs `FfiNestClient::conversations_session`). Default-on so the
+# Apple/Android/Windows app FFI exports it, but gated out of the Go mail-bridge
+# `--no-default-features` build because its return is the cross-crate
+# `fauna_conversations::ConversationsSession` Object and uniffi-bindgen-go emits an
+# uncompilable bare `fauna_conversations` cross-namespace import for it (same
+# Go-incompatibility reason as `mail-admin` / `pairing` / `value-format` / `logs`).
+# The Go bridge is a server with no client-conversations surface, so dropping it is
+# harmless. fauna-conversations/-mls/-client-conversations are already non-optional
+# deps, so this gates the leaking export + its imports; it also turns on
+# fauna-mail's `segments-receive` (the inbound `open_inbound_record` decrypt the
+# `NestMailInboundSource` mail-receive sources need — kept off the Go bridge build).
+#
+# It also carries the member-side **succession witness** and its peer-anchor
+# harvest sweep (`succession-aftermath.md` § Propagation → *MLS groups*): both
+# are properties of having a conversations session at all, not of the recovery
+# *ceremony*, so they ride this gate rather than `recovery-ceremony`. That is
+# why `dep:fauna-client-recovery` is turned on here as well — the crate is
+# optional so the Go mail-bridge `--no-default-features` build still drops it
+# whole, and the bridge has no conversations session to witness for.
+conversations-session = [
+    # The mail key cache reads the account's mail custody (`fauna.state.mail`)
+    # through the seat's account-store handle.
+    "account-runtime",
+    "fauna-mail/segments-receive",
+    "fauna-conversations/client-display",
+    "dep:fauna-client-recovery",
+    "fauna-client-recovery/conversations-witness",
+]
+# The native-client `__drafts` persistence seam (src/drafts.rs — FfiDraftsClient
+# over fauna_client_drafts::DraftsClient + FfiNestClient::drafts, AND the canonical
+# stateful FfiDraftsSync over DraftsSync + FfiNestClient::drafts_sync). Default-on
+# so the Apple/Android/Windows app FFI exports it for the per-app draft-
+# persistence v2 legs (the 6-client lift onto the shared seal + WS transport,
+# file-sync.md § Drafts Sync — "do NOT re-implement the seal or the WS call per
+# client"), but gated out of the Go mail-bridge `--no-default-features` build: the
+# bridge is a server with no compose UI, and dropping it keeps both handles off
+# the checked-in Go bindings so no off-win Go regen is needed (same gate rationale
+# as `nest-trust`'s built-in-typed free-fns; memory
+# reference_ffi_gate_conversations_session_excludes_go). The `dep:` form makes
+# fauna-client-drafts optional, so a featureless build drops the crate entirely.
+drafts = ["dep:fauna-client-drafts"]
+# The source-side IMAP import client (src/mail_import.rs — `FfiMailImportClient`),
+# per mailbox-migration.md § Client-driven streaming model: the concrete
+# `ImapSession<NativeTlsTransport>` facade UniFFI needs, since it cannot export
+# the generic the transport seam is built on. Pulls fauna-mail's
+# `imap-client-native` (tokio + tokio-rustls), which is NOT wasm-safe — fine
+# here, this crate is the native shell; the browser reaches the same protocol
+# core through fauna-wasm and the pure `imap-client` feature.
+#
+# Default-on so the five native apps get it, and gated so the Go mail-bridge
+# `--no-default-features` build DROPS it: the bridge never imports from a
+# foreign mailbox, and dropping it keeps `imap-proto`/rustls out of the bridge
+# and leaves `libs/fauna-mail-go` unchanged (no off-win Go regen). Same
+# reasoning as `drafts` above.
+mail-import = ["fauna-mail/imap-client-native"]
+# Expose the state machines' `set_*_for_test` setters + observer/connector doubles
+# via UniFFI for E2E, so a test build's bridge can drive snapshots (tracked
+# internally — "E2E bridge contract").
+#
+# This is where such forwards BELONG, and as of 2026-08-01 EVERY entry below is
+# reached only through this feature: the onboarding/launch-machine dep lines no
+# longer name `test-helpers`/`test-observer` themselves, so `testing.md`
+# convention 15 rule (b) now holds here and a plain `--release` build carries
+# none of the 23 seams (two-column symbol-table proof in that doc's
+# § Implementation status).
+#
+# ⚠ A real gate is not the same as clean artifacts — a build recipe can still
+# turn the feature on. All three native families are split into production/test
+# flavor pairs: android (`just android-ffi` / `android-ffi-test`, staged per
+# Gradle buildType), apple (`apple-ffi` / `apple-ffi-test`, and likewise
+# `apple-ffi-host` / `apple-ffi-host-test`) and windows (`windows-ffi` /
+# `windows-ffi-test`, whose production flavor also runs the generated-bindings
+# `*ForTest` witness in `_windows-ffi-bindgen`). The production flavors pass NO
+# test features, so shipped artifacts carry none of these seams. (An earlier
+# version of this comment predated the apple/windows splits and claimed the
+# shipped macOS/iOS/Windows artifacts DO carry the seams — stale; verified
+# against the justfile recipes 2026-08-13 review.)
+test-helpers = [
+    # The harness's networked seed exports (the `e2e-harness` feature above).
+    "e2e-harness",
+    # The loud surfaces' e2e seams (`src/e2e_seams.rs`, and the wake beside the
+    # re-sweep loop in `src/critical_alerts.rs`): the shared counters and
+    # backoff parser, the NestClient reconnect pace, and the wakeable loop.
+    "dep:fauna-e2e-contract",
+    "fauna-client/e2e-agent",
+    # The per-test factory reset's fresh dial budget (`dial_budget_clear_for_test`).
+    "dep:fauna-ws-substrate",
+    "fauna-ws-substrate/test-helpers",
+    "fauna-client-alert-sweep?/test-helpers",
+    # `fauna-mail`'s source-IMAP trust seed (FAUNA_E2E_IMAP_EXTRA_CA_PEM), read
+    # inside `NativeImapConnector::new` — the trust store `FfiMailImportClient`
+    # builds for apple/android/windows. The `*-ffi-test` flavors are
+    # release-profile, so without this forward the arm is absent from exactly the
+    # builds the e2e drives.
+    "fauna-mail/test-helpers",
+    "fauna-onboarding-machine/test-helpers",
+    "fauna-launch-machine/test-helpers",
+    "fauna-conversations/test-helpers",
+    # The FAUNA_E2E_SYNC_AGENT_BIN pin read FfiChildAgentSpawner's spawn
+    # resolves through (agent_spawner::agent_binary) — compiled out of a
+    # production fauna-ffi build together with the spawner itself.
+    "fauna-client-sync/test-helpers",
+    # The Feed-page snapshot injection seam (FfiFeedManager::inject_posts_for_test
+    # over fauna_feed::test_support + set_feed_snapshot_for_test) — the windows/apple
+    # e2e twin of the conversations inject seam, driving the unverified-source-badge
+    # `Failed` arm a real nest can't serve. Doubly gated out of Go (inside the
+    # default-off-in-Go `feed-manager` module, behind test-helpers).
+    "fauna-feed/test-helpers",
+    # The D10 delegation row's RENDER clock (never the mint clock) — the seam
+    # `atproto_delegation_advance_clock` drives so a test reaches
+    # expiring_soon/expired without sleeping out the ~90-day window
+    # (convention 14: a fake clock, never a sleep). The machine gates its setter
+    # on `debug_assertions OR e2e-agent`, and the apple-ffi/windows-ffi builds
+    # are `--release`, so the feature must be forwarded explicitly or the setter
+    # does not exist in the very builds the e2e drives.
+    "fauna-atproto-settings-machine?/e2e-agent",
+    # The backup-audit clock offset (`set_backup_audit_clock_offset_secs`, the
+    # `backup_audit_run_now` agent command's mechanism) — same rationale as the
+    # delegation clock above: `fauna-client-backup` gates its setter on
+    # `debug_assertions OR e2e-agent`, and the release apple-ffi/windows-ffi
+    # builds need it forwarded explicitly.
+    "fauna-client-backup?/e2e-agent",
+    # The trust facet's render clock (`set_trust_clock_offset_secs`, the
+    # `trust_facet_advance_clock` agent command's mechanism) — same rationale:
+    # `fauna-client-capabilities::trust_clock` gates its setter on
+    # `debug_assertions OR e2e-agent`, and the dep is optional (weak `?/`).
+    "fauna-client-capabilities?/e2e-agent",
+    # The fleet-removal convergence read (`device_set_state_json`, the
+    # `FfiNestClient::device_set_state_json` export's mechanism) — same
+    # rationale as the delegation clock above: `fauna-client-account-runtime`
+    # gates it on `debug_assertions OR e2e-agent`, and the dep is optional
+    # (`account-runtime` feature), so the weak `?/` form is required — a plain
+    # `/` would turn the dependency on unconditionally.
+    "fauna-client-account-runtime?/e2e-agent",
+    # The conversations push-arm kill-switch (`conv_push_source`'s
+    # `FAUNA_E2E_SUPPRESS_CONV_PUSH` read) — the layer-5 missed-push receive
+    # proof's only lever on the four UniFFI apps (macos, ios, windows, android),
+    # gated on `debug_assertions OR e2e-agent` in `fauna-client-conversations`.
+    # Forwarded rather than left to the profile so the flavor, not the build
+    # profile, is what decides — the `apple-ffi-test`/`windows-ffi-test`/
+    # `android-ffi-test` recipes all pass this feature, whatever profile they
+    # happen to use today.
+    "fauna-client-conversations/e2e-agent",
+    # The region plane's test-capable-build seams (the registry seed and the
+    # declared-region override, `fauna-client-region`'s `e2e-agent`, convention
+    # 15) — the release-profile `*-ffi-test` flavors need them forwarded, the
+    # same rationale as the conversations kill-switch above.
+    "fauna-client-region?/e2e-agent",
+    # The resident engine's full-reconcile cadence (`always_resident::rescan_interval`,
+    # the FAUNA_E2E_RESCAN_MS read) — linux and tui forward this from their own
+    # `e2e-agent` feature; the four UniFFI apps never did, so a released
+    # `--release` e2e build ran the 300s production cadence with no test able
+    # to see or budget for it (`drivers/ios.py`'s launch env has set the var
+    # since 2026-08-25). `fauna-sync-engine` is already a direct dependency
+    # below, gated the same `debug_assertions OR e2e-agent` way.
+    "fauna-sync-engine/e2e-agent",
+    # The screen_time.rs test-clock seams — same rationale and gate as above,
+    # on the other direct dependency that carries them.
+    "fauna-core/e2e-agent",
+    # The `dial` module's nest-dial override seams (lib.rs/dial.rs) — distinct
+    # from the `fauna-launch-machine/test-helpers` forward above (that crate
+    # deliberately splits `test-helpers` scaffolding from this `e2e-agent`
+    # redirect seam, per its own manifest comment).
+    "fauna-launch-machine/e2e-agent",
+    # The DNS-credential-verify fake-provider decorator (`maybe_wrap_fake`,
+    # `fauna-client-dns/src/lib.rs`) gates on `debug_assertions OR
+    # feature="test-helpers"` — `debug_assertions` covers macOS's debug
+    # apple-ffi-host build, but `apple-ffi-test`'s iOS slice is `--release`, so
+    # without this forward the decorator never wraps and every credential-add
+    # verify hits the real (unreachable-in-sandbox) provider until it times
+    # out. Same class of gap row 392 already fixed for e2e-agent seams; this
+    # one uses `test-helpers` instead, so it needs its own forward.
+    "fauna-client-dns?/test-helpers",
+    # The drafts autosave-window seam (FAUNA_E2E_DRAFTS_AUTOSAVE_DEBOUNCE_MS),
+    # read inside `fauna_client_drafts::autosave_debounce` — the one accessor
+    # `autosave_debounce_ms` answers from, so apple/android/windows all reach it
+    # without app-side plumbing. Same release-profile reason as the DNS forward
+    # above: `apple-ffi-test`'s iOS slice is `--release`, and iOS's leave-flush
+    # witness needs the window pushed PAST the test so a landed draft can only
+    # be the flush. `?` because the dep is optional behind `drafts`.
+    "fauna-client-drafts?/test-helpers",
+    # The registry half of the E2E bridge (`call_registry_method_for_test`,
+    # `src/accounts_registry.rs`) and the store fault it arms, which
+    # `fauna-client-accounts` gates on `debug_assertions OR test-helpers` — the
+    # same release-profile `apple-ffi-test` reason as the DNS forward above.
+    # `?` because the dep is optional behind `accounts-registry`.
+    "fauna-client-accounts?/test-helpers",
+]
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[build-dependencies]
+# The one derivation of `FAUNA_BUILD_COMMIT` (`ui/status.md` § State & data shape,
+# the build leg) — stamped so `fauna_ffi_build_commit()` names the commit the
+# native app's shared Rust was compiled from.
+fauna-build-commit = { path = "../fauna-build-commit" }
+
+[dependencies]
+# The shared `CloudBackupExclusion::ExcludedByShell` callback is typed
+# `anyhow::Result`, so the mobile custodian face (src/custodian_host.rs)
+# needs the crate to build one from a foreign excluder's error.
+anyhow = { workspace = true }
+fauna-core = { path = "../fauna-core", default-features = false }
+fauna-labeler = { path = "../fauna-labeler", optional = true }
+# BARE codec for the labeler `label()` ABI (input `LabelerPostInput` / output
+# `Vec<Label>`); gated with `labeler` since only that module serializes them.
+serde_bare = { workspace = true, optional = true }
+fauna-client-core = { path = "../fauna-client-core" }
+# WS-RPC client + the Layer-3 typed-call seams. Wrapped by the
+# FfiNestClient / FfiBridgesClient / FfiEmailClient / FfiSubscriptionsClient
+# UniFFI façade (src/nest_client.rs, bridges.rs, email_client.rs,
+# subscriptions_client.rs) so Apple/Windows/Android reach the same
+# `fauna.bridges.*` / `fauna.email.*` / `fauna.subscriptions.*` kinds the
+# Rust-native Linux app calls directly.
+fauna-client = { path = "../fauna-client" }
+# `test-helpers` only — the pure, wasm-safe half of the e2e observable contract.
+fauna-e2e-contract = { path = "../fauna-e2e-contract", optional = true }
+# `test-helpers` only — the process dial budget's per-test clear
+# (`src/e2e_seams.rs::dial_budget_clear_for_test`).
+fauna-ws-substrate = { path = "../fauna-ws-substrate", optional = true }
+# The `BearerSource` seam (+ `ApiError`) the seed-less File Provider host adapts a
+# Swift Keychain reader onto (`file_provider_host.rs` `ForeignBearer`), the same
+# trait the bearer-only Windows sync-service uses. Already transitive via
+# fauna-client; a direct path dep so the `use fauna_nest_http::…` resolves.
+fauna-nest-http = { path = "../fauna-nest-http" }
+# The pre-identity (anonymous) WS-RPC connector. Home of the shared
+# recipient-resolution seam (`resolve_nest` / `resolve_handle` in src/resolve.rs)
+# that calls the anonymous `fauna.nest.resolve` / `fauna.actor.by_handle`
+# discovery kinds — so Apple/Windows/Android stop hitting the deleted
+# `/api/v1/{resolve-node,actor/by-handle}` HTTP twins in per-app glue
+# (priority #2/#4; api-layers.md discovery row). Already in the tree transitively via fauna-{onboarding,launch}-machine;
+# named directly here so the seam reads from one place.
+fauna-anon-client = { path = "../fauna-anon-client" }
+fauna-client-account = { path = "../fauna-client-account" }
+# The multi-account registry (NOTE: -accounts, plural — distinct from the
+# WS-RPC account client above). src/accounts_registry.rs wraps it so native
+# apps implement only the FfiSecretStore key/value glue
+# (long-term-store.md § Multi-account evolution → Shared seam). Optional —
+# behind the default-on `accounts-registry` feature the Go build drops.
+fauna-client-accounts = { path = "../fauna-client-accounts", optional = true }
+# The shipped catalog, for the one line the registry renders itself — a refused
+# activation (`FfiAccountRegistry::switch_refusal`). `accounts-registry`-gated.
+fauna-i18n = { path = "../fauna-i18n", optional = true }
+# The shared credential slots (the T10 account-store writer key first of all)
+# reach the phones' own secure store over the SAME FfiSecretStore seam —
+# `install_platform_credential_store` in src/accounts_registry.rs lends the
+# app's store to the crate's foreign arm (apps/common.md § Credential storage
+# → The shared Rust credential slots on the phones). Rides the registry's
+# gate: it is the registry's store being lent.
+fauna-credential-store = { path = "../fauna-credential-store", optional = true }
+fauna-client-admin = { path = "../fauna-client-admin" }
+fauna-client-family = { path = "../fauna-client-family" }
+# The gated-feature plane's transparency read + its render derivations
+# (src/features.rs). Optional behind `value-format`, which is what gates the
+# module itself (its LocalizedText returns would make uniffi-bindgen-go emit a
+# bare `fauna_core` import) — so the Go mail-bridge's `--no-default-features`
+# build does not compile the crate at all. NOT gated on `payments`/`zaps`: the
+# read answers for whichever registry members a build ships.
+fauna-client-features = { path = "../fauna-client-features", optional = true }
+# The region content plane's app side (src/region.rs). Optional behind
+# `value-format` for the same reason as `fauna-client-features` above.
+fauna-client-region = { path = "../fauna-client-region", optional = true }
+# The shared Status snapshot (src/status.rs — the node/sync/MLS/build legs and
+# the `status-*` text projection, `ui/status.md` § State & data shape). Optional
+# behind `value-format` for the same reason as `fauna-client-features` above.
+fauna-client-status = { path = "../fauna-client-status", features = ["local-clock"], optional = true }
+fauna-client-bridges = { path = "../fauna-client-bridges" }
+# Encrypted-CalDAV Events store (events.md Decision B): `CalDavClient` over the
+# `fauna.bridges.*` calendar RPCs + client-side seal/unseal of the
+# `bridge_caldav_*` store, wrapped over UniFFI as FfiCaldavClient in
+# src/caldav_client.rs so Apple / Windows / Android read/write the same encrypted
+# store the Rust-native Linux app calls `CalDavClient` for directly (and the
+# mail-bridge MDA serves to Apple Calendar), off the legacy plaintext
+# `fauna.{calendars,events}.*` `content`-table path. Its FFI records cross only
+# built-in types, so the Go mail-bridge `--no-default-features` build emits it
+# cleanly (same as fauna-client-moderation/-snapshots).
+fauna-client-caldav = { path = "../fauna-client-caldav" }
+# The read/consumption CardDAV crate (FfiCarddavClient Address Book seam) — same
+# built-in-typed-records rationale as fauna-client-caldav, so the Go mail-bridge
+# `--no-default-features` build emits it cleanly.
+fauna-client-carddav = { path = "../fauna-client-carddav" }
+# The shared DAV-store context chokepoint (`dav_store_context`) — the
+# FfiCaldavClient seam sources the `fauna.state.mail` msek from it internally to
+# seal/unseal events (mirrors Linux's `caldav_context`). Also the followed-folders,
+# backup and preference helpers. Internal-only; no FFI types cross from it.
+fauna-client-config = { path = "../fauna-client-config" }
+# The trained-topic lifecycle (topic-factors.md § Authoring surface): wraps
+# fauna_client_personalization::topics::TrainedTopics, the SAME registry↔model-
+# plane sequencing service wasm binds (libs/fauna-wasm/src/rpc.rs) — windows is
+# the first FFI (native-client) consumer. Plain data types only (Vec<u8> /
+# String / u32) cross the boundary, so no Go mail-bridge gating is needed
+# (mirrors muted_keywords.rs / backup_destinations.rs).
+fauna-client-personalization = { path = "../fauna-client-personalization" }
+fauna-client-delegation = { path = "../fauna-client-delegation", optional = true }
+fauna-client-email = { path = "../fauna-client-email" }
+fauna-client-feed = { path = "../fauna-client-feed" }
+# Shared post-source classification (`classify_sources` / `SourceKind`), wrapped
+# by src/feed.rs as the `classifySources` UniFFI façade returning a flat
+# `FfiSourceBadge { id, label, glyph }` list (mirroring web's `fauna_wasm::classifySources`
+# shape) so Apple / Windows / Android key their `SourceGlyph → asset` icon map off the
+# precomputed `glyph` concept (the SAME map the conversations rail uses) and read
+# canonical labels from one definition — off the per-app `source -> badge` switches
+# (priority #1/#2/#4; render-model.md § Deltas → D5). The local `FfiSourceBadge` now
+# carries a `fauna_core::SourceGlyph` field, for which uniffi-bindgen-go emits an
+# uncompilable bare `fauna_core` cross-namespace import, so src/feed.rs is gated behind
+# the default-on `feed-badge` feature (above) — the Go mail-bridge `--no-default-features`
+# build drops it. Plain (non-uniffi) dep: `fauna-feed`'s own types never cross the FFI
+# boundary (only the local `FfiSourceBadge` does); `feed-badge` forwards
+# `fauna-core/uniffi` for SourceGlyph's registration.
+fauna-feed = { path = "../fauna-feed" }
+# Devices/Backups page folder control plane — WS-RPC twins of the deleted
+# `/api/v1/file-sets/*` HTTP (`fauna.folders.*`: list/create/update/delete/
+# devices/members.{add,list,remove}/schedule.set/lease.*). Wrapped by
+# FfiFoldersClient (src/folders_client.rs) so Apple / Windows / Android reach
+# the same kinds the Rust-native Linux app calls directly. Distinct from the
+# `folders`-feature wizard/devices machines (fauna-{folders,devices}-machine):
+# this is the raw typed-call client, wasm-clean and Go-bridge-emittable, so it
+# is unconditional like fauna-client-snapshots/-stats.
+fauna-client-folders = { path = "../fauna-client-folders" }
+fauna-client-posts = { path = "../fauna-client-posts" }
+# User-facing profile read/write + sign/decode (`fauna.profile.{get,set}` +
+# build_profile / decode_profile). Wrapped by FfiProfileClient + the
+# build_edited_profile / decode_profile_display free fns (src/profile.rs) so
+# Apple / Windows / Android drive the profile edit form over the same shared
+# sign/decode/read-modify-write logic the Rust-native Linux app calls
+# directly (apps/fauna-linux/src/views/profile/edit.rs). Only built-in types
+# cross the FFI boundary, so the Go mail-bridge `--no-default-features` build
+# emits it cleanly (same as fauna-client-snapshots/-stats) — but gated behind
+# the default-on `profile-client` feature so the bridge drops the unused module.
+fauna-client-profile = { path = "../fauna-client-profile" }
+# Backups page WS-RPC twins of the deleted `/api/v1/snapshots/*` +
+# `/api/v1/sync/backup-status` HTTP. `fauna-client-snapshots` =
+# `fauna.filesync.snapshot.*` (list/get/create_folder/delete/prune/check);
+# `fauna-client-sync` = `fauna.sync.backup_status`. Wrapped by
+# FfiSnapshotsClient / FfiSyncClient (src/snapshots_client.rs, sync_client.rs)
+# so Windows reaches the same kinds web + linux already migrated to.
+fauna-client-snapshots = { path = "../fauna-client-snapshots" }
+# `fauna.stats.get` (repository storage stats) — the Backups stats popover's
+# WS-RPC twin of the deleted `GET /api/v1/stats`. Wrapped by FfiStatsClient
+# (src/stats_client.rs).
+fauna-client-stats = { path = "../fauna-client-stats" }
+fauna-client-sync = { path = "../fauna-client-sync" }
+fauna-client-subscriptions = { path = "../fauna-client-subscriptions" }
+# Payment-provider config + claim redemption (fauna.payments.*), wrapped over
+# UniFFI as FfiPaymentsClient in src/payments_client.rs so Apple / Windows /
+# Android reach the same kinds the Rust-native Linux app calls directly
+# (monetization.md § Pillar 3 client legs).
+# OPTIONAL since 2026-08-10: reached only through this crate's own `payments`
+# feature, which is what an App-Store escape-hatch flavor turns off
+# (`dynamic-features.md` § Compile-time excision).
+fauna-client-payments = { path = "../fauna-client-payments", optional = true }
+# Spam-classifier preferences transport (fauna.spam.{get,set}_preferences),
+# wrapped over UniFFI as FfiSpamClient in src/spam.rs so Apple / Windows /
+# Android reach the WS-RPC kinds the Rust-native Linux app calls directly,
+# off the legacy GET|PUT /api/v1/spam/preferences HTTP twin.
+fauna-client-spam = { path = "../fauna-client-spam" }
+# Full-text search transport (fauna.search.query), wrapped over UniFFI as
+# FfiSearchClient in src/search_client.rs so Apple / Windows / Android reach the
+# WS-RPC kind the Rust-native Linux app calls directly, off the legacy
+# GET /api/v1/search HTTP twin.
+fauna-client-search = { path = "../fauna-client-search" }
+# Push-subscription-management transport (fauna.push.{vapid_key,subscribe,
+# unsubscribe}), wrapped over UniFFI as FfiPushClient in src/push_client.rs so
+# Apple / Windows / Android manage their device push subscriptions over the
+# WS-RPC kinds, off the deleted /api/v1/push/{vapid-key,subscribe} HTTP twins.
+# Only built-in types cross the FFI boundary, so the Go mail-bridge
+# `--no-default-features` build emits it cleanly (same as fauna-client-search).
+fauna-client-push = { path = "../fauna-client-push" }
+# MLS key-package pool transport (fauna.conversations.keypackage.{upload,count}),
+# wrapped over UniFFI as FfiConversationsClient in src/conversations_client.rs so
+# Apple / Windows / Android publish + count their own key packages over the
+# WS-RPC kinds the Rust-native Linux app calls directly, off the deleted
+# POST|GET /api/v1/keypackage/{actor} HTTP twins. The generic
+# `ConversationsClient<R>` here only crosses built-in types over the FFI boundary
+# (Vec<u8> / u64), so the Go mail-bridge `--no-default-features` build emits it
+# cleanly (same as fauna-client-search/-spam).
+fauna-client-conversations = { path = "../fauna-client-conversations" }
+# The T16 custody facet's ACT half (`run_custody_act` / `load_custody_facet` /
+# `spawn_drive`), wrapped over UniFFI in src/custody.rs so the android / macOS /
+# iOS / windows Devices legs drive the owner-side gestures through the same
+# assembly tui and linux do rather than re-deriving them — two of its orderings
+# (the accept binding the T10 writer key; revoke hitting the nest BEFORE
+# recording) are subtle enough that an independent re-derivation gets them wrong.
+#
+# Optional + folded into the default-on `custody` feature (above), which is what
+# keeps the Go mail-bridge `--no-default-features` build off
+# `fauna-sync-engine/account-runtime` — this crate enables that feature
+# explicitly, and it is default-off there so the lean deployments skip the
+# account store. Native-only by construction (its own Cargo.toml says why), which
+# is fine: this crate has no wasm target table either.
+fauna-client-custody = { path = "../fauna-client-custody", optional = true }
+# The custody facet's PURE half — `view_model`'s three-family fold and the two
+# label decisions (`custody_receipt_status_display`, `custody_held_bytes_display`,
+# `budget_draft_texts`) src/custody.rs projects. Already a transitive dep via
+# `fauna-client-custody`/`fauna-client-pair`, so this adds no crate — it only
+# makes it directly `use`-able. Optional under the same `custody` feature.
+#
+# Its `uniffi` feature is turned on by the `custody` feature above (not on this
+# line — rule (b) of the two-halves spine), so a `--no-default-features` build
+# genuinely drops the scaffolding rather than re-acquiring it here. That feature
+# is off by default in that crate, which is what keeps it wasm-clean for web.
+fauna-client-capabilities = { path = "../fauna-client-capabilities", optional = true }
+# The cross-device MLS state-sync core (`MlsStateSync` + the `orchestration`
+# restore/save helper) the native `conversations_session` factory injects into the
+# session as an `MlsSyncLauncher` (src/mls_sync_launch.rs). Already a transitive dep
+# via `fauna-client-conversations` (which owns `NestMlsReplicaTransport`), so this
+# adds no new crate — only makes it directly `use`-able. Used solely under
+# `conversations-session`; the Go mail-bridge `--no-default-features` build compiles
+# it (as today, transitively) but references none of it (same as fauna-client-conversations).
+fauna-client-mls-sync = { path = "../fauna-client-mls-sync" }
+# The `__drafts` reserved-folder seal + `fauna.drafts.{get,put}` WS-RPC client
+# (DraftsClient<R: RpcRequester> + the stateful DraftsSync wrapper), wrapped over
+# UniFFI as FfiDraftsClient + FfiDraftsSync in src/drafts.rs so Apple / Windows /
+# Android persist + restore compose drafts over the WS-RPC kinds the Rust-native
+# Linux app calls directly. Optional + folded into the default-on `drafts`
+# feature (above) so the Go mail-bridge `--no-default-features` build drops it.
+# Methods cross only built-in types (Vec<u8> / Option<Vec<u8>> / String / bool),
+# so when present it emits cleanly.
+fauna-client-drafts = { path = "../fauna-client-drafts", optional = true }
+fauna-client-contacts = { path = "../fauna-client-contacts" }
+# NIP-46 bunker control plane (`fauna.nostr.bunker.*`), wrapped by
+# src/nostr_client.rs — the *Connected apps* section (nostr.md § The nest as
+# the user's NIP-46 signer).
+fauna-client-nostr = { path = "../fauna-client-nostr" }
+fauna-client-notifications = { path = "../fauna-client-notifications" }
+# Fauna-native inbox delivery-queue drain (`fauna.inbox.{fetch,ack}`), wrapped
+# by src/inbox_client.rs. The transport migration of the HTTP inbox-GET twin.
+fauna-client-inbox = { path = "../fauna-client-inbox" }
+# Bluesky-native thread view (`bluesky.feed.thread`), wrapped by
+# src/bluesky_client.rs as FfiBlueskyClient so Apple / Windows / Android reach
+# the one protocol-unique consume-side Bluesky kind the Rust-native Linux app
+# calls directly, off the deleted GET /api/v1/bluesky/{feed/thread,thread} HTTP
+# twins. Built-in/projected types only over the FFI boundary, so the Go
+# mail-bridge `--no-default-features` build emits it cleanly (same as
+# fauna-client-inbox/-search).
+fauna-client-bluesky = { path = "../fauna-client-bluesky" }
+# Moderation scan-report feedback (`fauna.moderation.scan_report`), wrapped by
+# src/moderation_client.rs as FfiModerationClient so Android's client-side
+# scan-label batches reach the nest over the WS-RPC kind, off the deleted POST
+# /api/v1/moderation/scan-report HTTP twin. Built-in types only over the FFI
+# boundary, so the Go mail-bridge `--no-default-features` build emits it cleanly
+# (same as fauna-client-inbox/-search).
+fauna-client-moderation = { path = "../fauna-client-moderation" }
+# The four admin mail machines (DNS / local-domains / bridge-approval /
+# deliverability), exported over UniFFI in src/mail_admin.rs. `rpc-glue` pulls
+# the native `build_*_machine` seam constructors the free-fn FFI constructors
+# wrap (tracked internally).
+fauna-client-dns = { path = "../fauna-client-dns", features = ["uniffi"], optional = true }
+fauna-client-mail-settings = { path = "../fauna-client-mail-settings", features = ["uniffi", "rpc-glue"], optional = true }
+# The user-settings Linked-nests machine (fauna.pair.* over the bearer
+# connection), exported over UniFFI in src/pairing.rs.
+# Also carries the audit's two native seams (`native_backup_destination_connector`
+# / `native_backup_inclusion_source`) the `backup-audit` feature builds the pass
+# from — one copy of the connect sequence for every native app (priority #2).
+fauna-client-pair = { path = "../fauna-client-pair", features = ["uniffi"], optional = true }
+# The client-side backup audit loop (run_audit_pass + the native FileAuditStateStore).
+# No `uniffi` feature: nothing from this crate crosses the boundary — the FFI face
+# projects `DestinationAuditRecord` to its own row type, so the loud/quiet decision
+# is resolved on this side (docs/goal/ui/backups.md § Audit-alert surface).
+fauna-client-backup = { path = "../fauna-client-backup", optional = true }
+# The web-content authoring client (fauna.web.* over the bearer connection),
+# exported over UniFFI in src/web_content.rs. The `uniffi` feature derives
+# `uniffi::Record`/`Enum` on SubdomainView / ApexView / SubdomainDisabledReason so
+# they cross the boundary unchanged. Gated behind the default-on `web-content`
+# feature (above). See docs/goal/behavior/web-content-hosting.md § Admin apex
+# hosting / § Published-post management.
+fauna-client-web = { path = "../fauna-client-web", features = ["uniffi"], optional = true }
+# Shared in-memory log ring + native subscriber install, exported over UniFFI in
+# src/logs.rs (+ FfiAdminClient::logs in src/admin.rs). The `uniffi` feature
+# derives `uniffi::Record`/`Enum` on `LogEntry`/`LogLevel` so they cross the
+# boundary unchanged. Gated behind the default-on `logs` feature (see above).
+# See docs/goal/architecture/apps/observability.md.
+fauna-log = { path = "../fauna-log", features = ["uniffi"], optional = true }
+# The pure ATProto host-direction core: the projection translator
+# (deterministic TID + Post/Profile → app.bsky.* record JSON) and the D8
+# authorization module, both exported ungated in src/atproto.rs for the Go
+# atproto.pds bridge (atproto-pds-bridge.md § Where logic lives;
+# atproto-pds-full.md § F3 detail). `features = ["uniffi"]` adds the derives
+# on the authz input/verdict types so they cross the binding as themselves
+# rather than as a duplicated mirror type.
+# `default-features = false` drops the crate's `client` feature — the heavy
+# consume-side (reqwest/tokio/atrium/dashmap) never enters the FFI graph.
+# (Path dep, not `workspace = true`: the workspace-level entry implies
+# default features, and a member cannot override that to false.)
+fauna-bridge-atproto = { path = "../fauna-bridge-atproto", default-features = false, features = ["uniffi"] }
+# The e2e harness's gift-wrap builder only (the `e2e-harness` feature above).
+fauna-bridge-nostr = { workspace = true, optional = true }
+fauna-protocol = { workspace = true }
+fauna-provisioning = { path = "../fauna-provisioning", features = ["uniffi"] }
+# The snapshot-fixturing setters (`set_handle_check_snapshot_for_test`, etc.) that
+# the cross-app E2E bridge drives reach this crate ONLY through our own
+# `test-helpers` feature above — deliberately NOT named on this dep line.
+#
+# History, so nobody re-adds them: they were named here until 2026-08-01, which
+# turned them on for every consumer and rode the seams into five release artifacts
+# (windows/macos/ios/android + the tracked Go binding, whose
+# `--no-default-features` build a dep-line feature survives). Removing them used to
+# fail to compile because ONE method — `reset_provisioning_for_test` — carried a
+# per-method `#[cfg]` inside an unconditionally `uniffi::export`ed impl block, and
+# UniFFI does not propagate that cfg into its generated scaffolding; it now lives in
+# the crate's dedicated `#[cfg_attr(all(feature = "uniffi", feature =
+# "test-helpers"), uniffi::export)]` block, the shape `fauna-conversations` uses.
+fauna-onboarding-machine = { path = "../fauna-onboarding-machine", features = ["uniffi"] }
+# Folder creation wizard state machine for the Devices page. Mirrors the
+# onboarding machine; UniFFI re-export lives in src/folders.rs. In-memory only;
+# no test-helpers here (FakeFolderNestApi / with_nest_api are not FFI-exported,
+# and there is no E2E bridge for the wizard yet).
+fauna-folders-machine = { path = "../fauna-folders-machine", features = ["uniffi", "rpc-glue"], optional = true }
+# Page-level Devices state machine (device / folder / conflict reads + page
+# write gestures + the embedded wizard). UniFFI re-export lives in src/devices.rs.
+# Same `folders` gate as the wizard machine: its WS-RPC `rpc-glue` seam pulls the
+# native app crates uniffi-bindgen-go can't emit, so the Go mail-bridge
+# `--no-default-features` build drops it.
+fauna-devices-machine = { path = "../fauna-devices-machine", features = ["uniffi", "rpc-glue"], optional = true }
+fauna-backups-machine = { path = "../fauna-backups-machine", features = ["uniffi", "rpc-glue"], optional = true }
+# Page-level Labeler-Catalog state machine (browse / inspect-before-subscribe /
+# (un)subscribe community labelers). UniFFI re-export lives in
+# src/labeler_catalog.rs. Own `labeler-catalog` gate (below) — client-only UI,
+# same Go-incompatibility reason as `folders`/`devices` but tracked separately
+# since it has no relation to folders.
+fauna-labeler-catalog-machine = { path = "../fauna-labeler-catalog-machine", features = ["uniffi", "rpc-glue"], optional = true }
+# Page-level ATProto login-plane settings machine (the ATProto settings
+# app-credentials + connected-apps groups). UniFFI re-export lives in
+# src/atproto_settings.rs. Same Go-incompatibility gate as
+# `labeler-catalog` above, tracked separately since it is an unrelated surface.
+fauna-atproto-settings-machine = { path = "../fauna-atproto-settings-machine", features = ["uniffi", "rpc-glue"], optional = true }
+# Page-level connected-apps machine (the roster / Requests tray / Connect an
+# app). UniFFI re-export lives in src/connected_apps.rs; gated by `connected-apps`.
+fauna-client-connected-apps = { path = "../fauna-client-connected-apps", features = ["uniffi", "rpc-glue"], optional = true }
+# The app-wide critical-alerts registry (critical-alerts.md) feeder #1 (the
+# atproto-settings machine's genesis-seniority custody check) posts to.
+# src/critical_alerts.rs exposes the process-wide singleton — one native
+# process = one registry (unlike web's per-wasm-chunk split,
+# fauna-wasm-atproto-settings's own doc comment explains why that split is
+# needed there and not here). Folded into the `atproto-settings` feature
+# rather than its own: today's only FFI producer is that machine, and the
+# same Go-incompatibility gate applies (a `uniffi::Object` re-export from a
+# foreign crate is a bare cross-namespace import uniffi-bindgen-go can't
+# emit) — split out if a second FFI-exposed feeder needs it standalone.
+fauna-client-alerts = { path = "../fauna-client-alerts", features = ["uniffi"], optional = true }
+# The session-start critical-alert sweep orchestrator (critical-alerts.md
+# § Mechanism → Who runs the detector) — src/critical_alerts.rs exposes it as
+# one free function so android/windows/apple share the same FFI export tui's
+# own crate-local call already uses.
+# Folded into `atproto-settings` for the same reason `fauna-client-alerts` is:
+# the sweep reads feeder #1's rotation keyring through the same custody door
+# the settings machine does.
+fauna-client-alert-sweep = { path = "../fauna-client-alert-sweep", optional = true }
+# `identity_store::AtprotoIdentityStore` — the ATProto identity custody door
+# `atproto_settings::atproto_identity_store` builds for the settings machine
+# and the sweep (`NoAccountRuntime` on a build without `account-runtime`).
+fauna-client-atproto = { path = "../fauna-client-atproto", optional = true }
+# The stolen-identity succession ceremony (identity-succession.md § Implementation
+# status today, the correction paragraph) — src/recovery.rs exposes
+# `fauna_client_recovery::succeed_with_held_kit` plus the native `ceremony`
+# module's two closing arms. tui and linux call this crate in-process and web
+# drives it through fauna-wasm; the three FFI apps (macOS, iOS, windows) had NO
+# route to it at all until this dep landed, which is exactly the gap that goal
+# doc names. Optional + gated (`recovery-ceremony`) so the Go mail-bridge
+# `--no-default-features` build keeps its checked-in bindings byte-identical —
+# the bridge has no settings UI and no identity to succeed.
+fauna-client-recovery = { path = "../fauna-client-recovery", optional = true }
+# Page-level Media state machine (the cross-set all-media browser — content
+# plane). UniFFI re-export lives in src/media.rs. Same `folders` gate as the
+# devices/wizard machines: its WS-RPC `rpc-glue` seam pulls the native app
+# crate uniffi-bindgen-go can't emit, so the Go mail-bridge `--no-default-features`
+# build drops it.
+fauna-media-machine = { path = "../fauna-media-machine", features = ["uniffi", "rpc-glue"], optional = true }
+# LaunchMachine: app-launch decision tree + bearer-token refresh +
+# 401-reactive handling. See docs/goal/behavior/login.md and
+# docs/goal/behavior/onboarding.md § App-launch routing.
+# Same convention-15 history as the fauna-onboarding-machine dep above — the
+# `test-helpers`/`test-observer` features are forwarded from ours, never named
+# here. This crate needed no code change to allow it: its own test seams were
+# already in a properly gated export block.
+fauna-launch-machine = { path = "../fauna-launch-machine", features = ["uniffi"] }
+# `multidomain` adds the outbound DKIM `d=` selection (`select_signing_domain`)
+# the Go MTA checks a message's From: domain with — implies `dns-records`
+# (already in `default`) + `outbound`; net new is just `hex` + the cfg-gated
+# selection fn (priority #2: one selection rule across nest/clients/bridge).
+# `spam` carries the per-user spam disposition seam (`decide_spam_disposition`,
+# re-exported in src/mail.rs) AND the WASM-safe `spam-classifier` it implies —
+# the on-device scorer (`weighted_bayesian_milli_for_model`, `BayesianKnobs`) the
+# native apps + the MDA-Go run at the search-equivalent position
+# (`mail-spam.md` § Scoring placement). Declared explicitly rather than left to
+# transitive feature unification, since this crate re-exports the surface.
+# `msgid-mint` exports `new_fauna_msgid_local` — the Go submission server's
+# Message-ID stamp shares the self-describing mint with the native compose
+# path (family-safety.md § The mail gate; no Go reimplementation).
+fauna-mail = { workspace = true, features = ["uniffi", "multidomain", "caldav-schedule", "spam", "report-hash", "dedup-key", "msgid-mint", "body-ref", "staged-envelope"] }
+# Audience-keyed seal + UploadSidecar composer for the encrypted-mode blob
+# upload path (process_and_seal_upload, src/media_upload.rs). The full pipeline
+# (EXIF/IPTC strip + MIME sniff + JPEG thumbnail + C2PA detect) is enabled for
+# every native UniFFI app: `image`/`img-parts`/`c2pa` all cross-compile to
+# the four Android ABIs + the Apple targets (`c2pa` via `rust_native_crypto`,
+# pure-Rust). Re-verified for `c2pa` 0.90.3 on 2026-07-30 after the 0.78->0.90
+# bump: `cargo check -p fauna-media --features c2pa-detect
+# --target aarch64-linux-android` clean, zero warnings. The Apple half is now
+# verified too — on a macOS dev machine, 2026-07-30: a cold `just apple-ffi`
+# (cross-checkout cache MISS, so a real build) compiled `c2pa v0.90.3` for every
+# target slice and assembled all 5, zero errors. Both halves of this claim hold
+# at 0.90.3. Still true and worth keeping in mind: NO gate builds the Apple
+# targets, so the next bump that touches this tree needs the same manual
+# `just apple-ffi` on macOS or it ships unverified.
+# Feature unification flows this onto the transitively-pulled
+# `fauna-media-machine` (the Media-library upload seal), so `process_and_seal`
+# produces a real thumbnail + sniffed MIME on android/ios/macos/windows.
+#
+# CORRECTED 2026-09-10 (was: "the wasm web build leaves this at the stub -- no
+# crate in the wasm graph enables the features"). That was false, and it was
+# the kind of false that invites a cleanup: it read as licence to prune an
+# edge that is load-bearing. The shipped web bundle DOES run the curated
+# pipeline -- `libs/fauna-conversations/Cargo.toml`'s wasm32 block requests
+# `process_media` (alone, no `c2pa-detect`), which is exactly what
+# `docs/goal/ui/media.md` § Encryption at rest calls for, and what
+# `libs/fauna-wasm/src/lib.rs`'s const-assert has pinned since 2026-07-20.
+# Measure it, don't trust a comment:
+#   CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo build --unit-graph \
+#     -Z unstable-options --locked --target wasm32-unknown-unknown -p fauna-wasm
+# The env override is not optional -- without it `.cargo/config.toml`'s dev
+# workspace unification answers for the whole workspace rather than for this
+# artifact, which is how the original claim came to be measured wrong in both
+# directions. A merge gate runs that resolution for all five shipped
+# artifacts.
+fauna-media = { path = "../fauna-media", default-features = false, features = [
+    "process_media",
+    "c2pa-detect",
+] }
+fauna-conversations = { workspace = true, features = ["uniffi"] }
+fauna-index = { workspace = true, features = ["uniffi"] }
+# The index *orchestration* the MDA bridge leg drives over the FFI boundary
+# (`src/content_index_session.rs`): the mail builder, the mail/calendar key ring
+# and the rail-read that opens a slice. Non-optional for the same reason
+# `fauna-index` is — the Go mail-bridge build (`--no-default-features
+# --features labeler`) is this module's FIRST consumer, so gating it behind a
+# default-on feature would drop exactly the caller it exists for.
+fauna-client-index = { workspace = true }
+# Mail-segment backup coordinator. Plan 5 T9. `BackupCoordinator` (and the
+# `db`/`SyncDb` it owns) lives in the shared `fauna-sync-engine` crate, so
+# depend on the engine directly.
+# See `libs/fauna-ffi/src/mail_backup.rs` for the UniFFI wrapper.
+fauna-sync-engine = { workspace = true }
+# The share plane's host half every native host shares, and the admission
+# types its trait speaks — `p2p-share` only.
+fauna-client-share-host = { path = "../fauna-client-share-host", optional = true }
+# The share-link author seam — `e2e-harness` only (its private-link export).
+fauna-client-share = { path = "../fauna-client-share", optional = true }
+fauna-peer-share = { workspace = true, optional = true }
+# The seed-holding app's W3 account-store assembly — the eleven params that are
+# the same on every native app, performed once (tui and linux are the other two
+# consumers). Optional + folded into the default-on `account-runtime` feature so
+# the Go mail-bridge `--no-default-features` build drops the whole graph.
+fauna-client-account-runtime = { path = "../fauna-client-account-runtime", optional = true }
+# The local sync-agent IPC seam (`SyncPipeClient::connect_socket` + the shared
+# `convergence` loop + `SyncCapability`/`RequestMethod` wire types), wrapped by
+# src/sync_agent_provisioning.rs as the FaunaKit provisioning driver. Optional +
+# folded into the default-on `sync-agent-provisioning` feature so the Go mail-bridge
+# `--no-default-features` build drops the native-socket crate. Its convergence /
+# unix-transport modules are themselves `#[cfg(any(unix, windows))]`, matching the
+# `#[cfg(unix)]` wrapper module (macOS is the only driver; windows uses its own C#
+# codec, never this crate over FFI).
+fauna-ipc = { path = "../fauna-ipc", optional = true }
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["native"] }
+fauna-peer = { path = "../fauna-peer" }
+# The iroh substrate, for `offline-share`'s `peer_leg_transport` (see that
+# feature); `fauna-iroh`'s `quic` feature pulls iroh only when it is on.
+fauna-iroh = { path = "../fauna-iroh", features = ["quic"], optional = true }
+tokio = { workspace = true }
+# CancellationToken for the segment-backup push-debounce loop handle
+# (src/segment_backup.rs `FfiPushDebounceHandle`).
+tokio-util = { workspace = true }
+reqwest = { workspace = true }
+openmls = { workspace = true }
+# Implements `fauna_conversations::OutboundMailSink` for the native SMTP sink
+# (`conversations_session`, src/nest_client.rs) — the trait is `#[async_trait]`.
+async-trait = "0.1"
+uniffi = { workspace = true, features = ["cli"] }
+# `#[fauna_uniffi_async::export]` runs each async export on a tokio runtime
+# worker, off the foreign executor's small poll stack
+# (`docs/goal/architecture/apps/native-async-execution.md` § The rule).
+fauna-uniffi-async = { workspace = true }
+# Only the `logs` module's startup line needs it; optional + folded into `logs`.
+tracing = { workspace = true, optional = true }
+# Destination-id minting for src/backup_destinations.rs; optional + folded into
+# the `backup-destinations` feature (mirrors linux `destinations.rs`).
+uuid = { workspace = true, optional = true }
+ed25519-dalek.workspace = true
+hex.workspace = true
+blake3.workspace = true
+serde_json.workspace = true
+rand.workspace = true
+getrandom.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+# The conversations-seam wiring tests (`account_runtime.rs`): a no-nest
+# `RpcRequester` for the real account store they install, whose generic
+# `request` bounds name serde's traits.
+serde = { workspace = true }
+# `serde_bytes::ByteBuf` is needed by tests/wrapped_blob_ffi.rs to
+# construct `SubmissionToken` fixtures whose `user_sig` field is a
+# `ByteBuf`. The seal-side FFI signature itself takes the
+# canonical-CBOR bytes of the token (see `seal_submission_token_blob`),
+# so the production crate has no need for `serde_bytes`. Version
+# tracks the rest of the workspace (`libs/fauna-mls`, `libs/fauna-protocol`).
+serde_bytes = "0.11"
+# `media_upload`'s `public_post_image_yields_thumbnail_part` test builds a real
+# >300px PNG to exercise the on-device `process_media` thumbnail path through
+# the `process_and_seal_upload` binding, via `fauna-media`'s shared
+# `test_fixtures::build_png` (the same fixture that crate's own tests use —
+# priority #2, one canonical body instead of a hand-rolled local copy).
+# `image` is already in-graph via the normal `process_media` dep above; this
+# re-listing just turns on the feature gate exposing the shared builder to
+# the test build (dev-deps never reach the release FFI build).
+fauna-media = { path = "../fauna-media", default-features = false, features = [
+    "test-fixtures",
+] }
+# The Search-page snapshot injection seam (`SearchManager::set_snapshot_for_test`),
+# so src/search_manager.rs's tests pin that the façade reads *through* to the
+# manager rather than caching, without standing up a transport. Dev-only: the
+# production dep above stays plain, and the helper is compiled out of the
+# release FFI builds. Mirrors the `fauna-feed/test-helpers` forwarding used by
+# the Feed façade's inject seam.
+fauna-client-search = { path = "../fauna-client-search", features = ["test-helpers"] }
+# `wrapped_blob::submission_token::fresh_signed_token` — the canonical
+# SubmissionToken test fixture, shared with fauna-mls's own tests (mirrors
+# `fauna-conversations`'s identical `test-helpers` request on this same crate
+# for its MLS-2 forged-Welcome seam). Dev-only: excluded from `cargo build`.
+fauna-mls = { path = "../fauna-mls", features = ["test-helpers"] }
+# `Cid::of_raw` — tests/mail_index_session.rs's in-memory `__index` rail is
+# content-addressed exactly the way the production rail is, so a listing hands
+# out the same hashes a fetch is keyed by. Dev-only: the production crate never
+# addresses a blob itself, it hands bytes to the caller's rail.
+fauna-cbor = { path = "../fauna-cbor" }
+# `test_fixtures::item` — the shared `FeatureStatusItem` builder src/features.rs's
+# own tests use, one canonical body instead of a hand-rolled local copy
+# (mirrors `fauna-tui`'s identical `test-fixtures` request on this crate).
+# Dev-only: the production dep above (behind `value-format`) stays optional
+# and plain.
+fauna-client-features = { path = "../fauna-client-features", features = [
+    "test-fixtures",
+] }
+# `fixtures` — the synthetic registry and signed documents src/region.rs's own
+# tests hold a plane over (the same request `fauna-tui` makes). Dev-only.
+fauna-client-region = { path = "../fauna-client-region", features = [
+    "test-fixtures",
+] }
+# `chunk_seal::FramedChunk::arbitrary_for_fixtures` — the fixtures-only door
+# src/mail.rs's `webdav_open_file` tests use to reproduce a file the Go WebDAV
+# MDA sealed UNFRAMED before 2026-09-03, a shape no production writer can
+# produce any more. Dev-only: the release FFI cannot reach it.
+fauna-core = { path = "../fauna-core", default-features = false, features = [
+    "test-helpers",
+] }
+# `locks::ServingLock` — src/erase_guard.rs's tests stand in for a sibling APP
+# declared only at the shared store root, and read the root back to prove the
+# FFI seat declares itself there. Already in-graph through fauna-sync-engine,
+# which re-exports `db`/`root` but not `locks`.
+fauna-account-store = { path = "../fauna-account-store" }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"

@@ -1,0 +1,39 @@
+[package]
+name = "fauna-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+uniffi = ["dep:uniffi"]
+
+[dependencies]
+chacha20poly1305 = { workspace = true }
+fauna-carv2 = { workspace = true }
+fauna-cbor = { workspace = true }
+# fauna-index only needs the tokenizer; opt out of auth/spam/parser/kind-registry
+# (which pull tokio/hickory and don't compile to wasm32). Keeps the WASM build
+# of fauna-wasm-content-index slim and possible at all.
+fauna-mail = { path = "../fauna-mail", default-features = false, features = ["tokenizer"] }
+fauna-segment-store = { path = "../fauna-segment-store" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_bytes = "0.11"
+# The workspace pins tantivy with default-features off (it pulls `mmap` → `fs4`
+# → `rustix` → `errno`, which won't build on wasm32, and fauna-index only ever
+# uses `RamDirectory`, never `MmapDirectory`). Re-add three of tantivy 0.26's
+# default features: `lz4-compression` (pure-Rust `lz4_flex`), `stopwords`
+# (data-only), and `stemmer` (pure-Rust `rust-stemmers`) — 0.26's stop-word
+# filter does not compile without `stemmer`, so the two travel together.
+# `columnar-zstd-compression` stays off: the index stays lz4. This is what
+# makes `wasm-pack build libs/fauna-wasm-content-index --target web` possible.
+tantivy = { workspace = true, features = ["lz4-compression", "stopwords", "stemmer"] }
+thiserror = { workspace = true }
+zeroize.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+uniffi = { workspace = true, optional = true, features = ["tokio"] }
+
+[dev-dependencies]
+# Integration tests live in tests/round_trip.rs and use the public API only.

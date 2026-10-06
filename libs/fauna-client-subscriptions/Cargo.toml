@@ -1,0 +1,72 @@
+[package]
+name = "fauna-client-subscriptions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# `period_keys::MemoryPeriodKeyStore` — the door-exact in-memory period-key
+# store — for OTHER crates' tests (the feed's compose and unlock legs, the
+# grant mint); this crate's own tests get it without the feature.
+test-helpers = []
+
+[dependencies]
+# fauna-protocol carries the typed `fauna.subscriptions.*` wire types + the
+# `RpcRequester` seam this crate is generic over. `default-features = false`
+# drops the native-only `p2p` (fauna-wireguard → tokio net → mio) feature so
+# this crate compiles to wasm32; native workspace builds re-enable `p2p` via
+# Cargo feature unification (fauna-client pulls it). The path form is required
+# to override `default-features` — Cargo refuses the override on a
+# `workspace = true` entry whose workspace definition doesn't disable defaults.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# `ActorId` / `Timestamp` / `EmbedAsBytes` appear in the public method
+# signatures (subscribe/approve/remove take an ActorId, replies carry
+# Timestamps); the mint orchestration also reaches `subscription::crypto`
+# (`mint_key_blob`, `build_manage_subscribers_self_delegation`) +
+# `data::{SubscriptionsConfig, PendingRemoval, TierPeriod}`. Same
+# default-features handling as fauna-protocol above.
+fauna-core = { path = "../fauna-core", default-features = false }
+# The shared account-store crate (`StoreError` + the store seam traits): the
+# mint+upload orchestration OWNS persistence so the crash-recovery sentinel
+# (`SubscriptionsConfig::pending_removals`) hits disk BEFORE the network upload
+# — the only crash-safe shape for the irrecoverable rotated period key (mirrors
+# `fauna-client-mail-settings`'s rotation owning its store save).
+# It is wasm-clean (it backs the web SPA's account seams) + forwards
+# `js` itself on wasm, so no default-features juggling is needed here.
+fauna-client-config = { path = "../fauna-client-config" }
+# CSPRNG for the fresh broadcast period key (`fresh_period_key`); mirrors
+# `fauna-client-mail-settings::fresh_msek`. `getrandom` (below) backs it on wasm.
+rand = { workspace = true }
+# `Zeroizing` for the fresh period key before it lands in the sealed config.
+zeroize = { workspace = true }
+# Hex for the per-post unlock tier's random name suffix (`mint_unlock_tier_name`)
+# and the `unlocks_post` designation, which is a hex post id on the wire.
+hex = { workspace = true }
+# `run_author_reconcile_loop`'s per-tick logging — the same lines the two
+# hand-written per-app loops it replaced (linux, tui) already emitted.
+# Wasm-clean like the rest of this crate (fauna-wasm already depends on it),
+# so it does not reopen the no-tokio contract the lift is careful to keep.
+tracing = { workspace = true }
+# The period-key store seam (`period_keys::PeriodKeyStore`) — the
+# `fauna_client_config` store-seam split: `Send` futures natively,
+# `?Send` on wasm.
+async-trait = "0.1"
+
+# wasm: forward fauna-protocol's `js` feature (fauna-core's js-sys time
+# backend, Timestamp::now()) so the transitive wasm build resolves. Off on
+# native — js-sys is wasm-only. Same path/default-features as above; Cargo
+# merges the two entries (features are additive). `getrandom` gives
+# `rand::thread_rng()` its wasm backend (mirrors fauna-client-mail-settings).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+getrandom = { workspace = true }
+
+[dev-dependencies]
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# Names the serde bounds the `RpcRequester::request` method requires, for the
+# wire-contract tests' `RecordingRequester` mock impl. No `derive` needed
+# (trait paths only); mirrors fauna-client-events / -snapshots / -sync.
+serde = { workspace = true }

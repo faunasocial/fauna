@@ -1,0 +1,30 @@
+# Recorded exceptions for the `dep-npm-audit` check — the
+# known-vulnerability check over the locked npm closure of each Deno tree.
+# Owner: docs/goal/architecture/release-integrity.md § Dependency verification →
+# *The locked npm closure*.
+#
+# An advisory is closed by bumping the lockfile to a fixed version. An entry here is
+# for an advisory that cannot be fixed yet (no fixed version inside the 7-day minimum
+# release age, or the fix is a major bump still owed) AND whose vulnerable code is
+# shown not to run in anything this project ships or builds. `reason` states that
+# showing, in our own words — never the advisory's text pasted in.
+#
+# One entry per (tree, advisory id, package); every field is required. An entry that
+# matches no reported advisory fails the check: remove it, so it cannot cover a later
+# advisory by accident.
+#
+# [[exception]]
+# tree = "apps/fauna-web"            # the directory that tracks the deno.lock
+# id = "GHSA-xxxx-xxxx-xxxx"
+# package = "name"
+# reason = "..."
+# recorded = "YYYY-MM-DD"
+
+# Temporary: removed by the web app's move to SvelteKit 3, resolvable from
+# 2026-10-08 17:22 UTC under the 7-day minimum release age.
+[[exception]]
+tree = "apps/fauna-web"
+id = "GHSA-pxg6-pf52-xh8x"
+package = "cookie"
+reason = "SvelteKit 2 uses cookie only server-side, to serialize Set-Cookie headers. The web app is a static SPA (adapter-static, index.html fallback): no server ships, and nothing in src/ calls Kit's cookie API, so the serializer only ever runs at build time on our own values, never on input another party controls. Only SvelteKit 3 moves cookie to a fixed version. Owner-approved 2026-10-05."
+recorded = "2026-10-05"

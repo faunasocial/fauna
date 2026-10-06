@@ -1,0 +1,10 @@
+# Default config for web E2E tests.
+# Includes static_dir for SPA serving.
+
+[nest]
+mode = "public"
+listen = "0.0.0.0:3000"
+db_path = "/data/nest.db"
+blob_dir = "/data/blobs"
+require_registration = false
+static_dir = "/STATIC_DIR_PLACEHOLDER"

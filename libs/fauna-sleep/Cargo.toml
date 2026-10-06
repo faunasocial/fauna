@@ -1,0 +1,31 @@
+[package]
+name = "fauna-sleep"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+# One job: an async sleep that compiles for both targets. The deps are
+# TARGET-GATED rather than feature-gated, which is the whole reason this is its
+# own crate rather than a module in `fauna-core`: fauna-core's `tokio` is
+# `network`-gated and declared untargeted, so a sleep helper there would either
+# force `network` (redb + hickory-resolver) on six client crates or need
+# fauna-core's tokio entry moved under a target section — a manifest change to
+# the most central crate in the workspace, to serve ten lines of code.
+#
+# Nothing new enters the dependency tree: `gloo-timers` was already a direct dep
+# of all six consumers, so this crate REPLACES six declarations with one.
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `tokio::time::sleep`. The workspace pin carries `features = ["full"]`, so
+# `time` is present; this crate names no features of its own to avoid pinning a
+# second opinion about what tokio should be.
+tokio = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# The browser timer. tokio's does not build for wasm32-unknown-unknown at all —
+# that impossibility is what every one of the seven hand-written copies existed
+# to work around.
+gloo-timers = { version = "0.4", features = ["futures"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

@@ -1,0 +1,78 @@
+[package]
+name = "fauna-client-connected-apps"
+description = "Shared-Rust connected-apps page machine: the one roster over every third-party principal (plus the legacy OAuth-session, NIP-46 and mail app-password rosters it lifts), the typed-code Connect-an-app start, the quiet-push Requests tray, per-client blocks, and one revoke per row whose verb the machine chooses."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Turn on UniFFI scaffolding when consumed by fauna-ffi. Forwards the ATProto
+# settings machine's, whose `ConsentCardRow` this snapshot carries.
+uniffi = ["dep:uniffi", "fauna-core/uniffi", "fauna-atproto-settings-machine/uniffi", "dep:fauna-uniffi-async"]
+# Test helpers — FakeConnectedAppsNestApi.
+test-helpers = []
+# Test observer — CountingObserver / NullObserver.
+test-observer = []
+# Shared WS-RPC seam glue (`nest_api::ws_rpc` + `build_connected_apps_machine`).
+# Mirrors `fauna-labeler-catalog-machine`'s `rpc-glue`.
+rpc-glue = [
+    "dep:fauna-client-nostr",
+    "dep:fauna-client",
+    "dep:fauna-rpc-wasm",
+]
+
+[dependencies]
+# default-features = false: avoid fauna-core's `network` default (redb, tokio,
+# hickory-resolver), which breaks wasm. Needed for `LocalizedText`,
+# `MaybeSendSync`, the api-error macros and `control_chars`.
+fauna-core = { path = "../fauna-core", default-features = false }
+# The wire types this page reads (`principals`, `oauth_consent`,
+# `atproto_pds`, `nostr`) and the `RpcRequester` seam the typed calls are
+# generic over. `default-features = false` keeps it wasm-clean.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# The consent card's ONE composition (`consent_card_row`, `ConsentCardRow`,
+# `NestConsentRow`) and the one scope-wording path (`scope_words`) — reused,
+# never copied (`docs/goal/ui/connected-apps.md` § Architectural rules). Also
+# brings `fauna-client-bridges`, whose `AtprotoSettingsClient` the seam calls.
+fauna-atproto-settings-machine = { path = "../fauna-atproto-settings-machine" }
+fauna-client-bridges = { path = "../fauna-client-bridges" }
+# The mail app passwords' rows cross the seam as the mail-settings machine's own
+# `MailCredentialSummary`, and the production seam reads, revokes and reveals
+# them THROUGH that machine — never a second fold of the mail custody
+# (`docs/goal/ui/connected-apps.md` § State & data shape).
+fauna-client-mail-settings = { path = "../fauna-client-mail-settings" }
+# `rpc::CapabilitiesClient` — the consent-time grant's deposit and withdrawal
+# (`fauna.capabilities.{mint,revoke}`), which an approve of a records consent
+# runs through `fauna_atproto_settings_machine::consent_grant`. Wasm-clean.
+fauna-client-capabilities = { path = "../fauna-client-capabilities" }
+async-trait = "0.1"
+hex = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+uniffi = { workspace = true, optional = true, features = ["tokio"] }
+# `#[fauna_uniffi_async::export]` runs each async export on a tokio runtime
+# worker, off the foreign executor's small poll stack
+# (`docs/goal/architecture/apps/native-async-execution.md` § The rule).
+fauna-uniffi-async = { workspace = true, optional = true }
+
+# `rpc-glue`: the NIP-46 bunker roster's typed calls.
+fauna-client-nostr = { path = "../fauna-client-nostr", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fauna-client = { path = "../fauna-client", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm", optional = true }
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+tokio = { workspace = true }
+fauna-client-connected-apps = { path = ".", features = ["test-helpers", "test-observer", "rpc-glue"] }
+# The records-approve test: the in-memory kind-manifest and ledger doubles, and
+# the publisher key its fixture manifest is signed under.
+fauna-client-config = { path = "../fauna-client-config", features = ["test-helpers"] }
+ed25519-dalek = { workspace = true }
+serde_json = { workspace = true }

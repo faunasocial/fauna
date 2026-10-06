@@ -1,0 +1,5 @@
+# Down by default. The ATProto PDS bridge is off until the admin enables ATProto hosting
+# in their Fauna app: nest writes /data/atproto-enabled and sends an "up"
+# command on /run/fauna-supervisor.sock, which the supervisor maps to `s6-svc -u`.
+# Per docs/goal/behavior/atproto-pds-bridge.md § Enable UX +
+# docs/goal/behavior/mail-bridge-lifecycle.md § Default-off on first claim.

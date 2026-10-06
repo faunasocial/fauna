@@ -1,0 +1,6 @@
+[bindings.kotlin]
+# See sibling fauna-onboarding-machine/uniffi.toml for why each crate uses
+# its own Kotlin sub-package: avoids common-helper redeclaration errors.
+package_name = "com.fauna.ffi.provisioning"
+
+# See sibling crate's uniffi.toml for why Swift module_name is left default.

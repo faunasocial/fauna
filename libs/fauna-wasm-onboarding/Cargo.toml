@@ -1,0 +1,63 @@
+[package]
+name = "fauna-wasm-onboarding"
+description = "WASM bindings for Fauna onboarding (provisioning, registrar, OnboardingMachine)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Forwards to fauna-onboarding-machine/test-helpers and exposes the
+# test-only snapshot setters (set_handle_check_snapshot_for_test,
+# set_invite_request_snapshot_for_test, set_provisioning_snapshot_for_test,
+# set_step_for_test) on the wasm surface. The e2e test build (just web-test)
+# enables it; production
+# `just wasm` / `just web` does not. Keeps the test setters out of the
+# production bundle (tracked internally).
+test-helpers = ["fauna-onboarding-machine/test-helpers"]
+
+# wasm32-scoped on purpose: this crate builds only for wasm32, and a plain
+# [dependencies] table would leak its wasm-only feature activations (js,
+# wasm_js, …) into every HOST build's resolution under
+# resolver.feature-unification = "workspace". Add new deps here, never in a
+# plain [dependencies] table.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+fauna-provisioning = { path = "../fauna-provisioning", default-features = false, features = ["js"] }
+fauna-onboarding-machine = { path = "../fauna-onboarding-machine", default-features = false }
+# The pending-provision slot's writer (`docs/goal/behavior/onboarding.md` § 6):
+# web's registry is the same stateless localStorage view `fauna-wasm-launch`
+# builds, so the wizard wires its own store here rather than taking one across
+# the chunk boundary from JS — a Rust trait object cannot cross that boundary,
+# and a JS-passed store would be a step every future caller could forget, which
+# is the silent-loss failure class the slot exists to remove.
+#
+# Both declarations mirror `fauna-wasm-launch`'s, deliberately: `web-localstorage`
+# is what compiles `LocalStorageSecretStore` in at all (without it the type is
+# simply absent, and the error names the value rather than the feature), and
+# `fauna-launch-machine` is where `PendingProvisionStore` itself lives.
+fauna-client-accounts = { path = "../fauna-client-accounts", features = [
+    "web-localstorage",
+] }
+fauna-launch-machine = { path = "../fauna-launch-machine", default-features = false }
+# Installed at module init (`#[wasm_bindgen(start)]` in src/lib.rs) — each wasm
+# chunk is its own runtime, so this must be installed per-chunk. See the crate
+# doc comment.
+fauna-wasm-panic-hook = { path = "../fauna-wasm-panic-hook" }
+wasm-bindgen.workspace = true
+wasm-bindgen-futures = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true
+serde-wasm-bindgen = "0.6"
+ed25519-dalek.workspace = true
+hex.workspace = true
+getrandom = { workspace = true, features = ["wasm_js"] }
+js-sys.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+wasm-bindgen-test.workspace = true

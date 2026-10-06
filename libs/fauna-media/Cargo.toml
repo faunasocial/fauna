@@ -1,0 +1,67 @@
+[package]
+name = "fauna-media"
+description = "Audience-keyed seal layer + media upload pipeline for Fauna app uploads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["process_media", "c2pa-detect"]
+## Curated on-device processing: MIME sniff + EXIF/IPTC strip + JPEG thumbnail
+## render. Pulls `image` + `img-parts`, both of which cross-compile cleanly to
+## wasm32 + every Android/Apple target. This is the privacy-critical baseline
+## (EXIF strip + real MIME + thumbnail). Off → `process_media` is the
+## octet-stream / no-thumbnail / no-C2PA stub identity-passthrough.
+process_media = ["dep:image", "dep:img-parts", "dep:bytes"]
+## Additive C2PA provenance detection (populates `has_c2pa`). Pulls `c2pa`, a
+## large crypto + ASN.1 + parsing tree. It DOES cross-compile everywhere via
+## `rust_native_crypto` (pure-Rust, no OpenSSL — verified for wasm32 + all four
+## Android ABIs), but it bloats a wasm bundle, so a web build may take
+## `process_media` alone and leave `has_c2pa = false`. Implies `process_media`.
+c2pa-detect = ["process_media", "dep:c2pa"]
+## The `image`-crate-only slice of `process_media`, standalone so the shared
+## test-fixture builder (`test_fixtures`) compiles without turning on the
+## real processing pipeline (EXIF strip, thumbnail render, MIME sniff) —
+## `seal_test.rs`'s stub-mode tests deliberately keep that pipeline off.
+## `process_media` itself still pulls in `image` too, for the real pipeline.
+test-fixtures = ["dep:image"]
+
+[dependencies]
+fauna-core = { path = "../fauna-core", default-features = false }
+fauna-mls = { path = "../fauna-mls", default-features = false }
+zeroize.workspace = true
+serde.workspace = true
+serde_bytes = "0.11"
+fauna-cbor = { workspace = true }
+thiserror.workspace = true
+blake3.workspace = true
+
+# process_media feature: lift target's deps from bins/fauna-nest/storage/plaintext.rs.
+image = { workspace = true, optional = true }
+c2pa = { workspace = true, optional = true }
+img-parts = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+
+[dev-dependencies]
+fauna-core = { path = "../fauna-core", default-features = false }
+fauna-mls = { path = "../fauna-mls", default-features = false }
+# Self dev-dependency turns on test-fixtures for the integration-test build
+# only (tests/*.rs links the lib without cfg(test) set on it, so a feature
+# gate is the only way to expose test-only code to them). Mirrors
+# fauna-media-machine's own self dev-dependency. `default-features = false`
+# keeps the request minimal — this crate's `default` also pulls in
+# `c2pa-detect`, which test-fixtures has no need of. (Whether `process_media`
+# itself is actually off during `cargo test -p fauna-media --no-default-
+# features` depends on workspace-wide feature unification with every OTHER
+# member that depends on fauna-media — e.g. apps/fauna-linux — not on this
+# edge alone; this declaration is the correct minimal one regardless.)
+fauna-media = { path = ".", default-features = false, features = [
+    "test-fixtures",
+] }
+# Used by tests/process_test.rs to build EXIF/IPTC-bearing image fixtures.
+image = { workspace = true }
+img-parts = { workspace = true }
+bytes = { workspace = true }
+# Used by tests/seal_test.rs to write image fixtures to disk for the
+# from-path thumbnailer (the >64 MiB device-sync streaming-upload path).
+tempfile = { workspace = true }

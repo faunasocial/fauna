@@ -1,0 +1,30 @@
+[package]
+name = "fauna-client-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# fauna-protocol carries the typed `fauna.media.*` wire types (MediaItem /
+# MediaListRequest / MediaListReply) + the `RpcRequester` seam this crate is
+# generic over. `default-features = false` keeps the crate wasm32-clean (drops
+# native-only features); native workspace builds re-enable them via Cargo
+# feature unification. Same pattern as fauna-client-sync / fauna-client-snapshots.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# `sync::is_reserved_folder_name` — the one shared derivation of the reserved
+# `__*` set-name rule the browse/upload option lists exclude on. `default-features
+# = false` keeps this crate wasm32-clean (drops fauna-core's `network` default);
+# native workspace builds re-enable via Cargo feature unification, exactly as
+# fauna-media-machine and fauna-client-folders do.
+fauna-core = { path = "../fauna-core", default-features = false }
+serde = { workspace = true }
+
+# wasm: forward fauna-protocol's `js` feature (fauna-core's js-sys time backend)
+# so the transitive wasm build resolves. Off on native.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }

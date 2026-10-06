@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FaunaApp.Controls.FeedComposeBar"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <StackPanel Spacing="4">
+        <!-- Compose file ready indicator (ui/feed.md § Persistence → Attachments by
+             content address): rendered off the manager snapshot's attached_file, not
+             only a local pick — so a restored draft's handle shows too. IsClosable is
+             False: the × InfoBars ship is a dismiss, not a remove — the ONLY way to
+             drop the staged attachment is compose-file-remove below, which actually
+             stages None on the manager (a bar-only dismiss would leave the handle
+             staged with nothing on screen naming it). -->
+        <StackPanel Orientation="Horizontal" Spacing="4">
+            <InfoBar x:Name="FileReadyBar"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.ComposeFileReady}"
+                     Severity="Informational" IsOpen="False" IsClosable="False"
+                     Visibility="Collapsed" HorizontalAlignment="Stretch" />
+            <Button x:Name="ComposeFileRemoveButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ComposeFileRemove}"
+                    Content="&#xE711;" FontFamily="Segoe MDL2 Assets"
+                    Padding="8,4" Click="ComposeFileRemove_Click"
+                    Visibility="Collapsed"
+                    ToolTipService.ToolTip="{loc:Localize Key=common/remove}" />
+        </StackPanel>
+
+        <!-- Compose bar -->
+        <Grid ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <Button Grid.Column="0" x:Name="ComposeFileButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ComposeFile}"
+                    Content="&#xE723;" FontFamily="Segoe MDL2 Assets"
+                    Padding="8" Click="ComposeFile_Click"
+                    ToolTipService.ToolTip="{loc:Localize Key=conversations/unified/attachment_button}" />
+
+            <!-- Multi-line: a post body is markdown, where a blank line is a paragraph —
+                 a link alone in its own paragraph is what becomes a link-preview card
+                 (render-model.md § D4) — so the field keeps its line breaks, as linux's
+                 TextView and web's textarea do. Grows with its text up to MaxHeight,
+                 then scrolls. -->
+            <TextBox Grid.Column="1" x:Name="ComposeBox"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.ComposeTextField}"
+                     AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="160"
+                     ScrollViewer.VerticalScrollBarVisibility="Auto" MaxLength="3000"
+                     TextChanged="ComposeOrTags_TextChanged" />
+
+            <Button Grid.Column="2" x:Name="PostButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.PostSubmitButton}"
+                    Style="{StaticResource AccentButtonStyle}"
+                    Click="PostButton_Click" VerticalAlignment="Stretch" />
+
+            <Button Grid.Column="3" x:Name="ComposeDialogButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ComposeDialogButton}"
+                    Content="&#xE70F;" FontFamily="Segoe MDL2 Assets"
+                    Click="ComposeDialogButton_Click" Padding="8"
+                    VerticalAlignment="Stretch" />
+        </Grid>
+
+        <!-- Gate-to-tier (feed.md § Encryption at rest; monetization.md § Pillars 2+3):
+             Public (default) or one of the author's own tiers. The Public sentinel + the tier
+             items are added in code-behind (SetGateTiers) so each ComboBoxItem carries its tier
+             name in AutomationProperties.Name (driver.select matches Name EXACTLY). The public
+             teaser field appears only when a tier is selected. -->
+        <ComboBox x:Name="GateTierSelect"
+                  AutomationProperties.AutomationId="{x:Bind ids:Ids.ComposeGateTierSelect}"
+                  HorizontalAlignment="Stretch"
+                  SelectionChanged="GateTierSelect_SelectionChanged" />
+
+        <TextBox x:Name="GatePreviewBox"
+                 AutomationProperties.AutomationId="{x:Bind ids:Ids.ComposeGatePreviewField}"
+                 AcceptsReturn="False" MaxLength="3000"
+                 Visibility="Collapsed" />
+
+        <!-- Sell-this-post fields (monetization.md § Per-post pay-to-unlock):
+             "Sell this post…" is the always-last compose-gate-tier-select answer
+             (SetGateTiers). Visible only in sell mode (UpdateSellFieldsVisibility). -->
+        <TextBox x:Name="SellPriceBox"
+                 AutomationProperties.AutomationId="{x:Bind ids:Ids.ComposeSellPrice}"
+                 AcceptsReturn="False" MaxLength="200"
+                 Visibility="Collapsed" />
+
+        <!-- The gated asking-price field (dynamic-features.md section
+             Platform-family surface excision, "A gated plane's user-facing INPUTS
+             excise with it"): payments:AskingPriceInput lives in Views/Payments/
+             and is hosted through this ContentControl exactly like ProfilePage's
+             TierAskingPriceHost, so a store-safe build renders no price input at
+             all, never a bare TextBox here. Its AutomationId is set in this
+             file's own #if PAYMENTS block, never spelled here: XAML has no
+             preprocessor to strip a comment, so the literal id must never appear
+             outside the #if guarded C#, measured 2026-09-06. -->
+        <ContentControl x:Name="SellAskingPriceHost"
+                        HorizontalAlignment="Stretch"
+                        HorizontalContentAlignment="Stretch"
+                        Visibility="Collapsed" />
+
+        <CheckBox x:Name="SellSubscribersFreeCheck"
+                  AutomationProperties.AutomationId="{x:Bind ids:Ids.ComposeSellSubscribersFree}"
+                  IsChecked="True"
+                  Visibility="Collapsed" />
+
+        <!-- Tags field -->
+        <TextBox x:Name="TagsBox"
+                 AutomationProperties.AutomationId="{x:Bind ids:Ids.ComposeTagsField}"
+                 AcceptsReturn="False" MaxLength="500"
+                 TextChanged="ComposeOrTags_TextChanged" />
+    </StackPanel>
+</UserControl>

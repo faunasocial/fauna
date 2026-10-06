@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!-- Override WiX UI default strings for Fauna installer -->
+
+<WixLocalization Culture="en-US" xmlns="http://wixtoolset.org/schemas/v4/wxl">
+
+  <String Id="WelcomeDlgDescription" Value="The Setup Wizard will install Fauna on your computer. Fauna is a decentralised social platform where you own your data. Click Next to choose which components to install, or Cancel to exit." />
+
+</WixLocalization>

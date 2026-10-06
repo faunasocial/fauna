@@ -1,0 +1,85 @@
+[package]
+name = "fauna-rpc-wasm"
+description = "Browser transport for the WS-RPC façade (wasm) — gloo-net adapter + WsRpcClient impl of RpcRequester, plus the bulk-binary blob POST twin of fauna-nest-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+# rlib so the SPA's core bundle (libs/fauna-wasm) consumes it and re-exposes
+# the typed handle via #[wasm_bindgen] (Phase 4).
+crate-type = ["rlib"]
+
+# The entire crate is `#![cfg(target_arch = "wasm32")]` (see src/lib.rs), so on
+# native (workspace builds) it is an empty rlib that pulls none of the browser
+# deps below — they all live under the wasm target.
+# The e2e seams (convention 15 rule (b)): the reconnect PACE override behind
+# `fauna_e2e_agent::RECONNECT_BACKOFF` and the connection-report counter behind
+# `fauna_e2e_agent::CONNECTION_REPORTS_KEY`. Off by default and never named by a
+# consumer's dep line — `fauna-wasm`'s own `test-helpers` forwards it, so a
+# production bundle compiles both out.
+[features]
+test-helpers = ["dep:fauna-e2e-contract"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# default-features = false drops native-only `p2p` (wireguard); `js` forwards
+# fauna-core's js-sys time backend (Timestamp::now()) for the wasm build.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+# SRV-aware reconnect self-heal (serving-ports Pillar B): the pure recovery
+# decision helpers (`fauna_core::resolve::{srv_recovery_host, srv_recovered_url}`,
+# shared with the native reconnect path) + the DoH `_fauna._tcp` port lookup
+# (`fauna_provisioning::probe::fauna_srv_port`, the cross-platform twin of native
+# hickory) + a reqwest client to drive the DoH fetch. `default-features = false`
+# keeps the native TLS/tokio stacks out of the wasm build; `js` forwards the wasm
+# time/random backends. fauna-provisioning already rides the web bundle via the
+# onboarding machine, so this adds no new bundle weight.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+fauna-provisioning = { path = "../fauna-provisioning", default-features = false, features = ["js"] }
+# Dimension-4 localized error text (`RpcError::localized()`, `error::protocol::*`)
+# for `WsRpcError`'s `Display` — zero-dependency generated string constants, no
+# bundle-size concern.
+fauna-i18n = { path = "../fauna-i18n" }
+reqwest = { workspace = true }
+bytes = "1"
+futures-util = { workspace = true, features = ["sink"] }
+serde = { workspace = true }
+# The push forwarder: `RpcDispatcher::push_subscriber()` hands back a
+# `tokio::sync::broadcast::Receiver<PushEvent>`, so naming it needs tokio here.
+# `sync` only — no rt/net (which would pull mio, and mio does not build on wasm).
+tokio = { version = "1", default-features = false, features = ["sync"] }
+# The shared e2e counters (`test-helpers` only) — the pure, wasm-safe half of
+# `fauna-e2e-agent`, so this loop's reports are counted by the natives' code.
+fauna-e2e-contract = { path = "../fauna-e2e-contract", optional = true }
+# Marshals a decoded `PushEvent` into the JS payload object handed to the SPA's
+# push callback. `PushEvent` serializes untagged, so this is a single generic
+# conversion — no per-kind arm to keep in step.
+serde-wasm-bindgen = "0.6"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# Browser WebSocket: gloo-net's futures WebSocket is Stream<Item=Result<Message,
+# WebSocketError>> + Sink<Message>. `json` is required by `open_with_protocols`
+# (it serializes the protocol list to a JS value) — that's how we send the
+# `fauna.v1, bearer.<token>` subprotocol handshake.
+# `http` backs the bulk-binary blob POST (`blob_http`) beside the WebSocket
+# transport — the browser twin of native `fauna-nest-http`.
+gloo-net = { version = "0.6", default-features = false, features = ["websocket", "json", "http"] }
+# `FormData` + `Blob` build the two-part multipart body the nest's blob verifier
+# requires (`blob_http`); the browser derives the boundary from the FormData.
+web-sys = { version = "0.3", features = ["Blob", "BlobPropertyBag", "FormData"] }
+# wasm sleep for the reconnect backoff + the request-deadline timeout (same
+# crate the onboarding/launch machines use; no tokio timer on wasm).
+gloo-timers = { version = "0.4", features = ["futures"] }
+wasm-bindgen = { workspace = true }
+# spawn_local drives the dispatcher driver future + the reconnect loop;
+# JsFuture awaits the token-provider Promise.
+wasm-bindgen-futures = "0.4"
+# JS token-provider callback (Promise<string>).
+js-sys = { workspace = true }
+# Idempotency keys (mirrors NestClient::request). Both backends, as the SPA's
+# cdylib (libs/fauna-wasm) does — fauna-core pulls getrandom 0.3, a transitive
+# dep pulls 0.2; both need the wasm backend enabled.
+getrandom = { workspace = true, features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test.workspace = true

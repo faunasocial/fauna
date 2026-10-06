@@ -1,0 +1,141 @@
+[package]
+name = "fauna-account-plane"
+description = "The account data plane's wasm-capable client half (docs/goal/architecture/account-data-plane.md § The client-side lifecycle → The trigger fired, rulings (1) and (2)): the account-state and group planes, the generation passes, the page walk, the preference put and — under `account-driver` — the account driver (the command service, the pass and the serve loop) over the fauna-account-store floor; extracted from fauna-sync-engine, which re-exports every name at its old path and hosts the driver natively."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The lean `fauna-client-config` (wasm-clean) — the store seams the driver's
+# handle implements, and the group plane's authority-severance pass. First
+# added for the CAS-blob bridge, which is deleted (`config-dissolution.md`
+# § The `__config` dissolution schedule → *The closure order*, step (5)); the
+# feature was renamed from `preference-bridge` at step (6). Forwarded by
+# `fauna-sync-engine/preference-store`, never re-spelled there.
+preference-store = ["dep:fauna-client-config"]
+# Exposes `generation_fixture_test_support` — the generation-writer test
+# fixture — to OTHER crates' tests (the engine's account-runtime suite uses
+# it). This crate's own `#[cfg(test)]` modules get it without the feature,
+# the `#[cfg(any(test, feature = "test-helpers"))]` gating the engine's own
+# `test_support` uses. Native-only: the fixture stands on the SQLite backend.
+test-helpers = ["dep:tempfile"]
+# The account driver (`account_driver`, `observation_intake`'s door) — ruling
+# (2) of web's account-plane hosting: the command service, the pass and the
+# serve loop, platform-generic. Implies `preference-store` (the store seams
+# the handle implements) and adds the two wasm-clean client crates its steps call — the `fauna.sync.*`
+# adapter for the enrollment legs and the custody-ceremony seams — plus the
+# cross-target sleep and `catch_unwind`, and the two surface crates the
+# `preference_surfaces` twins compose over (delegation, personalization). Forwarded by
+# `fauna-sync-engine/account-runtime`, whose native host runs it.
+account-driver = [
+    "preference-store",
+    "dep:fauna-client-sync",
+    "dep:fauna-client-capabilities",
+    "dep:fauna-client-subscriptions",
+    "dep:fauna-sleep",
+    "dep:futures-util",
+    "dep:fauna-client-accounts",
+    "dep:wasm-bindgen-futures",
+    "dep:async-trait",
+    "dep:fauna-client-delegation",
+    "dep:fauna-client-personalization",
+]
+# Escape hatch to build the driver's `FAUNA_E2E_STATED_ROW` override into a
+# --release profile (debug_assertions off) — the engine's `e2e-agent` forwards
+# it. Never default-on (testing.md convention 15).
+e2e-agent = []
+
+# Dependency floor: fauna-account-store + the foundation facades, never the
+# engine graph (reqwest/notify/rusqlite/tokio's runtime/fs). Every dependency
+# here compiles for wasm32 — `just wasm-chunk-check` checks this crate there.
+[dependencies]
+fauna-account-store.workspace = true
+# Path dep because workspace inheritance cannot override default-features:
+# fauna-core's `network` graph pulls tokio → mio, which cannot build for
+# wasm32 (the floor's own reason, `fauna-account-store/Cargo.toml`).
+fauna-core = { path = "../fauna-core", default-features = false }
+# `generation_wraps` — the per-device generation-key wraps. Default `native`
+# pulls rusqlite; the plane needs none of it.
+fauna-mls = { path = "../fauna-mls", default-features = false }
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# `recovery_chain` — the RecoveryKey registration chain's reconcile, which the
+# secondary leg runs at every linked nest it reaches (`linked_leg`). Depends on
+# fauna-core and fauna-protocol only; wasm-clean.
+fauna-client-core = { path = "../fauna-client-core", default-features = false }
+# The escrow secret's type (`generation_escrow_recover::EscrowOpener` caches
+# the seed-derived X-Wing keypair). Already in the graph through fauna-core and
+# fauna-mls; wasm-clean.
+fauna-pq-kem = { path = "../fauna-pq-kem" }
+fauna-client-config = { path = "../fauna-client-config", optional = true }
+# `EnrollmentRefusal::notice` — the one rendered string the slot seam carries
+# (the same string the wire code localizes to). Zero-dep, wasm-safe.
+fauna-i18n = { path = "../fauna-i18n" }
+# `sync` for the plane's mint lock and the driver's channels; `rt` for
+# `pass_breath`'s `task::yield_now`; `macros` for the driver's `select!` — all
+# three build for wasm32 (`time` does not, and is banned here by test).
+tokio = { version = "1", default-features = false, features = ["sync", "rt", "macros"] }
+fauna-client-sync = { path = "../fauna-client-sync", optional = true }
+fauna-client-capabilities = { path = "../fauna-client-capabilities", optional = true }
+# The period-key store seam (`PeriodKeyStore`) the driver's handle
+# implements — the `fauna.state.subscriptions` custody every app reads
+# through. Wasm-clean.
+fauna-client-subscriptions = { path = "../fauna-client-subscriptions", optional = true }
+fauna-sleep = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+# `principal_bundle`'s store seam: `SecretStore`, the trait the native
+# `CredentialStore` and web's `LocalStorageSecretStore` both implement
+# (ruling (4)'s decision (c) — one bundle, never a twin). Wasm-clean without
+# its `web-localstorage` feature.
+fauna-client-accounts = { path = "../fauna-client-accounts", optional = true }
+# The Task-delegation and Trained-topics surfaces, for the plane-rail half of
+# their gestures in `preference_surfaces` (`account-driver` only). Their nest
+# legs (lease observation, the model plane) stay theirs; only the registry read
+# and write move onto the store. Default features: both are wasm-clean
+# (`fauna-client-delegation`'s tokio lease loop sits behind its `driver`).
+fauna-client-delegation = { path = "../fauna-client-delegation", optional = true }
+fauna-client-personalization = { path = "../fauna-client-personalization", optional = true }
+# The bundle's key-material custody (`Zeroizing` reads, the zeroized record),
+# and the throwaway replica's (`cold_replica`: its ephemeral writer secret and
+# the generation keys it holds) — unconditional since the replica is. Wasm-clean.
+zeroize = { workspace = true }
+# The succession-ledger seam impl on the handle (`fauna_client_config::
+# SuccessionLedgerStore` is `async_trait` with the native `Send` / wasm `?Send`
+# split).
+async-trait = { version = "0.1", optional = true }
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_bytes = "0.11"
+ed25519-dalek.workspace = true
+blake3.workspace = true
+hex.workspace = true
+# The outbox's intent-id mint (`outbox::enqueue_intent`).
+getrandom.workspace = true
+tempfile = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# The js-sys time helpers and js-backed randomness, exactly as fauna-wasm
+# enables them (`fauna-account-store/Cargo.toml`'s wasm32 table).
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"] }
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-client-core = { path = "../fauna-client-core", default-features = false, features = ["js"] }
+getrandom = { workspace = true, features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+# `web_host`'s `spawn_local` — the store task (`account-driver` only).
+wasm-bindgen-futures = { version = "0.4", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+# `kind_manifest_rows`' tests sign fixture manifests (a JSON payload).
+serde_json = { workspace = true }
+tempfile.workspace = true
+fauna-core = { workspace = true, features = ["test-helpers"] }
+# `now_or_never` — the succession tail's race probes fire a sibling's fence
+# from inside a synchronous window hook.
+futures-util = { workspace = true }
+# The severance pass's tests build ceremony snapshots through the real
+# `group_ceremony` builders, none hand-built.
+fauna-client-capabilities = { path = "../fauna-client-capabilities" }
+# The intake's and the tail's tests stand on the SQLite backend.
+fauna-account-store = { workspace = true, features = ["test-helpers"] }

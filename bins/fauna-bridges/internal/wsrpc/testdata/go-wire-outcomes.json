@@ -1,0 +1,21 @@
+{
+  "MtaStsMode": {
+    "Enforce": "enforce",
+    "None": "none",
+    "Testing": "testing"
+  },
+  "MtaStsOutcome": {
+    "FetchError": "fetch_error",
+    "Found": "found",
+    "Invalid": "invalid",
+    "NotPublished": "not_published"
+  },
+  "SrsBounceOutcome": {
+    "Expired": "expired",
+    "MacFail": "mac_fail",
+    "Malformed": "malformed",
+    "NotSrs": "not_srs",
+    "Ok": "ok",
+    "Orphan": "orphan"
+  }
+}

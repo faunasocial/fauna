@@ -1,0 +1,12 @@
+{
+  "participants": [ { "name": "Friend One" }, { "name": "Test Owner" } ],
+  "messages": [
+    { "sender_name": "Test Owner", "timestamp_ms": 1650000002000, "content": "See you there", "reactions": [ { "reaction": "\u00e2\u009d\u00a4", "actor": "Friend One" } ], "type": "Generic" },
+    { "sender_name": "Friend One", "timestamp_ms": 1650000001000, "photos": [ { "uri": "your_facebook_activity/messages/inbox/friendone_abc123/photos/img_1.jpg", "creation_timestamp": 1650000001 } ], "type": "Generic" },
+    { "sender_name": "Friend One", "timestamp_ms": 1650000000000, "content": "Ahoj! P\u00c5\u0099ijde\u00c5\u00a1?", "type": "Generic" }
+  ],
+  "title": "Friend One",
+  "is_still_participant": true,
+  "thread_path": "inbox/friendone_abc123",
+  "thread_type": "Regular"
+}

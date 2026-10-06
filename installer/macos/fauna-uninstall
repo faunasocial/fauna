@@ -1,0 +1,86 @@
+#!/bin/bash
+# Fauna — full uninstall.
+# Stops all services, removes plists + binaries + the /Applications/Fauna.app desktop
+# app. Preserves data (server + per-user) and the dedicated service users (they own
+# the preserved server data).
+#
+# The server services (nest, bridge) are machine LaunchDaemons under _fauna /
+# _fauna-bridge; sync is a per-user LaunchAgent. So this removes both the system
+# daemons and the per-user sync agent.
+#
+# Usage:
+#   sudo fauna-uninstall              # resolves the GUI user for the sync agent
+#   sudo fauna-uninstall <username>   # SSH / headless: name the sync user
+set -e
+
+if [ ! -w /usr/local/bin ]; then
+    echo "Error: run with sudo (sudo fauna-uninstall)"
+    exit 1
+fi
+
+echo "Stopping Fauna server daemons..."
+for label in social.fauna.nest social.fauna.bridge; do
+    launchctl bootout "system/$label" 2>/dev/null || true
+done
+
+echo "Removing LaunchDaemons..."
+for label in social.fauna.nest social.fauna.bridge; do
+    rm -f "/Library/LaunchDaemons/$label.plist"
+done
+
+# Resolve the per-user sync agent's user (the GUI user, or an explicit arg).
+if [ -n "${1:-}" ]; then
+    CONSOLE_USER="$1"
+else
+    CONSOLE_USER=$(/usr/sbin/scutil <<< "show State:/Users/ConsoleUser" \
+        | awk '/Name :/ { print $3 }')
+fi
+
+if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "loginwindow" ]; then
+    CONSOLE_UID=$(id -u "$CONSOLE_USER")
+    USER_HOME=$(dscl . -read /Users/"$CONSOLE_USER" NFSHomeDirectory \
+        | awk '{print $2}')
+    echo "Stopping the per-user sync agent for $CONSOLE_USER..."
+    launchctl bootout "gui/$CONSOLE_UID/social.fauna.sync-agent" 2>/dev/null || true
+    rm -f "$USER_HOME/Library/LaunchAgents/social.fauna.sync-agent.plist"
+else
+    echo "No GUI user resolved — skipping the per-user sync agent."
+    echo "  (pass the user: sudo fauna-uninstall <username>)"
+fi
+
+echo "Removing binaries..."
+rm -f /usr/local/bin/fauna-nest-daemon
+rm -f /usr/local/bin/fauna-sync-agent
+rm -f /usr/local/bin/fauna-tui
+rm -f /usr/local/bin/fauna-bridge-supervisor
+rm -f /usr/local/bin/fauna-mail-bridge
+rm -f /usr/local/bin/libfauna_ffi.dylib
+
+# Desktop app (the social.fauna.app component installs it to /Applications). Removing
+# the bundle is safe — the user's data lives per-user in ~/Library + the Keychain,
+# never inside the app bundle.
+echo "Removing the desktop app..."
+rm -rf /Applications/Fauna.app
+
+echo ""
+echo "Done. Server data, logs, and the _fauna / _fauna-bridge service users are"
+echo "preserved at:"
+echo "  /Library/Application Support/Fauna/   (server data + daemon logs, owned by _fauna)"
+if [ -n "${USER_HOME:-}" ]; then
+    # Two distinct per-user homes, one per consent domain (installers/macos.md
+    # § File Layout): the user-domain Application Support/Fauna — app data AND,
+    # since 2026-08-25, the sync agent's config/state/logs + the trust pins —
+    # and the app-group container, which since that date holds only the File
+    # Provider extension's state (the agent never opens it: a launchd agent is
+    # TCC-prompted there on every instance). Mislabeling either, as this message
+    # did until 2026-08-21, points a user at the wrong directory for their sync
+    # data; tests/e2e-unified/tests/test_macos_uninstall_message_paths.py pins it.
+    echo "  $USER_HOME/Library/Application Support/Fauna/   (app data + sync config/state + trust pins, per-user)"
+    echo "  $USER_HOME/Library/Group Containers/7457N3M72H.group.social.fauna.shared/   (File Provider extension state, per-user)"
+fi
+echo ""
+echo "To also remove all server data:"
+echo "  sudo rm -rf \"/Library/Application Support/Fauna/\""
+
+# Self-delete
+rm -f /usr/local/bin/fauna-uninstall

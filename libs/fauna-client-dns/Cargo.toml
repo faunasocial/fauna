@@ -1,0 +1,289 @@
+[package]
+name = "fauna-client-dns"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# UniFFI scaffolding for consumers in fauna-ffi (Apple/Android) +
+# uniffi-bindgen-cs (Windows). Off by default — most consumers wrap the
+# machine in a per-app glue layer that owns the FFI surface. Mirrors
+# fauna-client-mail-settings / fauna-onboarding-machine. Forwards
+# `fauna-core/uniffi` for the blanket `SecretString` custom-type reg used by
+# `DnsCredentialField` (registered in `fauna_core::secret`).
+uniffi = ["dep:uniffi", "fauna-core/uniffi", "dep:fauna-uniffi-async"]
+# Fakes for downstream integration tests (mirrors fauna-client-mail-settings).
+test-helpers = []
+# Forwards `fauna-core`'s own `local-clock` feature, for `cert_status_text`'s
+# expiry-date rendering (native-only — wasm has no OS timezone database).
+# Mirrors fauna-client-backup / fauna-client-capabilities: tui and linux
+# enable it here the same way they already enable `fauna-core/local-clock`
+# themselves; fauna-wasm never does, so this stays off the wasm-safe default.
+local-clock = ["fauna-core/local-clock"]
+
+[dependencies]
+# `fauna.dns.*` request/reply structs (`fauna_protocol::dns`). The nest
+# owns + defines them; this crate consumes ("DNS wire-type
+# ownership — nest defines, rust consumes"). The provider *publish* path is reached
+# through the `DnsProviderSeam` seam (real impl over `fauna-provisioning` lands
+# native-gated in Slice 3), not directly here, so this crate stays wasm-clean.
+# `default-features = false` drops fauna-protocol's `p2p` default (native-only
+# wireguard → tokio net → mio), which would otherwise break the wasm build; the
+# `js` time backend is forwarded on wasm below. Path form (not `workspace = true`)
+# is required to override `default-features`. Mirrors fauna-client-bridges.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# The client-held credential record is the `fauna.state.dns` plane kind's
+# `DnsConfig` (`fauna_core::data`). `default-features = false` drops fauna-core's
+# `network` default (tokio + redb + hickory) so the wasm seam builds; the `js`
+# time backend is forwarded on wasm below. Mirrors fauna-client-mail-settings.
+fauna-core = { path = "../fauna-core", default-features = false }
+# `cert_status_text`'s "Certificate:" / "self-signed" / "expires {date}"
+# strings — zero-dep, wasm-safe, same as every other machine crate returning
+# a rendered i18n string directly.
+fauna-i18n = { path = "../fauna-i18n" }
+# The single `_acme-challenge.<domain>` TXT record shape (name + short TTL) for
+# the DNS-01 cert order's publish/teardown helpers — reused, not duplicated, so
+# the native order and the manual-paste surface render the identical record.
+# `dns-records` is the pure WASM-safe builder feature (no tokio/dns/parser), and
+# is already in this crate's tree transitively via fauna-provisioning, so this
+# direct dep adds no build cost on either target.
+fauna-mail = { path = "../fauna-mail", default-features = false, features = ["dns-records"] }
+async-trait = "0.1"
+thiserror = { workspace = true }
+# The admin's actor Ed25519 signing key — the `DnsManagementMachine` holds it to
+# sign the LAN-TLS cert namespace entry it seals to the private nest (S5
+# `IssueCert`; `seal_lan_tls_cert_entry`'s `actor_sig`). Wasm-safe (fauna-core /
+# fauna-mls already link it on wasm); the field exists on both targets for a
+# uniform machine, but only the native `issue_cert` path uses it (web-deferred).
+ed25519-dalek = { workspace = true }
+# Snapshot/action serde — the wasm consumer (`libs/fauna-wasm`) crosses the
+# snapshot to JS and the action enum from JS via `serde_wasm_bindgen`; also names
+# the bounds the `DnsAdminClient` recording-mock test asserts. `derive` rides the
+# workspace default.
+serde = { workspace = true }
+# Producer-side error logging: the dispatch error transition logs the banner
+# message once (observability.md § Log on the *event*, not the *paint*).
+# wasm-safe — a no-op without a subscriber; web installs `RingLayer` at boot.
+tracing = { workspace = true }
+
+# ── WASM-safe ACME order core (`acme_pure`) — RustCrypto, BOTH targets ──
+# The pure-Rust ACME v2 client crypto: P-256 account/leaf keys + ES256 JWS
+# (`p256`/`ecdsa`), SHA-256 for the RFC-7638 JWK thumbprint + the DNS-01
+# key-authorization digest (`sha2`), base64url for JOSE + the credential blob
+# (`base64`), and PKCS#10 CSR assembly (`x509-cert`, which re-exports `der`).
+# These replace `instant-acme` (ring/aws-lc-rs JWS) + `rcgen` (CSR) — neither
+# browser-WASM-safe — on the wasm target. The `acme_pure` module is NOT cfg-gated,
+# so it also compiles on native (enabling the pebble proof); production uses it
+# only on wasm (native keeps `instant-acme`, no regression). `tls-certificates.md` § C.
+p256 = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+# PKCS#10 CSR assembly + DER encode/parse. `der` is named directly (SAN/extension
+# encoding, CSR re-parse in tests) and is already in the tree via `p256`/`x509-cert`
+# at the same 0.7 line, so no new copy enters. P-256 key generation uses `p256`'s
+# own (rand_core 0.6) `OsRng` — the version `ecdsa::SigningKey::random` binds — with
+# the `getrandom 0.2`/`js` wasm backend below; no separate rand dep is needed.
+x509-cert = { version = "0.2", features = ["builder"] }
+der = "0.7"
+# The issuance orchestration seals the issued cert to the private nest with
+# `fauna_mls::wrapped_blob::seal_lan_tls_cert_entry` (producer side of the Slice-4
+# namespace-sync cert consumer) and builds its `TlsCertBundle`. SHARED (was
+# native-only): the wasm `IssueCert` arm seals the same way now that the wasm order
+# core exists (`tls-certificates.md` § Where logic lives — the client seals). The
+# seal is pure crypto (HPKE), so `default-features = false` drops fauna-mls's
+# `native` (rusqlite) default; `js` (openmls/js) is forwarded on wasm below. Mirrors
+# fauna-client-caldav / fauna-client-mail-settings.
+fauna-mls = { path = "../fauna-mls", default-features = false }
+# (De)serialize the ACME `AccountCredentials` blob — moved here from native-only to
+# SHARED: the wasm `acme_pure` client persists/restores the SAME JSON shape the
+# native `instant-acme` path writes (`DnsConfig.acme_account`, D6 cross-device
+# reuse — `tls-certificates.md` § C.3), so the format must be byte-interoperable.
+serde_json = { workspace = true }
+# The DNS management record's store (`src/store.rs`): the `fauna.state.dns`
+# row, read and written through the seat's `AccountStoreHandle`. The driver
+# feature is the handle's home; it is wasm-clean, and every consumer of this
+# crate (fauna-ffi, linux, tui, fauna-wasm) already links it.
+fauna-account-plane = { workspace = true, features = ["account-driver"] }
+# Parse the issued leaf's `notAfter` for the `TlsCertBundle.expires_at` (mirrors
+# `bins/fauna-nest/src/acme_http01.rs::cert_seconds_remaining`). SHARED (was
+# native-only): the bundle helper `acme_shared::tls_cert_bundle_from_issued` runs on
+# both targets now (the wasm order core builds the same bundle). Pure-Rust
+# (nom-based ASN.1), so it links into the SPA wasm bundle.
+x509-parser = { workspace = true }
+
+# UniFFI scaffolding for the machine + its snapshot/action/error types
+# (`DnsManagementMachine`'s `#[cfg_attr(feature = "uniffi", …)]` exports). The
+# `tokio` feature backs the `async_runtime = "tokio"` exports on the async
+# `hydrate`/`dispatch` methods. Mirrors fauna-onboarding-machine.
+uniffi = { workspace = true, optional = true, features = ["tokio"] }
+# `#[fauna_uniffi_async::export]` runs each async export on a tokio runtime
+# worker, off the foreign executor's small poll stack
+# (`docs/goal/architecture/apps/native-async-execution.md` § The rule).
+fauna-uniffi-async = { workspace = true, optional = true }
+
+# Native concrete `DnsNest` seam (`build_dns_management_machine`): the shared
+# glue `fauna-ffi` + linux both call. Native-gated — a single generic `impl<R>
+# DnsNest` is impossible (async_trait `+ Send` vs AFIT `RpcRequester`), so the
+# seam binds the concrete transport per target: the native `NestClient` here, the
+# wasm `WsRpcClient` below.
+fauna-sleep = { workspace = true }
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The DNS-01 propagation gate's production probe (`resolvability.rs`) is now a
+# thin `Dns01ResolvabilityProbe` over
+# `fauna_core::authoritative_dns::authoritative_txt_visible` — the query itself
+# moved to the shared core so the NEST can run the identical one behind
+# `fauna.dns.probe_txt_visible` (the web app's arm of the gate; a browser has no
+# raw DNS). Hence no `hickory-resolver`/`hickory-proto` here any more:
+# `resolvability.rs`'s `#[cfg(test)]` responder is fauna-core's own shared
+# `authoritative_dns::spawn_responder` (test-helpers dev-dep below), not a
+# local copy that would need the codec crate directly.
+fauna-client = { path = "../fauna-client" }
+# Client-side DNS publish/verify — the shared `DnsProviderSeam` impl drives
+# fauna-provisioning's `DnsProvider` (verify + idempotent create_record). The
+# `native` default feature pulls reqwest (rustls-tls) + tokio for direct provider
+# calls; the wasm twin (below) links the same crate `default-features = false`
+# (fetch + CORS proxy). The provider-seam code itself is shared (the `provider_seam`
+# module); only the `reqwest::Client` construction differs per target.
+fauna-provisioning = { path = "../fauna-provisioning" }
+# The `reqwest::Client` the provider seam threads through `DnsProvider`'s calls.
+reqwest = { workspace = true }
+# The shared `StoreError` the `DnsStore` seam reports (re-exported from
+# `error.rs`); the client-held credential record round-trips `fauna.state.dns`
+# through the account store (`AccountDnsStore`), nest-opaque.
+fauna-client-config = { path = "../fauna-client-config" }
+# The DNS-01 ACME order core (`acme_order` module, S4). `instant-acme`'s crypto
+# is hard-wired to `ring`/`aws-lc-rs` (account-key JWS) and `rcgen` (CSR), neither
+# browser-WASM-safe — so the order runs on the **5 native apps only** and these
+# deps are native-gated, keeping the crate's wasm build (web keeps managed DNS
+# *publish* + the renew-reminder UI, not the order). Web-enablement is a later
+# pure-Rust-crypto slice.
+instant-acme = { workspace = true }
+# CSR + cert keypair for the finalize step (this crate's own test fixtures still
+# call it directly; the finalize-step CSR itself now goes through fauna-acme-core).
+rcgen = "0.13"
+# The shared keypair→CSR→finalize→poll tail, once the order is `Ready` — the
+# same mechanism `fauna-acme-http01`'s HTTP-01 loop drives. Native-only, same as
+# the two deps above.
+fauna-acme-core = { path = "../fauna-acme-core" }
+# (`serde_json` for the ACME `AccountCredentials` blob is now a SHARED dep above —
+# the wasm `acme_pure` client round-trips the same byte format, D6.)
+# `tokio::time::sleep` for the DNS-propagation wait + order/cert poll loops.
+tokio = { workspace = true }
+# (`fauna-mls` is now a SHARED dep above — the wasm order core seals too.)
+# (`x509-parser` is now a SHARED dep above — the shared `acme_shared` bundle helper
+# parses the issued leaf's `notAfter` on both targets.)
+
+# Wasm concrete `DnsNest` seam (`wasm_seam::build_dns_management_machine` +
+# `build_dns_management_machine_with_credentials`): the browser `WsRpcClient`
+# (`RpcRequester` over gloo-net) the web `admin-dns` page drives through
+# `libs/fauna-wasm`. `fauna-rpc-wasm` is itself `#![cfg(wasm32)]` (an empty rlib
+# on native), so it only links into the SPA bundle.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm" }
+# Forward fauna-protocol's `js` (fauna-core's js-sys time backend) on wasm.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+# Forward fauna-core's `js` time backend on wasm (Timestamp::now / created_at).
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+# Client-side DNS publish/verify on the web `admin-dns` managed-mode page — the
+# shared `DnsProviderSeam` over fauna-provisioning's `DnsProvider`, the SAME path
+# the web onboarding wizard already uses to verify/publish DNS from the browser.
+# `default-features = false, features = ["js"]` drops the `native` (reqwest
+# rustls-tls + tokio) default so it links into the SPA bundle; provider API calls
+# that browsers can't reach cross-origin are routed through the stateless
+# `services/fauna-cors-proxy` (`fauna_provisioning::proxy`), so the nest still
+# never sees the credential (dns-management.md § Where the credential lives).
+fauna-provisioning = { path = "../fauna-provisioning", default-features = false, features = ["js"] }
+# The `reqwest::Client` the provider seam threads through `DnsProvider`'s calls;
+# on wasm it is the fetch-backed client (no rustls). Mirrors the onboarding
+# machine's wasm reqwest pin exactly so the feature set unifies in the SPA build.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# The shared `StoreError` the `DnsStore` seam reports (re-exported from
+# `error.rs`); the client-held credential record round-trips `fauna.state.dns`
+# through the account store, nest-opaque.
+fauna-client-config = { path = "../fauna-client-config" }
+# Forward fauna-mls's `js` (openmls/js) on wasm so the shared `seal_lan_tls_cert_entry`
+# the wasm `IssueCert` arm calls links into the SPA bundle. Mirrors fauna-client-caldav.
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"] }
+# `getrandom`'s browser backend so `OsRng` (the `acme_pure` P-256 key generation)
+# resolves on wasm. `acme_pure` uses `p256`'s rand_core 0.6 `OsRng`, which is backed
+# by getrandom **0.2** (the `js` feature), mirroring fauna-mls's `getrandom_02`
+# entry. Build-target only; the crate code never names `getrandom` directly.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+# Browser async sleep for the `acme_pure` order's propagation wait + poll loops
+# (tokio's timer doesn't build for wasm; native uses `tokio::time::sleep` via the
+
+[dev-dependencies]
+# Turn on the account-store seams' shared in-memory doubles
+# (`fauna_client_config::test_helpers`) for the test
+# build only — a dev-dep feature, so it cannot reach a release artifact.
+fauna-client-config = { path = "../fauna-client-config", features = [
+    "test-helpers",
+] }
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+tokio = { workspace = true }
+# Fake provider API for the `RpcDnsProvider` owner-name wire tests (the seam must
+# send zone-RELATIVE owners to the relative-name providers — the Hetzner
+# double-suffix regression). Same version fauna-provisioning's conformance tests
+# already resolve, so no new copy enters the tree.
+wiremock = "0.6"
+
+# ── S4b pebble real-wire acceptance (`tests/pebble_dns01.rs`, native, #[ignore]) ──
+# Drives `obtain_certificate_dns01_with_http` against a local pebble ACME server,
+# so it exercises the account→order→authorizations→finalize half the CA-free unit
+# tests can't. All of the following are DEV-ONLY (test binary), so they touch
+# neither the production lib build nor the wasm build.
+#
+# Self dev-dep turns on `test-helpers` for the integration-test build only (the
+# production lib stays feature-clean). Same shape as fauna-client-mail-settings.
+fauna-client-dns = { path = ".", features = ["test-helpers"] }
+# The `reqwest::Client` the **pure** (`acme_pure`) driver's `_with_http` proof
+# entries take — the test builds one trusting pebble's throwaway CA. Same
+# rustls-tls workspace pin the lib uses on native, so no new copy enters the tree;
+# `add_root_certificate` (rustls) injects pebble's CA alongside the webpki roots.
+reqwest = { workspace = true }
+# The pebble docker lifecycle + CA-trusting UA-tagged `instant_acme::HttpClient`
+# (hyper/hyper-rustls/rustls wiring) — shared with fauna-acme-http01's identical
+# pebble_http01.rs harness (was two byte-identical copies).
+fauna-pebble-testkit = { path = "../fauna-pebble-testkit" }
+rustls-pki-types = "1"
+# Minimal in-process authoritative DNS responder pebble queries for the
+# `_acme-challenge` TXT (and CAA, answered empty). Just `Message` encode/decode
+# over a raw `tokio` UDP socket — no server framework. `0.26` matches the
+# hickory-proto already in the tree (via fauna-core's resolver); `std` is all the
+# wire codec needs.
+hickory-proto = { version = "0.26", default-features = false, features = ["std"] }
+# `DnsZoneRef` + `SecretString` to construct the zone and the fake-seam method
+# signatures; `async-trait` to impl the (native) `DnsProviderSeam`. Both are
+# already lib deps, but normal deps are not in scope for the integration-test
+# crate. `default-features = false` mirrors the lib's native fauna-core entry.
+# `features = ["test-helpers"]` additionally exposes
+# `authoritative_dns::spawn_responder` — this same feature line is what
+# `resolvability.rs`'s own `#[cfg(test)] mod tests` (built as part of this
+# crate's `cargo test`, hence unified with these dev-deps) needs to reach the
+# shared responder instead of a local copy.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["test-helpers"] }
+async-trait = "0.1"
+# Parse the issued leaf to assert it is pebble-CA-issued (not a self-signed floor)
+# and covers exactly the ordered SANs — the proof the CA half ran. `0.16` matches
+# the lib's pin so no second copy enters the tree.
+x509-parser = "0.16"
+# `DnsManagementMachine::with_credentials` + its `ManualOrderTestSeam` — the
+# machine-level pebble proof that `resume_manual_issue` re-opens and completes
+# after a drop+rebuild, not just the free `begin_dns01_order`/`complete_dns01_order`
+# functions the rest of this file drives. A fake actor signing key for it.
+ed25519-dalek = { workspace = true }
+# `PublishCertRequest`/`CertStatusReply`/`DomainDns`/`DomainVerifyStatus` for the
+# minimal `DnsNest` fake
+# — not otherwise in scope for the integration-test crate (fauna-client-dns's own
+# `use fauna_protocol::{dns, tls}::{...}` imports are private).
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+
+# `tests/pebble_dns01.rs` needs the `test-helpers` entry point; the self dev-dep
+# above turns the feature on for every `cargo test` of this package, and this guard
+# makes the dependency explicit + skips the target if it is ever built without it.
+[[test]]
+name = "pebble_dns01"
+required-features = ["test-helpers"]

@@ -1,0 +1,100 @@
+[package]
+name = "fauna-peer-channel"
+description = "The Y.1 peer channel: length-prefixed DAG-CBOR over the substrate-agnostic fauna-transport ByteStream, hosting the L3 RpcDispatcher peer-symmetrically (WireGuard or iroh). The peer analog of the nest↔nest federation channel."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The cross-user share leg's hardening surface
+# (`hardening::KIND_PAYLOAD_COVERAGE_P2P_SHARE` + its decode check) — part of
+# the gated `p2p-share` plane, forwarded from the plane's own wire feature.
+# The hardening merge gate runs with this ON (justfile
+# `peer-channel-hardening-check`) so the gated surface is never the
+# untested flavor.
+p2p-share = ["fauna-protocol/p2p-share"]
+
+[dependencies]
+fauna-transport = { workspace = true }
+# The L3 dispatcher this channel hosts (RpcDispatcher + the Request/Reply/RpcError
+# wire types). A real dep now that the PeerChannel ergonomic wrapper originates and
+# serves Y.1 RPCs (slice 4); it was a test-only dep when only the L2 adapter existed.
+fauna-protocol = { workspace = true }
+# The `Serialize`/`DeserializeOwned` bounds on the shared `to_value`/`from_value`
+# round-trip this crate owns for the peer + federation channels — trait bounds
+# only; the encoding itself is `fauna-protocol`'s canonical CBOR.
+serde = { workspace = true }
+bytes = { workspace = true }
+futures-util = { workspace = true, features = ["sink"] }
+tokio-util = { workspace = true, features = ["codec"] }
+# `rt` to spawn the dispatcher driver + the serve loop; `sync` for the inbound mpsc
+# the serve loop drains and its in-flight `Semaphore`; `time` for
+# `REPLY_ENQUEUE_BUDGET`, the clock a served Reply's enqueue is raced against;
+# `io-util` for the AsyncRead/AsyncWrite the hardening module's in-memory replay
+# stream implements (the PQ-2 fuzz surface). (The workspace pins tokio "full", so
+# these are documentary — they record what the channel actually needs.)
+tokio = { workspace = true, features = ["rt", "sync", "time", "io-util"] }
+thiserror = { workspace = true }
+# A fresh 16-byte idempotency key per originated request — same `getrandom::fill`
+# pattern as fauna-sidecar-client's `fresh_idem` (priority #4: reuse, don't drift).
+getrandom = { workspace = true }
+# The PQ-2 hardening surface (`hardening::check_kind_payload_decode`) strict-decodes
+# the admit exchange's inline witness payloads — `DeviceAuthorization` and
+# `CustodyGrant` live in fauna-core beside their verifiers. A real dep since the
+# inner witness parsers joined `KIND_PAYLOAD_COVERAGE` (W8.1 (account-data-plane.md § Workstreams); previously dev-only
+# for the corpus generator's `EmbedAsBytes`).
+fauna-core = { workspace = true }
+
+[dev-dependencies]
+# `test-util` + `time` for the serve-admission tests' paused clock: under
+# `start_paused` the runtime advances the clock only once every task is idle, so
+# a `sleep` there is a quiescence barrier rather than a wall-clock wait
+# (`testing.md` convention 14).
+tokio = { workspace = true, features = [
+    "io-util",
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "test-util",
+    "time",
+] }
+# `test_transport::stalled_sink_transport` — the "peer accepted the connection
+# and then stopped reading" double the serve-admission tests drive. Gated behind
+# `test-helpers` precisely so it can only ever be reached from a dev-dependency
+# like this one, never from a release build.
+fauna-protocol = { workspace = true, features = ["test-helpers"] }
+# The typed `fauna.peer.*` round-trip test (slice 6) names serde's trait bounds in
+# its `to_value`/`from_value` helpers; dev-only (the crate itself never touches
+# serde directly — encode_canonical/decode_strict encapsulate it).
+serde = { workspace = true }
+# The `PeerNode` tests (slice 7) implement the `#[async_trait]` `PeerTransport` /
+# `PeerConn` seam traits with an in-memory transport; dev-only (the crate's own
+# code implements neither — it only *consumes* a `dyn PeerTransport`).
+async-trait = "0.1"
+# The p2p-share corpus generator signs REAL fixtures (a device-authorized
+# roster entry needs a device signing key); dev-only.
+ed25519-dalek = { workspace = true }
+# The PQ-2 corpus generator + smoke (`tests/fuzz_smoke.rs`) construct the real
+# peer-leg wire structs; the CID/block fields are `serde_bytes::ByteBuf`.
+# (fauna-core moved to a real dependency with the inner-witness decode arms.)
+serde_bytes = "0.11"
+# The PQ-2 completeness pin (`tests/fuzz_smoke.rs`) asserts this crate's
+# `hardening::KIND_PAYLOAD_COVERAGE` covers `fauna_peer_sync::server::
+# allowlisted_kinds()` — the serve surface target 3 exists to harden. A
+# **dev-dependency cycle** (fauna-peer-sync depends on this crate normally),
+# which cargo permits precisely for this: a test naming its consumer. It must
+# be here rather than in fauna-peer-sync's own tests because the gate that
+# re-fires on an allowlist change runs exactly one thing —
+# `cargo test -p fauna-peer-channel --test fuzz_smoke` (justfile
+# `peer-channel-hardening-check`) — so a pin anywhere else would not fire.
+fauna-peer-sync = { workspace = true }
+# The SHARE plane's twin of the pin above: the same
+# `KIND_PAYLOAD_COVERAGE_P2P_SHARE` ↔ allowlist tie, against
+# `fauna_peer_share::server::allowlisted_kinds()`. Here for the same two reasons
+# — the **dev-dependency cycle** cargo permits for a test naming its consumer,
+# and the fact that the gate re-firing on an allowlist change runs exactly
+# `cargo test -p fauna-peer-channel --test fuzz_smoke` (justfile
+# `peer-channel-hardening-check`), so a pin anywhere else would not fire. The
+# pin itself is `#[cfg(feature = "p2p-share")]`, so a default-features run
+# simply does not compile it.
+fauna-peer-share = { workspace = true }

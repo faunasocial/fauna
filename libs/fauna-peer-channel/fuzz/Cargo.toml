@@ -1,0 +1,42 @@
+[package]
+name = "fauna-peer-channel-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone fuzz crate; not part of the parent workspace. The empty
+# [workspace] table tells cargo to stop walking upward for a workspace
+# root. Combined with `exclude = ["libs/fauna-peer-channel/fuzz"]` in the
+# root Cargo.toml, this keeps the fuzz crate isolated from workspace builds
+# (per cargo-fuzz convention, mirroring libs/fauna-mls/fuzz).
+#
+# ⚠ Building this crate fetches `libfuzzer-sys` from crates.io — OUTSIDE the
+# vetted workspace lockfile, so the supply-chain policy applies: that fetch
+# (and the cargo-fuzz install it serves) needs explicit maintainer approval
+# first. The merge-gate smoke does NOT build this crate — see README.md.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+fauna-peer-channel = { path = ".." }
+
+[[bin]]
+name = "framing_decode"
+path = "fuzz_targets/framing_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "frame_decode"
+path = "fuzz_targets/frame_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "kind_payload_decode"
+path = "fuzz_targets/kind_payload_decode.rs"
+test = false
+doc = false

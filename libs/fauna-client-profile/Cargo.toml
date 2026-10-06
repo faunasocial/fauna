@@ -1,0 +1,48 @@
+[package]
+name = "fauna-client-profile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# fauna-protocol carries the typed `fauna.profile.get` wire types + the
+# `RpcRequester` seam this crate is generic over (mirrors fauna-client-posts /
+# fauna-client-feed). `default-features = false` keeps it wasm32-buildable; the
+# path form is required to override `default-features`.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+
+# fauna-core: the canonical `data::Profile` + the `encoding` decode/verify
+# helpers `decode_profile` runs (signed `EmbedAsBytes` verify-then-bare). The
+# nest serves opaque stored bytes; the typed decode lives client-side so all 6
+# apps share one decode + verify path (priority #2). `default-features =
+# false` drops the native-only `network` feature so the crate stays wasm-safe
+# (mirrors fauna-client-feed).
+fauna-core = { path = "../fauna-core", default-features = false }
+
+# The nest's blob-upload response carries a hex blake3 digest; `ProfileImageEdit`
+# converts it to the raw-codec `ContentHash` the `Profile` record's avatar /
+# banner fields hold, so no client re-implements that decode. Pure Rust, wasm-safe.
+hex = { workspace = true }
+
+# `RecoveryHeadError`'s three arms — the recovery-head mirror is the one call
+# here that composes two round trips plus a signing step, so its failure needs
+# to say WHICH leg failed. Pure derive macro, wasm-safe.
+thiserror = { workspace = true }
+
+# wasm: forward the `js` feature (fauna-core's js-sys time backend) so the
+# transitive wasm build resolves. Off on native.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# Names the serde bounds the `RpcRequester::request` method requires, for the
+# wire-contract tests' `RecordingRequester` mock impl (mirrors
+# fauna-client-posts / -feed). No `derive` needed (trait paths only).
+serde = { workspace = true }
+# `ByteBuf` for constructing the mock `ProfileGetReply::body` in the
+# wire-contract test (matches fauna-protocol's pin).
+serde_bytes = "0.11"

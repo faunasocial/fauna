@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FaunaApp.Controls.DmComposeBar"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:FaunaApp.Controls"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <StackPanel Spacing="4">
+        <!-- Markdown toolbar -->
+        <controls:MarkdownToolbar x:Name="Toolbar" Margin="0,4,0,0" />
+
+        <!-- Reply preview -->
+        <StackPanel x:Name="ReplyPreview" Visibility="Collapsed"
+                    Orientation="Horizontal" Padding="0,4" Spacing="8"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.DmReplyPreview}"
+                       x:Name="ReplyPreviewText" Opacity="0.7" FontSize="12"
+                       VerticalAlignment="Center" />
+            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.DmReplyCancel}"
+                    Content="&#xE711;" FontFamily="Segoe MDL2 Assets"
+                    FontSize="10" Padding="4,2"
+                    Click="CancelReply_Click" />
+        </StackPanel>
+
+        <!-- Editable reply "To" line — visible only on recipient-selection rails
+             (mail; gated in SetCapabilities on supports_recipient_selection). Each
+             chip drops from this reply only; the add box parses + adds a recipient.
+             conversations.md § Participants vs. reply recipients. Chips built
+             imperatively (mirrors linux) with the id on the inner TextBlock. -->
+        <StackPanel x:Name="ReplyToLine" Visibility="Collapsed"
+                    Orientation="Horizontal" Spacing="6" Padding="0,2">
+            <TextBlock x:Name="ReplyToLabel" Opacity="0.7" VerticalAlignment="Center" />
+            <StackPanel x:Name="ReplyRecipientChips" Orientation="Horizontal" Spacing="4"
+                        VerticalAlignment="Center" />
+            <TextBox x:Name="ReplyRecipientAddBox"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.DmReplyRecipientAdd}"
+                     MinWidth="140"
+                     KeyDown="ReplyRecipientAdd_KeyDown" />
+        </StackPanel>
+
+        <!-- Subject input — visible only when topic-toggle-button is checked -->
+        <TextBox x:Name="SubjectInputBox"
+                 AutomationProperties.AutomationId="{x:Bind ids:Ids.SubjectInput}"
+                 PlaceholderText="{loc:Localize Key=conversations/unified/topic_input_placeholder}"
+                 Visibility="Collapsed"
+                 TextChanged="SubjectInput_TextChanged" />
+
+        <!-- Staged-attachment chips — one removable chip per staged compose.attachments
+             entry (conversations.md § Attachments → Staged-attachment preview). Built
+             imperatively (mirrors ReplyRecipientChips above; see DmComposeBar.SetAttachments). -->
+        <StackPanel x:Name="AttachmentChips" Visibility="Collapsed"
+                    Orientation="Horizontal" Spacing="4" Margin="0,2" />
+
+        <!-- Compose bar -->
+        <Grid ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <ToggleButton Grid.Column="0"
+                          x:Name="TopicToggleButton"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.TopicToggleButton}"
+                          Content="{loc:Localize Key=conversations/unified/topic_toggle_add}"
+                          Padding="8,4"
+                          Checked="OnTopicToggled"
+                          Unchecked="OnTopicToggled"
+                          ToolTipService.ToolTip="Add a topic / subject line" />
+
+            <Button Grid.Column="1"
+                    x:Name="AttachButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.AttachmentButton}"
+                    Content="&#xE723;"
+                    FontFamily="Segoe MDL2 Assets"
+                    Padding="8"
+                    Click="AttachFile_Click"
+                    ToolTipService.ToolTip="{loc:Localize Key=conversations/unified/attachment_button}" />
+
+            <!-- Column 2 reserved for spacing / future toolbar split -->
+
+            <!-- Compose body. A RichEditBox used as an in-place markdown DECORATION
+                 SURFACE over the LITERAL markdown source (markers stay in the buffer;
+                 Document.GetText returns literal source on send) — NOT a WYSIWYG editor.
+                 It carries a custom IValueProvider automation peer so the e2e ValuePattern
+                 (dm-text-field set/get) contract keeps working, and source ranges are
+                 styled in code via ITextRange.CharacterFormat.
+                 conversations.md § Compose-field inline markdown styling. -->
+            <controls:MarkdownRichEditBox Grid.Column="3"
+                     x:Name="MessageBox"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.DmTextField}"
+                     Padding="10,6,8,6"
+                     BorderThickness="1" />
+
+            <Button Grid.Column="4"
+                    x:Name="SendButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.DmSendButton}"
+                    Style="{StaticResource AccentButtonStyle}"
+                    Click="SendButton_Click"
+                    VerticalAlignment="Stretch" />
+        </Grid>
+    </StackPanel>
+</UserControl>

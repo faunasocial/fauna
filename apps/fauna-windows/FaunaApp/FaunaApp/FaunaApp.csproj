@@ -1,0 +1,167 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100</TargetFramework>
+    <!-- Every runtime id a build of this graph restores for: the release publish
+         (`-r win-x64` / `-r win-arm64`, .github/workflows/release.yml) and the ARM64
+         MSBuild path. Restore-only — output paths still follow RuntimeIdentifier — and
+         what lets a LOCKED restore (packages.lock.json) accept those builds. -->
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <!-- The Windows App SDK auto-initializer (the bootstrapper WindowsPackageType=None
+         generates) FAILS in a process that has package identity — measured 2026-09-26:
+         FaunaApp.exe exited 0x80070032 (ERROR_NOT_SUPPORTED) the moment it ran under the
+         sparse identity package that app.manifest.in's msix element now binds it to.
+         OnPackageIdentity_NoOp makes the bootstrapper succeed as a no-op there, so one
+         binary runs both ways: without identity the bootstrapper resolves the runtime as
+         before; with identity the runtime must already be in the process's package graph
+         — the self-contained release publish carries it beside the exe, and the e2e
+         harness declares the installed framework package on the identity it lends a
+         framework-dependent Debug build (tests/e2e-unified/helpers/taskbar_badge.py).
+         installers/windows.md § Package identity for FaunaApp.exe. -->
+    <WindowsAppSDKBootstrapAutoInitializeOptions_OnPackageIdentity_NoOp>true</WindowsAppSDKBootstrapAutoInitializeOptions_OnPackageIdentity_NoOp>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <RootNamespace>FaunaApp</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Embeds the app manifest (Per-Monitor v2 DPI awareness, the msix identity
+         element) into the exe. Required for this unpackaged WinUI 3 app to render
+         crisply on scaled / HiDPI RDP displays; SDK-style projects don't auto-detect
+         a manifest by filename. The embedded file is GENERATED from app.manifest.in
+         by FaunaGenerateAppManifest below, so its msix publisher comes from the one
+         build-time home (installer/PackageIdentity.props). -->
+    <ApplicationManifest>$(BaseIntermediateOutputPath)app.manifest</ApplicationManifest>
+    <!-- Resolve AppxPackage MSBuild tasks from VS Build Tools when building via dotnet CLI -->
+    <MSBuildExtensionsPath Condition="!Exists('$(MSBuildExtensionsPath)\Microsoft\VisualStudio\v$(VisualStudioVersion)\AppxPackage')">$(MSBuildProgramFiles32)\Microsoft Visual Studio\18\BuildTools\MSBuild</MSBuildExtensionsPath>
+    <!-- App icon (2026-07-20): rendered from Fauna's one brand mark via a
+         dedicated icon-rendering script, the same Assets/AppIcon.ico the
+         installer's ARPPRODUCTICON stages (Package.wxs) — replacing the
+         default WinExe icon on the taskbar/Alt-Tab/Explorer (former
+         "No ARPPRODUCTICON" gap; same fix landed for the macOS installer). -->
+    <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
+  </PropertyGroup>
+  <!-- Opt-in e2e automation flavor (testing.md § Cross-app e2e conventions,
+       point 15). The automation surface — Testing/TestAgent, the e2e state
+       protocol and command table in App.xaml.cs, the *ForTest UniFFI seam call
+       sites — compiles under `#if DEBUG || FAUNA_E2E_AGENT`. Debug covers the
+       ordinary e2e loop; this property is the "explicit e2e build flavor"
+       convention 15 sanctions alongside it, for the ONE case that needs an
+       automatable RELEASE build: tests/platform/windows/test_installer.py
+       publishes Release, installs the MSI, and then drives the installed
+       product through the agent.
+
+       Windows' twin of linux's opt-in `e2e-agent` cargo feature. NEVER set by
+       `just windows-release` or by .github/workflows/release.yml — the shipped
+       MSI is built without it, which is what makes the compile-time exclusion a
+       security boundary rather than a convention. A build that sets it must
+       also stage the TEST FFI flavor (`just windows-ffi-test <profile>`), since
+       the seam call sites it enables need bindings that export the seams. -->
+  <PropertyGroup Condition="'$(FaunaE2eAgent)'=='true'">
+    <DefineConstants>$(DefineConstants);FAUNA_E2E_AGENT</DefineConstants>
+  </PropertyGroup>
+  <!-- ── The `payments` compile condition (dynamic-features.md § Platform-family
+       surface excision — "C#: a define"). POSITIVE and default-ON, which is the
+       rule for every family whose toolchain can REMOVE a condition; apple's
+       negative `FAUNA_EXCISE_PAYMENTS` is the documented exception, forced by
+       SwiftPM's inability to un-define. MSBuild has no such limit, so the flavor
+       root states the default and `/p:FaunaStoreSafe=true` takes it away.
+
+       Setting it is HALF an excised build. The other half is the Rust face:
+       `just windows-ffi-store-safe` stages a fauna_ffi.dll built with no default
+       features and the store-safe complement feature, whose generated C# face
+       carries no FfiPaymentsClient at all — so a payments call site that forgets
+       its own `#if PAYMENTS` is a COMPILE ERROR rather than a silent leak. Never
+       flip one half alone. (The cargo flags are named rather than spelled: an XML
+       comment may not contain a double hyphen.)
+
+       ⚠ A define cannot reach XAML, which has no preprocessor: the §4/§5 renders
+       and the claim-redeem input live in Views/Payments/ and are removed as
+       ITEMS below. Both halves are load-bearing and they fail differently — drop
+       the define and the excised flavor stops compiling; drop the item removal
+       and it compiles, paints nothing, and ships every element id
+       (dynamic-features.md § What "completely compiled away" means, criterion 1).
+       Same two-halves shape android's BuildConfig constant + source-set split
+       takes, for the same reason. ── -->
+  <PropertyGroup Condition="'$(FaunaStoreSafe)'!='true'">
+    <DefineConstants>$(DefineConstants);PAYMENTS</DefineConstants>
+  </PropertyGroup>
+  <!-- ── The XAML half of the payments excision. XAML has NO preprocessor, so the
+       define above cannot reach an `AutomationProperties.AutomationId` attribute:
+       the WinUI XAML compiler emits every literal into the generated .g.cs and the
+       binary XBF, and both ship inside FaunaApp.dll. Removing the ITEM is the only
+       construct that removes the markup — the C# twin of web's isolated-module
+       pattern and android's per-build-type source sets.
+
+       So every payments render lives in Views\Payments\ and nowhere else, and each
+       is hosted by a ContentControl its page's `#if PAYMENTS` code-behind fills.
+       A payments render placed anywhere else compiles in BOTH flavors and ships its
+       ids in both — the exact mutant `just windows-store-safe-check` is graded
+       against, and the one no compile gate can see. `<Compile Remove>` for the
+       code-behind must accompany `<Page Remove>`: an orphaned .xaml.cs referencing
+       a removed page's generated partial does not compile. ── -->
+  <ItemGroup Condition="'$(FaunaStoreSafe)'=='true'">
+    <Page Remove="Views\Payments\**\*.xaml" />
+    <Compile Remove="Views\Payments\**\*.cs" />
+  </ItemGroup>
+  <!-- ── The `p2p-share` member: the same two halves, its own condition. It is a
+       registry member of its own and NOT a subset of `payments`, so it gets its
+       own define (one condition per member — apple's `FAUNA_EXCISE_P2P_SHARE`,
+       dynamic-features.md § Platform-family surface excision). Today windows
+       renders only the member's ceremony half (the offline co-present share on
+       the Folders page); its markup lives in Views\P2pShare\ and nowhere else,
+       hosted by a ContentControl FoldersPage's `#if P2P_SHARE` code-behind fills,
+       and its glue (App's seat state, the ceremony doors, the consent card and
+       landed-scope rows, the TestAgent arms) sits in `#if P2P_SHARE`. ── -->
+  <PropertyGroup Condition="'$(FaunaStoreSafe)'!='true'">
+    <DefineConstants>$(DefineConstants);P2P_SHARE</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(FaunaStoreSafe)'=='true'">
+    <Page Remove="Views\P2pShare\**\*.xaml" />
+    <Compile Remove="Views\P2pShare\**\*.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.7.260224002" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\FaunaApp.Core\FaunaApp.Core.csproj" />
+  </ItemGroup>
+  <!-- Native UniFFI cdylib produced by `just windows-ffi`. Copied next to the
+       app at build time so P/Invoke resolves the [DllImport("fauna_ffi")]
+       declarations in the generated C# bindings. Directory is gitignored;
+       missing means the recipe hasn't run yet. -->
+  <ItemGroup Condition="'$(Platform)'=='ARM64' or '$(RuntimeIdentifier)'=='win-arm64'">
+    <Content Include="runtimes\win-arm64\native\fauna_ffi.dll" Condition="Exists('runtimes\win-arm64\native\fauna_ffi.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>fauna_ffi.dll</Link>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Visible>false</Visible>
+    </Content>
+  </ItemGroup>
+  <ItemGroup Condition="'$(Platform)'=='x64' or '$(RuntimeIdentifier)'=='win-x64'">
+    <Content Include="runtimes\win-x64\native\fauna_ffi.dll" Condition="Exists('runtimes\win-x64\native\fauna_ffi.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>fauna_ffi.dll</Link>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Visible>false</Visible>
+    </Content>
+  </ItemGroup>
+  <!-- The package-identity publisher's one build-time home, and the embedded app
+       manifest generated from it (installers/windows.md § Package identity for
+       FaunaApp.exe). The msix element's publisher must equal the identity package's
+       Identity/@Publisher exactly or the exe runs silently without identity, so it is
+       substituted here from $(FaunaPackagePublisher) rather than hand-kept in the
+       manifest. XML-escaped because a DN may quote a component. WriteOnlyWhenDifferent
+       keeps the file's timestamp, so an unchanged publisher never forces a recompile. -->
+  <Import Project="..\..\installer\PackageIdentity.props" />
+  <Target Name="FaunaGenerateAppManifest" BeforeTargets="PrepareForBuild">
+    <PropertyGroup>
+      <_FaunaPublisherXml>$(FaunaPackagePublisher.Replace('&amp;', '&amp;amp;').Replace('"', '&amp;quot;'))</_FaunaPublisherXml>
+      <_FaunaAppManifestText>$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)\app.manifest.in').Replace('@@Publisher@@', '$(_FaunaPublisherXml)'))</_FaunaAppManifestText>
+    </PropertyGroup>
+    <Error Condition="'$(FaunaPackagePublisher)' == ''" Text="FaunaPackagePublisher is empty — installer\PackageIdentity.props sets the default." />
+    <Error Condition="$(_FaunaAppManifestText.Contains('@@'))" Text="app.manifest.in still carries an unsubstituted @@token@@ after generation." />
+    <MakeDir Directories="$(BaseIntermediateOutputPath)" />
+    <WriteLinesToFile File="$(ApplicationManifest)" Lines="$([MSBuild]::Escape($(_FaunaAppManifestText)))" Overwrite="true" WriteOnlyWhenDifferent="true" />
+  </Target>
+</Project>

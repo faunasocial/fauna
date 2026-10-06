@@ -1,0 +1,181 @@
+[package]
+name = "fauna-media-machine"
+description = "Shared-Rust page-level Media state machine: the cross-set all-media browser (content plane). Observer-driven snapshot over fauna-client-media. Mirrors fauna-devices-machine."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Turn on UniFFI scaffolding when consumed by fauna-ffi.
+uniffi = ["dep:uniffi", "fauna-core/uniffi", "dep:fauna-uniffi-async"]
+# Test helpers — FakeMediaNestApi + the nest_api-injecting constructor.
+test-helpers = []
+# Test observer — CountingObserver / NullObserver.
+test-observer = []
+# Shared WS-RPC seam glue (`nest_api::ws_rpc` + `build_media_machine`) — the
+# production `MediaNestApi` impl over `fauna-client-media`. Pulls the per-target
+# transport (native `fauna-client`'s `NestClient`, wasm `fauna-rpc-wasm`'s
+# `WsRpcClient`) + `fauna-protocol` for the `RpcErrorClass`/`RpcError` error
+# mapping. `fauna-ffi` + linux (native) and the web SPA (wasm) enable it;
+# pure-machine + fake consumers skip it. Mirrors `fauna-devices-machine`'s `rpc-glue`.
+rpc-glue = [
+    "dep:fauna-client-sync",
+    "dep:fauna-protocol",
+    "dep:fauna-client",
+    "dep:fauna-nest-http",
+    "dep:serde_json",
+    "dep:fauna-rpc-wasm",
+    # wasm blob-upload coordinator (LEG B) — no-ops on native (deps declared
+    # only under the wasm target, exactly like `dep:fauna-rpc-wasm`).
+    "dep:gloo-net",
+    # The full-file download leg's wasm binding (`WasmPublicChunkFetcher`,
+    # `nest_api::ws_rpc::wasm::build_media_machine`) — a no-op on native
+    # (fauna-core's own dep is wasm32-target-gated, same as the others above).
+    "fauna-core/blob-fetch-wasm",
+]
+
+[dependencies]
+# default-features = false: avoid fauna-core's `network` default (redb, tokio,
+# hickory-resolver) which breaks wasm builds via Cargo feature unification. We
+# only need the always-on `localized::LocalizedText` (+ its uniffi derive) and
+# `MaybeSendSync` (the seam supertrait).
+fauna-core = { path = "../fauna-core", default-features = false }
+# The shared cross-set media client surface (the `fauna.media.list` pager + the
+# `MediaSnapshot` / `MediaSortKey` / `view()` sort-filter logic this machine
+# drives). Non-optional: the machine core holds a `MediaSnapshot` and applies its
+# `view()` to derive the rendered page (`media.md` § Where logic lives — sort /
+# filter is shared Rust, part of `media_snapshot()`). wasm-clean (a thin client).
+fauna-client-media = { path = "../fauna-client-media" }
+# The share-link author seam (`share-links.md` § Where logic lives): mint + seal
+# + register, the verified re-derivation, the list rows, the expiry options and
+# the eligibility predicate the Media page's share surfaces are driven from.
+# Non-optional (the gestures are machine core); wasm-clean.
+fauna-client-share = { path = "../fauna-client-share" }
+# The ingress layer the `upload` gesture runs first (`process_media`: strip,
+# thumbnail) and the audience-keyed thumbnail seal (`seal_rendered_thumbnail` +
+# `Audience` + `UploadSidecar.to_dag_cbor()`); the file itself seals through
+# `fauna_core::blob_seal::seal_blob` (`media.md` § Encryption at rest → *One
+# at-rest shape*).
+# Non-optional: `MediaMachine::upload` is part of the machine core, on every
+# target. `default-features = false` means this crate does not *request*
+# `process_media` (image / c2pa / img-parts) itself — the seal + sidecar path is
+# pure Rust + AEAD and compiles without it. It does NOT mean the stub is what
+# ships: every artifact that actually needs a thumbnail turns the feature on and
+# Cargo unifies it back onto this dep — `fauna-wasm-media` requests it directly,
+# `fauna-wasm` inherits it through `fauna-conversations`' wasm32 block, and
+# `fauna-ffi` takes it with `c2pa-detect` for native. Read the consuming
+# artifact's manifest, not this line, to know which pipeline a build gets.
+fauna-media = { path = "../fauna-media", default-features = false }
+serde = { workspace = true }
+# The full-file download seam: `fauna_core::file_download::BlobFetcher` is an
+# anyhow-Result trait, and so is the re-seal's write seam
+# (`fauna_core::nest_reseal::ChunkStoreSink`, bound to the uploader in
+# `blob_uploader::UploaderSink` for the machine's inherited-version restore).
+# wasm-safe.
+anyhow = { workspace = true }
+# `rpc-glue`: parse the `{"hash": "<hex>"}` reply of the native blob POST
+# (`NativeBlobUploader`). Optional, pulled by `rpc-glue`; wasm-safe.
+serde_json = { workspace = true, optional = true }
+async-trait = "0.1"
+# Content-address verification of a fetched thumbnail: `fetch_thumbnail` checks
+# `blake3(fetched sealed bytes) == the requested content hash` before decrypting,
+# so a malicious / buggy nest can't substitute a different owner-sealed blob (the
+# AEAD tag alone proves *sealed-under-the-owner-key*, not *this* blob). `pure`
+# (via the workspace default) keeps it wasm-safe; blake3 is already in the wasm
+# graph (fauna-core key derivation, fauna-media hashing) so this adds no bundle.
+blake3 = { workspace = true }
+# Hex-encode a version's manifest hash for the FFI-clean `FileVersionSummary`
+# (the wire carries raw bytes; clients hand the hex back on restore).
+hex = { workspace = true }
+# Producer-side error logging: the page's error transitions log the localized
+# banner message once (observability.md § Log on the *event*, not the *paint*).
+# wasm-safe — a no-op without a subscriber; web installs `RingLayer` at boot.
+tracing = { workspace = true }
+
+uniffi = { workspace = true, optional = true, features = ["tokio"] }
+# `#[fauna_uniffi_async::export]` runs each async export on a tokio runtime
+# worker, off the foreign executor's small poll stack
+# (`docs/goal/architecture/apps/native-async-execution.md` § The rule).
+fauna-uniffi-async = { workspace = true, optional = true }
+
+# `rpc-glue`: `fauna-protocol` for the `RpcErrorClass`/`RpcError` error mapping
+# in the WS-RPC seam. Generic over `RpcRequester`, so it's a plain optional dep
+# (not target-gated); the seam that uses it is gated. default-features = false
+# drops fauna-protocol's `p2p` default (native-only wireguard) so the wasm seam
+# builds; `js` time backend forwarded on wasm below.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, optional = true }
+# `rpc-glue`: the shared `fauna.sync.*` typed-call surface — the WS-RPC seam's
+# `record_member` / `delete_member` gestures ride `SyncClient::changes_record`
+# (priority #2: the same adapter the sync engine + Devices page lift). Transport-
+# agnostic + wasm-clean; a plain optional dep pulled by `rpc-glue`. Mirrors
+# `fauna-devices-machine`.
+fauna-client-sync = { path = "../fauna-client-sync", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `rpc-glue`: the native `NestClient` (`Arc<NestClient>: RpcRequester`) the
+# WS-RPC seam binds. Native-gated; excluded from wasm so the crate stays
+# wasm-clean. Pulled with `rpc-glue`.
+fauna-client = { path = "../fauna-client", optional = true }
+# `rpc-glue`: the bulk-binary HTTP content API the native `MediaBlobUploader`
+# (LEG A) rides — `ReqwestNestContentApi::post_multipart_blob` to `POST
+# /api/v1/blob`, the carve-out that stays HTTP. Built from `NestClient`'s
+# `AuthClient` (its SPKI-pinned reqwest client + shared bearer cache), so no
+# parallel token / TLS re-pin. NATIVE-ONLY (`reqwest`/`tokio`); the wasm uploader
+# (LEG B) is a separate fetch coordinator, so this is excluded from the wasm
+# bundle. Pulled by `rpc-glue` (a no-op on wasm, like `fauna-client`).
+fauna-nest-http = { path = "../fauna-nest-http", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `rpc-glue`: the browser `WsRpcClient` (`RpcRequester` over gloo-net) the web
+# Media page drives. Optional + pulled by `rpc-glue`; `#![cfg(wasm32)]` itself,
+# so it only links into the SPA bundle. Mirrors the native `fauna-client` entry.
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm", optional = true }
+# Forward fauna-protocol's `js` (fauna-core's js-sys time backend) on wasm.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"], optional = true }
+# `rpc-glue` (wasm): the browser fetch behind `WasmBlobFetcher` (LEG B's render
+# twin — the public GET-by-hash thumbnail leg). Optional + pulled by `rpc-glue`;
+# only links into the SPA bundle. The upload half no longer needs its own
+# multipart glue (`web-sys`/`js-sys`/`wasm-bindgen` dropped 2026-07-31): the
+# two-part `sidecar` + `bytes` body the nest requires is built once in
+# `fauna_rpc_wasm::post_multipart_blob`, the browser twin of the
+# `fauna-nest-http` content API the native uploader (LEG A) rides.
+gloo-net = { version = "0.6", default-features = false, features = ["http"], optional = true }
+
+[dev-dependencies]
+# The share-link wire types the lifecycle tests' delegating fake names.
+fauna-client-share = { path = "../fauna-client-share" }
+# The shared `RpcRequester` doubles + `ClassifiedError`, the one home for
+# "a rejection is exactly an answer carrying an RpcError" (priority #2).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+tokio = { workspace = true }
+# The `FolderKeyResolver` trait is anyhow-Result typed; the
+# lifecycle tests' fake resolver names it.
+anyhow = { workspace = true }
+# The `fetch_thumbnail` tests seal a fixture blob with `crypto::encrypt_backup_chunk`
+# (the producer's primitive) to assert the machine fetches + decrypts the round
+# trip. `default-features = false` mirrors the normal dep (wasm-clean; crypto is
+# always-on). A dev-dep so `tests/*.rs` can name `fauna_core` directly.
+fauna-core = { path = "../fauna-core", default-features = false }
+# Self dev-dependency turns on the test-only features for the integration-test
+# build only (the `#[cfg(any(test, feature = "..."))]` items aren't visible to
+# `tests/*.rs` otherwise — `cfg(test)` isn't set on the crate-under-test when an
+# integration test links it). `rpc-glue` so the native ws_rpc seam + its unit
+# tests compile under `cargo test`. Mirrors fauna-devices-machine.
+fauna-media-machine = { path = ".", features = ["test-helpers", "test-observer", "rpc-glue"] }
+# Turn on the real `process_media` producer for the test build only (feature
+# unification with the stub dep above): the thumbnail-upload test needs
+# `process_media` to actually render a thumbnail. Dev-deps never reach the
+# crate's library consumers (fauna-wasm-media stays on the stub), so this only
+# affects `cargo test -p fauna-media-machine`. `test-fixtures` turns on
+# `fauna-media`'s shared `test_fixtures::build_png`, the same >300px fixture
+# that crate's own tests use (priority #2, one canonical body).
+fauna-media = { path = "../fauna-media", default-features = false, features = [
+    "process_media",
+    "test-fixtures",
+] }
+# The `fetch_thumbnail` content-address tests compute a fixture blob's real
+# content hash (lowercase-hex `blake3`) — the value the nest assigns and a client
+# fetches by — so they pass a genuine hash, not a placeholder. Re-listed as a
+# dev-dep so `tests/*.rs` can name `blake3` directly (like `fauna-core` above).
+blake3 = { workspace = true }

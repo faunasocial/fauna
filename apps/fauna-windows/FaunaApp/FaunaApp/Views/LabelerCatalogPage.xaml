@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.LabelerCatalogPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- Settings → Community labelers (content-moderation-and-ranking.md § Tier-3
+         community models & background re-processing; ui.yaml labeler-catalog):
+         browse + inspect-before-subscribe over EVERY published labeler
+         (fauna.labelers.list). Reached from the Personalization home's
+         browse-catalog button. A thin renderer over its OWN LabelerCatalogMachine
+         instance (the windows per-page-machine convention — mirrors
+         PersonalizationPage/DevicesPage/FoldersPage rather than linux's
+         per-settings-shell shared machine). Mirrors apps/fauna-linux/src/views/
+         personalization/mod.rs's CatalogShell (the lift reference).
+
+         ⚠ No ConfigureAwait(false) — a WinUI page that mutates bound state off
+         the UI thread throws a silent COMException
+         (reference_windows_vm_configureawait_comexception). -->
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Padding="16" Spacing="16" MaxWidth="700" HorizontalAlignment="Left">
+
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="False"
+                IsClosable="True" />
+
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=labeler_catalog/title}" />
+
+            <!-- labeler-inspect-panel: the inspect-before-subscribe detail,
+                 collapsed until a row's inspect button is tapped
+                 (LabelerCatalogSnapshot.inspecting). -->
+            <Border x:Name="InspectPanelBorder"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerInspectPanel}"
+                    AutomationProperties.Name="{loc:Localize Key=labeler_catalog/title}"
+                    Visibility="Collapsed"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="12">
+                <StackPanel Spacing="8">
+                    <TextBlock x:Name="InspectMetadataText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerInspectMetadata}"
+                               TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+
+                    <!-- list-kind inspect only (content-moderation-and-ranking.md
+                         § Tier-3 artifact kinds; topic-factors.md § Publishing):
+                         the decoded publisher-chosen name + the EXACT id→score
+                         map, every entry (never a capped preview). Collapsed for
+                         a wasm labeler — RenderInspectPanel toggles visibility on
+                         inspecting.artifactKind. -->
+                    <StackPanel x:Name="InspectListSection" Spacing="8" Visibility="Collapsed">
+                        <TextBlock x:Name="InspectListNameText"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerInspectListName}"
+                                   TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                        <TextBlock x:Name="InspectListEntryCountText"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerInspectListEntryCount}"
+                                   Opacity="0.7" FontSize="12" />
+                        <!-- A Border (not a bare container) carries the list test
+                             id with a non-empty Name — the bare-id-root prune
+                             trap; rows live in a non-virtualizing StackPanel so
+                             FlaUI realizes every row (mirrors CatalogListBorder
+                             below). -->
+                        <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerInspectListEntries}"
+                                AutomationProperties.Name="{loc:Localize Key=labeler_catalog/title}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1" CornerRadius="6" Padding="8">
+                            <StackPanel x:Name="InspectListEntriesContainer" Spacing="2" />
+                        </Border>
+                    </StackPanel>
+
+                    <!-- text-model-kind inspect only (content-moderation-and-
+                         ranking.md § Tier-3 artifact kinds; topic-factors.md §
+                         Publishing a trained factor, v2; IDs user-approved
+                         2026-08-13): the decoded publisher-chosen name + the
+                         artifact's WHOLE vocabulary — every n-gram, never a
+                         capped preview, since unlike a List's entries (ids the
+                         publisher already made public) this vocabulary IS
+                         what the subscriber is being asked to trust. Collapsed
+                         for every other kind — RenderInspectPanel toggles
+                         visibility on inspecting.artifactKind. -->
+                    <StackPanel x:Name="InspectModelSection" Spacing="8" Visibility="Collapsed">
+                        <TextBlock x:Name="InspectModelNameText"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerInspectModelName}"
+                                   TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                        <TextBlock x:Name="InspectModelNgramCountText"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerInspectModelNgramCount}"
+                                   Opacity="0.7" FontSize="12" />
+                        <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerInspectModelEntries}"
+                                AutomationProperties.Name="{loc:Localize Key=labeler_catalog/title}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1" CornerRadius="6" Padding="8">
+                            <StackPanel x:Name="InspectModelEntriesContainer" Spacing="2" />
+                        </Border>
+                    </StackPanel>
+
+                    <Button x:Name="InspectCloseButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerInspectCloseButton}"
+                            Content="{loc:Localize Key=labeler_catalog/close_inspect}"
+                            HorizontalAlignment="Left"
+                            Click="InspectCloseButton_Click" />
+                </StackPanel>
+            </Border>
+
+            <!-- A Border (not a bare container) carries the list test id with a
+                 non-empty Name — a container without one prunes from the UIA
+                 tree along with its children (the bare-id-root prune trap);
+                 rows live in a non-virtualizing StackPanel so FlaUI realizes
+                 every row. -->
+            <Border x:Name="CatalogListBorder"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerCatalogList}"
+                    AutomationProperties.Name="{loc:Localize Key=labeler_catalog/title}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="12">
+                <StackPanel Spacing="4">
+                    <TextBlock x:Name="CatalogEmptyText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerCatalogEmpty}"
+                               Opacity="0.5" TextWrapping="Wrap"
+                               Visibility="Collapsed"
+                               Text="{loc:Localize Key=labeler_catalog/empty}" />
+                    <StackPanel x:Name="CatalogContainer" Spacing="6" />
+                </StackPanel>
+            </Border>
+
+            <ProgressRing x:Name="LoadProgress" IsActive="False" Visibility="Collapsed"
+                          HorizontalAlignment="Center" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

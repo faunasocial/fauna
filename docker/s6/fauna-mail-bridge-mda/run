@@ -1,0 +1,57 @@
+#!/command/with-contenv /bin/bash
+# fauna-mail-bridge MDA role — IMAP (993 implicit TLS, 143 STARTTLS) + CalDAV +
+# CardDAV + WebDAV (all on 443 HTTPS → :8444 behind the SNI-router, one shared
+# DAV listener). Down by default; nest brings it up via the supervisor sidekick
+# socket once the admin enables email and/or CalDAV and/or CardDAV and/or WebDAV.
+#
+# Email (IMAP), CalDAV, CardDAV, and WebDAV gate INDEPENDENTLY (caldav-server.md /
+# webdav-server.md § Independent enablement): the one MDA process hosts all four,
+# so it must run if ANY flag is present, and the binary then binds each protocol's
+# listener per its own `fetch_config` flag. The flag guard re-downs the service if
+# it is started before any of /data/{imap,caldav,carddav,webdav}-enabled exists.
+#
+# A distinct service-user keypair per role (mta.key vs mda.key) per
+# docs/goal/behavior/mail-bridge-lifecycle.md § Multi-role multi-process — the
+# supervisor runs the same binary twice with different keypairs, and nest
+# assigns each its role via whoami. The bridge LOADS the keypair from
+# /data/keys/mda/mda.key (in the fauna-mda-owned 0700 subdir — security.md § UID
+# isolation); the ARTIFACT (entrypoint.sh) mints it AS ROOT + publishes the
+# blessed pubkey before this service starts (load-only on the image path; a non-artifact/dev run auto-generates on first load). See § Cold boot,
+# § Multi-role.
+if [ ! -e /data/imap-enabled ] && [ ! -e /data/caldav-enabled ] \
+   && [ ! -e /data/carddav-enabled ] && [ ! -e /data/webdav-enabled ]; then
+    exec s6-svc -d /run/service/fauna-mail-bridge-mda
+fi
+# Re-bless from the current keyfile (root, pre-drop): after an admin key
+# rotation the bridge regenerated its keypair, but only root may update the
+# blessed registry — this closes the strict-mode re-key loop
+# (mail-bridge-lifecycle.md § Service-user re-keying; no-op on a normal start).
+/usr/local/bin/rebless-bridge-key.sh mda
+# (security.md § Co-resident process trust boundary): the DAV-443 listener
+# is a LOOPBACK bind the SNI router forwards to with a PROXY-v2 header conveying
+# the real client IP — which the AUTH lockout and report_auth_event audit key on.
+# Any co-resident UID (canonically a compromised fauna-mta, the highest-RCE-risk
+# surface) can reach that loopback port too and forge a header, so loopback alone
+# cannot prove the router wrote it. This secret — the SAME file the nest and
+# router run-scripts read — is the proof: the router appends it as a PROXY-v2
+# TLV, and the bridge honours a conveyed source only when it matches. Read HERE
+# as root, before the s6-setuidgid drop and before the Landlock sandbox (whose
+# profile does not grant /data/keys/router), and exported rather than passed on
+# the argv: /proc/<pid>/cmdline is world-readable, /proc/<pid>/environ is
+# own-UID-only, so a sibling bridge UID can read neither the root-owned 0600 file
+# nor this process's environ. Empty on a non-router box => the bridge keeps its
+# trust-any-loopback behaviour.
+export FAUNA_ROUTER_PROXY_SECRET="$(cat /data/keys/router/proxy-secret 2>/dev/null || true)"
+# The hostile-MIME IMAP/CalDAV parser runs under fauna-sandbox's `bridge-imap`
+# profile: Landlock (fs default-deny — only /data/keys/mda + operator-hatch
+# granted, so the sealed store is kernel-unreadable even on in-container
+# priv-esc) + seccomp. fauna-sandbox raises CAP_NET_BIND_SERVICE into the ambient
+# set so the bridge still binds 993/143 under no_new_privs (security.md § UID
+# isolation, slice 4).
+exec s6-setuidgid fauna-mda \
+  fauna-sandbox bridge-imap -- \
+  fauna-mail-bridge \
+    --keypair-file /data/keys/mda/mda.key \
+    --nest-endpoint "https://127.0.0.1:${FAUNA_PORT:-3000}" \
+    --data-dir /data \
+    --log-level "${FAUNA_LOG_LEVEL:-info}"

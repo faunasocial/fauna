@@ -1,0 +1,261 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.EventsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:models="using:FaunaApp.Core.Models"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <Page.Resources>
+        <local:HexToColorConverter x:Key="HexToColor" />
+    </Page.Resources>
+
+    <Grid Padding="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" x:Name="EventsTitle"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                   Style="{StaticResource SubtitleTextBlockStyle}"
+                   Margin="0,0,0,8" />
+
+        <!-- Header with month navigation and view toggle -->
+        <Grid Grid.Row="1" Margin="0,0,0,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <Button Grid.Column="0" Content="&#xE76B;" FontFamily="Segoe MDL2 Assets"
+                    Click="PrevMonth_Click" Padding="8"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.EventsPrevMonth}"
+                    AutomationProperties.Name="events-prev-month" />
+            <TextBlock Grid.Column="1" x:Name="MonthYearText"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.CalendarDateLabel}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" />
+            <Button Grid.Column="2" Content="&#xE76C;" FontFamily="Segoe MDL2 Assets"
+                    Click="NextMonth_Click" Padding="8"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.EventsNextMonth}"
+                    AutomationProperties.Name="events-next-month" />
+            <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="2" Margin="8,0,0,0"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.EventsViewToggle}"
+                        AutomationProperties.Name="events-view-toggle">
+                <Button x:Name="AgendaButton" Click="AgendaView_Click" Padding="8,4"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.CalendarViewAgenda}" />
+                <Button x:Name="MonthButton" Click="MonthView_Click" Padding="8,4"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.CalendarViewMonth}" />
+                <Button x:Name="WeekButton" Click="WeekView_Click" Padding="8,4"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.CalendarViewWeek}" />
+                <Button x:Name="DayButton" Click="DayView_Click" Padding="8,4"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.CalendarViewDay}" />
+            </StackPanel>
+            <Button Grid.Column="4" Content="&#xE787;" FontFamily="Segoe MDL2 Assets"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.NewCalendarBtn}"
+                    AutomationProperties.Name="new-calendar-btn"
+                    Click="NewCalendar_Click"
+                    Padding="8" Margin="8,0,0,0" />
+
+            <Button Grid.Column="5" Content="&#xE710;" FontFamily="Segoe MDL2 Assets"
+                    Click="NewEvent_Click" Padding="8"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.NewEventBtn}"
+                    AutomationProperties.Name="new-event-btn" />
+        </Grid>
+
+        <!-- Calendar creation panel (shown when new-calendar-btn is clicked) -->
+        <StackPanel Grid.Row="2" x:Name="CalendarCreationPanel" Orientation="Horizontal"
+                    Spacing="8" Margin="0,0,0,8" Visibility="Collapsed">
+            <TextBox x:Name="CalendarNameBox"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.CalendarName}"
+                     MinWidth="200" />
+            <Button x:Name="CreateCalendarButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.CreateCalendar}"
+                    Click="CreateCalendar_Click" />
+        </StackPanel>
+
+        <!-- Calendar list: calendar-item selects (narrows the agenda to just this
+             calendar); calendar-visibility toggles that calendar's membership in
+             the no-selection union's display filter — two independent
+             affordances per row (events.md § Where logic lives → Which
+             calendars display; ratified 2026-08-02). FlaUI drives the CheckBox
+             via the Toggle pattern (fires Checked/Unchecked, not Click) — see
+             CalendarVisibility_Toggled.
+
+             Height-capped, and the event form below scrolls inside its own capped
+             region: this page has no page-level ScrollViewer, so every Auto row
+             grows at the expense of row 5. An uncapped list pushed the view grids
+             and the event form past the window's bottom edge once a user had
+             about eight calendars, where no scroll could reach them. The capped
+             list scrolls instead. Its panel is a plain StackPanel, not the
+             default virtualizing one, so every row stays realized: a calendar
+             scrolled out of view is still selectable and readable. -->
+        <ListView Grid.Row="3" x:Name="CalendarList"
+                  Visibility="Collapsed" SelectionMode="Single"
+                  MaxHeight="120"
+                  SelectionChanged="CalendarList_SelectionChanged">
+            <ListView.ItemsPanel>
+                <ItemsPanelTemplate>
+                    <StackPanel />
+                </ItemsPanelTemplate>
+            </ListView.ItemsPanel>
+            <ListView.ItemTemplate>
+                <DataTemplate x:DataType="vm:CalendarRowVm">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <TextBlock Text="{x:Bind Calendar.Name}"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.CalendarItem}"
+                                   VerticalAlignment="Center"
+                                   Padding="4" />
+                        <CheckBox IsChecked="{x:Bind IsVisible, Mode=OneWay}"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.CalendarVisibility}"
+                                  Checked="CalendarVisibility_Toggled"
+                                  Unchecked="CalendarVisibility_Toggled" />
+                    </StackPanel>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+
+        <!-- Event creation panel (shown when new-event-btn is clicked). Scrolls
+             inside a capped region so the open form never pushes row 5 off the
+             page; the summary and start fields at its top stay in view. -->
+        <ScrollViewer Grid.Row="4" x:Name="EventCreationPanel"
+                      MaxHeight="240" Margin="0,0,0,8" Visibility="Collapsed"
+                      VerticalScrollBarVisibility="Auto">
+        <StackPanel Spacing="8">
+            <TextBox x:Name="EventSummaryBox"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.EventSummary}"
+                     MinWidth="200" />
+            <!-- Combined date+time text input (ui.yaml event-dtstart/event-dtend:
+                 a single combined control on all 7 apps; WinUI has no native
+                 single combined datetime picker, so — like Linux/Android — this
+                 is a text field accepting ISO "YYYY-MM-DDTHH:MM"). -->
+            <TextBox x:Name="EventStartBox"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.EventDtstart}"
+                     MinWidth="200" />
+            <TextBox x:Name="EventEndBox"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.EventDtend}"
+                     MinWidth="200" />
+            <TextBox x:Name="EventDescriptionBox"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.EventFormDescription}"
+                     Header="{loc:Localize Key=events/description}"
+                     AcceptsReturn="True" TextWrapping="Wrap"
+                     MinHeight="60" />
+            <TextBox x:Name="EventLocationBox"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.EventFormLocation}" />
+            <Button x:Name="CreateEventButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.CreateEvent}"
+                    Click="CreateEventInline_Click" />
+        </StackPanel>
+        </ScrollViewer>
+
+        <!-- Month grid (calendar view).
+             AutomationProperties.Name is required: a bare layout Grid carrying only an
+             AutomationId is pruned from the UIA tree, so FlaUI's is_visible/find returns
+             nothing (the documented WinUI list-count prune trap). -->
+        <Grid Grid.Row="5" x:Name="MonthGrid" Visibility="Collapsed"
+              AutomationProperties.AutomationId="{x:Bind ids:Ids.EventsMonthGrid}"
+              AutomationProperties.Name="Month grid" />
+
+        <!-- Week grid (built in code-behind: header + all-day band + scrollable time grid) -->
+        <Grid Grid.Row="5" x:Name="WeekGrid" Visibility="Collapsed"
+              AutomationProperties.AutomationId="{x:Bind ids:Ids.CalendarWeekGrid}"
+              AutomationProperties.Name="Week grid"
+              MinHeight="100" />
+
+        <!-- Day timeline (built in code-behind: all-day band + scrollable time column) -->
+        <Grid Grid.Row="5" x:Name="DayTimeline" Visibility="Collapsed"
+              AutomationProperties.AutomationId="{x:Bind ids:Ids.CalendarDayTimeline}"
+              AutomationProperties.Name="Day timeline"
+              MinHeight="100" />
+
+        <!-- Event list (agenda view) -->
+        <ListView Grid.Row="5" x:Name="AgendaPanel" SelectionMode="None">
+            <ListView.ItemTemplate>
+                <DataTemplate x:DataType="models:EventInfo">
+                    <StackPanel Spacing="4">
+                        <!-- Card body: a flat, full-width button → opens EventDetailPage.
+                             The inline RSVP buttons below are SIBLINGS (not nested in
+                             this button), so each stays independently invokable. -->
+                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.EventCard}"
+                                AutomationProperties.Name="{x:Bind Summary}"
+                                Tag="{x:Bind}" Click="EventCard_Click"
+                                Background="Transparent" BorderThickness="0" Padding="12"
+                                HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="4" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+
+                                <!-- Color bar -->
+                                <Border Grid.RowSpan="3" Grid.Column="0"
+                                        Background="{x:Bind CalendarColor, Converter={StaticResource HexToColor}}"
+                                        CornerRadius="2" />
+
+                                <!-- Summary -->
+                                <TextBlock Grid.Row="0" Grid.Column="1"
+                                           Text="{x:Bind Summary}"
+                                           AutomationProperties.AutomationId="{x:Bind ids:Ids.EventCardSummary}"
+                                           Style="{StaticResource BodyStrongTextBlockStyle}" />
+
+                                <!-- Time -->
+                                <TextBlock Grid.Row="1" Grid.Column="1"
+                                           Text="{x:Bind TimeRange}"
+                                           Opacity="0.6" />
+
+                                <!-- Location -->
+                                <TextBlock Grid.Row="2" Grid.Column="1"
+                                           Text="{x:Bind Location}"
+                                           Opacity="0.5" FontSize="12" />
+
+                                <!-- RSVP badge -->
+                                <TextBlock Grid.RowSpan="3" Grid.Column="2"
+                                           Text="{x:Bind RsvpStatus}"
+                                           VerticalAlignment="Center"
+                                           Opacity="0.6" FontSize="12" />
+                            </Grid>
+                        </Button>
+
+                        <!-- Inline RSVP buttons (quick affordance; canonical rsvp-button-group) -->
+                        <StackPanel Orientation="Horizontal" Spacing="4" Margin="28,0,0,0">
+                            <Button Content="{loc:Localize Key=events/rsvp/going}" FontSize="11" Padding="6,2" Tag="{x:Bind Id}" Click="RsvpGoing_Click"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.EventRsvpGoing}" />
+                            <Button Content="{loc:Localize Key=events/rsvp/interested}" FontSize="11" Padding="6,2" Tag="{x:Bind Id}" Click="RsvpInterested_Click"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.EventRsvpInterested}" />
+                            <Button Content="{loc:Localize Key=events/rsvp/decline}" FontSize="11" Padding="6,2" Tag="{x:Bind Id}" Click="RsvpDecline_Click"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.EventRsvpDecline}" />
+                        </StackPanel>
+                    </StackPanel>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+
+        <ProgressRing Grid.Row="5" x:Name="LoadingRing"
+                      IsActive="False" Visibility="Collapsed"
+                      HorizontalAlignment="Center" VerticalAlignment="Center" />
+
+        <controls:CopyableInfoBar Grid.Row="5" x:Name="ErrorBar"
+                 Severity="Error" IsOpen="False" IsClosable="True"
+                 VerticalAlignment="Bottom" Margin="0,0,0,16" />
+    </Grid>
+</Page>

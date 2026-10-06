@@ -1,0 +1,7 @@
+{
+  "FcrdnsMode": {
+    "Enforce": "enforce",
+    "Off": "off",
+    "ScoreSignal": "score_signal"
+  }
+}

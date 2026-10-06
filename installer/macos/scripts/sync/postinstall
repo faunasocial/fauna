@@ -1,0 +1,62 @@
+#!/bin/bash
+# Postinstall script for the Fauna Sync component.
+#
+# Sync stays a PER-USER LaunchAgent (unlike the nest/bridge machine daemons): it
+# syncs the logged-in user's files into the user's folders, so it is inherently
+# per-user (installers/macos.md § launchd jobs — the same split as Windows).
+#
+# Since the A4 sync-agent cutover the LaunchAgent runs `fauna-sync-agent` — the
+# provisioned per-user agent the desktop app drives over the unix socket
+# (`sync-agent.md` § Packaging + lifecycle). It ships ENABLED (RunAtLoad +
+# KeepAlive, no Disabled key): an agent with no provisioned capability idles
+# harmlessly until the app's first post-auth provisioning.
+#
+# No launchd stdout/stderr redirect: the agent writes its own size-capped log
+# under its data dir (`fauna_log`, observability.md § Persistence & privacy),
+# and launchd never rotates a redirect — the old `sync-agent.log` copy reached
+# 6.6 GB. The app's self-install (`SyncAgentSpawner.swift`) writes the same
+# redirect-free plist.
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/common.sh"
+
+resolve_console_user
+setup_user_directories
+
+# Prefer the agent copy INSIDE the app bundle: a bundle-attributed agent
+# prompts for TCC AppData as "Fauna" on the app's own subject — one Allow
+# covers app + agent, sticky under the stable Developer ID — while the bare
+# /usr/local/bin exec prompts as a scary path subject (measured 2026-08-23,
+# installers/macos.md § Identifier domain, record item 5/6). The app choice
+# installs BEFORE sync (distribution.xml choices-outline order), so on an
+# app-included install the bundled copy exists by the time this runs; a
+# services-only install falls back to the bare binary.
+BUNDLED_AGENT="/Applications/Fauna.app/Contents/MacOS/fauna-sync-agent"
+if [ -x "$BUNDLED_AGENT" ]; then
+    AGENT_EXEC="$BUNDLED_AGENT"
+else
+    AGENT_EXEC="/usr/local/bin/fauna-sync-agent"
+fi
+
+PLIST_CONTENT=$(cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>social.fauna.sync-agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${AGENT_EXEC}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+EOF
+)
+
+install_launchagent "social.fauna.sync-agent" "$PLIST_CONTENT"

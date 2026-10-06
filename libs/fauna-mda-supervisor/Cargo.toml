@@ -1,0 +1,22 @@
+[package]
+name = "fauna-mda-supervisor"
+description = "Platform-agnostic supervision logic for the Go fauna-mail-bridge MDA child (CalDAV + IMAP): reconcile the child against the nest's enable flags, pin the CalDAV operator-hatch, and restart on an admin CalDAV-port change. Consumed by the per-OS service shells (Windows SCM service, macOS LaunchDaemon)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fauna-deployment-flags.workspace = true
+tokio.workspace = true
+serde.workspace = true
+tracing.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+# Dev-only: the CalDAV listen constant's test ties its port to the protocol's
+# `DEFAULT_CALDAV_PORT`. Kept out of `[dependencies]` so this shell stays free
+# of the heavy runtime crates.
+fauna-protocol.workspace = true
+# The child-output capture test installs a thread-local collecting layer to
+# read back what the supervisor forwarded from the MDA's stdout/stderr.
+tracing-subscriber.workspace = true

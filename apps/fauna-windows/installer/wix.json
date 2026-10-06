@@ -1,0 +1,8 @@
+{
+  "$schema": "https://wixtoolset.org/schemas/v5/wixext.json",
+  "extensions": [
+    "WixToolset.Util.wixext",
+    "WixToolset.UI.wixext",
+    "WixToolset.Firewall.wixext"
+  ]
+}

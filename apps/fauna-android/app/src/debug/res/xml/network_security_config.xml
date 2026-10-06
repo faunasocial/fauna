@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DEBUG-ONLY overlay of src/main/res/xml/network_security_config.xml.
+
+  Android resource merging resolves a same-named resource from the variant's own
+  build-type source set ahead of src/main, so this file IS the policy for
+  `debug` and reaches NO shipping build type (`release`, `storeSafe`, `foss`)
+  — testing.md convention 15: the automation surface is compiled out of release
+  artifacts. Here the build system's own source-set merge is that boundary
+  rather than a release-shrinker fold, which is why the witness is a source-set
+  assertion and not an artifact grep:
+  tests/e2e-unified/tests/test_android_cleartext_debug_only.py
+  derives each shipping type's real directory set from build.gradle.kts, so a
+  future srcDir addition that pulled this file into a shipping variant reds
+  instead of trusting this comment.
+
+  Why it exists: the e2e harness's default nest mode serves plain
+  http://127.0.0.1:[port], and `adb reverse tcp:[p] tcp:[p]` makes that the
+  DEVICE's own loopback (tests/e2e-unified/drivers/android.py). Without this, an
+  android e2e run cannot complete even its first journey, because every nest
+  call dies on the base config's cleartext refusal (testing.md, section
+  "Default app and nest mode", Android's run venue, constraint 3).
+
+  127.0.0.1 ONLY. No LAN range, no 10.0.2.2, and base-config is NOT flipped:
+  constraint 3 is "production's no-cleartext network policy is never widened",
+  and a debug build that trusted a LAN address would put an unauthenticated
+  plaintext nest on a network interface, which constraint 2 forbids outright.
+  10.0.2.2 (the emulator's alias for its host) is deliberately absent, because
+  the reverse tunnel is what carries the device to the nest: the device only
+  ever needs its own loopback.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>

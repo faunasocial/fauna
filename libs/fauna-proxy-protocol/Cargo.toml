@@ -1,0 +1,12 @@
+[package]
+name = "fauna-proxy-protocol"
+description = "Minimal, zero-dependency PROXY protocol v2 codec (encode + parse) shared by fauna-sni-router and fauna-nest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Intentionally none — std only. The router is a deliberately minimal L4 splicer
+# and nest parses this on its TLS accept path; keeping the codec dependency-free
+# keeps both binaries lean and the parsing surface auditable (the security
+# review flagged untrusted-input parsers as the zero-day surface).

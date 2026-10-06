@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FaunaApp.Views.Onboarding.DnsConfigView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:local="using:FaunaApp.Views.Onboarding"
+    xmlns:controls="using:FaunaApp.Controls"
+    xmlns:loc="using:FaunaApp.Markup"
+    mc:Ignorable="d"
+    xmlns:ids="using:FaunaApp.UiIds">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <Grid Padding="48" HorizontalAlignment="Center" MaxWidth="700">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <!-- Error display: shared element, must be present on every page
+                 per the cross-app e2e contract. -->
+            <controls:CopyableInfoBar
+                Grid.Row="0"
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="{Binding HasError, Mode=OneWay}"
+                Message="{Binding ErrorMessage, Mode=OneWay}"
+                IsClosable="True"
+                Margin="0,0,0,16" />
+
+            <StackPanel Grid.Row="1" Spacing="12">
+                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                           Style="{StaticResource TitleTextBlockStyle}"
+                           Text="{loc:Localize Key=onboarding/dns_config/title}"
+                           HorizontalAlignment="Center" />
+
+                <!-- Buy / same-provider checkboxes. The state machine derives
+                     provider eligibility from these flags + capabilities; we
+                     re-render the row in codebehind via Bindings.Update(). -->
+                <CheckBox AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsBuyDomainCheckbox}"
+                          Content="{loc:Localize Key=onboarding/dns_config/buy_domain_checkbox}"
+                          IsChecked="{Binding BuyDomain, Mode=TwoWay}" />
+                <CheckBox AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsSameProviderCheckbox}"
+                          Content="{loc:Localize Key=onboarding/dns_config/same_provider_checkbox}"
+                          IsChecked="{Binding SameProviderForVps, Mode=TwoWay}" />
+
+                <!-- Provider row. Populated imperatively in codebehind:
+                     one Button per DNS-capable provider, each with
+                     AutomationId dns-provider-row[<provider_id>] to match
+                     the Linux/web indexed pattern.
+
+                     AutomationProperties.Name=" " is a known WinUI 3 trick
+                     to force a panel into the UIA "content" view: bare
+                     panels with no Name get pruned from the automation
+                     tree as raw view, so cf.ByAutomationId() misses
+                     them. A non-empty Name flips the peer's
+                     IsContentElement flag — same approach used by the
+                     error-message mirrors in AdminUsersPage.
+
+                     controls:WrapStack, not a horizontal StackPanel: six
+                     DNS-capable providers do not fit the MaxWidth="700"
+                     page on one line, and a StackPanel overflows (clipped,
+                     UIA IsOffscreen=true) rather than wrapping — which made
+                     the last row, `bundled`, invisible to e2e even though
+                     Invoke() still reached it. Web wraps the same row
+                     (flex-wrap); see WrapStack.cs for why the bridge's
+                     scroll-into-view cannot substitute. -->
+                <controls:WrapStack x:Name="DnsProviderRow"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsProviderRow}"
+                                    AutomationProperties.Name=" "
+                                    HorizontalSpacing="8"
+                                    VerticalSpacing="8" />
+
+                <!-- Set up later — escape hatch when the user can't / doesn't
+                     want to verify a DNS provider; the machine sets
+                     dns.setUpLater = true and advances to vps_config. -->
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsSetUpLaterButton}"
+                        Content="{loc:Localize Key=onboarding/dns_config/set_up_later}"
+                        Command="{Binding DnsSetUpLaterCommand}"
+                        HorizontalAlignment="Stretch" />
+
+                <!-- Per-provider section: link, open-in-browser, help text,
+                     credentials form, verify, status, price, price confirm.
+                     Visibility is bound to a bool VM property because
+                     FaunaApp.Core can't reference Microsoft.UI.Xaml.Visibility. -->
+                <StackPanel x:Name="ProviderSection"
+                            Visibility="{x:Bind local:DnsConfigView.BoolToVisibility(ViewModel.DnsProviderSectionVisible), Mode=OneWay}"
+                            Spacing="8">
+                    <HyperlinkButton x:Name="ProviderLink"
+                                     AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsProviderLink}"
+                                     Click="OnProviderLinkClick" />
+                    <Button x:Name="ProviderOpenBrowserBtn"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsProviderOpenBrowserButton}"
+                            Content="{loc:Localize Key=onboarding/dns_config/open_in_browser}"
+                            Click="OnProviderLinkClick"
+                            HorizontalAlignment="Stretch" />
+                    <TextBlock x:Name="ProviderHelpText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsProviderHelpText}"
+                               TextWrapping="Wrap"
+                               Opacity="0.7" />
+
+                    <!-- Reusable credentials form. The wrapper carries the
+                         dns-credentials-form id; child input ids come from
+                         FieldMetaPlain.id (matches Linux/web).
+                         AutomationProperties.Name=" " forces the
+                         UserControl peer into the content view (same
+                         trick used on dns-provider-row above). -->
+                    <controls:GenericProviderForm
+                        x:Name="CredsForm"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsCredentialsForm}"
+                        AutomationProperties.Name=" "
+                        Fields="{x:Bind ViewModel.VisibleDnsFields, Mode=OneWay}"
+                        SetField="{x:Bind ViewModel.SetDnsCred}"
+                        GetField="{x:Bind ViewModel.GetDnsCred}"
+                        HostedAuthLabel="{x:Bind ViewModel.HostedAuthLabelDns}"
+                        HostedAuthEnabled="{x:Bind ViewModel.HostedAuthEnabledDns}"
+                        HostedAuthRun="{x:Bind ViewModel.HostedAuthRunDns}" />
+
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsVerifyButton}"
+                            Content="{loc:Localize Key=provisioning/verify_credentials}"
+                            IsEnabled="{x:Bind ViewModel.CanVerifyDns, Mode=OneWay}"
+                            Command="{Binding VerifyDnsCommand}"
+                            HorizontalAlignment="Stretch" />
+
+                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsStatusText}"
+                               Text="{x:Bind ViewModel.DnsStatusText, Mode=OneWay}"
+                               TextWrapping="Wrap"
+                               Opacity="0.7" />
+
+                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsTldPriceDisplay}"
+                               Text="{x:Bind ViewModel.TldPriceText, Mode=OneWay}"
+                               Visibility="{x:Bind local:DnsConfigView.BoolToVisibility(ViewModel.TldPriceVisible), Mode=OneWay}" />
+
+                    <CheckBox AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsPriceConfirmCheckbox}"
+                              Content="{loc:Localize Key=registrar/price_confirm}"
+                              IsChecked="{Binding PriceAgreed, Mode=TwoWay}"
+                              Visibility="{x:Bind local:DnsConfigView.BoolToVisibility(ViewModel.PriceConfirmVisible), Mode=OneWay}" />
+
+                    <!-- Per-provider registrar notes (Porkbun's account-contact
+                         reminder today). Visible iff the selected provider has
+                         a registrar_notes_key set in i18n/providers.yaml AND
+                         buy_domain is on. Mirrors Linux dns_config.rs:292-301
+                         and the apple/web equivalents. Per target doc §4. The
+                         text/visibility live on the codebehind because the
+                         provider registry is in the FaunaApp assembly, not
+                         Core. -->
+                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsRegistrarNotesText}"
+                               Text="{x:Bind RegistrarNotesText, Mode=OneWay}"
+                               TextWrapping="Wrap"
+                               Opacity="0.7"
+                               Visibility="{x:Bind local:DnsConfigView.BoolToVisibility(RegistrarNotesVisible), Mode=OneWay}" />
+
+                    <!-- WHOIS contact form. Visibility driven by the VM
+                         (buyDomain + UnregisteredBuyable + selectedRegistrarRequiresContact)
+                         per target-state doc §4. AutomationProperties.Name=" "
+                         forces the panel into the UIA content view (same
+                         trick used on dns-provider-row/dns-credentials-form).
+                         Each TextBox uses Binding TwoWay+PropertyChanged to
+                         push every keystroke into ContactInfo via SetContact —
+                         matches Apple's MacDnsConfigView.contactField. -->
+                    <StackPanel x:Name="ContactForm"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsContactForm}"
+                                AutomationProperties.Name=" "
+                                Spacing="6"
+                                Visibility="{x:Bind local:DnsConfigView.BoolToVisibility(ViewModel.ContactFormVisible), Mode=OneWay}">
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7"
+                                   Text="{loc:Localize Key=registrar/contact/first_name}" />
+                        <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsContactFirstNameInput}"
+                                 Text="{Binding ContactFirstName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7"
+                                   Text="{loc:Localize Key=registrar/contact/last_name}" />
+                        <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsContactLastNameInput}"
+                                 Text="{Binding ContactLastName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7"
+                                   Text="{loc:Localize Key=registrar/contact/email}" />
+                        <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsContactEmailInput}"
+                                 Text="{Binding ContactEmail, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7"
+                                   Text="{loc:Localize Key=registrar/contact/phone}" />
+                        <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsContactPhoneInput}"
+                                 Text="{Binding ContactPhone, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7"
+                                   Text="{loc:Localize Key=registrar/contact/address1}" />
+                        <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsContactAddress1Input}"
+                                 Text="{Binding ContactAddress1, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7"
+                                   Text="{loc:Localize Key=registrar/contact/city}" />
+                        <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsContactCityInput}"
+                                 Text="{Binding ContactCity, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7"
+                                   Text="{loc:Localize Key=registrar/contact/state}" />
+                        <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsContactStateInput}"
+                                 Text="{Binding ContactState, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7"
+                                   Text="{loc:Localize Key=registrar/contact/postal_code}" />
+                        <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsContactPostalCodeInput}"
+                                 Text="{Binding ContactPostalCode, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7"
+                                   Text="{loc:Localize Key=registrar/contact/country}" />
+                        <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsContactCountryInput}"
+                                 Text="{Binding ContactCountry, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                    </StackPanel>
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,16,0,0">
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsConfigBackButton}"
+                            Content="{loc:Localize Key=common/back}"
+                            Command="{Binding BackCommand}" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.DnsConfigContinueButton}"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Content="{loc:Localize Key=common/continue}"
+                            IsEnabled="{x:Bind ViewModel.CanContinueDns, Mode=OneWay}"
+                            Command="{Binding DnsConfigContinueCommand}"
+                            HorizontalAlignment="Stretch" />
+                </StackPanel>
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</UserControl>

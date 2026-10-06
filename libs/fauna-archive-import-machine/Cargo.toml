@@ -1,0 +1,97 @@
+[package]
+name = "fauna-archive-import-machine"
+description = "The import-from-an-export-archive wizard's shared state machine (docs/goal/behavior/archive-import.md § The wizard and its machine)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# UniFFI scaffolding for the fauna-ffi consumers (slice 7). Off by default —
+# mirrors fauna-client-mail-settings.
+uniffi = ["dep:uniffi", "fauna-core/uniffi"]
+# The generated fixture corpus + the in-memory ArchiveNest fake for
+# downstream integration tests (fauna-ffi, the tui walk).
+test-helpers = ["fauna-archive/test-helpers"]
+# Native WS-RPC seam glue: `rpc_glue::build_archive_import_machine`. Pulls the
+# native transport + the client crates the seam delegates to.
+rpc-glue = [
+    "dep:anyhow",
+    "dep:fauna-client",
+    "dep:fauna-client-account",
+    "dep:fauna-client-sync",
+    "dep:fauna-client-folders",
+    "dep:fauna-client-subscriptions",
+    "dep:fauna-client-config",
+    "dep:fauna-client-posts",
+    "dep:fauna-client-caldav",
+    "dep:fauna-protocol",
+    "dep:fauna-sync-engine",
+    # `FolderArchiveSource` bridges the sync `ArchiveSource::read_at` onto the
+    # async range read with `block_in_place` + `Handle::block_on`, which the
+    # multi-thread scheduler provides.
+    "tokio/rt-multi-thread",
+]
+
+[dependencies]
+# `default-features = false` keeps fauna-core's `network` default (redb, tokio,
+# hickory) out of wasm builds; the path form is required to override defaults
+# (mirrors libs/fauna-archive).
+fauna-core = { path = "../fauna-core", default-features = false }
+# The archive model, the zip seam and the parsers this machine drives.
+fauna-archive = { path = "../fauna-archive" }
+# Canonical DAG-CBOR — every `state/`, `model/` and marker file in the archive
+# folder is a Fauna record.
+fauna-cbor = { workspace = true }
+# The backdating post builders + `decode_post` (slice 3, Task 6).
+fauna-client-core = { path = "../fauna-client-core" }
+serde = { workspace = true, features = ["derive"] }
+# `state::InFlightPost` carries a gated post's built bytes through the folder
+# — byte strings, not integer arrays, in the canonical CBOR.
+serde_bytes = "0.11"
+async-trait = "0.1"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+hex = { workspace = true }
+blake3 = { workspace = true }
+zeroize = { workspace = true }
+getrandom = { workspace = true }
+uniffi = { workspace = true, optional = true, features = ["tokio"] }
+# rpc-glue only. `anyhow` is the error type of the shared download walk's
+# `BlobFetcher` seam, which this crate implements over the HTTP chunk store.
+anyhow = { workspace = true, optional = true }
+# rpc-glue only: `discovery::capability::HIDDEN_TIERS` (the gate every non-public
+# import rides) and the `fauna.sync.files` / RPC-error wire types.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, optional = true }
+# rpc-glue only: `fauna.account.get` → the handle half of the VEVENT ORGANIZER.
+fauna-client-account = { path = "../fauna-client-account", optional = true }
+fauna-client-subscriptions = { path = "../fauna-client-subscriptions", optional = true }
+fauna-client-config = { path = "../fauna-client-config", optional = true }
+fauna-client-posts = { path = "../fauna-client-posts", optional = true }
+fauna-client-caldav = { path = "../fauna-client-caldav", optional = true }
+fauna-client-folders = { path = "../fauna-client-folders", optional = true }
+fauna-client-sync = { path = "../fauna-client-sync", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Forward fauna-core's js-sys time backend on wasm (mirrors libs/fauna-archive).
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+# Only a DIRECT dependency can turn on a crate's wasm backend feature, and both
+# getrandom majors arrive transitively here (via fauna-cbor's ed25519-dalek and
+# fauna-core's rand_core 0.9). Mirrors libs/fauna-archive + libs/fauna-wasm.
+getrandom = { workspace = true, features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `sync` backs the fake nest's `on_post_created` notify; `rt` is what the
+# `uniffi::export(async_runtime = "tokio")` faces (slice 7) need.
+tokio = { version = "1", default-features = false, features = ["sync", "rt"] }
+fauna-client = { path = "../fauna-client", optional = true }
+fauna-sync-engine = { path = "../fauna-sync-engine", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+# `fauna_archive::testing::{fixture_zip, zip_of}` — the generated corpus.
+fauna-archive = { path = "../fauna-archive", features = ["test-helpers"] }
+# Self-dev-dependency: turns `test-helpers` on for this package's own test
+# targets, so `nest::fakes` is available to integration tests too.
+fauna-archive-import-machine = { path = ".", features = ["test-helpers"] }

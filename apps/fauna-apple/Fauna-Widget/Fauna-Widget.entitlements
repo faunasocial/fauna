@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Widget extensions run sandboxed. -->
+  <key>com.apple.security.app-sandbox</key>
+  <true/>
+  <!-- The ONE thing the widget reads: the unread-count snapshot the app writes
+       into the shared container (FaunaExtensionKit's UnreadSnapshotStore). It
+       holds no credential and opens no network connection — so no
+       network.client, and never the app-only account keychain group
+       (apps/common.md § Home-screen widget; installers/macos.md § Identifier
+       domain). -->
+  <key>com.apple.security.application-groups</key>
+  <array>
+    <string>7457N3M72H.group.social.fauna.shared</string>
+  </array>
+</dict>
+</plist>

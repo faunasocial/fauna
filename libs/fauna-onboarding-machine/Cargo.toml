@@ -1,0 +1,168 @@
+[package]
+name = "fauna-onboarding-machine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Turn on UniFFI scaffolding when consumed by fauna-ffi. Forwards to
+# fauna-launch-machine too: `new_with_persistence`'s UniFFI-exported
+# constructor takes `Arc<dyn PendingProvisionStore>`, and that trait's
+# `#[uniffi::export(with_foreign)]` (which generates the FfiConverterArc impl
+# the constructor needs) lives behind fauna-launch-machine's OWN `uniffi`
+# feature — without this forward it never turns on, and any UniFFI build hits
+# `the trait uniffi::FfiConverterArc<UniFfiTag> is not implemented for (dyn
+# fauna_launch_machine::PendingProvisionStore + 'static)`.
+uniffi = ["dep:uniffi", "fauna-provisioning/uniffi", "fauna-core/uniffi", "fauna-launch-machine/uniffi", "dep:fauna-uniffi-async"]
+# Test helpers — CountingObserver, set_step_for_test.
+test-observer = []
+# The E2E bridge surface (`call_machine_method*`). Forwards to the native trust
+# seam so `set_nest_identity_pin_for_test` can seed the *installed* pin store;
+# the wasm twin needs no feature (`LocalStoragePinStore` is plain public API).
+# It also forwards `fauna-launch-machine/e2e-agent`, because
+# `set_provider_base_urls` mirrors its `"nest"` entry into that crate's dial
+# seam: the two are ONE automation surface, and a config that compiled them
+# apart would leave the wizard redirected while the launch dialed the literal.
+test-helpers = ["fauna-anon-client/test-helpers", "fauna-launch-machine/e2e-agent"]
+# Release-profile e2e builds, mirroring the app crates' own `e2e-agent`: same
+# forward, for the same reason.
+e2e-agent = ["fauna-launch-machine/e2e-agent"]
+
+[dependencies]
+# Generated i18n string constants (zero deps, wasm-clean) — `hosted_auth_button_text`
+# derives the button label here rather than in each app, mirroring the
+# fauna-launch-machine::render_text precedent for the same shape.
+fauna-i18n = { path = "../fauna-i18n" }
+# default-features = false: avoid pulling fauna-provisioning's `native` default,
+# which forces `reqwest/rustls-tls` and breaks wasm builds. The machine's own
+# target sections below handle the per-target reqwest features.
+fauna-provisioning = { path = "../fauna-provisioning", default-features = false }
+# default-features = false: avoid fauna-core's `network` default (redb, tokio,
+# hickory-resolver) which breaks wasm builds via Cargo feature unification.
+# Mirroring the pattern used by fauna-provisioning.
+fauna-core = { path = "../fauna-core", default-features = false }
+# default-features = false: take only fauna-nest-http's portable subset —
+# `ApiError` (the shared error taxonomy our per-endpoint enums refine via
+# `From`) + `paths` (the path constants). Its `client` feature (reqwest + the
+# bearer flows) is native-only; we don't want it dragged onto wasm via Cargo
+# feature unification. nest_api keeps its own typed-endpoint trait (design
+# tracked internally).
+fauna-nest-http = { path = "../fauna-nest-http", default-features = false }
+# The launch machine owns the **dial** seam (`fauna_launch_machine::dial`): which
+# URL a client opens a socket to for a stored `nest_url`. A direct dep (it was
+# already transitive via fauna-nest-http) so `set_provider_base_urls` can mirror
+# its `"nest"` entry there and `resolved_nest_dial_url` can delegate rather than
+# keep a second copy of the rule. No cycle: fauna-launch-machine is a leaf that
+# never reaches back here.
+fauna-launch-machine = { path = "../fauna-launch-machine" }
+# WS-RPC wire types for the pre-identity onboarding kinds (claim / invite /
+# register / storage-mode / setup-status), consumed by `nest_api::ws_rpc_impl`,
+# plus the shared `auth::run_silent_challenge` ceremony (`auth-ceremony` feature)
+# behind the handle-check probe. default-features = false: drop the native-only
+# `p2p` default (pulls fauna-wireguard → mio) so the wasm onboarding build still
+# compiles; the wasm consumer (libs/fauna-rpc-wasm) turns on the `js` time
+# backend via feature unification. Mirrors fauna-rpc-wasm's own declaration.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["auth-ceremony"] }
+# Box-recovery leg 3 (box-recovery.md § Recovery UI step 4): the recovery-mode
+# re-provision drive reads the selected box's custodied deployment seed + domain
+# from the `fauna.state.deployment-seeds` plane kind (device store joined with a
+# cold nest read) — the `recovery_config` reader. Wasm-clean (deps only fauna-core + fauna-protocol,
+# both default-features = false), so it drags no native-only deps onto the wasm
+# onboarding build and forms no Cargo cycle (unlike pulling the authed NestClient
+# from fauna-client → fauna-nest-http → fauna-launch-machine; see the native-deps
+# note below).
+fauna-client-config = { path = "../fauna-client-config" }
+# The plane-era recovery reads (`box-recovery.md` § The plane-era recovery
+# floor, *(b)*): `fauna_account_plane::deployment_seed_recovery`'s local read,
+# cold read and resolver, so both `RecoveryConfigReader` arms — and through
+# them the `fauna-wasm-onboarding` chunk — can resolve a box's seed without it
+# leaving Rust. Default features only: the floor crate is wasm-clean by its
+# own rule (`just wasm-chunk-check`), and none of its driver features belong
+# in a pre-login surface.
+fauna-account-plane = { path = "../fauna-account-plane" }
+# The `recovery_entry` screen's phrase-only restore: `parse_kit` (the shared
+# `fauna://recovery` grammar) + `restore_seed` (challenge → sign → fetch →
+# unseal), composed once for all 7 apps rather than re-derived behind each
+# wizard. Wasm-clean by construction — it is generic over the same
+# `RpcRequester` seam this crate's `WsRpcNestApi` is — so it adds no native
+# surface to the wasm onboarding build.
+fauna-client-recovery = { path = "../fauna-client-recovery" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = "0.1"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# Ed25519 signing for invite-request / register / cancel wire formats.
+# The wizard signs over canonical messages defined by the nest's
+# bins/fauna-nest/src/{invite_requests,registration}.rs handlers.
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+# The one SHA-256 both mobile apps take over the attested age-claim message
+# (`age_claim_digest`) — pure Rust, wasm-clean, already in the graph via fauna-core.
+sha2 = { workspace = true }
+
+uniffi = { workspace = true, optional = true, features = ["tokio"] }
+# `#[fauna_uniffi_async::export]` runs each async export on a tokio runtime
+# worker, off the foreign executor's small poll stack
+# (`docs/goal/architecture/apps/native-async-execution.md` § The rule).
+fauna-uniffi-async = { workspace = true, optional = true }
+fauna-sleep = { workspace = true }
+# The shared nest-identity trust core. Both targets: `nest_trust::read_login_binding`
+# is the nest-bound mode commit's identity read (the possession-proven identity
+# the target-agnostic `ws_rpc_impl` consumes),
+# and on wasm it additionally carries the pin store + first-contact possession
+# proof for `WsNestApi::core` and the E2E bridge's
+# `set_nest_identity_pin_for_test` arm (`nest_trust::LocalStoragePinStore`; the
+# native pin twin lives in `fauna-anon-client` below). `auth-ceremony` carries
+# the `RpcRequester`-generic ceremony surface both uses need. Wasm-clean by
+# construction (it is the crate the wasm arm already consumed).
+fauna-client-core = { path = "../fauna-client-core", default-features = false, features = [
+    "auth-ceremony",
+] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native: tokio's `time` + `rt` are enough for the lock-free sleep helper
+# inside continue_from_vps. Avoid `full` features so we don't drag mio onto
+# wasm builds via Cargo's feature unification.
+tokio = { version = "1", default-features = false, features = ["time", "rt"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# Native anonymous WS-RPC connector behind `WsNestApi` (the production NestApi).
+# `fauna-anon-client` is the native-only leaf crate holding `AnonymousNestClient`;
+# it deliberately does NOT depend on `fauna-nest-http`, so consuming it here does
+# not form the `fauna-client → fauna-nest-http → fauna-launch-machine` Cargo
+# cycle that pulling the connector from `fauna-client` would. The wasm twin is
+# `fauna-rpc-wasm` below.
+fauna-anon-client = { path = "../fauna-anon-client" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# WASM: drop rustls (won't compile). tokio is not pulled in at all on this
+# target; the sleep's browser timer left with the hand-written `#[cfg]` split
+# and lives in `fauna-sleep` now.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+wasm-bindgen-futures = "0.4"
+# Wasm anonymous WS-RPC connector behind `WsNestApi`. `fauna-rpc-wasm` is
+# `#![cfg(target_arch = "wasm32")]`, so it is target-gated here (mirroring the
+# native `fauna-client` above).
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm" }
+[dev-dependencies]
+tokio = { workspace = true }
+wiremock = "0.6"
+tracing-subscriber = { workspace = true }
+# `nest_host`'s own unit test needs `fauna_core::web::AUTHORITY_TERMINATOR_CASES`,
+# which is `#[cfg(any(test, feature = "test-helpers"))]` on fauna-core's own
+# side — `cfg(test)` is never set on a dependency, only on the crate under
+# test, so the shared cases need the feature turned on explicitly (mirrors
+# `fauna-client-dns`'s self dev-dependency for the same reason).
+fauna-core = { path = "../fauna-core", default-features = false, features = ["test-helpers"] }
+# Integration tests in `tests/*.rs` drive the machine through the test-helper
+# surface — `FakeNestApi`, `OnboardingMachine::with_nest_api`, the
+# `set_*_for_test` setters, `NullObserver` / `CountingObserver` — all gated
+# behind the `test-helpers` / `test-observer` features (those items are
+# `#[cfg(any(test, feature = "..."))]`, and `cfg(test)` is *not* set on the
+# crate-under-test when an integration test links it). A self dev-dependency
+# turns those features on for the integration-test build only; the production
+# lib build stays feature-clean. Without it, `cargo test -p
+# fauna-onboarding-machine` — and therefore `cargo test --workspace` — fails to
+# compile.
+fauna-onboarding-machine = { path = ".", features = ["test-helpers", "test-observer"] }

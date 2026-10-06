@@ -1,0 +1,283 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FaunaApp.Controls.MailAliasesPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Controls"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Loaded="Panel_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- User-facing mail-aliases page (docs/goal/behavior/mail-aliases.md § Aliases
+         UX): where a person manages their own per-account mail addresses — the
+         canonical <handle>@<domain> exact alias, extra exact aliases, a wildcard
+         prefix, and one-click disposable mints, each with an optional label +
+         per-alias spam-threshold / rate-cap override + disable / revoke / delete.
+         Dumb renderer of the shared fauna_client_mail_settings::MailAliasesMachine
+         (exposed over UniFFI by libs/fauna-ffi/src/mail_admin.rs build_mail_aliases_
+         machine) — no business logic here (priority #2). Lifts the linux reference
+         (apps/fauna-linux/src/settings/mail_aliases.rs) and mirrors the sibling
+         MailSettingsPanel: embedded as a section in SettingsPage, sharing that
+         page's single page-heading + error-message (the machine error routes up via
+         ErrorChanged). The add/edit sheet + per-row destructive confirms are inline
+         reveals (not ContentDialogs) so every ID lives in one tree for FlaUI,
+         matching the uniform e2e action + the linux reveal idiom.
+
+         The per-row disabled-toggle is two-way (Revoke + Enable) — disable is no
+         longer a one-way trap (mail-aliases.md § Disable, a product invariant). One
+         honest gap remains, mirrored from the lead (surfaced, never faked): the
+         per-row "Show audit" disclosure is inert (list_account_alias_hits is a
+         follow-on slice). -->
+    <StackPanel Spacing="12">
+
+        <!-- ── Top group: heading + add/generate buttons (always present) ── -->
+        <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                   Text="{loc:Localize Key=mail_aliases/title}" />
+        <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                   Text="{loc:Localize Key=mail_aliases/description}" />
+
+        <ProgressRing x:Name="LoadingRing"
+                      IsActive="False" Visibility="Collapsed"
+                      HorizontalAlignment="Left" />
+
+        <!-- Vertical, one button per row — a horizontal row clipped the third
+             (last) button off-screen at the app's own DIP-scaled minimum
+             window size (600, App.xaml.cs), with no way to reach it: the
+             FlaUI e2e bridge's scroll-into-view sweeps only a VERTICALLY-
+             scrollable ancestor, so a real user on a similarly narrow/high-DPI window would
+             hit the identical wall. Mirrors linux's reference layout
+             (apps/fauna-linux/src/settings/mail_aliases.rs): each button its
+             own full-width row, not a horizontal bar. -->
+        <StackPanel Orientation="Vertical" Spacing="8">
+            <Button x:Name="AddButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAddButton}"
+                    Style="{StaticResource AccentButtonStyle}"
+                    HorizontalAlignment="Stretch"
+                    Content="{loc:Localize Key=mail_aliases/add_button}"
+                    Click="Add_Click" />
+            <Button x:Name="GenerateButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesGenerateDisposableButton}"
+                    HorizontalAlignment="Stretch"
+                    Content="{loc:Localize Key=mail_aliases/generate_button}"
+                    Click="GenerateDisposable_Click" />
+            <Button x:Name="ImportButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesImportButton}"
+                    HorizontalAlignment="Stretch"
+                    Content="{loc:Localize Key=mail_aliases/import_button}"
+                    Click="Import_Click" />
+        </StackPanel>
+
+        <!-- Transient "Copied <address>" confirmation after a successful mint. -->
+        <TextBlock x:Name="MintedToast"
+                   Opacity="0.7" FontSize="12" TextWrapping="Wrap"
+                   Visibility="Collapsed" />
+
+        <!-- ── Add/edit inline sheet (mail-aliases-add-sheet-*; collapsed) ── -->
+        <StackPanel x:Name="AddSheet" Spacing="8" Visibility="Collapsed">
+            <TextBlock x:Name="SheetTitle" Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=mail_aliases/form_title}" />
+
+            <!-- mail-aliases-add-sheet-kind-picker — single value-via-state toggle:
+                 unchecked = Exact (default), checked = Wildcard prefix. Disposable
+                 mints via the dedicated generate button, not this sheet
+                 (mail-aliases.md § Aliases UX). Read-only on Edit (kind immutable).
+                 A ToggleButton (toggles on Invoke), not a Click handler — its state
+                 is read at submit time, so no handler is wired. -->
+            <ToggleButton x:Name="KindPicker"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAddSheetKindPicker}"
+                          Content="{loc:Localize Key=mail_aliases/kind_wildcard_label}" />
+
+            <TextBox x:Name="PatternInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAddSheetPatternInput}"
+                     PlaceholderText="{loc:Localize Key=mail_aliases/pattern_placeholder}" />
+            <TextBox x:Name="LabelInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAddSheetLabelInput}"
+                     PlaceholderText="{loc:Localize Key=mail_aliases/label_placeholder}" />
+            <TextBox x:Name="SpamThresholdInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAddSheetSpamThresholdInput}"
+                     PlaceholderText="{loc:Localize Key=mail_aliases/spam_threshold_placeholder}" />
+            <TextBox x:Name="RatePerHourInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAddSheetRatePerHourInput}"
+                     PlaceholderText="{loc:Localize Key=mail_aliases/rate_per_hour_placeholder}" />
+
+            <!-- ttl/uses — disposable-only, minted via the generate button (not this
+                 sheet), so hidden in the seed; present in the tree for ui.yaml
+                 conformance (same as MailSettingsPanel's conditional fields). -->
+            <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAddSheetTtlInput}"
+                     PlaceholderText="{loc:Localize Key=mail_aliases/ttl_placeholder}"
+                     Visibility="Collapsed" />
+            <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAddSheetUsesInput}"
+                     PlaceholderText="{loc:Localize Key=mail_aliases/uses_placeholder}"
+                     Visibility="Collapsed" />
+
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button x:Name="SubmitButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAddSheetSubmitButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Content="{loc:Localize Key=mail_aliases/submit}"
+                        Click="Submit_Click" />
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAddSheetCancelButton}"
+                        Content="{loc:Localize Key=mail_aliases/cancel}"
+                        Click="Cancel_Click" />
+            </StackPanel>
+        </StackPanel>
+
+        <!-- ── Bulk-import inline sheet (mail-aliases-import-*; collapsed;
+             mail-aliases.md § Bulk import). Paste one address per line — each
+             becomes an exact alias delivering to the caller; duplicates/invalid
+             lines are skipped and reported in the result summary below. Clones
+             the AddSheet collapsed-StackPanel pattern. ── -->
+        <StackPanel x:Name="ImportSheet" Spacing="8" Visibility="Collapsed">
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=mail_aliases/import_title}" />
+            <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=mail_aliases/import_subtitle}" />
+
+            <TextBox x:Name="ImportTextArea"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesImportTextarea}"
+                     AcceptsReturn="True" TextWrapping="Wrap" Height="120"
+                     ScrollViewer.VerticalScrollBarVisibility="Auto"
+                     PlaceholderText="{loc:Localize Key=mail_aliases/import_placeholder}" />
+
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button x:Name="ImportSubmitButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesImportSubmitButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Content="{loc:Localize Key=mail_aliases/import_submit}"
+                        Click="ImportSubmit_Click" />
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesImportCancelButton}"
+                        Content="{loc:Localize Key=mail_aliases/import_cancel}"
+                        Click="ImportCancel_Click" />
+            </StackPanel>
+
+            <!-- x:Name is a code-behind handle only (no UIA Name) — no static
+                 AutomationProperties.Name / Text: a label read by e2e get_text must have
+                 no static Name or get_text returns the static Name instead of the
+                 dynamic Text (reference_windows_flaui_gettext_dynamic_label_no_name;
+                 mirrors AdminMailPage's PublishSpamBaselineResult). A bare TextBlock
+                 that starts Collapsed and later flips Visible never gets a real
+                 AutomationPeer in WinUI3 — measured on Grid/Border/ContentControl
+                 (FeedPage's post-image lightbox) and
+                 reproduced here for TextBlock; wrapping
+                 in a Button (the same proven idiom, non-interactive here — no
+                 Click) is the fix. -->
+            <Button x:Name="ImportResultButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesImportResult}"
+                    Background="Transparent" BorderThickness="0" Padding="0"
+                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                    IsTabStop="False"
+                    Visibility="Collapsed">
+                <TextBlock x:Name="ImportResultText" TextWrapping="Wrap" />
+            </Button>
+        </StackPanel>
+
+        <!-- ── Aliases list (mail-aliases-list) ──
+             A Border (not a bare ItemsControl) carries the test id with a non-empty
+             Name: an empty ItemsControl collapses to zero size → FlaUI IsOffscreen →
+             is_visible False (the bare-id-root prune trap; see AdminDnsPage
+             admin-dns-credentials-list). The empty-state caption keeps a non-zero
+             rectangle even with no aliases. The inner ItemsControl uses a
+             non-virtualizing StackPanel panel so FlaUI realizes every row for
+             count-all (reference_winui_flaui_datatemplate_name). -->
+        <Border x:Name="ListBorder"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesList}"
+                AutomationProperties.Name="Aliases"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1" CornerRadius="6" Padding="12">
+            <StackPanel Spacing="4">
+                <TextBlock x:Name="ListEmpty" Opacity="0.5" TextWrapping="Wrap"
+                           Visibility="Collapsed"
+                           Text="{loc:Localize Key=mail_aliases/empty}" />
+                <ItemsControl x:Name="AliasesList">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Vertical" Spacing="8" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:MailAliasRow">
+                            <!-- Row container needs AutomationProperties.Name or
+                                 FlaUI counts 0 (reference_winui_flaui_datatemplate_name). -->
+                            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesListItem}"
+                                    AutomationProperties.Name="{x:Bind Address}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1" CornerRadius="6"
+                                    Padding="12" Margin="0,4">
+                                <Grid ColumnSpacing="8" RowSpacing="2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" Spacing="2">
+                                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesListItemPattern}"
+                                                   Text="{x:Bind Address}"
+                                                   Style="{StaticResource BodyStrongTextBlockStyle}"
+                                                   IsTextSelectionEnabled="True" />
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesListItemKind}"
+                                                       Text="{x:Bind KindBadge}"
+                                                       Opacity="0.7" FontSize="12" />
+                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesListItemLabel}"
+                                                       Text="{x:Bind Label}"
+                                                       Opacity="0.7" FontSize="12" />
+                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesListItemHits}"
+                                                       Text="{x:Bind Hits}"
+                                                       Opacity="0.7" FontSize="12" />
+                                        </StackPanel>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal"
+                                                Spacing="4" VerticalAlignment="Center">
+                                        <!-- Mutating controls — present on ordinary rows, OMITTED on the
+                                             read-only canonical <handle>@<domain> row (mail-aliases.md:249,
+                                             the nest rejects disabling/renaming/deleting it). Collapsed via
+                                             BoolToVisibilityInverse(IsCanonical): a collapsed control has no
+                                             UIA peer, so the e2e per-control n-1 count proves the canonical
+                                             row alone drops them. -->
+                                        <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center"
+                                                    Visibility="{x:Bind local:MailAliasesPanel.BoolToVisibilityInverse(IsCanonical)}">
+                                            <!-- Two-way "Active" toggle (mail-aliases.md § Disable; linux
+                                                 mail_aliases.rs is the reference): IsOn = Active (= !disabled),
+                                                 so native On = receiving / Off = disabled. ON→Enable, OFF→Revoke
+                                                 — disable is no longer a one-way unrecoverable trap. -->
+                                            <ToggleSwitch AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesListItemDisabledToggle}"
+                                                          IsOn="{x:Bind Active}"
+                                                          ToolTipService.ToolTip="{loc:Localize Key=mail_aliases/active_toggle_tooltip}"
+                                                          Tag="{x:Bind AliasIdHex}"
+                                                          Toggled="DisabledToggle_Toggled" />
+                                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesListItemEditButton}"
+                                                    Content="{x:Bind EditLabel}"
+                                                    Tag="{x:Bind AliasIdHex}"
+                                                    Click="Edit_Click" />
+                                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesListItemRevokeButton}"
+                                                    Content="{x:Bind RevokeLabel}"
+                                                    Tag="{x:Bind AliasIdHex}"
+                                                    Click="Revoke_Click" />
+                                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesListItemOverflowMenu}"
+                                                    Content="{x:Bind DeleteLabel}"
+                                                    Tag="{x:Bind AliasIdHex}"
+                                                    Click="Delete_Click" />
+                                        </StackPanel>
+                                        <!-- Read-only canonical marker shown IN PLACE of the mutating
+                                             controls (the primary address + sign-in identity). -->
+                                        <TextBlock Text="{loc:Localize Key=mail_aliases/primary_address_badge}"
+                                                   ToolTipService.ToolTip="{loc:Localize Key=mail_aliases/primary_address_tooltip}"
+                                                   Opacity="0.7" FontSize="12" VerticalAlignment="Center"
+                                                   Visibility="{x:Bind local:MailAliasesPanel.BoolToVisibility(IsCanonical)}" />
+                                        <!-- Audit disclosure stays on EVERY row (incl. canonical). -->
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesListItemShowAudit}"
+                                                Content="{x:Bind ShowAuditLabel}"
+                                                IsEnabled="False" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </Border>
+    </StackPanel>
+</UserControl>

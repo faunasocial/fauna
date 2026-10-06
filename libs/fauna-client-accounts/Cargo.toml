@@ -1,0 +1,53 @@
+[package]
+name = "fauna-client-accounts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+## Expose the in-memory `SecretStore` fake outside of `cfg(test)` for
+## downstream integration tests (mirrors fauna-launch-machine's pattern).
+test-helpers = []
+## Enable UniFFI scaffolding once the registry crosses the native FFI
+## boundary (Stage 1). Off by default so wasm / server builds stay lean.
+uniffi = ["dep:uniffi", "fauna-core/uniffi"]
+## Web's localStorage SecretStore + the logical->native key mapping
+## (`web_store.rs`, wasm32-only), and the cross-tab registry mutation lock
+## (`web_mutation_lock.rs`, the Web Locks leg of `MutationLock`). Lives HERE -
+## beside the registry whose keys it stores - so both wasm chunks share one
+## store and take ONE lock. Enabled by fauna-wasm (switcher glue) and fauna-wasm-launch (launch).
+web-localstorage = ["dep:web-sys", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys"]
+
+[dependencies]
+fauna-core = { path = "../fauna-core", default-features = false }
+# The launch machine's single-identity persistence seam. This crate sits
+# *on top* of it (account management over unchanged single-identity
+# machinery) and provides `RegistryLaunchPersistence`, so a platform
+# implements only `SecretStore` — one foreign seam, not two. No cycle:
+# fauna-launch-machine predates this crate and doesn't depend on it.
+fauna-launch-machine = { path = "../fauna-launch-machine" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uniffi = { workspace = true, optional = true }
+web-sys = { version = "0.3", features = ["Window", "Storage"], optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { workspace = true, optional = true }
+
+# The account **serving lock** (`fauna_account_store::locks::ServingLock`) the
+# session holder takes beside its per-app instance lock, so an erase can see a
+# sibling *app* and not only a sibling window of its own app. Native-only, like
+# the `instance_lock`/`sole_instance` modules that use it.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fauna-account-store = { workspace = true }
+
+[dev-dependencies]
+# Drive the real `LaunchMachine::start()` in the seam integration test.
+tokio = { workspace = true }
+# Shared lock dirs for the cross-process mutation-lock tests.
+tempfile = { workspace = true }
+# The copy selectors' "every key resolves in the shipped catalog" pins.
+fauna-i18n = { path = "../fauna-i18n" }

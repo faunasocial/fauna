@@ -1,0 +1,51 @@
+[package]
+name = "fauna-client-feed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# fauna-protocol carries the typed `fauna.feed.*` wire types + the
+# `RpcRequester` seam this crate is generic over (mirrors fauna-client-bridges
+# / fauna-client-posts). `default-features = false` drops the native-only `p2p`
+# feature so this crate compiles to wasm32; native workspace builds re-enable it
+# via Cargo feature unification. The path form is required to override
+# `default-features`.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+
+# fauna-core: the canonical `scoring::FilterRule` the feed-rule encoder builds
+# (`encode_filter_rule`) and the `rules` wire field carries. `default-features = false` drops the native-only
+# `network` feature so the crate stays wasm-safe; mirrors how fauna-protocol
+# declares it. fauna-protocol does NOT re-export `FilterRule`, so this is a
+# direct dep.
+fauna-core = { path = "../fauna-core", default-features = false }
+
+
+# serde: `Serialize` on the rule-builder presentation types
+# (`RuleTypeOption`/`RuleInputKind`), so `fauna-wasm` can hand the catalog to the
+# SPA as a plain object via serde_wasm_bindgen (the native apps cross through
+# the `Ffi*` mirrors instead — this crate carries no `uniffi` feature). Mirrors
+# how fauna-folders-machine declares serde for `ConflictPolicyOption`. Already
+# present transitively via serde_json, so this adds no build cost.
+serde = { workspace = true, features = ["derive"] }
+
+# wasm: forward the `js` feature (fauna-core's js-sys time backend) so the
+# transitive wasm build resolves. Off on native.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The encoder tests render a typed `FilterRule` to JSON to pin its
+# externally-tagged shape independent of serde's formatting.
+serde_json = { workspace = true }
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# Names the serde bounds the `RpcRequester::request` method requires, for the
+# wire-contract tests' `RecordingRequester` mock impl. No `derive` needed
+# (trait paths only); mirrors fauna-client-events / -snapshots / -sync.
+serde = { workspace = true }
+# The shipped string catalog, so the built-in factor options' label keys are
+# checked against it (`factor_options.rs`). Dependency-free generated crate.
+fauna-i18n = { path = "../fauna-i18n" }

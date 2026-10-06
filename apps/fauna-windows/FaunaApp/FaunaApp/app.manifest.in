@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="FaunaApp.app"/>
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 and Windows 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+    </application>
+  </compatibility>
+
+  <!-- Per-Monitor v2 DPI awareness. Without this, the unpackaged WinUI 3 process
+       runs DPI-unaware (96 DPI) and Windows bitmap-stretches it, which shows up as
+       blurry fonts on scaled displays and HiDPI RDP sessions (e.g. Retina Mac with
+       "Optimize for Retina displays"). This is the manifest the standard Visual
+       Studio WinUI 3 template ships; the XAML framework re-rasterizes crisply at the
+       session's scale once the process is Per-Monitor-v2 aware. -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/PM</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
+    </windowsSettings>
+  </application>
+
+  <!-- Package identity on the MSI channel (installers/windows.md § Package identity
+       for FaunaApp.exe). The MSI registers the sparse identity package
+       (installer/sparse/AppxManifest.xml.in) with the install directory as its
+       external location, but a process launched from that directory gains the
+       package's identity ONLY if its own embedded manifest carries this element
+       with publisher / packageName / applicationId equal to the identity package's
+       Identity/@Publisher, Identity/@Name and Application/@Id (measured 2026-09-26:
+       without it, a directly launched exe under a registered external-location
+       package reports "no package identity", 0x80073D54). Identity is what unlocks
+       the taskbar badge — windows' home-screen widget (apps/windows.md § Home-screen
+       widget) — and, in time, packaged toast activation. The Store package is a full
+       MSIX, whose identity comes from the package itself; this element is ignored
+       there.
+
+       This file is a TEMPLATE: publisher is the build-time token the
+       FaunaGenerateAppManifest target in FaunaApp.csproj substitutes with
+       $(FaunaPackagePublisher), whose one home is installer/PackageIdentity.props
+       (the dev self-sign DN by default; a release build passes the production
+       cert's DN). The sparse-package build reads the same home, so the two cannot
+       drift. A mismatch is not an error: the exe simply runs without identity, as
+       every build did before this element. -->
+  <msix xmlns="urn:schemas-microsoft-com:msix.v1"
+        publisher="@@Publisher@@"
+        packageName="FaunaSocial.Fauna"
+        applicationId="FaunaApp" />
+</assembly>

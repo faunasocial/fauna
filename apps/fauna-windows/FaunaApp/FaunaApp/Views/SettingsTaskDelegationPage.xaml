@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.SettingsTaskDelegationPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- Settings → Task delegation sub-page (participants.md § Task delegation +
+         § The assignment picker; ui.yaml `task-delegation`; placement ratified
+         2026-07-08, settings.md § Navigation model — after Nests). Reached via
+         {"view":"settings","id":"task-delegation"}. A dumb renderer of the
+         shared TaskDelegationViewModel — rows are built in code-behind
+         (Page_Loaded / RenderRows) since the picker's per-option
+         AutomationProperties.Name must carry the stable cross-app key,
+         distinct from its localized Content, which x:Bind/DataTemplate can't
+         express as cleanly as an imperative build (mirrors AdminUsersPage's
+         tier ComboBox). -->
+
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="16" MaxWidth="700" HorizontalAlignment="Left">
+
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="False"
+                IsClosable="True" />
+
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=task_delegation/title}" />
+            <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=task_delegation/description}" />
+
+            <ProgressRing x:Name="LoadProgress" IsActive="False" Visibility="Collapsed"
+                          HorizontalAlignment="Left" Width="24" Height="24" />
+
+            <!-- A Border (not a bare container) carries the list test id with a
+                 non-empty Name — a bare-id-root container without one prunes
+                 from the UIA tree along with its children. -->
+            <Border x:Name="ListBorder"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.TaskDelegationList}"
+                    AutomationProperties.Name="{loc:Localize Key=task_delegation/title}">
+                <StackPanel x:Name="RowsContainer" Spacing="12" />
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

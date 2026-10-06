@@ -1,0 +1,1038 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Supersession guard. This is the most expensive workflow in the tree and was
+# the only one anywhere without one: 8 of the 10 internal workflows declare a
+# `concurrency:` group, the sibling shipped `release-macos.yml` declares one,
+# and the internal `ci.yml` solves the same problem a second way (a `check-stale`
+# job that exits when a newer commit has landed). This one had neither, so a PR
+# pushed twice in a minute ran the whole matrix twice to completion.
+#
+# The cost is measured, not assumed — per-job wall times from run 33360161856,
+# the only run that exists: rust 126.1 + linux-desktop 45.3 + web 39.8 +
+# check-generated 1.0 + protocol-checks 0.8 + secret-scan 0.3 + ui-lint 0.2 =
+# ~213 minutes, with `go` and `macos` still skipped. While the repository is
+# private that is ~11% of the 2000-minute monthly allowance per superseded run;
+# once public, standard runners are free and the win becomes queue latency
+# instead. Either way a superseded run's verdict is discarded by definition.
+#
+# Cancellation is deliberately PR-only. A push to `main` keeps
+# `cancel-in-progress: false`, so a RUNNING main verdict is never discarded —
+# main's green record is what the merge-gate posture leans on. That is not the
+# same as every push getting a verdict: the group keeps GitHub's default
+# `queue: single`, under which a newly queued run CANCELS any run already
+# pending in the group, so of several pushes that land while one run is in
+# progress only the newest is tested. Public `main` moves only by a sync PR's
+# squash merge, so that takes two syncs landing inside one ~2-hour run.
+# `queue: max` (up to 100 pending) is the lever if that ever changes, and it is
+# NOT a one-line addition: GitHub rejects `queue: max` beside a
+# `cancel-in-progress` that is true as a workflow validation error — this
+# block's IS true on every pull request — and documents no expression form for
+# `queue`, so it cannot be scoped to pushes within this one block.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# CI consumes the COMMITTED libs/fauna-mail-go bindings and builds no
+# uniffi-bindgen-go. That generator is a single rustc process compiling askama's
+# compile-time templates, and a GitHub-hosted runner is shut down for memory
+# before it finishes — measured three times on 2026-08-28, at 11, 27 and 9
+# minutes in, in both the release and the debug profile, on the `go` and
+# `check-generated` jobs alike. The bindings are tracked precisely so a machine
+# that cannot build the generator can still consume its output, and their
+# freshness is gated where the generator does build: on a development machine's
+# merge gate, before the commit this run is testing ever landed.
+#
+# Workflow-level so every job inherits it — `go` (via `just mail-bridge-test`),
+# `check-generated` (via `mail-bridge-ffi-check` and `dagcbor-fixtures`), and
+# anything added later that reaches the same recipes.
+env:
+  FAUNA_GO_BINDINGS: tracked
+
+jobs:
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          fetch-depth: 0
+      # Not gitleaks/gitleaks-action: for an ORGANIZATION-owned repository the
+      # action refuses to run without a GITLEAKS_LICENSE secret (measured on
+      # this repository's first run). The scanner itself is free — fetch the
+      # pinned release, verify its checksum, scan the full history with it.
+      - name: Fetch gitleaks (pinned, checksum-verified)
+        run: |
+          set -euo pipefail
+          v=8.30.1
+          # The release archive's published content digest (gitleaks_<v>_checksums.txt).
+          digest="sha256:551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+          mkdir -p "$RUNNER_TEMP/gitleaks"
+          curl -sSL -o "$RUNNER_TEMP/gitleaks/gitleaks.tgz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${v}/gitleaks_${v}_linux_x64.tar.gz"
+          echo "${digest#sha256:}  $RUNNER_TEMP/gitleaks/gitleaks.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks/gitleaks.tgz" -C "$RUNNER_TEMP/gitleaks" gitleaks
+      # `.gitleaks.toml` extends the default rules and path-allowlists the
+      # reviewed test fixtures (the publisher's gate checks every entry names
+      # exactly one approved file); named explicitly so a moved or missing
+      # config fails loudly instead of silently scanning with the defaults.
+      - name: Scan the full history
+        run: '"$RUNNER_TEMP/gitleaks/gitleaks" git --config .gitleaks.toml --redact --verbose .'
+
+  rust:
+    name: Rust (check, clippy, test, fmt)
+    runs-on: ubuntu-latest
+    # A ceiling, not a cost: a job that finishes sooner bills only what it used.
+    #
+    # 240, not 180 -- MEASURED, twice, on the 2-CPU / 8 GB runner a private
+    # repository gets (public repositories get 4 CPUs / 16 GB). Both runs of
+    # 2026-08-28 ran `cargo test --workspace` to its own end and failed on test
+    # RESULTS, not on a timeout or a resource kill, so both are complete figures
+    # for the dominant step:
+    #
+    #   run 1            clippy 8m36s   test 103m23s   job total 115m03s
+    #   run 2            clippy 8m55s   test 100m29s   job total 110m49s
+    #
+    # Both totals STOP THERE: the three feature steps below were skipped, so
+    # each figure covers only the job's first three quarters -- already ~64% of
+    # a 180 ceiling. Those steps cost ~43 min on a 26-core dev box, and the two
+    # ratios this runner gives against that box (clippy 2.03x, test 1.17x) put
+    # them at 50-87 min here, projecting the whole job to 161-198 min. So 180
+    # was a ceiling the job could cross on its first COMPLETE run, on evidence
+    # this repository already had; 240 clears the pessimistic projection with
+    # room, and is still well inside GitHub's 360-minute job maximum.
+    timeout-minutes: 240
+    # Workspace members left out of this job's `--workspace` runs. Declared once
+    # and used by both the clippy and the test step below: they were two
+    # hand-maintained copies, and a copy that is not the one you edit is a copy
+    # that drifts.
+    #
+    # TWO CLASSES, and the difference is load-bearing. The first CANNOT build for
+    # the host target on a Linux runner. The second builds here perfectly well and
+    # is left out on cost -- reading that second class as a buildability claim is
+    # exactly the error this comment used to invite, and it invited it for months.
+    #
+    # (1) Cannot build for the HOST target on a Linux runner
+    #
+    #   * The fauna-wasm-* family targets wasm32 and reaches for wasm_bindgen, so
+    #     every one NAMED HERE is a hard compile error on a host target. The web job
+    #     builds them properly via `just web`. This list must stay in step with the
+    #     justfile's `test-compile-check` recipe, which leaves out the same family
+    #     for the same reason -- and it does: both name the same ten.
+    #     Those ten are NOT the whole `fauna-wasm-*` family, which is eleven.
+    #     `fauna-wasm-panic-hook` is deliberately in neither list, and its absence
+    #     is correct BY DESIGN rather than by luck: the crate carries a crate-level
+    #     `#![cfg(target_arch = "wasm32")]` and declares its dependencies in a
+    #     wasm32 target table, so off wasm32 it compiles to an empty rlib that
+    #     references none of them. Its own module header says exactly that,
+    #     anticipating this question. Read this list as ten specific crates rather
+    #     than as a rule about the prefix -- and note that the accounting no longer
+    #     rests on a reader noticing: a publish-time gate fails if any family member
+    #     is in neither list, does not compile away off wasm32, and carries no
+    #     `wasm-host-build-exempt` declaration with a reason.
+    #   * fauna-shellext-fixture is a Windows dev fixture whose un-gated main.rs
+    #     calls #[cfg(windows)] code, so it fails on any non-Windows host.
+    #   * fauna-linux needs GTK4/libadwaita, which only the linux-desktop job
+    #     installs; that job builds it.
+    #
+    # (2) Builds here -- left out deliberately, and the widening is UNPRICED
+    #
+    #   * fauna-ffi is the UniFFI cdylib. The go job exercises it via
+    #     uniffi-bindgen-go, so it is covered publicly, just not by this job.
+    #   * fauna-ipc, fauna-cfapi and fauna-{bridge,nest}-service are the
+    #     Windows service/IPC crates BY PURPOSE, not by buildability: each keeps its
+    #     platform plumbing behind a `cfg(windows)` dependency table (fauna-ipc
+    #     carries a `cfg(unix)` one beside it) and compiles cleanly on Linux.
+    #     Measured 2026-09-10, when a fifth such crate was still listed (a thin
+    #     Windows wrapper around fauna-sync-agent, since removed: the agent crate
+    #     itself builds the Windows binary and is NOT excluded here):
+    #     `cargo test --no-run --locked` over those five plus
+    #     fauna-ffi exits 0 and produces 20 test executables, and the internal
+    #     `test-compile-check` recipe names none of them, so it compiles all six on
+    #     Linux at every merge. This workflow has no `windows` job, so no public job
+    #     reaches them at all.
+    #     Whether to widen this job over them is a COST question and stays OPEN. It
+    #     must be priced by a real runner measurement -- 2 CPU / 8 GB on a private
+    #     repository, 4 cores / 16 GB on a public one -- and never by a
+    #     dev-box figure: measured ratios between the same commands on a dev box and
+    #     on a runner span 1.17x to 13.5x, so no constant scales one into the other.
+    env:
+      WORKSPACE_EXCLUDES: >-
+        --exclude fauna-wasm
+        --exclude fauna-wasm-atproto-settings
+        --exclude fauna-wasm-backups
+        --exclude fauna-wasm-connected-apps
+        --exclude fauna-wasm-content-index
+        --exclude fauna-wasm-folders
+        --exclude fauna-wasm-labeler-catalog
+        --exclude fauna-wasm-launch
+        --exclude fauna-wasm-media
+        --exclude fauna-wasm-onboarding
+        --exclude fauna-ffi
+        --exclude fauna-ipc
+        --exclude fauna-bridge-service
+        --exclude fauna-nest-service
+        --exclude fauna-cfapi
+        --exclude fauna-shellext-fixture
+        --exclude fauna-linux
+      # Strip the DWARF from every executable this job links -- a disk budget,
+      # not a speed knob (see `Free runner disk` for the arithmetic it serves).
+      # The workspace's `[profile.dev]` already keeps only line tables, yet a
+      # fauna-nest integration-test binary still carried 144 of its 464 MB in
+      # `.debug*` sections (measured 2026-10-06 on a development machine); stripping cuts the test
+      # executables by ~31%. `debuginfo` keeps the symbol table, so panic
+      # messages keep their `file:line` (that comes from `Location`, never from
+      # DWARF) and the e2e agent's stall capture still names its frames (its
+      # tests pass stripped, measured the same day). What it costs is the line
+      # numbers in a `RUST_BACKTRACE` -- which this job never sets; reproduce a
+      # red locally for those.
+      CARGO_PROFILE_DEV_STRIP: debuginfo
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+
+      # Toolchain (channel/date + components + targets) comes from
+      # rust-toolchain.toml. `rustflags: ""` stops -D warnings being injected
+      # globally (clippy gets it explicitly below; build-only jobs must not).
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0
+        with:
+          rustflags: ""
+          cache: false
+
+      # The hosted runner image leaves ~12 GB free, and a cold `cargo test
+      # --workspace` of this tree needs well over that: this repository's
+      # second run died on `No space left on device` 21 minutes into the test
+      # build (2026-08-28) — the same disk on private and public runners. The
+      # image ships toolchains this job never touches; removing them is what
+      # makes the test step possible at all. `df` before and after puts the
+      # real figures in the log.
+      #
+      # ⚠ THE FIRST LIST WAS NOT ENOUGH, AND THE WAY IT FAILED IS THE REASON
+      # THIS COMMENT IS LONG. Run 33360161856 (2026-08-31) freed 12 GB → 32 GB
+      # here, compiled and ran the whole workspace — and reported **119 test
+      # failures across 20 nest conformance binaries**, every one of them a
+      # cascade from a single fact:
+      #
+      #     blob store refused write: 2110230528 bytes free
+      #       < 2147483648 floor + N blob (disk guard)
+      #
+      # `df` at the end of that step read `70G used, 2.0G avail, 98%`. The nest's
+      # blob store has a 2 GiB free-space floor, so once the build filled the
+      # disk EVERY test that writes a blob failed, and they failed with product-
+      # shaped messages — `HTTP 500: storage error`, `custody_incomplete`, "the
+      # page never settled within 120s". A reader grading that job sees twenty
+      # broken subsystems; there is one broken number. That is the
+      # verdict-it-did-not-earn shape, in its most expensive form: the failures
+      # are real, reproducible, and about nothing the commit changed.
+      #
+      # The measured budget, from that run's own `df` lines:
+      #
+      #   after this step                        32 GB free
+      #   after `cargo test --workspace`           2 GB free   (-30 GB)
+      #   after deleting target/debug/deps/*      24 GB free   (+22 GB)
+      #
+      # So the test EXECUTABLES alone are ~22 GB and the rest of the target dir
+      # ~8 GB. 32 GB of headroom cannot cover 30 GB of build plus a 2 GiB floor
+      # the tests need at their PEAK, which is exactly when the target dir is
+      # largest. The fix is more headroom, not a smaller floor: the floor is
+      # production behaviour under test, and lowering it for CI would delete the
+      # coverage rather than earn it.
+      #
+      # ⚠ AND THE TREE OUTGREW THE BIGGER RECLAIM. Run 37462163851 (2026-10-06,
+      # sync PR #1) freed 43 GB here and still ended the then-single Test step at
+      # `2.0G avail, 98%` -- 74 fauna-nest tests across 8 targets refused writes
+      # under the same disk guard, and the seed run hours earlier had cleared it
+      # by 0.1 GB. Freeing more image cannot keep pace with a tree that grows, so
+      # the fix changes the SHAPE of the peak instead: the test build runs in two
+      # halves (fauna-nest, then the rest of the workspace) with the linked
+      # executables deleted between them, so the disk holds one half's binaries
+      # at a time rather than all ~640; and `CARGO_PROFILE_DEV_STRIP` (job env)
+      # shrinks every one of them. The `df` line each reclaim step prints first
+      # is the end-of-half reading -- the peak each half reached.
+      #
+      # The additions below are the rest of the image's large unused trees
+      # (Swift, GHCup, miniconda, PowerShell, global npm, the Azure CLI) plus an
+      # apt cache clean, worth roughly another 10-14 GB on the standard image.
+      # Every one is a toolchain no step in this job invokes. None of them needs
+      # a `|| true`: `rm -rf` on an absent path already succeeds, so a tree that
+      # disappears from a future runner image costs its share of the headroom
+      # and nothing else -- and the assertion below is what then notices.
+      - name: Free runner disk
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo rm -rf /usr/share/swift /usr/local/.ghcup /usr/share/miniconda \
+                      /usr/local/share/powershell /usr/local/lib/node_modules /opt/az
+          sudo apt-get clean
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h / | tail -1
+          # The reclaim asserts that it worked, rather than leaving the answer
+          # to be discovered 108 minutes later. When the disk ran out mid-run
+          # the job did not stop: it kept going and reported 119 failures whose
+          # messages describe the blob store, the sync engine and the folder
+          # rails -- twenty subsystems, none of them broken. Reading that report
+          # costs hours and lands on the wrong conclusion, which is worse than
+          # no report at all. A run that cannot fit should say so in the forty
+          # seconds it takes to measure.
+          #
+          # 36, from the budget above: ~30 GB for a cold `cargo test
+          # --workspace` plus the 2 GiB the nest blob store must STILL see free
+          # at the build's peak, plus margin for a tree that grows. If this ever
+          # fires on a healthy run the tree outgrew the runner -- raise it only
+          # together with a fresh `df` that justifies the new number, never to
+          # make a red go away.
+          #
+          # It lives inside this step rather than beside it so that the check
+          # and the reclaim it grades cannot drift apart, and because a separate
+          # step would have to be silenced in the local replay's SKIP_STEPS --
+          # where the only sanctioned reason is "it provisions the runner", and
+          # widening that rule to fit a disk assertion would cost more than the
+          # step is worth. `/` is the runner's build filesystem; on a dev box it
+          # is not, and the figure does not transfer (a compressing filesystem
+          # stores the same build in a third of the bytes), which is exactly why
+          # this belongs to the runner-only step.
+          avail=$(df --output=avail --block-size=1G / | tail -1 | tr -dc '0-9')
+          echo "free after reclaim: ${avail}G (need 36G)"
+          if [ "${avail:-0}" -lt 36 ]; then
+            echo "::error::Only ${avail}G free after reclaiming the runner image." \
+                 "A cold 'cargo test --workspace' of this tree needs ~30GB and the" \
+                 "nest blob store refuses writes below a 2GiB floor, so the suite" \
+                 "would run for ~108 minutes and then report a wave of storage" \
+                 "failures that are this disk, not the code under test. Free more" \
+                 "of the runner image above."
+            exit 1
+          fi
+
+      # PROVISIONING FIRST, GATES AFTER -- the order is load-bearing, not
+      # cosmetic. Every gate below carries `if: ${{ !cancelled() }}` so that a
+      # red in one does not silence the next (see the Clippy step), and a gate
+      # that runs on a half-provisioned runner reports a FALSE red instead of a
+      # verdict: `Clippy --workspace` compiles libs/ksni, which does not link
+      # without the libdbus headers two steps down, and the Test steps need ffmpeg.
+      # Hoisting every install above the first gate is what makes the bare
+      # `!cancelled()` safe on all of them -- the alternative is a compound
+      # `steps.<id>.outcome` condition on each gate, which the local replay of
+      # this workflow deliberately cannot evaluate.
+      #
+      # SCOPE OF THAT GUARANTEE, measured 2026-08-30 and narrower than the
+      # paragraph above implies: `!cancelled()` protects against a FAILING STEP,
+      # not against a DYING RUNNER. When the runner is terminated -- exit 143,
+      # "The runner has received a shutdown signal" -- the condition evaluates
+      # FALSE and every remaining gate is `skipped`, exactly as it would be on a
+      # user cancel. On the first run of the re-inited repository the `Test` step
+      # was killed mid-compile and all four steps below it were skipped despite
+      # carrying this guard. So on a small runner, which is where a shutdown is
+      # most likely, the guard is inert precisely when the per-feature steps
+      # would have mattered most. Read a `skipped` tail as "the machine died",
+      # never as "the gate declined to run".
+
+      # Must precede every apt step below: `apt-get update` fails on a source
+      # nothing here installs from, and the runner image ships one that 403s.
+      # See the script for the measurement.
+      - name: Prune unusable third-party apt sources
+        run: bash .github/prune-apt-sources.sh
+
+      # libs/ksni (the tray crate; a workspace member, unlike fauna-linux which
+      # is excluded above) links libdbus-sys, whose build script runs pkg-config
+      # for dbus-1; a bare runner has no libdbus-1-dev, and the first run of
+      # this repository failed exactly there (2026-08-28). Same package the
+      # linux-desktop job installs.
+      - name: Install D-Bus dev headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      # The first gate, so nothing before it can have failed -- it needs no
+      # condition of its own. It runs after the installs above rather than
+      # before them (it was first until 2026-08-29) for the ordering reason at
+      # the top of this list; the ~1 min of apt it now waits on is nothing
+      # against the coverage the move buys the steps below.
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      # `if: !cancelled()` from here down, for exactly the reason the Test steps
+      # pass `--no-fail-fast`: these are independent gates, and a run that
+      # stops at the first red exits over ground it never covered. A `cargo fmt`
+      # nit must not silence clippy, the workspace test suite, and the three
+      # feature steps behind it -- which is what it did until 2026-08-29.
+      # Excludes: see WORKSPACE_EXCLUDES above.
+      - name: Clippy
+        if: ${{ !cancelled() }}
+        run: cargo clippy --workspace $WORKSPACE_EXCLUDES -- -D warnings
+
+      # `--no-fail-fast`: cargo otherwise aborts at the first failing crate and
+      # never reaches the tail, so one run reports one break no matter how many
+      # exist. This job's purpose is a buildability verdict over the whole
+      # workspace, and a fail-fast abort exits over ground it never covered --
+      # the same shape as a target skipped for want of its required features,
+      # which is why the per-feature steps below exist.
+      #
+      # TWO HALVES, one verdict: together they are exactly the old single
+      # `cargo test --workspace --no-fail-fast $WORKSPACE_EXCLUDES`, split so the
+      # disk never holds both halves' executables at once (`Free runner disk`
+      # has the run that forced it). fauna-nest goes FIRST, on the freshest disk,
+      # because its tests are the ones the blob store's 2 GiB floor bites. The
+      # split costs no rebuild: `.cargo/config.toml` resolves features across
+      # the whole workspace whatever is selected, so both halves share every
+      # dependency artifact.
+      - name: Test (fauna-nest)
+        if: ${{ !cancelled() }}
+        run: cargo test -p fauna-nest --no-fail-fast
+
+      # Same delete as `Reclaim disk before the per-feature steps` below, and
+      # safe for the same reasons; here every executable it finds is a
+      # fauna-nest test the step above has finished running.
+      - name: Reclaim disk between the test halves
+        if: ${{ !cancelled() }}
+        run: |
+          df -h / | tail -1
+          if [ -d target/debug/deps ]; then
+            find target/debug/deps -maxdepth 1 -type f -executable ! -name '*.so' -delete
+          fi
+          df -h / | tail -1
+
+      - name: Test (rest of the workspace)
+        if: ${{ !cancelled() }}
+        run: cargo test --workspace --no-fail-fast $WORKSPACE_EXCLUDES --exclude fauna-nest
+
+      # The runner has room for the workspace test build OR the three feature
+      # builds below, not both -- measured, not feared: on 2026-08-30 the
+      # test-hooks step died compiling `fauna-nest` with
+      # `failed to write .../lib.rmeta: No space left on device`, the runner
+      # having warned `Free space left: 66 MB` one step earlier. `Free runner
+      # disk` above had left 32G (72G, 84% -> 56% used); Clippy, Test and the
+      # first two feature steps consumed all of it.
+      #
+      # What it deletes is exactly the dead weight: `cargo test --workspace`
+      # links ~640 test executables into target/debug/deps, and NOTHING below
+      # reads one -- the per-feature steps are `-p fauna-nest`, needing only the
+      # dependency rlib/rmeta this leaves untouched. Measured over a local
+      # replay of this same command: 637 executables = 48.9G apparent, against
+      # 6.1G of rlib+rmeta and 0.6G of proc-macro .so. Hence the `! -name
+      # '*.so'`: a proc-macro dylib is executable, is a build input here, and
+      # must survive.
+      #
+      # Deleting a cargo output is safe by construction -- cargo checks that
+      # its outputs still exist, not merely their fingerprints, so anything it
+      # does still want it rebuilds. Nothing below wants any of these.
+      #
+      # The `df` pair is the instrument, not decoration: it is how the next run
+      # reports the arithmetic of this fix rather than leaving it inferred.
+      - name: Reclaim disk before the per-feature steps
+        if: ${{ !cancelled() }}
+        run: |
+          df -h / | tail -1
+          # Guarded because the shell is `bash -e` and this step runs on
+          # `!cancelled()`, i.e. after a red Clippy or Test too: a housekeeping
+          # step that reds the job because its own `find` met no directory
+          # would be worse than the disk it is here to reclaim.
+          if [ -d target/debug/deps ]; then
+            find target/debug/deps -maxdepth 1 -type f -executable ! -name '*.so' -delete
+          fi
+          df -h / | tail -1
+
+      # Optional cargo features are OFF by default, so --workspace never compiles
+      # or tests them; build + lint + test each explicitly so they cannot rot.
+      #
+      # `if: !cancelled()` on all three, for exactly the reason the Test steps
+      # above pass `--no-fail-fast`: these are independent gates, and a run
+      # that stops at the first red exits over ground it never covered. Without
+      # it they are hostage to the longest and most failure-prone step in their
+      # own job -- and that is not hypothetical. THEY HAVE NEVER RUN. Both real
+      # runs of 2026-08-28 skipped all three because `Test` failed first, which
+      # left the only coverage these `required-features` targets have anywhere
+      # (see the test-hooks step's own comment) unexecuted on every runner this
+      # repository has ever had. The step ordering keeps the broad workspace
+      # verdict ahead of the narrow ones; it just no longer silences them.
+      #
+      # These three were the first steps to carry the condition (2026-08-28,
+      # where the gap was measured). Clippy and Test carry it too since
+      # 2026-08-29, and the installs were hoisted above every gate in the same
+      # change -- WITHOUT that hoist these three were themselves unsound: a red
+      # `Check formatting` used to skip the apt steps while `!cancelled()` still
+      # ran all three here, on a runner that had never installed their
+      # prerequisites. They were only ever safe because nothing had reached
+      # them at all.
+      #
+      # ALL FOUR per-feature steps -- these three and the activitypub one below --
+      # are `--lib --bins`, while the `nest-feature-clippy` recipe they mirror is
+      # `--lib --bins --tests`. So every one of them leaves its feature's in-src
+      # `#[cfg(test)]` modules uncompiled. That gap is deliberate and priced in one
+      # place: see the activitypub step's comment below, which carries the
+      # measurement and says why closing it is one uniform decision about all four
+      # rather than a per-step cleanup. Do not read `--lib --bins` here as
+      # complete coverage of a feature.
+      #
+      # ALL FOUR also run WITHOUT `CARGO_RESOLVER_FEATURE_UNIFICATION=selected`,
+      # which the recipe they mirror sets on every one of its lines. `.cargo/
+      # config.toml` SHIPS with `feature-unification = "workspace"`, so these
+      # steps resolve dep features as if the whole workspace were selected.
+      # Measured on the curated tree 2026-09-12, by resolution rather than by
+      # build (`cargo tree --locked -p fauna-nest --features <f>`, both settings,
+      # all four features): workspace unification is a STRICT SUPERSET of
+      # selected -- 734 -> 1067 packages for nostr and the same shape for the
+      # other three (+321 to +337), 45-49 shared deps handed extra features, and
+      # ZERO packages or features present only under `selected`.
+      #
+      # Two consequences, and they point the same way. (1) These steps are the
+      # WEAKER of the two gates: a dep feature `fauna-nest` fails to declare can
+      # be supplied by another workspace member here and not there, so the class
+      # is caught by the internal recipe first and this job can never be its sole
+      # discoverer. (2) They are also the more expensive, by ~330 packages. So
+      # adding the variable would make them stricter AND cheaper, which is not
+      # the tradeoff this was assumed to be -- it was deferred three times as a
+      # heavy A/B when its correctness half needed no build at all.
+      # What stays unpriced is the only thing a dev box may not price: the runner
+      # wall-time, and whether the stricter resolution reds something the looser
+      # one masks today. Both want one real runner measurement, not a local one.
+      - name: Clippy + test (fauna-nest --features nostr)
+        if: ${{ !cancelled() }}
+        run: |
+          cargo clippy -p fauna-nest --features nostr --lib --bins -- -D warnings
+          cargo test -p fauna-nest --features nostr --test conformance_nostr_storage_gate
+
+      - name: Clippy + test (fauna-nest --features bluesky)
+        if: ${{ !cancelled() }}
+        run: |
+          cargo clippy -p fauna-nest --features bluesky --lib --bins -- -D warnings
+          cargo test -p fauna-nest --features bluesky --test conformance_bluesky --test conformance_bluesky_link --test conformance_bluesky_feed_ingest
+
+      - name: Clippy + test (fauna-nest --features test-hooks)
+        if: ${{ !cancelled() }}
+        run: |
+          cargo clippy -p fauna-nest --features test-hooks --lib --bins -- -D warnings
+          # The targets `fauna-nest` declares `required-features =
+          # ["test-hooks"]` on. They are the feature's only real coverage:
+          # `--workspace` cannot reach them, because the feature is off by
+          # default and cargo skips a target whose required features are not
+          # enabled -- silently, with exit 0.
+          cargo test -p fauna-nest --features test-hooks \
+            --test conformance_at_rest_byte_scan \
+            --test conformance_content_sealing_epochs_client \
+            --test desktop_serve_loop \
+            --test desktop_serve_loopback \
+            --test desktop_serve_port_change_loopback \
+            --test index_survives_nest_restart
+
+      # The fourth off-by-default `fauna-nest` feature, and the reason this job
+      # now has a gate keeping this list in step with the justfile's
+      # `nest-feature-clippy` recipe (`verify_ci_feature_coverage`). The list
+      # above was seeded on 2026-06-21, when that recipe named two features and
+      # this matched it. The recipe grew `activitypub` on 2026-07-16 -- in a
+      # commit titled "gate the activitypub feature against silent clippy rot",
+      # closing this exact class internally -- and this file was never updated.
+      # For the 56 days since, NO public job on ANY event compiled one line of
+      # the 9,272-line `bins/fauna-nest/src/activitypub/` subtree, the 27
+      # `feature = "activitypub"` sites across nine other files, or the 13
+      # `#[cfg(test)]` modules inside that subtree: the feature is off by
+      # default and no workspace member enables it, so `--workspace` cannot
+      # reach it either. This is drift being repaired, not scope being widened.
+      #
+      # Clippy-only, and `--lib --bins` exactly like the three steps above:
+      # unlike nostr (22 suites) and bluesky (2), `activitypub` gates NO
+      # crate-level integration suite and declares no `required-features`
+      # target, so there is nothing for a test step to name.
+      #
+      # `--tests` was measured and deliberately NOT taken. It would reach the 13
+      # `#[cfg(test)]` modules inside the gated subtree, which `--lib --bins`
+      # leaves uncompiled -- but on this tree `--tests` costs 216 further crate
+      # compilations, 64 of them workspace-local crates `fauna-nest` does not
+      # depend on at all (`fauna-feed` among them), because `.cargo/config.toml`
+      # ships with workspace feature unification ON. That is a large bill on a
+      # 2-CPU runner, and it is NOT this step's to pay: the three steps above
+      # have exactly the same `--tests` gap against the same recipe, so closing
+      # it is one uniform decision about all four, priced by a runner run.
+      #
+      # Placed LAST on purpose. Disk is the binding constraint in this job (see
+      # the reclaim step above), so the last per-feature step is the one that
+      # dies if the budget is short -- and the test-hooks step above it is the
+      # ONLY coverage its `required-features` targets have anywhere. Better to
+      # risk this one. On the arithmetic: this step is strictly cheaper than
+      # either the nostr or bluesky step, which each do this same clippy AND
+      # link test binaries, and both of which ran inside the budget on
+      # 2026-08-30 -- clippy emits metadata rather than linking executables.
+      # ⚠ What is NOT measured: the marginal cost of a fourth step on a real
+      # runner. This exact command exits 0 in 268s on a 26-core dev box, and no
+      # constant scales that to a 2-CPU/8-GB runner. The next real run is its
+      # first measurement.
+      - name: Clippy (fauna-nest --features activitypub)
+        if: ${{ !cancelled() }}
+        run: cargo clippy -p fauna-nest --features activitypub --lib --bins -- -D warnings
+
+  go:
+    name: Go (mail-bridge build, test, fmt)
+    runs-on: ubuntu-latest
+    # 90, not 30: the job compiles the whole FFI cdylib (the client stack) cold
+    # before the Go suite can run; sized like the other cold-build jobs.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: '1.26'
+      # The Go mail-bridge links libfauna_ffi.so via cgo; `just mail-bridge-test`
+      # builds it (pinned Rust toolchain) before running the Go suite.
+      #
+      # The `with:` block is the house one every sibling Rust job here carries
+      # and the internal ci.yml orders ("keep this block identical across every
+      # Rust job in this file"). It was absent from the day this workflow was
+      # authored (2026-06-21) and nothing noticed for 71 days, because this job
+      # has never executed on any runner: it was skipped while the repository
+      # was private, and that skip was only removed 2026-08-31.
+      #
+      # `rustflags: ""` is the load-bearing half. Without it the action injects
+      # `-D warnings` into RUSTFLAGS for the whole job, and cargo applies
+      # RUSTFLAGS to every unit it compiles — so a single deprecation warning
+      # anywhere in the cdylib's dep tree fails a job whose subject is the Go
+      # suite, on a toolchain pinned to a NIGHTLY that gains lints routinely.
+      # That is exactly what the `rust` job's own comment means by "build-only
+      # jobs must not" get it.
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0
+        with:
+          rustflags: ""
+          cache: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+      # Every `just` recipe carrying a staleness gate shells out to `uv` (the
+      # justfile's `{{py}}`), so a runner without it dies at the gate with
+      # `uv: command not found` -- exit 127, before a line of Go or Rust is
+      # compiled. `mail-bridge-test` depends on `mail-bridge-ffi`, which is
+      # gated, so this job needs uv as much as the three that already install
+      # it. Measured on the first sync PR's run (2026-09-11, run
+      # 34608182467): this job had never executed on a runner before that day.
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      # The Go suite this job exists to run includes `internal/atprotorepo`'s
+      # five video tests, which shell out to ffmpeg and FAIL rather than skip
+      # when it is absent ("ffmpeg is required by the video projection and by
+      # this test") -- the honest shape, since a skip would be false coverage
+      # for the video projection. The `rust` job installs it for the same
+      # reason; this job and `check-generated` reach the same tests and did
+      # not. Measured on run 34608182467, where `check-generated` went red on
+      # exactly those five.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Check formatting (fauna-mail-bridge)
+        working-directory: bins/fauna-bridges
+        run: |
+          # Our code only — third_party/go-imap is a vendored module.
+          unformatted=$(gofmt -l cmd internal)
+          if [ -n "$unformatted" ]; then
+            echo "Files need formatting:"; echo "$unformatted"; exit 1
+          fi
+
+      # An independent gate: a `gofmt` nit says nothing about whether the bridge
+      # builds or its suite passes, and this step is the job's whole substance
+      # (a cold FFI cdylib build plus the Go suite) to the formatter's seconds.
+      #
+      # It has no prerequisite step of its own to guard against: this job builds
+      # no generator at all. The workflow-level `FAUNA_GO_BINDINGS: tracked`
+      # makes `mail-bridge-ffi` build the cdylib and consume the COMMITTED
+      # `libs/fauna-mail-go` tree as-is, so the only non-success this
+      # `!cancelled()` can run past is a red `gofmt` above -- which is exactly
+      # what it is for.
+      - name: Build + test fauna-mail-bridge
+        if: ${{ !cancelled() }}
+        run: just mail-bridge-test
+
+  web:
+    name: Web (WASM + SPA build)
+    runs-on: ubuntu-latest
+    # 90, not 35: a COLD build of every WASM chunk plus the SPA on a 4-core
+    # runner was cancelled at the old ceiling on this repository's first run
+    # (2026-08-28); later runs restore the toolchain action's cache, the first
+    # run and every lockfile change do not.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain + wasm32 target from rust-toolchain.toml
+        with:
+          rustflags: ""
+          cache: false
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed  # v2.0.5
+        with:
+          deno-version: v2.x
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+      - name: Install wasm-pack
+        run: cargo install wasm-pack
+      # The SPA build runs under bubblewrap (scripts/deno-sandbox.ts fails
+      # closed on Linux without it); the probe fails here, by name, if the
+      # runner's kernel refuses the unprivileged namespaces. The Ubuntu 24.04
+      # runner image refuses them by default (AppArmor's
+      # apparmor_restrict_unprivileged_userns=1: bwrap dies with "loopback:
+      # Failed RTM_NEWADDR: Operation not permitted"), so lift that on this
+      # throwaway VM first; the sysctl is absent on older kernels, hence `|| true`.
+      # The launcher builds its seccomp filter with the system libseccomp
+      # (libseccomp2, on every Ubuntu) and fails closed without it; the second
+      # probe names that too.
+      - name: Install bubblewrap
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          command -v bwrap || { sudo apt-get update && sudo apt-get install -y bubblewrap; }
+          bwrap --unshare-all --ro-bind / / true
+          ldconfig -p | grep -q 'libseccomp\.so\.2 ' || { echo "libseccomp.so.2 missing (libseccomp2)"; exit 1; }
+      # `just web` builds all wasm chunks, copies pkg/* into apps/fauna-web/static/,
+      # then runs deno install + deno task build.
+      - name: Build WASM chunks + Svelte SPA
+        run: just web
+
+  linux-desktop:
+    name: Linux Desktop (build, package, test)
+    runs-on: ubuntu-latest
+    # 90, not 30: a COLD release build of the desktop app on a 4-core runner was
+    # still compiling libs/ at minute 17 and was cancelled at the old ceiling on
+    # this repository's first run (2026-08-28). The toolchain action's cache
+    # shortens later runs, but the first run and every lockfile change are cold.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
+        with:
+          rustflags: ""
+          cache: false
+      - name: Prune unusable third-party apt sources
+        run: bash .github/prune-apt-sources.sh
+      - name: Install GTK4 dev dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libsqlite3-dev libdbus-1-dev desktop-file-utils
+      # Ahead of the build since 2026-08-29, because it never needed it: this
+      # validates a file that is IN THE TREE (desktop-file-utils comes from the
+      # apt step above), so the only thing the old position bought was being
+      # silenced by a red 17-minute cold release build. Reordering states the
+      # independence outright and needs no `if:` -- preferred over
+      # `!cancelled()` wherever a step can simply be moved ahead of what used
+      # to gate it.
+      - name: Validate .desktop file
+        run: desktop-file-validate apps/fauna-linux/packaging/social.fauna.fauna.desktop
+      - name: Build release binary
+        run: cargo build -p fauna-linux --release
+      # A genuine chain: it runs the binary the step above produces.
+      - name: Version smoke test
+        run: target/release/fauna-desktop --version
+
+  macos:
+    name: macOS (desktop app bundle)
+    # Skipped while the repository is private: macos-15 minutes bill at
+    # 10x against the organisation's free-plan allowance, and the private
+    # phase is an environment test, not the macOS buildability proof --
+    # that proof is the first run on a public repository, when
+    # this condition becomes true on its own. `ci-pass` below accepts the
+    # resulting skip only while private.
+    if: ${{ !github.event.repository.private }}
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
+        with:
+          rustflags: ""
+          cache: false
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+      # `mac-app release` builds the host darwin FFI slice, the SwiftPM
+      # FaunaMacOS product and the sync agent, then assembles + ad-hoc signs
+      # build/Release/Fauna.app -- the exact bundle release-macos.yml signs and
+      # notarizes. No credentials here: this job is the buildability proof, so a
+      # contributor's change to the macOS app is compiled on every PR.
+      - name: Build Fauna.app (release, ad-hoc signed)
+        run: just mac-app release
+      - name: Verify the bundle
+        run: |
+          codesign --verify --deep --strict build/Release/Fauna.app
+          ditto -c -k --keepParent build/Release/Fauna.app Fauna.app.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: Fauna.app-unsigned
+          path: Fauna.app.zip
+          if-no-files-found: error
+
+  ui-lint:
+    name: UI Lint (ui.yaml spec + WinUI conventions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      # Three unrelated linters over three unrelated surfaces: a red in one
+      # carries no information about the other two, so each reports on its own.
+      # Without this the job answered only "the FIRST of three lints", and a
+      # single ui.yaml nit hid every WinUI finding behind it. The first needs no
+      # condition (nothing before it but `Install uv`, which all three need).
+      #
+      # The residual is deliberate and cheap: a failed `Install uv` now yields
+      # three identical `uv: command not found` reds instead of one. That is
+      # noise in an obvious direction, not a wrong verdict, and the whole job
+      # has a 5-minute ceiling.
+      - name: ui.yaml nav-skeleton completeness
+        run: uv run scripts/lint-ui-elements.py --nav
+      - name: WinUI DataTemplate-root AutomationProperties.Name
+        if: ${{ !cancelled() }}
+        run: uv run scripts/lint_winui_datatemplate_names.py
+      - name: WinUI x:Bind nested-call check
+        if: ${{ !cancelled() }}
+        run: uv run scripts/lint_winui_xbind_nested_calls.py
+
+  check-generated:
+    name: Check generated files in sync with sources
+    runs-on: ubuntu-latest
+    # 90, matching every other Rust-compiling job that is not `rust` itself.
+    # It was 45, and 45 was calibrated on a job that no longer exists: while
+    # this step restated a four-leg list, its only Rust was
+    # `dagcbor-fixtures-rust`, measured on the real 2-CPU runner at 32.6 s of
+    # dev-profile compile inside a 49 s job (run 33360161856, 2026-08-31).
+    # Running the recipe itself adds `mail-bridge-ffi-check`, whose
+    # `cargo build -p fauna-ffi --release` compiles the UniFFI cdylib — the
+    # crate this runner class has been measured taking ~10 min on at DEV
+    # profile, and the crate two other jobs have already died on (OOM in `go`,
+    # SIGTERM in `rust`). Nobody has measured that leg on a runner, and a
+    # dev-box replay cannot stand in for one (26 cores vs 2–4; the dev-box /
+    # runner ratio for the same command has been measured anywhere from 1.17x
+    # to 13.5x, so no projection from it means anything).
+    #
+    # What IS measured, on this exact runner and at this exact profile: the
+    # `linux-desktop` job's `cargo build -p fauna-linux --release` took
+    # 44m34s (same run). That package resolves 791 crates; the leg this job
+    # just acquired resolves 685 — 87% of it, same profile — where the leg it
+    # used to be (`dagcbor-fixtures-rust`, `fauna-cbor`) resolves 61 at DEV
+    # profile. So 45 was set to roughly the cost of the single step the job
+    # had just gained, before its other five legs, the Go build and the
+    # toolchain sync. 90 restores the ~2x headroom every sibling job has.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      # This job compiles Rust — through the recipe, not in a `run:` line, which
+      # is exactly why it went so long without this step. Without the action the
+      # job re-syncs the pinned nightly on every run (13 s, measured in the run
+      # above) and carries NO cargo cache, so it rebuilds its whole dep tree
+      # from cold every time. Every other job in this workflow that reaches
+      # cargo declares it; pinned by `test_public_workflows_shape.py`.
+      #
+      # The `with:` block is the house one; this site was authored WITHOUT it
+      # hours earlier the same day, which is why it is called out rather than
+      # copied silently. `rustflags: ""` matters most here of anywhere: this
+      # job's `mail-bridge-ffi-check` leg runs `cargo build -p fauna-ffi
+      # --release` over the whole cdylib dep tree, and `-D warnings` (which the
+      # action injects job-wide without this line, and which cargo then applies
+      # to every unit) would fail it on any dep warning the pinned nightly
+      # starts emitting — in a job whose subject is generated-file freshness.
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
+        with:
+          rustflags: ""
+          cache: false
+      # ...and it compiles GO, for the same invisible reason and through the same
+      # move to the recipe. Two of the six legs reach a Go toolchain:
+      # `mail-bridge-ffi-check` builds the mail-bridge (cgo, linking the cdylib it
+      # just built) and the supervisor (CGO_ENABLED=0), and `dagcbor-fixtures` runs
+      # the codec-fixtures suite. Neither is greppable here — both are `go -C
+      # bins/fauna-bridges …` two recipe hops down. Until 2026-08-31 the job ran a
+      # restated four-leg list (`i18n-check providers-check ui-ids-check
+      # dagcbor-fixtures-rust`) that reached no Go at all, so this is a leg the job
+      # ACQUIRED, not one that had been running unpinned. Without the action the job
+      # takes whatever Go the runner image happens to ship and carries no module
+      # cache; `bins/fauna-bridges/go.mod` requires 1.26.0, so an older image would
+      # silently auto-download a toolchain on every run. Pinned by
+      # `test_public_workflows_shape.py`, which also asserts this version agrees
+      # with the `go` job's and with go.mod.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: '1.26'
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+      # Every leg, through the recipe itself — never a leg list restated here.
+      # Two of them reach `mail-bridge-ffi` (`mail-bridge-ffi-check` directly,
+      # `dagcbor-fixtures` through its recipe dependency) and both honour the
+      # workflow-level FAUNA_GO_BINDINGS above, so neither builds a bindgen:
+      # `mail-bridge-ffi-check` keeps the half that needs none — compiling the
+      # tracked binding against the freshly built cdylib — and says so in its
+      # own output rather than reporting a narrower check under the same green.
+      # `mail-bridge-ffi-check` runs the Go suite, and `internal/atprotorepo`'s
+      # video tests fail loudly without ffmpeg rather than skipping. See the
+      # `go` job's copy of this step for the full reasoning; run 34608182467
+      # went red here on those five tests.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Verify generated files match sources
+        run: just check-generated
+
+  protocol-checks:
+    name: Protocol (CDDL evolution + L3 mandate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          fetch-depth: 0  # need merge-base for diff against origin/main
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
+        with:
+          rustflags: ""
+          cache: false
+      # THE MIDDLE BUCKET, and the call is recorded here rather than defaulted.
+      #
+      # Each gate here runs its own self-test immediately before itself. Those
+      # two halves are NOT independent: a checker whose own tests fail produces
+      # a verdict that is untrustworthy in the reassuring direction, and a green
+      # line from a broken checker is worse than no line at all. So the check
+      # must stay hostage to its self-test -- but only to ITS OWN, and the two
+      # gates are entirely independent of each other and of the L3 check.
+      #
+      # Expressing that needs the pair to be ONE step. GitHub's default step
+      # condition is `success()`, which is job-wide: a two-step pair would also
+      # skip on an unrelated earlier red, silencing the second gate whenever the
+      # first went red -- the very thing this condition exists to remove. The
+      # condition that would fix it, `!cancelled() && steps.<id>.outcome ==
+      # 'success'`, is a compound expression the local replay of this workflow
+      # deliberately cannot evaluate (its expression evaluator answers one
+      # declared body, never a conjunction) -- and it does not degrade
+      # gracefully: an undeclared expression makes the driver refuse the WHOLE
+      # run, so the standing pre-publish sweep stops dead. Pinned red by
+      # `test_a_compound_step_condition_stops_the_replay`, which also records
+      # that the bare `!cancelled()` used everywhere else does evaluate.
+      # Folding each pair into a single step
+      # says the same thing in the shell instead: the runner's default
+      # `bash -e` aborts the step on the self-test's non-zero exit, so the check
+      # below it cannot run on a checker that failed its own tests, while the
+      # PAIR carries `!cancelled()` like any other independent gate.
+      - name: CDDL schema-evolution gate (self-test, then check)
+        run: |
+          uv run --no-project --with pytest pytest scripts/test_check_cddl_evolution.py -q
+          uv run --no-project python scripts/check-cddl-evolution.py
+      - name: Additive struct-evolution gate (self-test, then check)
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p check-additive-evolution
+          cargo run -p check-additive-evolution
+      # No self-test pair of its own -- a plain independent gate, so it simply
+      # reports.
+      - name: fauna-protocol L3 mandate check
+        if: ${{ !cancelled() }}
+        run: ./scripts/check-protocol-deps.sh
+
+  # The shipped suites nothing else runs. Until 2026-09-08 this repository
+  # carried 702 test files and invoked 687 of them: `i18n/generator/tests`
+  # (55 tests), four `scripts/` linter + staleness self-tests (57) and
+  # `tests/e2e-unified/fakes/` (18) were named by no recipe and no CI job, so
+  # no red here could ever fire on them. That is the "green forever because it
+  # never runs" class, one noun over from the gate-scope ratchets: a SUITE
+  # nothing invokes rather than a gate that selects nothing.
+  #
+  # It calls the `just` recipe rather than repeating its pytest lines, so the
+  # contributor-facing command and the CI gate cannot drift apart. The shipped
+  # half of `tests/scripts/` (the feature-catalog tooling's fixture-world tests
+  # and four script self-tests) joined the recipe 2026-09-09, and the Docker
+  # entrypoint overlay tests (pure text, no Docker) joined it 2026-09-13.
+  #
+  # "A recipe names it" is not "a job here runs it", and the gap is most of the
+  # tree: of 720 test files on 2026-09-13, 18 run in this workflow once the
+  # overlay tests joined. The other 702 are the cross-app journey suite under
+  # `tests/e2e-unified/tests`, which drives built apps, nests, browsers and
+  # Docker images no job here provisions; contributors run it through the
+  # `e2e-*` recipes. No job in this workflow can go red for them.
+  shipped-suites:
+    name: Shipped suites (i18n generator, script self-tests, catalog tooling, e2e fakes, docker overlay)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+      # The recipe guards on `command -v pytest` and SKIPS loudly when it is
+      # absent — correct for a dev box that has not set one up, and a silent
+      # pass here, which is precisely the defect this job exists to end. So
+      # pytest is installed onto PATH and its presence asserted BEFORE the
+      # recipe runs: a missing interpreter must fail this job, never skip it.
+      # Two things this step must get right, both measured on the first sync
+      # PR's run (2026-09-11, run 34608182467), where it got neither:
+      #
+      # 1. THE INTERPRETER. A bare `uv tool install pytest` takes the runner
+      #    image's default Python -- 3.12 on ubuntu-24.04 -- while this tree
+      #    pins 3.14 in `.python-version`. That is the same silent per-machine
+      #    divergence the fleet's "never bare python3" rule exists to stop, and
+      #    it is not theoretical here: on 3.12 the fake IMAP source's five TLS
+      #    tests fail with CERTIFICATE_VERIFY_FAILED and pass on 3.14
+      #    (reproduced locally in clean venvs of each, same package set).
+      # 2. THE DEPENDENCIES. `uv tool install pytest` gives pytest and nothing
+      #    else, so the suites fail at COLLECTION on their first third-party
+      #    import -- the run above died on `No module named 'yaml'` before a
+      #    single test executed. The list below is the closure of what the four
+      #    `shipped-suite-test` invocations import, each one added because a
+      #    clean-venv run named it: pyyaml (the i18n generator), pytest-timeout
+      #    (the e2e conftest refuses to load without it), blake3 + cbor2 (the
+      #    envelope helpers), cryptography (the fake source's certificates),
+      #    pytest-httpserver + requests (the fakes' own fixtures), and
+      #    websocket-client (the WS-RPC client core).
+      - name: Install pytest onto PATH, on the pinned interpreter
+        run: |
+          uv tool install --python "$(cat .python-version)" \
+            --with pyyaml --with pytest-timeout --with blake3 --with cbor2 \
+            --with cryptography --with pytest-httpserver --with requests \
+            --with websocket-client \
+            pytest
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Assert pytest is runnable (a skip here would be a false green)
+        run: |
+          command -v pytest || { echo "pytest missing — the suite would SKIP, not run"; exit 1; }
+          pytest --version
+      - name: Shipped suites
+        run: just shipped-suite-test
+
+  ci-pass:
+    name: CI passed
+    if: always()
+    needs: [secret-scan, rust, go, web, linux-desktop, macos, ui-lint, check-generated, protocol-checks, shipped-suites]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        run: |
+          for r in \
+            "secret-scan:${{ needs.secret-scan.result }}" \
+            "rust:${{ needs.rust.result }}" \
+            "go:${{ needs.go.result }}" \
+            "web:${{ needs.web.result }}" \
+            "linux-desktop:${{ needs.linux-desktop.result }}" \
+            "macos:${{ needs.macos.result }}" \
+            "ui-lint:${{ needs.ui-lint.result }}" \
+            "check-generated:${{ needs.check-generated.result }}" \
+            "protocol-checks:${{ needs.protocol-checks.result }}" \
+            "shipped-suites:${{ needs.shipped-suites.result }}"; do
+            name="${r%%:*}"; res="${r##*:}"
+            echo "  $name: $res"
+            if [[ "$res" == "success" ]]; then continue; fi
+            # The macOS job skips itself while the repository is private (see
+            # its `if:`); that skip is the only non-success result accepted, and
+            # only while private -- once public, every job must succeed.
+            if [[ "$name" == "macos" && "$res" == "skipped" \
+                  && "${{ github.event.repository.private }}" == "true" ]]; then
+              echo "    ($name is skipped while the repository is private)"
+              continue
+            fi
+            failed=1
+          done
+          if [[ "${failed:-0}" == "1" ]]; then echo "CI failed"; exit 1; fi
+          echo "All CI checks passed"

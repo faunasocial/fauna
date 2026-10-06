@@ -1,0 +1,5 @@
+# cargo-fuzz run artifacts (the corpus is tracked; these are not)
+target/
+artifacts/
+coverage/
+Cargo.lock

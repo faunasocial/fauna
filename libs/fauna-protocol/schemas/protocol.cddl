@@ -1,0 +1,16 @@
+; Spec Y protocol-level kinds. See § 2.5.
+
+ResyncRequiredPayload = {
+  dropped_count: uint .size 8,
+  * tstr => any,
+}
+
+EchoRequest = {
+  data: bstr,
+  * tstr => any,
+}
+
+EchoReply = {
+  data: bstr,
+  * tstr => any,
+}

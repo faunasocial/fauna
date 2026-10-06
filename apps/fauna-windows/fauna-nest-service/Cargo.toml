@@ -1,0 +1,93 @@
+[package]
+name = "fauna-nest-service"
+description = "FaunaNest Windows Service — local private nest HTTP server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fauna-nest-svc"
+path = "src/main.rs"
+
+[features]
+# Convention 15 flavor split — the twin of `bins/fauna-nest-daemon`'s. This SCM
+# shell runs `desktop_serve::run_serve_loop`, whose `test-hooks`-gated plain-HTTP
+# escape (`FAUNA_INSECURE_DISABLE_TLS`) the tier_3 Windows CalDAV/IMAP leg needs
+# and no shipped `FaunaNest` service may contain. Features are NOT inherited from a
+# dependency, so the forward has to be spelled out for the e2e flavor to exist at
+# all.
+#
+# ⚠ Forwarded as a FEATURE, never added to the `fauna-nest` dep line below: naming
+# it there would turn the escape on for the release exe too. Note the dep line
+# carries `default-features = false` with an explicit feature list — this forward
+# is ADDITIVE on top of that list and does not disturb it.
+#
+# The e2e path must build with it, and does not get it for free: the leg's exe is
+# built by hand on Windows (`tests/e2e-unified/helpers/windows_caldav_nest.py`
+# locates a pre-built `fauna-nest-svc.exe` rather than building one). That helper
+# now checks the flavor and skips with the right command when the exe lacks the
+# escape, so a stale release-flavor exe reads as "rebuild me", not as a red leg.
+#
+# Release paths must NOT pass this (`release.yml`'s "Build Rust binaries
+# (Windows service crates)" step builds `-p fauna-nest-service --release` with
+# no features — that is the security boundary). Witness: a release `fauna-nest-svc.exe` contains no
+# `FAUNA_INSECURE_DISABLE_TLS` string.
+test-hooks = ["fauna-nest/test-hooks"]
+
+[dependencies]
+# Explicit path deps, NOT `.workspace = true`, for the three crates whose feature
+# set this Windows service shell needs to differ from the root workspace default.
+# The root entries carry default features (bins/fauna-nest's own `fauna-nest-daemon`
+# / `fauna-router` binaries need them); this SCM shell wants the minimal graph the
+# retired apps/fauna-windows workspace used to impose. A member manifest cannot flip
+# `default-features = false` on a `workspace = true` dep whose root entry has
+# defaults, so the spec is written out here — which also makes the feature set
+# invocation-independent (it used to depend on WHICH workspace ran the build; see
+# build-system.md § Cargo target dir layout (win)).
+# ⚠ `default-features = false` is NOT a no-op here any more, and the features
+# named below are load-bearing. Until 2026-08-10 `fauna-nest`'s own `default` was
+# `[]`, so this line excised nothing and the note here said so — while warning
+# that it was written out rather than depending on `default` staying empty. That
+# instinct was right: the nest-side `payments` excision made `default =
+# ["store-safe", "payments", "zaps"]`, at which point a bare
+# `default-features = false` would have silently stripped the payments plane —
+# **and the `subscriptions` capability token** — from the shipped `FaunaNest`
+# service exe, with both flavors still building green and no test naming it.
+# Measured before the change: `cargo tree -p fauna-nest-service -e features`
+# resolved `fauna-protocol feature "payments"` exactly as `-p fauna-nest` did,
+# inherited through the nest's then-unconditional dep line.
+#
+# So this line names what the service shipped before that change and still ships:
+# `store-safe` (the non-member complement — empty today, but naming it means a
+# future default-on nest surface reaches this exe instead of being silently
+# excised here) + `payments`. `zaps` is deliberately absent: the zap surfaces live
+# inside `fauna-nest`'s `nostr`-gated subtree and this exe builds no `nostr`, so
+# no zap surface is reachable either way — claiming the flag would overstate what
+# it ships. Whether the Windows service *should* keep payments is a separate
+# product question; it must not change as a side effect of a refactor.
+fauna-nest = { path = "../../../bins/fauna-nest", default-features = false, features = ["store-safe", "payments"] }
+# Defaults stay ON (fauna-core `default = ["network"]`); `format_text` is additive
+# on top — the spec the retired apps workspace carried.
+fauna-core = { path = "../../../libs/fauna-core", features = ["format_text"] }
+# This crate's own DIRECT edge asks for no default features — a preserved spec
+# from the retired apps workspace, not a behavior change. It does not by itself
+# decide what the final build compiles: fauna-nest pulls fauna-protocol with
+# defaults transitively and cargo unifies features across the graph.
+# `node_policy` is an unconditional module, so
+# `node_policy::DEFAULT_SERVING_PORT` is exposed either way.
+fauna-protocol = { path = "../../../libs/fauna-protocol", default-features = false }
+fauna-ipc.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+fauna-log = { path = "../../../libs/fauna-log" }
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+hex.workspace = true
+toml = "0.8"
+getrandom.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-service = { workspace = true }

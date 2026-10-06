@@ -1,0 +1,78 @@
+[package]
+name = "fauna-client-alert-sweep"
+description = "The session-start critical-alert sweep: runs every feeder that must be checked outside its own page, so a set-and-forget deployment still raises its banner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Forwards to `fauna-client-atproto`'s own opt-in, so this crate's
+# `enable_fake_plc_directory_for_test` passthrough (gated on
+# `any(debug_assertions, feature = "test-helpers")`) is reachable from a
+# `wasm-pack build` consumer: wasm-pack builds `--release` internally
+# regardless of dev/prod flavor (testing.md convention 15 rule (b)), so
+# `debug_assertions` alone is never true there and the feature is the only
+# path a wasm consumer (`fauna-wasm`) has to reach it.
+test-helpers = ["fauna-client-atproto/e2e-agent"]
+
+[dependencies]
+# The registry the sweep's feeders post to and clear from. Wasm-clean (its only
+# dep is fauna-core's `localized`), which is what lets this crate compile into
+# the web core chunk alongside the native builds.
+fauna-client-alerts = { path = "../fauna-client-alerts" }
+# Feeder: the pending-RecoveryKey-replacement window
+# (`identity-succession.md` § The RecoveryKey → *Replacement*). This crate is
+# the CALLER the detection has been waiting for — `refresh_pending_replacement_alert`
+# is deliberately not driven by the Settings page's lifecycle, because the
+# condition must reach a user who never opens Settings.
+fauna-client-recovery = { path = "../fauna-client-recovery" }
+# Feeder: the published ATProto handle binding (`atproto-pds-bridge.md` § State
+# & data shape). The check itself lives in the feeder's own crate; what lives
+# here is the sweep's decision about when it is allowed to run at all.
+fauna-client-atproto = { path = "../fauna-client-atproto" }
+# The one nest read that feeder needs — `fauna.bridges.atproto.get_integration_status`,
+# for the DID to audit and the handle domain to audit it against.
+fauna-client-bridges = { path = "../fauna-client-bridges" }
+# `ActorId` (the identity every alert key is scoped to) and `Timestamp::now_secs`
+# for the clock-reading convenience wrapper. `default-features = false` drops the
+# `network` default (redb/tokio/hickory) so the crate stays wasm-clean; `js` is
+# forwarded on wasm32 below, exactly as fauna-client-recovery does.
+fauna-core = { path = "../fauna-core", default-features = false }
+# The `RpcRequester` transport seam this crate is generic over, and the
+# `RpcErrorClass` bound its feeders' error taxonomies need. `default-features =
+# false` drops the native-only `p2p` default (wireguard → tokio net) so this
+# compiles to wasm32; native builds re-enable it through feature unification.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# One line per feeder outcome — this crate is best-effort by contract, so the
+# log IS the observability surface for a sweep that partly failed.
+tracing = { workspace = true }
+
+# Forward the `js` backends on wasm (fauna-core's js-sys clock — `now_secs` is
+# read here), mirroring fauna-client-recovery's own wasm block. The re-sweep
+# loop's wait (`RE_SWEEP_INTERVAL_SECS`) needs no per-target dep here any more:
+# `fauna-sleep` owns that split for every crate that has it.
+fauna-sleep = { workspace = true }
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The in-memory requester the sweep tests drive (a hand-rolled `RpcRequester`
+# that answers `fauna.recovery.replacement.status`), plus the async runtime to
+# block on it.
+tokio = { workspace = true }
+serde = { workspace = true }
+# Feeder #1's fixtures build a PLC audit-log body by hand, so the custody
+# decision is drivable with no directory in the path.
+serde_json = { workspace = true }
+# The fake `AtprotoIdentityStore` the read-ordering tests drive.
+async-trait = "0.1"
+# Turns on fauna-client-atproto's own `test-fixtures` for this crate's test
+# build only, to reach `test_fixtures::plc_operation_entry_json` — feeder #1's
+# audit-log fixture — and `identity_store::InMemoryAtprotoIdentityStore`).
+# Unrelated to this crate's own `test-helpers` feature
+# forward (`fauna-client-atproto/e2e-agent`, above) — a different feature name
+# on the same path dependency, so Cargo unions both for the test build.
+fauna-client-atproto = { path = "../fauna-client-atproto", features = [
+    "test-fixtures",
+] }

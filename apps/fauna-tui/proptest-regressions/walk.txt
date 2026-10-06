@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 54990cbb32b292ee816da2c03eea749ac877db70dfeaa2dfb43e1a99e0c99194 # shrinks to steps = [ClickSidebar(12), ClickPage(4), Back]
+cc 8470fc2427da27db6b21ea1ee49e964218d45116ec7725620c1865fbe2a9ef62 # shrinks to steps = [ClickSidebar(2), ZoneSidebar, FocusNext, FocusNext, FocusPrev, ZonePage, FocusPrev, Actuate]
+cc dac53b4de2a57788ac2b87d0e778103da5371bfed7c38c9be4d2283df55b3847 # shrinks to steps = [ClickSidebar(11)]
+cc 448facbf4086bc560c7d7961812f31903dd3e93c25b2aed434be1762c05e2506 # shrinks to steps = [ClickSidebar(11)]

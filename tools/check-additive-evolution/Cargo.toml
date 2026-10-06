@@ -1,0 +1,34 @@
+# Additive-only schema-evolution lint for Rust wire + at-rest struct shapes.
+# The type-level analogue of `scripts/check-cddl-evolution.py`: that gates the
+# CDDL *schema* files; this gates the Rust **structs** the CDDL gate can't see —
+# `fauna-protocol`'s client↔nest↔nest wire payloads and `fauna-segment-store`'s
+# at-rest serde types — and every crate's deserializable enums against
+# `enum_ledger.txt` (`src/enums.rs`). Run in CI's `protocol-checks` job. See `src/lib.rs` for
+# the contract and the cold-read design rationale.
+#
+# A workspace member (not a standalone like the Go/Python tools) on purpose: it
+# parses the SAME Rust the workspace compiles, so sharing the workspace
+# `Cargo.lock`'s `syn` version avoids parser-vs-compiler skew, and `cargo
+# {clippy,test} --workspace` in the `rust` CI job exercises it for free so the
+# gate itself can't silently rot.
+[package]
+name = "check-additive-evolution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "check-additive-evolution"
+path = "src/main.rs"
+
+[lib]
+name = "check_additive_evolution"
+path = "src/lib.rs"
+
+[dependencies]
+# `full` to parse whole files (items, not just expressions); `extra-traits` so
+# parsed nodes are comparable in tests. Version tracks the workspace lock.
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"

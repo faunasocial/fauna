@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Auto-start at sign-in (apps/macos.md § App Lifecycle → Auto-start at sign-in).
+  Shipped at Fauna.app/Contents/Library/LaunchAgents/ and registered by the app
+  through SMAppService.agent(plistName:) — it moves and uninstalls with the
+  bundle. `Label` must equal AppleIdentifiers.appLaunchAgent; `BundleProgram` is
+  relative to the bundle root; the autostart argument (AutoStart.flag) makes the
+  login launch resident with no main window. (A double hyphen is illegal inside
+  an XML comment, hence no literal flag here.)
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>social.fauna.FaunaMacOS</string>
+	<key>BundleProgram</key>
+	<string>Contents/MacOS/Fauna</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>Contents/MacOS/Fauna</string>
+		<string>--autostart</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+</dict>
+</plist>

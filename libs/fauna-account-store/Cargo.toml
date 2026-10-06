@@ -1,0 +1,115 @@
+[package]
+name = "fauna-account-store"
+description = "The account store — the local replica floor of the account data plane (docs/goal/architecture/account-data-plane.md § The account store): the client-side state-dir + SQLite db floor extracted from fauna-sync-engine, plus the journal / state-entry / frontier / store-meta tables behind a trait-abstracted physical backend."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Dependency floor (the extracted db floor's own invariant, app-guidelines.md
+# § crate layering): fauna-core + rusqlite + anyhow plus foundation facades
+# (tracing, serde, serde_json) — never the engine graph
+# (tokio/reqwest/notify/MLS). rusqlite is target-gated so the trait/types
+# layers compile for wasm32 — web's parallel physical backend rides the same
+# store API (account-data-plane.md § Store logical schema, Physical
+# realization).
+[dependencies]
+# Path dep like fauna-wasm's, because workspace inheritance cannot override
+# default-features: the floor needs none of fauna-core's `network` graph
+# (tokio → mio), and mio cannot build for wasm32.
+fauna-core = { path = "../fauna-core", default-features = false }
+# The segment-adoption pair (W2.2 (account-data-plane.md § Workstreams)): `fauna-carv2` frames the `.dat`,
+# `fauna-cbor` decodes the `.meta` sidecar. Both are inside the floor by the
+# rule's own test — pure, dependency-thin, and already in `fauna-core`'s own
+# graph (`ContentHash` *is* `fauna_cbor::Cid`), so neither widens what this
+# crate can reach and both compile for wasm32.
+fauna-carv2.workspace = true
+fauna-cbor.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_bytes = "0.11"
+serde_json.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rusqlite.workspace = true
+# `sqlite-schema-meta`: the shared additive column reconciler both SQLite
+# genesis blocks (`db.rs`'s `sync.db`, `sqlite.rs`'s store) pair with — the
+# same one the nest's genesis runs. Native-only, like `rusqlite`.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["sqlite-schema-meta"] }
+
+# The W6 platform-root resolver's macOS home lookup (`root.rs` — the
+# passwd-database fallback `SyncPaths` established; that agent code now
+# delegates here, so the dep moved with the derivation).
+[target.'cfg(target_os = "macos")'.dependencies]
+dirs.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# The js-sys time helpers, exactly as fauna-wasm enables them.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+# Same feature shims fauna-wasm carries: getrandom refuses wasm32 unless its
+# js backend is switched on; these enable it for the transitive graph.
+getrandom = { workspace = true, features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+# The web arm (`src/indexeddb.rs`): IndexedDB through its typed bindings, OPFS
+# by property lookup. These are the wasm32 counterpart of `rusqlite` above —
+# the platform's storage binding, inside the floor by the same rule — and
+# every one is already in the workspace graph (`fauna-rpc-wasm`,
+# `fauna-client-accounts`).
+wasm-bindgen.workspace = true
+wasm-bindgen-futures = "0.4"
+js-sys.workspace = true
+web-sys = { version = "0.3", features = [
+    "DomException",
+    "DomStringList",
+    "Event",
+    "EventTarget",
+    "IdbCursor",
+    "IdbCursorDirection",
+    "IdbCursorWithValue",
+    "IdbDatabase",
+    "IdbFactory",
+    "IdbIndex",
+    "IdbIndexParameters",
+    "IdbKeyRange",
+    "IdbObjectStore",
+    "IdbObjectStoreParameters",
+    "IdbOpenDbRequest",
+    "IdbRequest",
+    "IdbTransaction",
+    "IdbTransactionMode",
+    "IdbVersionChangeEvent",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test.workspace = true
+
+[[test]]
+# The browser suite (`tests/web.rs`, wasm32-only): the conformance cases over
+# the IndexedDB arm. Needs the harness feature; empty on native.
+name = "web"
+required-features = ["test-helpers"]
+
+[features]
+# The backend-generic conformance suite (`src/conformance.rs`) for test builds
+# outside this crate — web's browser suite and tests above the store. Never a
+# production feature. (`src/memory.rs` is ungated: the box-recovery cold read
+# holds its throwaway replica there — `lib.rs`.)
+test-helpers = []
+
+# Native-only: none of these build for wasm32 (tokio's full runtime, a temp
+# dir, the segment writer's file I/O), and the browser suite needs none of
+# them — it runs the target-agnostic cases only.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# `test-helpers` unlocks `fauna_core::process_hook::ProcessHook` — the shared
+# process-wide interleaving-fence hook `sqlite.rs`'s `pair_window` module
+# uses (round 116 lift; mirrors `fauna-sync-engine`'s own dev-dep
+# re-declaration of fauna-core/test-helpers for the same lift).
+fauna-core = { workspace = true, features = ["test-helpers"] }
+# Test-only, deliberately outside the dependency floor: the segment *writer*.
+# W2.2 adopts a format this crate does not own, so the adoption tests drive the
+# real `FramedSegment` writer rather than a hand-rolled imitation of it — the
+# only check that catches the writer growing away from this reader.
+fauna-segment-store.workspace = true
+tokio.workspace = true
+tempfile.workspace = true
+hex.workspace = true

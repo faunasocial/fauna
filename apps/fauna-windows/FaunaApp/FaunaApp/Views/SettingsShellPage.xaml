@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.SettingsShellPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+      Settings sidebar-swap shell (settings.md § Navigation model, ratified
+      2026-06-03). Mirrors the admin shell (Model B): entered via the single
+      `settings-tab` in the main nav (MainPage); the settings sub-pages are
+      switched by THIS shell-local NavigationView, which renders as a **vertical
+      (Left) nav rail** that takes over the app sidebar slot in place — MainPage
+      hides its own pane while the shell is shown (NavView.IsPaneVisible=false),
+      so there is one rail, not two. This is the uniform desktop shape (linux
+      settings_shell + web's rail that replaces the app sidebar are the
+      references). The `settings-nav-back` "leave settings" button lives in the
+      rail header (PaneHeader) so it is present on every sub-page; NavBack_Click →
+      MainPage.LeaveSettings() returns to the non-settings app (Conversations,
+      the primary view), restoring the main pane — it is NOT an inter-sub-page
+      jump. Status is the default (first) sub-page; the nav-by-id map is the
+      platform-agnostic, unit-tested FaunaApp.Core SettingsNavigation.
+
+      This shell is wired live to `settings-tab` (MainPage.NavView_SelectionChanged
+      Settings branch); the former single-scroll SettingsPage and standalone
+      status-tab are gone (the Status page is now this shell's default sub-page).
+    -->
+    <NavigationView
+        x:Name="SettingsNav"
+        PaneDisplayMode="Left"
+        IsBackButtonVisible="Collapsed"
+        IsSettingsVisible="False"
+        IsPaneToggleButtonVisible="False"
+        SelectionChanged="SettingsNav_SelectionChanged">
+
+        <NavigationView.PaneHeader>
+            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <Button x:Name="NavBackButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.SettingsNavBack}"
+                        AutomationProperties.Name="{loc:Localize Key=settings/exit_settings}"
+                        ToolTipService.ToolTip="{loc:Localize Key=settings/exit_settings}"
+                        Click="NavBack_Click"
+                        VerticalAlignment="Center">
+                    <FontIcon Glyph="&#xE72B;" FontSize="14" />
+                </Button>
+                <TextBlock VerticalAlignment="Center"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=common/settings}" />
+            </StackPanel>
+        </NavigationView.PaneHeader>
+
+        <NavigationView.MenuItems>
+            <NavigationViewItem x:Name="SubStatus" Tag="status" Content="{loc:Localize Key=common/status}" />
+            <NavigationViewItem x:Name="SubAccount" Tag="account" Content="{loc:Localize Key=common/account}" />
+            <NavigationViewItem x:Name="SubMemberReview" Tag="member-review" Content="{loc:Localize Key=settings/member_review_page/title}" />
+            <NavigationViewItem x:Name="SubPrivacy" Tag="privacy" Content="{loc:Localize Key=settings/privacy}" />
+            <NavigationViewItem x:Name="SubMutedWords" Tag="muted-words" Content="{loc:Localize Key=muted_words/title}" />
+            <NavigationViewItem x:Name="SubPersonalization" Tag="personalization" Content="{loc:Localize Key=personalization/title}" />
+            <NavigationViewItem x:Name="SubLabelerCatalog" Tag="labeler-catalog" Content="{loc:Localize Key=labeler_catalog/title}" />
+            <NavigationViewItem x:Name="SubGeneral" Tag="general" Content="{loc:Localize Key=settings/general}" />
+            <NavigationViewItem x:Name="SubEncryption" Tag="encryption" Content="{loc:Localize Key=settings/encryption_page/title}" />
+            <NavigationViewItem x:Name="SubWeb" Tag="web" Content="{loc:Localize Key=web_settings/title}" />
+            <NavigationViewItem x:Name="SubSubscriptions" Tag="subscription-settings" Content="{loc:Localize Key=subscriptions/title}" />
+            <NavigationViewItem x:Name="SubDevices" Tag="devices" Content="{loc:Localize Key=devices/title}" />
+            <NavigationViewItem x:Name="SubFolders" Tag="folders" Content="{loc:Localize Key=folders/title}" />
+            <!-- The standalone Nostr page (nostr.md § Page structure) — its own rail
+                 entry like mail, never a row on the unified Bridges page. The
+                 `nostr-settings-link` id is the actions/nostr.py navigate fallback for
+                 shells that reach the page from a row rather than a rail. -->
+            <NavigationViewItem x:Name="SubNostr" Tag="nostr"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.NostrSettingsLink}"
+                                Content="{loc:Localize Key=nostr/title}" />
+            <!-- The dedicated AT Protocol page (ui/atproto.md). Slot is "after Nostr" —
+                 the sibling deep-integration page. -->
+            <NavigationViewItem x:Name="SubAtproto" Tag="atproto"
+                                Content="{loc:Localize Key=atproto_settings/title}" />
+            <NavigationViewItem x:Name="SubMail" Tag="mail-settings" Content="{loc:Localize Key=mail_settings/title}" />
+            <NavigationViewItem x:Name="SubMailAliases" Tag="mail-aliases" Content="{loc:Localize Key=mail_aliases/title}" />
+            <NavigationViewItem x:Name="SubMailSpam" Tag="mail-spam" Content="{loc:Localize Key=mail_spam/title}" />
+            <NavigationViewItem x:Name="SubMailExport" Tag="mail-export" Content="{loc:Localize Key=mail_export/title}" />
+            <NavigationViewItem x:Name="SubMailImport" Tag="mail-import" Content="{loc:Localize Key=mail_import/title}" />
+            <NavigationViewItem x:Name="SubMailLists" Tag="mail-lists" Content="{loc:Localize Key=mail_lists/title}" />
+            <NavigationViewItem x:Name="SubMailListMembers" Tag="mail-list-members" Content="{loc:Localize Key=mail_lists/members_title}" />
+            <NavigationViewItem x:Name="SubLinkedNests" Tag="nests" Content="{loc:Localize Key=nests/title}" />
+            <NavigationViewItem x:Name="SubTaskDelegation" Tag="task-delegation" Content="{loc:Localize Key=task_delegation/title}" />
+            <NavigationViewItem x:Name="SubConnectedApps" Tag="connected-apps" Content="{loc:Localize Key=connected_apps/title}" />
+            <NavigationViewItem x:Name="SubLogs" Tag="logs" Content="{loc:Localize Key=logs/title}" />
+        </NavigationView.MenuItems>
+
+        <Frame x:Name="SettingsContentFrame" />
+    </NavigationView>
+</Page>

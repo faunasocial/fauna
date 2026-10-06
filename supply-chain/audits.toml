@@ -1,0 +1,376 @@
+
+# cargo-vet audits file
+
+[[audits.addr2line]]
+who = "claude-sonnet-5-5, claude-opus-5-5 (dep-aggregate quorum)"
+criteria = "safe-to-deploy"
+version = "0.26.1"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification → § Reviewing untrusted source without being subverted; design doc 2026-06-29-injection-resistant-dependency-review.md § Layer B).
+Injection-resistant verdict-integrity gate (S9): adversarial N-of-M model-diverse refute-review; the verdict is computed by the review aggregator (dep-aggregate) from Cargo.lock, un-authorable by the crate.
+Reviewers (2; models: claude-opus-5-5, claude-sonnet-5-5): all disposition=could-not-refute-safe; clearing quorum 2/2 (unanimous). Mechanical pre-scan (dep-scan): verdict=SCAN-CLEAN, suggested_depth=B, build-time-exec=False, capabilities=env×2, fs×7, log-emit×1, process×6, unsafe×8.
+Depth: B (deepest performed across the quorum). Classification: runtime-only per the mechanical census.
+Source bytes: crates.io static.crates.io/crates/addr2line/addr2line-0.26.1.crate; SHA-256 59317f77929f0e679d39364702289274de2f0f0b22cbf50b2b8cff2169a0b27a == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: no blocking findings across 2 reviewer(s); all disposition=could-not-refute-safe. Recorded notes: [unsafe/informational src/loader.rs:159] Mmap::map of input files is inherently unsound if the file is modified concurrently; only reached through the Loader API (not used by wasmtime runtime for its own code). | [unsafe/informational src/loader.rs:159] Loader (feature `loader`, on by default) memory-maps debug files with memmap2; if another process truncates or rewrites a mapped file the read becomes UB/SIGBUS. Not reachable from a wasm guest; only … | [other/informational src/bin/addr2line.rs:111] All process/env capabilities in this crate are in the optional CLI binary (required-features=['bin']); the library has no network, process, env or build-time code (no build.rs). Site coverage: every reviewer dispositioned all 14 scan-listed review site(s) with a source-verified quote. Rubric (network/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe, injection): clear across the quorum."""
+
+[[audits.anyhow]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "1.0.102"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: B. Classification: build-time-exec (build.rs rustc-feature-probe) + runtime lib, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/anyhow/anyhow-1.0.102.crate; SHA-256 7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. build.rs is the standard dtolnay rustc-feature-probe (compiles src/nightly.rs via $RUSTC into OUT_DIR to detect error_generic_member_access; parses `rustc --version`); reads only cargo-provided env (RUSTC/OUT_DIR/TARGET/RUSTC_BOOTSTRAP/CARGO_ENCODED_RUSTFLAGS), writes only OUT_DIR, cleans up. The ~100 unsafe lines are the type-erased Error vtable (ptr.rs thin NonNull<T> Own/Ref/Mut wrappers + error.rs per-type monomorphized object_drop/ref/downcast/boxed fns) — standard manual-vtable type erasure, no transmute-to-unrelated-type, no integer-to-pointer forging. All net/process/fs tokens in executing code are doc-comment examples only. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.anyhow]]
+who = "claude-sonnet-5-5, claude-opus-5-5 (dep-aggregate quorum)"
+criteria = "safe-to-deploy"
+version = "1.0.104"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification → § Reviewing untrusted source without being subverted; design doc 2026-06-29-injection-resistant-dependency-review.md § Layer B).
+Injection-resistant verdict-integrity gate (S9): adversarial N-of-M model-diverse refute-review; the verdict is computed by the review aggregator (dep-aggregate) from Cargo.lock, un-authorable by the crate.
+Reviewers (2; models: claude-opus-5-5, claude-sonnet-5-5): all disposition=could-not-refute-safe; clearing quorum 2/2 (unanimous). Mechanical pre-scan (dep-scan): verdict=FLAGGED, suggested_depth=B, build-time-exec=True, capabilities=env×3, fs×8, log-emit×1, process×7, unsafe×104.
+Depth: B (deepest performed across the quorum). Classification: build-time-exec per the mechanical census.
+Source bytes: crates.io static.crates.io/crates/anyhow/anyhow-1.0.104.crate; SHA-256 330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470 == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: no blocking findings across 2 reviewer(s); all disposition=could-not-refute-safe. Recorded notes: [suspicious-build-rs/informational build.rs:117] Build script runs rustc (honoring RUSTC_WRAPPER/RUSTC_WORKSPACE_WRAPPER and RUSTFLAGS) to compile a probe file; standard compiler feature probe, output cleaned from OUT_DIR, no network/credentials. | [suspicious-build-rs/informational build.rs:117] build.rs runs $RUSTC (via RUSTC_WRAPPER/RUSTC_WORKSPACE_WRAPPER when set, as cargo does) on src/nightly.rs into OUT_DIR/probe and `$RUSTC --version`; reads only cargo-provided env (RUSTC, OUT_DIR, TAR… Site coverage: every reviewer dispositioned all 107 scan-listed review site(s) with a source-verified quote. Rubric (network/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe, injection): clear across the quorum."""
+
+[[audits.async-trait]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "0.1.89"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: A (full read of all of src/). Classification: build-time-exec (proc-macro), shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/async-trait/async-trait-0.1.89.crate; SHA-256 9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. Pure proc-macro, no build.rs. Standard proc_macro/proc_macro2/quote/syn toolkit; zero unsafe in crate source; no network/filesystem/process/env/credential access; no obfuscation; no dynamic codegen beyond quote!. Transforms async fn in traits to fn -> Pin<Box<dyn Future>>, matching documented purpose. Rubric (network/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.clap_derive]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "3.2.25"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: B. Classification: build-time-exec (proc-macro, build=false). NOT in the nest closure — pulled only by the vendored uniffi-bindgen-cs-fauna C# bindgen dev tool (clap_derive 3.2.25 -> clap 3.2.25 -> uniffi-bindgen-cs); reviewed alongside 4.6.0 to clear the dep-inventory name-keyed exemption phantom.
+Source bytes: crates.io static.crates.io/crates/clap_derive/clap_derive-3.2.25.crate; SHA-256 ae6371b8bdc8b7d3959e9cf7b22d4435ef3e79e138688421ec654acf8c81b008 == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. Pure proc-macro, zero unsafe, same clap-derive shape as 4.6.0. Command::new(#name) and include_str!("../README.md") are GENERATED tokens / doc include. Method::from_env reads ONLY hard-coded cargo-provided vars (CARGO_PKG_DESCRIPTION/AUTHORS/VERSION) at macro-expansion for the #[clap(author,version,about)] derive-from-Cargo.toml feature — no arbitrary env access, no exfiltration. No fs/net/process/credential at expansion. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.clap_derive]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "4.6.0"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: B. Classification: build-time-exec (proc-macro), build=false, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/clap_derive/clap_derive-4.6.0.crate; SHA-256 1110bd8a634a1ab8cb04345d8d878267d57c3cf1b38d91b71af6686408bbca6a == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. Pure proc-macro. syn/quote #[derive(Parser/Args/Subcommand/ValueEnum)] codegen. The Command::new / env::var("CARGO_PKG_NAME") / include_str!("../README.md") hits are GENERATED tokens (clap CLI-builder output executed at the USER's runtime + a doc include), not macro-time execution. No fs/net/process/credential at expansion. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.cpp_demangle]]
+who = "claude-sonnet-5-5, claude-opus-5-5 (dep-aggregate quorum)"
+criteria = "safe-to-deploy"
+version = "0.5.1"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification → § Reviewing untrusted source without being subverted; design doc 2026-06-29-injection-resistant-dependency-review.md § Layer B).
+Injection-resistant verdict-integrity gate (S9): adversarial N-of-M model-diverse refute-review; the verdict is computed by the review aggregator (dep-aggregate) from Cargo.lock, un-authorable by the crate.
+Reviewers (2; models: claude-opus-5-5, claude-sonnet-5-5): all disposition=could-not-refute-safe; clearing quorum 2/2 (unanimous). Mechanical pre-scan (dep-scan): verdict=SCAN-CLEAN, suggested_depth=B, build-time-exec=True, capabilities=env×3, fs×6, log-emit×1, process×2, unsafe×2.
+Depth: B (deepest performed across the quorum). Classification: build-time-exec per the mechanical census.
+Source bytes: crates.io static.crates.io/crates/cpp_demangle/cpp_demangle-0.5.1.crate; SHA-256 0667304c32ea56cb4cd6d2d7c0cfe9a2f8041229db8c033af7f8d69492429def == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: no blocking findings across 2 reviewer(s); all disposition=could-not-refute-safe. Recorded notes: [unsafe/informational src/ast.rs:920] reference_newtype! casts &T to &Newtype(T) without #[repr(transparent)]; works in practice (single-field struct) but is not a guaranteed layout. Not remotely exploitable in practice. | [suspicious-build-rs/informational build.rs:1] build.rs only reads in/ and tests/ files from the crate dir (absent from published package) and writes generated test files into OUT_DIR; no process, no network. | [unsafe/informational src/ast.rs:920] reference_newtype! casts &$oldtype to &$newtype without #[repr(transparent)] on the newtype; sound in practice for a single-field struct but relies on unspecified layout. Not attacker-controllable. | [suspicious-build-rs/informational build.rs:1] build.rs only generates test files into OUT_DIR from in/ and tests/ inside the crate dir; both directories are absent from the published crate, so it returns early. Reads only CARGO_MANIFEST_DIR/OUT_D… | [other/informational src/lib.rs:65] Demangles guest-provided symbol names (wasm name section) when wasmtime demangling is used; parser is safe Rust with a recursion limit; worst case from hostile input is an error/DoS, not memory unsafe… Site coverage: every reviewer dispositioned all 2 scan-listed review site(s) with a source-verified quote. Rubric (network/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe, injection): clear across the quorum."""
+
+[[audits.futures-macro]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "0.3.32"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: A (full read of all of src/). Classification: build-time-exec (proc-macro), shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/futures-macro/futures-macro-0.3.32.crate; SHA-256 e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. Pure proc-macro, no build.rs. Standard proc_macro/proc_macro2/quote/syn toolkit; zero unsafe in the crate's own source (the unsafe { Pin::new_unchecked } tokens it emits are in the GENERATED output — the standard futures-rs stack-pinning idiom, each with a safety comment — not executed at build time); no network/filesystem/process/env/credential access; no obfuscation; no dynamic codegen beyond quote!. Implements join!/try_join!/select!/select_biased!/stream_select!/#[test] macros, matching documented purpose. Rubric (network/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.gimli]]
+who = "claude-sonnet-5-5, claude-opus-5-5 (dep-aggregate quorum)"
+criteria = "safe-to-deploy"
+version = "0.33.0"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification → § Reviewing untrusted source without being subverted; design doc 2026-06-29-injection-resistant-dependency-review.md § Layer B).
+Injection-resistant verdict-integrity gate (S9): adversarial N-of-M model-diverse refute-review; the verdict is computed by the review aggregator (dep-aggregate) from Cargo.lock, un-authorable by the crate.
+Reviewers (2; models: claude-opus-5-5, claude-sonnet-5-5): all disposition=could-not-refute-safe; clearing quorum 2/2 (unanimous). Mechanical pre-scan (dep-scan): verdict=SCAN-CLEAN, suggested_depth=B, build-time-exec=False, capabilities=unsafe×23.
+Depth: B (deepest performed across the quorum). Classification: runtime-only per the mechanical census.
+Source bytes: crates.io static.crates.io/crates/gimli/gimli-0.33.0.crate; SHA-256 0bf7f043f89559805f8c7cacc432749b2fa0d0a0a9ee46ce47164ed5ba7f126c == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: no blocking findings across 2 reviewer(s); all disposition=could-not-refute-safe. Recorded notes: [unsafe/informational src/read/util.rs:183] ArrayVec::swap_remove only asserts len > 0, not index < len; an out-of-range index below capacity would swap an uninitialized slot into the popped position. It is pub(crate) and its only caller (cfi.r… | [other/informational src/read/cfi.rs:2639] gimli parses untrusted DWARF (e.g. guest wasm debug info if wasmtime debug-info features are enabled); all parsing is safe Rust over bounds-checked readers; the 20 non-doc unsafe sites are confined to… Site coverage: every reviewer dispositioned all 23 scan-listed review site(s) with a source-verified quote. Rubric (network/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe, injection): clear across the quorum."""
+
+[[audits.indexmap]]
+who = "claude-sonnet-5-5, claude-opus-5-5 (dep-aggregate quorum)"
+criteria = "safe-to-deploy"
+version = "2.14.2"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification → § Reviewing untrusted source without being subverted; design doc 2026-06-29-injection-resistant-dependency-review.md § Layer B).
+Injection-resistant verdict-integrity gate (S9): adversarial N-of-M model-diverse refute-review; the verdict is computed by the review aggregator (dep-aggregate) from Cargo.lock, un-authorable by the crate.
+Reviewers (2; models: claude-opus-5-5, claude-sonnet-5-5): all disposition=could-not-refute-safe; clearing quorum 2/2 (unanimous). Mechanical pre-scan (dep-scan): verdict=SCAN-CLEAN, suggested_depth=B, build-time-exec=False, capabilities=unsafe×13.
+Depth: B (deepest performed across the quorum). Classification: runtime-only per the mechanical census.
+Source bytes: crates.io static.crates.io/crates/indexmap/indexmap-2.14.2.crate; SHA-256 cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855 == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: no blocking findings across 2 reviewer(s); all disposition=could-not-refute-safe. Site coverage: every reviewer dispositioned all 12 scan-listed review site(s) with a source-verified quote. Rubric (network/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe, injection): clear across the quorum."""
+
+[[audits.indoc]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "2.0.7"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: A. Classification: build-time-exec (proc-macro), build=false, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/indoc/indoc-2.0.7.crate; SHA-256 79cf5c93f93228cf8efb3ba362535fb11199ac548a09ce117c9b1adc3030d706 == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. Pure proc-macro, zero unsafe, fully read. Indentation-trimming literal macro (token-stream manipulation). The env! hits are in doc-comment examples only. No fs/net/process/credential/env at expansion. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.libc]]
+who = "claude-sonnet-5-5, claude-opus-5-5 (dep-aggregate quorum)"
+criteria = "safe-to-deploy"
+version = "0.2.189"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification → § Reviewing untrusted source without being subverted; design doc 2026-06-29-injection-resistant-dependency-review.md § Layer B).
+Injection-resistant verdict-integrity gate (S9): adversarial N-of-M model-diverse refute-review; the verdict is computed by the review aggregator (dep-aggregate) from Cargo.lock, un-authorable by the crate.
+Reviewers (2; models: claude-opus-5-5, claude-sonnet-5-5): all disposition=could-not-refute-safe; clearing quorum 2/2 (unanimous). Mechanical pre-scan (dep-scan): verdict=FLAGGED, suggested_depth=B, build-time-exec=True, capabilities=env×14, log-emit×7, net×1, process×12, unsafe×473.
+Depth: B (deepest performed across the quorum). Classification: build-time-exec per the mechanical census.
+Source bytes: crates.io static.crates.io/crates/libc/libc-0.2.189.crate; SHA-256 3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2 == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: no blocking findings across 2 reviewer(s); all disposition=could-not-refute-safe. Recorded notes: [suspicious-build-rs/informational build.rs:344] Build script unconditionally executes `emcc -dumpversion` via PATH on any target; harmless version probe but a PATH-resolved executable run at build time. | [unsafe/informational src/unix/bsd/apple/mod.rs:1783] extra_traits (off by default) PartialEq/Hash impls read union fields; not enabled by wasmtime and no untrusted input. | [process/concern build.rs:344] libc build.rs unconditionally runs `emcc -dumpversion` (emcc.bat on Windows) resolved from the build machine PATH on every target, not just emscripten; output only parsed to an integer and used to set… | [unsafe/concern src/unix/linux_like/linux/mod.rs:1137] af_alg_iv (deprecated) with feature extra_traits: as_slice() builds a slice of `ivlen` bytes after a zero-length array, an out-of-bounds read if the value was constructed in Rust with nonzero ivlen (D… | [suspicious-build-rs/informational build.rs:66] cargo:warning lines (build.rs:66,73,106,119,192,201) print only fixed strings, a parsed FreeBSD version integer, detected rustc minor/nightly, and cfg names from ALLOWED_CFGS; LIBC_BUILD_VERBOSE gates… | [other/informational src/unix/linux_like/linux/gnu/b64/x86_64/mod.rs:235] Spot-checked memory-safety-relevant definitions wasmtime relies on: linux-gnu x86_64 mcontext_t (23 gregs, REG_RIP=16, REG_RSP=15), aarch64 ucontext_t/mcontext_t (sigmask before 16-aligned mcontext wi… | [other/informational src/unix/linux_like/linux_l4re_shared.rs:1550] ELF32_R_INFO computes `sym << (8 + t) & 0xff` (wrong vs the C macro (sym<<8)+(t&0xff)); long-standing upstream correctness bug in a pure-arithmetic helper; not memory-safety relevant and unused by was… Site coverage: every reviewer dispositioned all 485 scan-listed review site(s) with a source-verified quote. 5 site concern(s): [site concern build.rs:344] emcc_version_code() is called unconditionally (every target, not only emscripten) and runs whatever `emcc` (or emcc.bat) resolves on the build machine PATH with -dumpversion; output only parsed to an … | [site concern src/unix/linux_like/android/mod.rs:616] Deprecation note on af_alg_iv (android): under feature extra_traits its Debug/PartialEq/Hash call as_slice() which reads ivlen bytes past a zero-length array (see the next site / concern finding). | [site concern src/unix/linux_like/android/mod.rs:698] af_alg_iv::as_slice (android, only with feature extra_traits): from_raw_parts over `ivlen` bytes following a [u8;0] field; out-of-bounds read if a Rust-constructed af_alg_iv carries a nonzero ivlen. D… | [site concern src/unix/linux_like/linux/mod.rs:1049] Deprecation note on af_alg_iv (linux): under feature extra_traits its Debug/PartialEq/Hash call as_slice() which reads ivlen bytes past a zero-length array (see the next site / concern finding). | [site concern src/unix/linux_like/linux/mod.rs:1137] af_alg_iv::as_slice (linux, only with feature extra_traits): from_raw_parts over `ivlen` bytes following a [u8;0] field; out-of-bounds read if a Rust-constructed af_alg_iv carries a nonzero ivlen. Dep… Rubric (network/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe, injection): clear across the quorum."""
+
+[[audits.mach2]]
+who = "claude-sonnet-5-5, claude-opus-5-5 (dep-aggregate quorum)"
+criteria = "safe-to-deploy"
+version = "0.6.0"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification → § Reviewing untrusted source without being subverted; design doc 2026-06-29-injection-resistant-dependency-review.md § Layer B).
+Injection-resistant verdict-integrity gate (S9): adversarial N-of-M model-diverse refute-review; the verdict is computed by the review aggregator (dep-aggregate) from Cargo.lock, un-authorable by the crate.
+Reviewers (2; models: claude-opus-5-5, claude-sonnet-5-5): all disposition=could-not-refute-safe; clearing quorum 2/2 (unanimous). Mechanical pre-scan (dep-scan): verdict=SCAN-CLEAN, suggested_depth=B, build-time-exec=False, capabilities=log-emit×1, unsafe×41.
+Depth: B (deepest performed across the quorum). Classification: runtime-only per the mechanical census.
+Source bytes: crates.io static.crates.io/crates/mach2/mach2-0.6.0.crate; SHA-256 dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: no blocking findings across 2 reviewer(s); all disposition=could-not-refute-safe. Recorded notes: [unsafe/informational src/structs.rs:9] Bindings only (no deps, no build.rs, no_std); spot-checked layouts used by wasmtime trap handling against Apple headers: arm_thread_state64_t (x[29],fp,lr,sp,pc,cpsr,pad => count 68), x86_thread_state… Site coverage: every reviewer dispositioned all 41 scan-listed review site(s) with a source-verified quote. Rubric (network/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe, injection): clear across the quorum."""
+
+[[audits.memfd]]
+who = "claude-sonnet-5-5, claude-opus-5-5 (dep-aggregate quorum)"
+criteria = "safe-to-deploy"
+version = "0.6.6"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification → § Reviewing untrusted source without being subverted; design doc 2026-06-29-injection-resistant-dependency-review.md § Layer B).
+Injection-resistant verdict-integrity gate (S9): adversarial N-of-M model-diverse refute-review; the verdict is computed by the review aggregator (dep-aggregate) from Cargo.lock, un-authorable by the crate.
+Reviewers (2; models: claude-opus-5-5, claude-sonnet-5-5): all disposition=could-not-refute-safe; clearing quorum 2/2 (unanimous). Mechanical pre-scan (dep-scan): verdict=SCAN-CLEAN, suggested_depth=B, build-time-exec=False, capabilities=fs×3, unsafe×3.
+Depth: B (deepest performed across the quorum). Classification: runtime-only per the mechanical census.
+Source bytes: crates.io static.crates.io/crates/memfd/memfd-0.6.6.crate; SHA-256 57804b2c9b69967f1536a56f86297e367a33b19e98852ed624b84551cdbc0d90 == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: no blocking findings across 2 reviewer(s); all disposition=could-not-refute-safe. Recorded notes: [filesystem/informational src/memfd.rs:70] Only filesystem operations are memfd_create and fcntl seal queries/adds via rustix; no paths, no network, no env, no build script. close-on-exec is on by default. Site coverage: every reviewer dispositioned all 3 scan-listed review site(s) with a source-verified quote. Rubric (network/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe, injection): clear across the quorum."""
+
+[[audits.object]]
+who = "claude-sonnet-5-5, claude-opus-5-5 (dep-aggregate quorum)"
+criteria = "safe-to-deploy"
+version = "0.40.0"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification → § Reviewing untrusted source without being subverted; design doc 2026-06-29-injection-resistant-dependency-review.md § Layer B).
+Injection-resistant verdict-integrity gate (S9): adversarial N-of-M model-diverse refute-review; the verdict is computed by the review aggregator (dep-aggregate) from Cargo.lock, un-authorable by the crate.
+Reviewers (2; models: claude-opus-5-5, claude-sonnet-5-5): all disposition=could-not-refute-safe; clearing quorum 2/2 (unanimous). Mechanical pre-scan (dep-scan): verdict=SCAN-CLEAN, suggested_depth=B, build-time-exec=False, capabilities=fs×47, log-emit×3, unsafe×20.
+Depth: B (deepest performed across the quorum). Classification: runtime-only per the mechanical census.
+Source bytes: crates.io static.crates.io/crates/object/object-0.40.0.crate; SHA-256 dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: no blocking findings across 2 reviewer(s); all disposition=could-not-refute-safe. Recorded notes: [filesystem/informational src/read/archive.rs:7] The dossier's fs capability hits are doc comments / std::io Read+Seek traits for ReadCache; the crate opens no files itself and has no build script, network or process code. | [other/informational src/pod.rs:43] object parses compiled artifacts (wasmtime .cwasm ELF) and guest-derived data; all casts go through the size/alignment-checked pod helpers. Whether a precompiled artifact is trusted is a wasmtime-leve… Site coverage: every reviewer dispositioned all 20 scan-listed review site(s) with a source-verified quote. Rubric (network/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe, injection): clear across the quorum."""
+
+[[audits.pin-project-internal]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "1.1.13"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: B. Classification: build-time-exec (proc-macro), build=false, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/pin-project-internal/pin-project-internal-1.1.13.crate; SHA-256 c96395f0a926bc13b1c17622aaddda1ecb55d49c8f1bf9777e4d877800a43f8b == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. Pure proc-macro. syn/quote #[pin_project] codegen. The 'unsafe' tokens are generated OUTPUT (emitting `unsafe fn drop` for the PinnedDrop idiom) and AST-qualifier handling (reading/setting sig.unsafety; bail! if a user wrongly marks PinnedDrop::drop unsafe) — not macro-time execution. No fs/net/process/credential/env at expansion. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.rustc-demangle]]
+who = "claude-sonnet-5-5, claude-opus-5-5 (dep-aggregate quorum)"
+criteria = "safe-to-deploy"
+version = "0.1.28"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification → § Reviewing untrusted source without being subverted; design doc 2026-06-29-injection-resistant-dependency-review.md § Layer B).
+Injection-resistant verdict-integrity gate (S9): adversarial N-of-M model-diverse refute-review; the verdict is computed by the review aggregator (dep-aggregate) from Cargo.lock, un-authorable by the crate.
+Reviewers (2; models: claude-opus-5-5, claude-sonnet-5-5): all disposition=could-not-refute-safe; clearing quorum 2/2 (unanimous). Mechanical pre-scan (dep-scan): verdict=SCAN-CLEAN, suggested_depth=B, build-time-exec=False, capabilities=log-emit×1, process×2.
+Depth: B (deepest performed across the quorum). Classification: runtime-only per the mechanical census.
+Source bytes: crates.io static.crates.io/crates/rustc-demangle/rustc-demangle-0.1.28.crate; SHA-256 b74b56ffa8bb2830709a538c2cbcae9aa062db0d2a42563bfb09bdaae44020eb == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: no blocking findings across 2 reviewer(s); all disposition=could-not-refute-safe. Recorded notes: [other/informational src/v0.rs:16] No unsafe, no I/O, no build script; parser of untrusted symbol strings bounds recursion with MAX_DEPTH=500. include_str! of v0-large-test-symbols is only in a #[test]. Site coverage: every reviewer dispositioned all 2 scan-listed review site(s) with a source-verified quote. Rubric (network/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe, injection): clear across the quorum."""
+
+[[audits.rustversion]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "1.0.22"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: B. Classification: build-time-exec (build/build.rs NON-ROOT, build="build/build.rs") + proc-macro, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/rustversion/rustversion-1.0.22.crate; SHA-256 b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. build script spawns $RUSTC --version (honoring RUSTC_WRAPPER, with clippy-driver/mirai retries), parses it with a pure-text parser (build/rustc.rs), writes the parsed Version to OUT_DIR/version.expr; reads only RUSTC/RUSTC_WRAPPER/OUT_DIR/HOST; no network/credential/external-write. This IS the crate's documented purpose (conditional compilation by rustc version). The proc-macro 'unsafe' token is keyword-parsing in the const-fn qualifier scanner (constfn.rs). Note: build script lives at the non-root path build/build.rs. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.serde]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "1.0.228"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: B. Classification: build-time-exec (build.rs rustc-version-probe) + runtime lib, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/serde/serde-1.0.228.crate; SHA-256 9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. build.rs is the dtolnay rustc-version probe (parse `rustc --version`, emit no_core_*/no_std_atomic* cfgs) + writes a version-namespaced private.rs to OUT_DIR; reads only RUSTC/OUT_DIR/CARGO_PKG_VERSION_PATCH/TARGET. The 2 unsafe sites are str::from_utf8_unchecked over provably-ASCII buffers (format.rs Buf::as_str reads only write_str-copied &str bytes; ser/impls.rs Ipv4Addr serialize writes only ASCII digits+'.' delimiters, with a test asserting format_u8 correctness). `std::net` is `pub use` for the IpAddr/SocketAddr Serialize impls (type re-export, not networking). No process(beyond rustc)/fs(beyond OUT_DIR)/credential. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.serde_core]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "1.0.228"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: B. Classification: build-time-exec (build.rs rustc-version-probe) + runtime lib, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/serde_core/serde_core-1.0.228.crate; SHA-256 41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. serde re-exports this crate's code; identical surface. build.rs is the dtolnay rustc-version probe + writes a version-namespaced private.rs to OUT_DIR; reads only RUSTC/OUT_DIR/CARGO_PKG_VERSION_PATCH/TARGET. The 2 unsafe sites are str::from_utf8_unchecked over provably-ASCII buffers (format.rs Buf::as_str over write_str-copied &str bytes; ser/impls.rs Ipv4Addr serialize over ASCII digits+'.'). `std::net` is `pub use` for IpAddr/SocketAddr Serialize impls. No process(beyond rustc)/fs(beyond OUT_DIR)/credential. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.serde_derive]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "1.0.228"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: B. Classification: build-time-exec (proc-macro), build=false, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/serde_derive/serde_derive-1.0.228.crate; SHA-256 d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79 == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. Pure proc-macro, zero unsafe. syn/quote #[derive(Serialize/Deserialize)] codegen. The lone env! is env!("CARGO_PKG_VERSION_PATCH") namespacing the generated __private module reference (compile-time constant, matches serde's build.rs-written private.rs). No fs/net/process/credential at expansion. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.serde_repr]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "0.1.20"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: A. Classification: build-time-exec (proc-macro), build=false, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/serde_repr/serde_repr-0.1.20.crate; SHA-256 175ee3e80ae9982737ca543e96133087cbd9a485eecc3bc4de9c1a37b47ea59c == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. Pure proc-macro, zero unsafe, all 275 LOC read. syn/quote derive of integer-repr Serialize/Deserialize. No fs/net/process/credential/env. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.serde_with_macros]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "3.18.0"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: B. Classification: build-time-exec (proc-macro), build=false, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/serde_with_macros/serde_with_macros-3.18.0.crate; SHA-256 d3db8978e608f1fe7357e211969fd9abdcae80bac1ba7a3369bb7eb6b404eb65 == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. Pure proc-macro, zero unsafe. syn/quote attribute macros (#[serde_as] et al.). No fs/net/process/credential/env at expansion. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.target-lexicon]]
+who = "claude-sonnet-5-5, claude-opus-5-5 (dep-aggregate quorum)"
+criteria = "safe-to-deploy"
+version = "0.13.5"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification → § Reviewing untrusted source without being subverted; design doc 2026-06-29-injection-resistant-dependency-review.md § Layer B).
+Injection-resistant verdict-integrity gate (S9): adversarial N-of-M model-diverse refute-review; the verdict is computed by the review aggregator (dep-aggregate) from Cargo.lock, un-authorable by the crate.
+Reviewers (2; models: claude-opus-5-5, claude-sonnet-5-5): all disposition=could-not-refute-safe; clearing quorum 2/2 (unanimous). Mechanical pre-scan (dep-scan): verdict=RED, suggested_depth=B, build-time-exec=True, capabilities=env×3, fs×2, process×2. Pre-scan RED cleared in the venue: each of its 2 RED finding(s) was ruled false-positive by all 2 reviewers, each quoting the whole source line, verified against the scanned tree (unicode-hazard src/targets.rs:2119 | unicode-hazard src/targets.rs:2123).
+Depth: B (deepest performed across the quorum). Classification: build-time-exec per the mechanical census.
+Source bytes: crates.io static.crates.io/crates/target-lexicon/target-lexicon-0.13.5.crate; SHA-256 adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: no blocking findings across 2 reviewer(s); all disposition=could-not-refute-safe. Recorded notes: [suspicious-build-rs/informational build.rs:63] Build script runs rustc --version and includes src/*.rs to parse TARGET and generate host.rs in OUT_DIR; no network, no other process. | [suspicious-build-rs/informational build.rs:55] build.rs include!s src/data_model.rs, triple.rs, targets.rs to parse $TARGET and writes OUT_DIR/host.rs with HOST constants (custom vendor emitted via {:?}, so escaped); runs only `$RUSTC --version`. … Site coverage: every reviewer dispositioned all 2 scan-listed review site(s) with a source-verified quote. Rubric (network/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe, injection): clear across the quorum."""
+
+[[audits.thiserror]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "1.0.69"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: B. Classification: build-time-exec (build.rs rustc-feature-probe) + runtime lib, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/thiserror/thiserror-1.0.69.crate; SHA-256 b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52 == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. build.rs is the dtolnay rustc-feature-probe (compiles build/probe.rs via $RUSTC into OUT_DIR for error_generic_member_access); reads only RUSTC/OUT_DIR/TARGET/RUSTC_BOOTSTRAP/CARGO_ENCODED_RUSTFLAGS, writes only OUT_DIR. Zero unsafe in crate source. No network, no process beyond rustc, no credential, no fs beyond OUT_DIR. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.thiserror]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "2.0.18"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: B. Classification: build-time-exec (build.rs rustc-feature-probe) + runtime lib, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/thiserror/thiserror-2.0.18.crate; SHA-256 4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4 == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. build.rs is the dtolnay rustc-feature-probe (compiles build/probe.rs via $RUSTC) + writes a version-namespaced private.rs (`__private<patch>`) to OUT_DIR via string templating; reads only RUSTC/OUT_DIR/CARGO_PKG_VERSION_PATCH/RUSTC_BOOTSTRAP/RUSTFLAGS, writes only OUT_DIR. Zero unsafe in crate source. No network/process(beyond rustc)/credential/fs(beyond OUT_DIR). Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.thiserror-impl]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "1.0.69"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: B. Classification: build-time-exec (proc-macro), build=false, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/thiserror-impl/thiserror-impl-1.0.69.crate; SHA-256 4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1 == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. Pure proc-macro. syn/quote-based #[derive(Error)] codegen. The single 'unsafe' token is a keyword in scan_expr.rs's expression-scanner state table (recognizing user `unsafe` blocks while parsing display-format args), not macro-time execution. No fs/net/process/credential/env at expansion. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.thiserror-impl]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "2.0.18"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: B. Classification: build-time-exec (proc-macro), build=false, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/thiserror-impl/thiserror-impl-2.0.18.crate; SHA-256 ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5 == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. Pure proc-macro. syn/quote-based #[derive(Error)] codegen. The single 'unsafe' token is a keyword in scan_expr.rs's expression-scanner state table (recognizing user `unsafe` blocks), not macro-time execution. No fs/net/process/credential/env at expansion. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.tokio-macros]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "2.6.1"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: B. Classification: build-time-exec (proc-macro), build=false, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/tokio-macros/tokio-macros-2.6.1.crate; SHA-256 5c55a2eff8b69ce66c84f85e1da1c233edc36ceb85a2058d11b0d6a3c7e7569c == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. Pure proc-macro, zero unsafe. syn/quote #[tokio::main]/#[tokio::test] codegen. No fs/net/process/credential/env at expansion. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.tracing-attributes]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "0.1.31"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: B. Classification: build-time-exec (proc-macro), build=false, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/tracing-attributes/tracing-attributes-0.1.31.crate; SHA-256 7490cfa5ec963746568740651ac6781f701c9c5ea257c58e057f3ba8cf69e8da == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. Pure proc-macro, zero unsafe. syn/quote #[instrument] codegen. No fs/net/process/credential/env at expansion. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.typeid]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "1.0.3"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: A. Classification: build-time-exec (build.rs rustc-version-parse) + runtime lib, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/typeid/typeid-1.0.3.crate; SHA-256 bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. 255 LOC fully read. build.rs parses `rustc --version` only (emits no_const_type_id cfg). The single executed unsafe is the documented mem::transmute::<&dyn NonStaticAny, &(dyn NonStaticAny + 'static)> lifetime-erasure (the crate's whole purpose: produce a TypeId for a non-'static type), immediately consumed by a 'static-bounded get_type_id call; all other unsafe is doc examples. No net/process(beyond rustc)/fs/env/credential. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.wasm-bindgen-macro]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "0.2.114"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: A. Classification: build-time-exec (proc-macro), build=false, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/wasm-bindgen-macro/wasm-bindgen-macro-0.2.114.crate; SHA-256 18a2d50fcf105fb33bb15f00e7a77b772945a2ee45dcf454961fd843e74c18e6 == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. Tiny proc-macro (75 LOC, zero unsafe). Delegates to wasm-bindgen-macro-support for #[wasm_bindgen] codegen; declares the local-data __wasm_bindgen_class_marker entry point. No fs/net/process/credential/env at expansion. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""
+
+[[audits.wasm-bindgen-shared]]
+who = "claude-opus-4-8[1m]"
+criteria = "safe-to-deploy"
+version = "0.2.114"
+notes = """
+Provenance-logged review (release-integrity.md § Dependency verification; design doc 2026-06-28-dependency-dossier-and-scoring.md § Review log).
+Reviewer model: claude-opus-4-8[1m] (Claude Opus 4.8, 1M ctx). Reviewed with Claude Code, 2026-06-28.
+Depth: B. Classification: build-time-exec (build.rs git-rev + source-hash) + runtime lib, shipped in nest closure => priority-1.
+Source bytes: crates.io static.crates.io/crates/wasm-bindgen-shared/wasm-bindgen-shared-0.2.114.crate; SHA-256 75a326b8c223ee17883a4251907455a2431acc2791c98c26279376490c378c16 == Cargo.lock checksum (provenance binding holds; a hash mismatch reverts this crate to unreviewed).
+Findings: CLEAN. build.rs runs `git rev-parse HEAD` (first 9 chars -> WBG_VERSION env) and a std DefaultHasher hash of its own src/lib.rs (-> SCHEMA_FILE_HASH) for wasm-bindgen <-> CLI schema-version compat; reads only CARGO_MANIFEST_DIR + own source; no network/credential/external-write. Zero unsafe in src. Rubric (net/process/credential/fs/env, obfuscation, dynamic codegen, suspicious build.rs, unexpected unsafe): all clear."""

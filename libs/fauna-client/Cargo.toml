@@ -1,0 +1,94 @@
+[package]
+name = "fauna-client"
+description = "Async Rust client for communicating with fauna-nest servers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Publishes `crate::testing` — the mocked-socket `SupervisedChannel` that lets a
+# test drive a real `NestClient` through its connect/reconnect lifecycle. Off by
+# default and pulled only by `[dev-dependencies]`, so the doubles cannot reach a
+# release artifact (the structural posture `fauna-client-testkit` documents, and
+# `e2e-conventions.md` § point 15). Forwards the substrate's own `test-util`,
+# which owns the in-memory transport `crate::testing` re-exports.
+test-util = ["fauna-ws-substrate/test-util"]
+# Opens `NestClient::set_reconnect_backoff_for_test` — the e2e agent's reconnect
+# pace override (convention 14's lever for the `Unreachable` journey) — to a
+# RELEASE-profile e2e build. A debug build reaches it through
+# `debug_assertions`; a plain `--release` build compiles it out (convention 15).
+# Also forwards the client clock's e2e offset (`fauna_protocol::client_clock`),
+# which the bearer cache's spend rule reads.
+e2e-agent = ["fauna-protocol/e2e-agent"]
+
+[dependencies]
+fauna-i18n = { path = "../fauna-i18n" }
+fauna-core.workspace = true
+fauna-protocol.workspace = true
+fauna-cbor.workspace = true
+# AuthClient delegates the bearer-token cache to a `BearerSource`
+# (`fauna-nest-http`'s trait). Production token *acquisition* now rides the
+# pre-identity WS-RPC silent challenge (`fauna.auth.{challenge,verify}`) via `WsChallengeBearer`
+# (`ws_challenge_bearer.rs`), not the legacy HTTP `POST /auth/token`; the
+# `http` reqwest client below stays for the still-HTTP content API + register.
+# fauna-client is native-only (apps/fauna-windows and native hosts; no wasm
+# consumer — the web SPA's client logic is the separate fauna-client-core
+# crate), so these are plain, un-gated deps — no target cfg needed.
+fauna-nest-http = { path = "../fauna-nest-http" }
+# Seal + sidecar pipeline for the composer's blob attachments
+# (`media_upload`). Native-only, like this crate.
+fauna-media = { path = "../fauna-media" }
+# Native pre-identity (anonymous) WS-RPC connector — `WsChallengeBearer` opens
+# one to mint its bearer over the silent challenge. Leaf crate with no
+# fauna-nest-http dep, so this edge is acyclic.
+fauna-anon-client = { path = "../fauna-anon-client" }
+# Substrate-neutral WS transport: the tungstenite Bytes adapter + keepalive +
+# the reconnect supervisor. The client supplies the bearer-subprotocol connect
+# + push bridge as its `SupervisedChannel` impl; the nest federation channel
+# shares the same substrate (Spec Y2 slice 4). Native-only, like this crate.
+fauna-ws-substrate = { path = "../fauna-ws-substrate" }
+async-trait = "0.1"
+# `chunk_download`'s `BlobFetcher` impl: the shared trait in
+# `fauna_core::file_download` returns `anyhow::Result`.
+anyhow.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+# Install the ring CryptoProvider before the first `wss://` connect — rustls
+# 0.23 (pulled by tokio-tungstenite's rustls-tls feature) requires a
+# process-default provider or `connect_async` panics on TLS. ring-only, matches
+# the workspace rustls.
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+futures-util = { workspace = true, features = ["sink"] }
+tracing.workspace = true
+url = "2"
+bytes.workspace = true
+getrandom.workspace = true
+thiserror.workspace = true
+# PeriodMediaSeal's period_key — a caller-supplied secret this crate never
+# derives, only carries through to `fauna_media::seal_for_audience`.
+zeroize.workspace = true
+
+[dev-dependencies]
+# Self dev-dep purely to switch this crate's own `test-util` feature on for the
+# integration tests — an integration test is a separate crate and does not
+# inherit its library's features. (Cargo permits a dev-dependency cycle; nothing
+# in `[dependencies]` is affected, so release builds still see `testing` gated
+# off.) `tests/common/mod.rs` re-exports `fauna_client::testing` through it.
+fauna-client = { path = ".", features = ["test-util"] }
+# `test-util` enables `tokio::time::pause`/`start_paused` for the ws_adapter
+# heartbeat tests (not part of tokio's `full` feature set).
+tokio = { workspace = true, features = ["full", "test-util"] }
+# The substrate's in-memory harness (`mpsc_pair`, `QueueChannel`) drives the
+# reconnect integration test without a real WebSocket.
+fauna-ws-substrate = { path = "../fauna-ws-substrate", features = ["test-util"] }
+# `reqwest_pinned_tls` integration test: stand up a self-signed TLS server and
+# prove the reqwest content-API leg pins the served SPKI (rejects without/with a
+# wrong pin, accepts the matching one) — the security property that retires
+# `FAUNA_INSECURE_TLS`.
+tokio-rustls = { workspace = true }
+rcgen = "0.13"

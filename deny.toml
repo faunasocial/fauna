@@ -1,0 +1,70 @@
+# cargo-deny policy — the source / ban / license half of the dependency-review gate
+# (S5b step 4c; docs/goal/architecture/release-integrity.md § Dependency verification:
+# "a `cargo-deny` source/ban/license policy run on every `main` push that touches
+# dependency files"). Wired into .github/workflows/supply-chain.yml as the `cargo-deny`
+# job, on the same dep-path triggers as cargo-vet/cargo-audit. cargo-deny reads only
+# Cargo.lock metadata (no crate source), so it carries no injection exposure.
+#
+# The CI job runs `cargo deny check bans licenses sources` — NOT advisories: cargo-audit
+# (`--deny warnings`, same workflow) is the dedicated advisory/CVE/yanked gate, and a
+# second advisory checker here would only drift against it. The [advisories] block below
+# is kept minimal so a bare `cargo deny check` (all checks) still parses.
+#
+# Tuned so the CURRENT tree passes (cargo deny list, 2026-06-30). When a check newly
+# fails on a dep change, that is the signal working — extend the allowlist deliberately
+# (a new license, a new registry/git source), do not silently widen it.
+
+[advisories]
+version = 2
+# cargo-audit owns advisories (see header). No bespoke ignores here.
+
+[licenses]
+version = 2
+# Permissive / standard OSS licenses present in the resolved tree. A new license outside
+# this set fails the gate — review it (copyleft reach, attribution terms) before allowing.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "0BSD",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "LGPL-2.1-or-later",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "WTFPL",
+    "Zlib",
+    "zlib-acknowledgement",
+]
+# A license expression is "satisfied" if any OR-branch is allowed; AND requires all.
+confidence-threshold = 0.8
+
+[bans]
+# The tree carries many duplicate transitive versions (normal for a large workspace) —
+# warn, don't fail, so the gate stays meaningful rather than perpetually red.
+multiple-versions = "warn"
+# `wildcards` is left "allow", not "deny": the Fauna workspace pervasively uses
+# `version = "*"` for intra-workspace PATH deps (benign — the version is pinned by the
+# path), and cargo-deny's `allow-wildcard-paths` exemption only applies to crates marked
+# `publish = false`, which the workspace members are not. Denying would therefore require
+# marking ~100 Cargo.toml files `publish = false` (a separate refactor) or accept a perma-
+# red gate. The supply-chain footgun the check targets — a `*` on an EXTERNAL crates.io
+# dep — is not present (external deps are pinned). Upgrade path: mark workspace crates
+# `publish = false`, then flip to `wildcards = "deny"` + `allow-wildcard-paths = true`.
+wildcards = "allow"
+
+[sources]
+# crates.io-only: the resolved tree must come from crates.io. A non-crates.io registry or
+# an ad-hoc git dependency must be added here deliberately — and an ECS-style git fork is
+# additionally routed to the injection-resistant review venue by the dep-prescan gate
+# (dep-changed classifies git/path deps separately from registry crates).
+unknown-registry = "deny"
+unknown-git = "deny"
+# No allow-org / allow-git entries yet: every current dependency resolves from crates.io.

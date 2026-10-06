@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.SettingsMailPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="24" MaxWidth="600" HorizontalAlignment="Left">
+
+            <!-- Error bar (the hosted panel routes its machine error up via
+                 ErrorChanged → this page's shared error-message). -->
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="False"
+                IsClosable="True" />
+
+            <!-- Header -->
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}" Style="{StaticResource TitleTextBlockStyle}" Text="{loc:Localize Key=mail_settings/title}" />
+
+            <controls:MailSettingsPanel x:Name="MailSettingsControl" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

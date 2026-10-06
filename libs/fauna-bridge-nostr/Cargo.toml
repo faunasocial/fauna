@@ -1,0 +1,49 @@
+[package]
+name = "fauna-bridge-nostr"
+description = "Nostr protocol bridge library for Fauna"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fauna-core.workspace = true
+fauna-cbor.workspace = true
+secp256k1 = { version = "0.30", features = ["rand", "global-context"] }
+bech32 = "0.11"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+blake3.workspace = true
+hex.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+# The relay dialer parses the relay URL itself to resolve and pin its target
+# before the WebSocket handshake (`relay_client::RelayDialPolicy`) — the same
+# `url` every other dialer in the workspace already uses.
+url.workspace = true
+urlencoding.workspace = true
+rand.workspace = true
+chacha20.workspace = true
+hmac.workspace = true
+hkdf.workspace = true
+# Real NIP-04 (AES-256-CBC) — versions already in the workspace lockfile via
+# other crates' dep trees; no new supply-chain surface.
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+
+[features]
+# Adversarial gift-wrap constructors for tests that must forge exactly what a
+# hostile sender controls (`nip17::wrap_dm_with_rumor_recipient`). Compiled OUT
+# of every release artifact — e2e conventions point 15 — and taken by
+# `fauna-nest`'s dev-dependency re-declaration only (the `fauna-acme-http01`
+# pattern).
+test-helpers = []
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FaunaApp.Controls.MarkdownToolbar"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+        ContentControl wrapper carries the AutomationId because:
+          1. UIA only includes elements with AutomationPeers in tree —
+             Border / StackPanel are layout primitives whose peers
+             aren't IsControlElement, so their AutomationId is dropped.
+          2. ContentControl IS a Control, has its own
+             ContentControlAutomationPeer (control type "Custom"), and
+             exposes IsEnabled which capability gating can flip.
+          3. AutomationProperties.Name forces it into UIA Content view
+             so FlaUI's tree dump shows it for debugging.
+    -->
+    <ContentControl x:Name="ToolbarHost"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.MarkdownToolbar}"
+                    AutomationProperties.Name="Markdown toolbar"
+                    HorizontalContentAlignment="Stretch">
+        <StackPanel Orientation="Horizontal" Spacing="2">
+        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MarkdownBoldButton}"
+                Content="B" FontWeight="Bold" Padding="6,2" FontSize="12"
+                Click="Bold_Click" ToolTipService.ToolTip="{loc:Localize Key=markdown/bold}" />
+        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MarkdownItalicButton}"
+                Content="I" FontStyle="Italic" Padding="6,2" FontSize="12"
+                Click="Italic_Click" ToolTipService.ToolTip="{loc:Localize Key=markdown/italic}" />
+        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MarkdownCodeButton}"
+                Content="&lt;/&gt;" Padding="6,2" FontSize="11"
+                FontFamily="Consolas"
+                Click="Code_Click" ToolTipService.ToolTip="{loc:Localize Key=markdown/code}" />
+        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MarkdownLinkButton}"
+                Content="&#xE71B;" FontFamily="Segoe MDL2 Assets"
+                Padding="6,2" FontSize="12"
+                Click="Link_Click" ToolTipService.ToolTip="{loc:Localize Key=markdown/link}" />
+        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MarkdownHeadingButton}"
+                Content="H" FontWeight="Bold" Padding="6,2" FontSize="12"
+                Click="Heading_Click" ToolTipService.ToolTip="{loc:Localize Key=markdown/heading}" />
+        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MarkdownListButton}"
+                Content="&#xE8FD;" FontFamily="Segoe MDL2 Assets"
+                Padding="6,2" FontSize="12"
+                Click="List_Click" ToolTipService.ToolTip="{loc:Localize Key=markdown/list_item}" />
+        <!-- Per-editor inline-marker visibility toggle (hide-by-default; conversations.md
+             § Compose-field inline markdown styling). Default un-checked = markers HIDDEN.
+             Tooltip uses the SHARED i18n key (web + linux render the same key) — never a
+             windows-only literal (priority #1). The 6 buttons above now also
+             route their tooltips through the terse shared markdown/* keys web renders as
+             tooltips (converged to the clean uniform shape rather than
+             minting per-syntax-hint keys). -->
+        <ToggleButton AutomationProperties.AutomationId="{x:Bind ids:Ids.MarkdownMarkerToggleButton}"
+                      Content="&#x2217;" Padding="6,2" FontSize="12"
+                      IsChecked="False"
+                      Checked="MarkerToggle_Checked" Unchecked="MarkerToggle_Unchecked"
+                      ToolTipService.ToolTip="{loc:Localize Key=markdown/toggle_markers}" />
+        </StackPanel>
+    </ContentControl>
+</UserControl>

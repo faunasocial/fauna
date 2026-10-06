@@ -1,0 +1,71 @@
+[package]
+name = "fauna-client-custody"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ⚠️ NATIVE-ONLY BY CONSTRUCTION, and that is the whole reason this crate
+# exists. The T16 custody facet's PURE half (the three folds, the bundle, the
+# registry overlay, the budget seed texts) lives in `fauna-client-capabilities`,
+# which is deliberately wasm-clean so the web leg renders from the same
+# projection every native app does. The ACT half cannot live there: it needs
+# BOTH `fauna-sync-engine` (the `AccountStoreHandle` behind the R14 (account-data-plane.md § The ratified decisions) registry
+# rows) and `fauna-client-conversations` (the ceremony poster), each of which
+# already depends ON `fauna-client-capabilities` and is itself native-only.
+# Those two are independent siblings — neither depends on the other — so no
+# existing crate can host the acts without inventing an edge between them.
+# Hence this crate: it sits ABOVE both, is consumed only by app shells, and
+# nothing depends back on it (leaf — no cycle possible).
+#
+# Do NOT add a wasm target table here. The web leg's acts are a separate design
+# question, not a matter of forwarding a `js` feature.
+
+[dependencies]
+# `NestClient` — the authenticated connection every act rides (the config CAS,
+# the capabilities RPC, the conversations post).
+# The pinned-nest-identity read (`trust::pinned_identity`) — the nest-form
+# accept binds the host's PINNED nest actor identity, never the nest's own
+# claim. Already in the build graph through fauna-client.
+fauna-anon-client = { path = "../fauna-anon-client" }
+fauna-client = { path = "../fauna-client" }
+# The custody SEMANTICS, all already shared: `custody_ceremony::{build_accept,
+# decline_offer, begin_offer, drive_ceremonies, OfferParams}`,
+# `grant_log::record_revoke`, `rpc::CapabilitiesClient` (the nest-side revoke),
+# `DEFAULT_GRANT_WINDOW_SECS`, and `view_model`'s fold + overlay this crate
+# re-folds through after every act. This crate assembles them; it re-derives
+# none of them.
+fauna-client-capabilities = { path = "../fauna-client-capabilities" }
+# The account-store seams — `SuccessionLedgerStore` and `ResolvingLedgerStore`
+# (`fauna.state.succession-ledger`) are where the ceremony's ledger records are
+# read and written.
+fauna-client-config = { path = "../fauna-client-config" }
+# `SessionCustodyPoster` — the ceremony's outbound leg over an existing 1:1
+# conversation channel. Native-only (it pulls `fauna-mls/native`).
+fauna-client-conversations = { path = "../fauna-client-conversations" }
+# `ConversationsSession` — what the poster wraps.
+fauna-conversations = { path = "../fauna-conversations" }
+# `Timestamp`, `ActorKeypair`, and the custody wire shapes the acts compose:
+# `custody_grant::{CustodyScopeSet, random_grant_id}`, `custodies_held::
+# CustodyHeld` (the R14 row), `device_endpoints::DeviceEndpoints`, `encoding`,
+# `hex32`. Full default features — this crate is native-only, so there is no
+# wasm-cleanliness constraint to respect here.
+fauna-core = { path = "../fauna-core" }
+# `merge_policy::KIND_CUSTODIES_HELD` — the registry kind the budget/stop writes
+# and the fold's overlay both address.
+fauna-protocol = { path = "../fauna-protocol" }
+# `account_runtime::{AccountStoreHandle, StoreRoot, production_credential_store,
+# resolve_writer_key_serialized}` — the R14 registry door AND the T10 writer-key
+# resolve the accept binds. This is the dependency that forces the crate split.
+#
+# `account-runtime` is DEFAULT-OFF in fauna-sync-engine (the lean deployments —
+# windows' sync service, the Go mail-bridge's
+# `--no-default-features` fauna-ffi — must not pay for it), and the module it
+# gates is the whole reason this crate exists, so it is enabled explicitly here
+# rather than inherited from whichever app happens to link us.
+fauna-sync-engine = { path = "../fauna-sync-engine", features = ["account-runtime"] }
+# `spawn` (the drive pass, fire-and-forget) + `spawn_blocking` (the writer-key
+# resolve, which is blocking I/O).
+tokio = { workspace = true }
+# The drive pass reports its counts and swallows an owed drive at debug — the
+# state is durable and the next edge retries.
+tracing = { workspace = true }

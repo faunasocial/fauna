@@ -1,0 +1,59 @@
+[package]
+name = "fauna-client-share-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ⚠️ NATIVE-ONLY BY CONSTRUCTION, on `fauna-client-custody`'s precedent — and
+# for the same structural reason. The cross-user share plane's DRIVER lives in
+# `fauna-sync-engine::share_glue` (`p2p.md` § Cross-user shared-set transfer);
+# the app half is a `SharePlaneHost`, and six of its nine methods are one
+# identical expression over seams every native app already holds — its nest
+# client, its conversations session, its identity secret. Those bodies need
+# `fauna-client-folders/mls` (`MlsSetMembership`,
+# `compute_engine_key_bindings_blob`) and `fauna-conversations`, edges
+# `fauna-sync-engine` refuses ON PURPOSE so the bearer-only `fauna-sync-agent` and the `--no-default-features` Go mail bridge never pay
+# for the conversations/MLS graph. So the bodies cannot live beside the driver;
+# they live ABOVE it, in a leaf that only share-plane hosts link.
+#
+# THIS CRATE IS THE GATE. No feature is threaded through unrelated consumers
+# (`fauna-ffi`, `fauna-client-account-runtime`, …) because nothing that is not
+# a share-plane host depends on it — the excision-spine rule
+# `fauna-sync-engine`'s `p2p-share` note states, applied one crate up: an app
+# takes this behind its OWN `p2p-share` feature, never unconditionally. Nothing
+# depends back on it (leaf — no cycle possible).
+#
+# Do NOT add a wasm target table here: the share leg is web's declared
+# structural absence (no QUIC seam in the wasm graph — `p2p.md`'s walk rule 5).
+
+[dependencies]
+# `NestClient` — the authenticated connection the key-bindings blob and the
+# brake/policy reads ride.
+fauna-client = { workspace = true }
+# The account-store crate; the holder's custody reader `resolve_engine_keys`
+# takes is a `FolderKeyReader` over the `fauna.state.folder-keys` plane kind.
+fauna-client-config = { path = "../fauna-client-config" }
+# `MlsSetMembership` (the M2 roster consult over the conversations rail's
+# engine) and `resolve_engine_keys` (the engine keys the pump serves under). Both are `mls`-gated there, and the `SetMembership` impl the
+# driver's admission seam needs is `p2p-share`-gated — so both features, the
+# exact pair every consumer of this crate already enables.
+fauna-client-folders = { path = "../fauna-client-folders", features = ["mls", "p2p-share"] }
+# `ConversationsSession` — `engine()`, `send_share_endpoints`, and the sink
+# registration door; `backend::ShareEndpointsSink`, the rail's ingest trait.
+fauna-conversations = { path = "../fauna-conversations" }
+# `ActorKeypair`, `ActorId`, `FolderEngineKeys`, `EffectivePolicy`. Full default features — native-only, no wasm constraint.
+fauna-core = { path = "../fauna-core" }
+# `admission::SetMembership` — the trait object the driver asks the host for.
+fauna-peer-share = { workspace = true }
+# `account_runtime::AccountStoreHandle` (the durable sink's write door) and
+# `share_glue::{accept_share_advertisement, live_capabilities,
+# transfer_policy}` — the decisions this crate assembles and never re-derives.
+# Both features are DEFAULT-OFF there for the lean deployments' sake, and both
+# gate `share_glue` itself, so they are enabled explicitly here rather than
+# inherited from whichever app links us.
+fauna-sync-engine = { workspace = true, features = ["account-runtime", "p2p-share"] }
+# The sink trait is `async_trait`-shaped in the conversations rail.
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true }

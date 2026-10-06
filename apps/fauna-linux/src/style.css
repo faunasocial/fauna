@@ -1,0 +1,201 @@
+/* Fauna brand overrides for GTK4/Adwaita */
+
+:root {
+    --fauna-accent: #6366f1;
+    --fauna-accent-hover: #4f46e5;
+    --fauna-bg: #0f0f0f;
+    --fauna-bg-surface: #1a1a1a;
+    --fauna-bg-hover: #262626;
+    --fauna-text: #e5e5e5;
+    --fauna-text-muted: #737373;
+    --fauna-border: #333333;
+    --fauna-success: #22c55e;
+    --fauna-danger: #ef4444;
+}
+
+/* Dark theme overrides */
+window.background {
+    background-color: var(--fauna-bg);
+}
+
+.sidebar-list {
+    background-color: var(--fauna-bg-surface);
+}
+
+.sidebar-list row:selected {
+    background-color: var(--fauna-bg-hover);
+}
+
+.fauna-accent {
+    color: var(--fauna-accent);
+}
+
+.fauna-muted {
+    color: var(--fauna-text-muted);
+}
+
+/* The selected `calendar-item` in the Events sidebar (goal/ui/events.md
+   § User actions: "Select calendar (filter visible events)"). Distinct from the
+   per-row `calendar-visibility` checkbox, which filters the no-selection
+   union. */
+.cal-selected {
+    font-weight: bold;
+    background-color: alpha(currentColor, 0.10);
+}
+
+/* Calendar color classes — 8 colors x 3 variants */
+.cal-indigo-bg { background-color: #4338ca; color: #c7d2fe; }
+.cal-indigo-border { border-left: 3px solid #6366f1; }
+.cal-indigo-text { color: #c7d2fe; }
+
+.cal-emerald-bg { background-color: #047857; color: #a7f3d0; }
+.cal-emerald-border { border-left: 3px solid #10b981; }
+.cal-emerald-text { color: #a7f3d0; }
+
+.cal-amber-bg { background-color: #b45309; color: #fde68a; }
+.cal-amber-border { border-left: 3px solid #f59e0b; }
+.cal-amber-text { color: #fde68a; }
+
+.cal-rose-bg { background-color: #be123c; color: #fecdd3; }
+.cal-rose-border { border-left: 3px solid #f43f5e; }
+.cal-rose-text { color: #fecdd3; }
+
+.cal-cyan-bg { background-color: #0e7490; color: #a5f3fc; }
+.cal-cyan-border { border-left: 3px solid #06b6d4; }
+.cal-cyan-text { color: #a5f3fc; }
+
+.cal-violet-bg { background-color: #6d28d9; color: #ddd6fe; }
+.cal-violet-border { border-left: 3px solid #8b5cf6; }
+.cal-violet-text { color: #ddd6fe; }
+
+.cal-orange-bg { background-color: #c2410c; color: #fed7aa; }
+.cal-orange-border { border-left: 3px solid #f97316; }
+.cal-orange-text { color: #fed7aa; }
+
+.cal-slate-bg { background-color: #475569; color: #e2e8f0; }
+.cal-slate-border { border-left: 3px solid #94a3b8; }
+.cal-slate-text { color: #e2e8f0; }
+
+/* Calendar UI classes */
+.today-marker { background-color: #6366f1; border-radius: 50%; min-width: 28px; min-height: 28px; }
+.current-time-line { background-color: #ef4444; min-height: 2px; }
+/* The month day cell is a flat button (it is clickable — the Outlook month→day
+   drill-in), so its own button padding is zeroed out to keep the pre-button
+   geometry: content starts at the cell edge and event bars keep their width. */
+.day-cell { border: 1px solid #333333; min-height: 100px; padding: 0; }
+.day-cell-dimmed { opacity: 0.4; }
+.event-bar { border-radius: 3px; padding: 1px 4px; margin: 1px 2px; min-height: 20px; }
+.event-block { border-radius: 4px; padding: 4px 6px; }
+.mini-month-day { min-width: 28px; min-height: 28px; padding: 2px; }
+.mini-month-day:hover { background-color: #262626; border-radius: 50%; }
+.mini-month-selected { background-color: #333333; border-radius: 50%; }
+
+/* Week / Day grid */
+.week-day-header { padding: 6px 4px; border-bottom: 1px solid #333333; }
+.week-day-header-today { background-color: rgba(99, 102, 241, 0.15); }
+.hour-label { color: #737373; min-width: 52px; padding-right: 6px; }
+.day-column { border-left: 1px solid #333333; }
+.all-day-banner { background-color: #1a1a1a; padding: 4px 0; border-bottom: 1px solid #333333; }
+.all-day-chip { border-radius: 3px; padding: 2px 6px; margin: 1px 2px; }
+
+/* Attendee rows (event detail § Attendee list presentation) */
+.attendee-monogram {
+    min-width: 28px;
+    min-height: 28px;
+    border-radius: 50%;
+    background-color: #4338ca;
+    color: #c7d2fe;
+    font-weight: bold;
+}
+/* The one shared RSVP status → color mapping, rendered as colored text. */
+.rsvp-going { color: #22c55e; font-weight: bold; }
+.rsvp-interested { color: #f59e0b; font-weight: bold; }
+.rsvp-declined { color: #ef4444; font-weight: bold; }
+.rsvp-waitlisted { color: #f97316; font-weight: bold; }
+.rsvp-secondary { color: #737373; font-weight: bold; }
+
+/* Error banner */
+.error-banner {
+    background-color: rgba(239, 68, 68, 0.15);
+    border-bottom: 1px solid #ef4444;
+    color: #fca5a5;
+    padding: 6px 12px;
+}
+
+/* Message bubbles */
+.message-self {
+    background-color: #1e1b4b;
+    border-radius: 12px 12px 4px 12px;
+    padding: 8px 12px;
+    margin: 4px 8px 4px 48px;
+}
+.message-peer {
+    background-color: #1a1a1a;
+    border-radius: 12px 12px 12px 4px;
+    padding: 8px 12px;
+    margin: 4px 48px 4px 8px;
+}
+.message-sender { font-weight: bold; }
+.message-time { color: #737373; font-size: 0.85em; }
+/* Deleted-message tombstone placeholder (conversations.md § Reactions & message
+   delete) — body/attachments/reactions stripped, just dim italic text. */
+.message-deleted { font-style: italic; }
+/* The mark for `SearchNav::Mail`'s second half (conversations.md § The
+   selected message) — a mail search hit's message, so the user does not have
+   to hunt for it after the thread jump. A ring rather than a fill swap: it
+   must read on top of both .message-self and .message-peer's own background. */
+.message-selected { box-shadow: inset 0 0 0 2px #f59e0b; }
+
+/* Aggregated reaction pills under a bubble (dm-reaction-pill — emoji + count;
+   tap-to-toggle). `-mine` highlights a reaction the local user added
+   (reacted_by_me) so its own state reads at a glance. */
+.dm-reaction-pill {
+    padding: 1px 8px;
+    border-radius: 12px;
+    background-color: #262626;
+    font-size: 0.9em;
+    min-height: 0;
+}
+.dm-reaction-pill-mine {
+    background-color: #312e81;
+    color: #c7d2fe;
+}
+/* Quick-set emoji buttons in the ⋯ actions flyout — a bit larger so the glyphs read. */
+.dm-reaction-quickset { font-size: 1.2em; padding: 2px 4px; }
+
+/* The interaction bar's like TOGGLE, lit off `viewer_liked` (feed.md
+   § Interaction bar → Repost). Same idea as `.dm-reaction-pill-mine` above —
+   the viewer's own live interaction has to read at a glance, because the next
+   tap reverses it. tui expresses the same state as its `state=on/off` attr. */
+.liked { color: #f43f5e; }
+/* The repost TOGGLE, lit off `viewer_repost_id` — same idiom as `.liked`. */
+.reposted { color: #22c55e; }
+
+/* Block styling for message-bubble bodies (document::render_to_widget, walking the
+   shared RenderDocument). Inline styling (bold/italic/code/link) is Pango markup; these
+   classes carry the block-level look that used to live on the TextBuffer tags. */
+.md-heading1 { font-size: 1.6em; font-weight: bold; }
+.md-heading2 { font-size: 1.3em; font-weight: bold; }
+.md-heading3 { font-size: 1.1em; font-weight: bold; }
+.md-code-block {
+    font-family: monospace;
+    background-color: #1a1a1a;
+    border-radius: 4px;
+    padding: 6px 8px;
+}
+.md-blockquote {
+    font-style: italic;
+    color: #737373;
+    border-left: 3px solid #404040;
+    padding-left: 12px;
+}
+.md-list-indent { margin-left: 16px; }
+
+/* Critical-alerts banner (critical-alerts.md) — deliberately loud: possible
+ * compromise / data-loss conditions only, never ordinary errors. */
+.critical-alerts-banner {
+  background-color: #a51d2d; /* GNOME dark red */
+  color: #ffffff;
+  font-weight: bold;
+  padding: 10px 14px;
+}

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A drop-in replacement for the per-page error <InfoBar x:Name="ErrorBar"
+     AutomationProperties.AutomationId="error-message" ...>: same Message / IsOpen /
+     Severity / IsClosable / Title surface (so existing code-behind
+     `ErrorBar.Message = …; ErrorBar.IsOpen = …` is unchanged), but the message is
+     rendered in a selectable TextBlock and a small copy button sits inline at the
+     right of the message — immediately left of the InfoBar's built-in close (X).
+     The copy button is placed in the message Content (NOT the InfoBar.ActionButton
+     slot) on purpose: the ActionButton reflows onto its own row below a long
+     message (looks bad), whereas an inline button stays put next to the X.
+     The control self-collapses when not open so a closed bar takes no layout space. -->
+<UserControl
+    x:Class="FaunaApp.Controls.CopyableInfoBar"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:FaunaApp.Markup"
+    Visibility="Collapsed"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <InfoBar
+        x:Name="Bar"
+        AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+        Severity="{x:Bind Severity, Mode=OneWay}"
+        Title="{x:Bind Title, Mode=OneWay}"
+        IsOpen="{x:Bind IsOpen, Mode=TwoWay}"
+        IsClosable="{x:Bind IsClosable, Mode=OneWay}">
+        <InfoBar.Content>
+            <Grid Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock
+                    Grid.Column="0"
+                    x:Name="MessageText"
+                    Text="{x:Bind Message, Mode=OneWay}"
+                    IsTextSelectionEnabled="True"
+                    TextWrapping="Wrap"
+                    VerticalAlignment="Center" />
+                <Button
+                    Grid.Column="1"
+                    Click="CopyButton_Click"
+                    VerticalAlignment="Top"
+                    Margin="8,0,0,0"
+                    Padding="6"
+                    Background="Transparent"
+                    BorderThickness="0"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessageCopyButton}"
+                    AutomationProperties.Name="{loc:Localize Key=common/copy}"
+                    ToolTipService.ToolTip="{loc:Localize Key=common/copy}">
+                    <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}" FontSize="14" Glyph="&#xE8C8;" />
+                </Button>
+            </Grid>
+        </InfoBar.Content>
+    </InfoBar>
+</UserControl>

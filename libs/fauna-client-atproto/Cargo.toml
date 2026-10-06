@@ -1,0 +1,91 @@
+[package]
+name = "fauna-client-atproto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Keeps the PLC-directory env override (`genesis_verify::plc_directory_base_url`)
+# alive in a RELEASE-profile e2e build. Off by default, so the override is
+# compiled out of shipped artifacts entirely — `testing.md` convention 15, and
+# the close of finding item 3. Consumers forward it via
+# `fauna-atproto-settings-machine/e2e-agent`.
+e2e-agent = []
+# Exposes `test_fixtures::plc_operation_entry_json` to a downstream crate's
+# own test build — a self dev-dependency turns this on the same way
+# `fauna-media`/`fauna-client-features`'s `test-fixtures` features do. No new
+# dep pulled in: serde_json is already an unconditional dep below. This
+# crate's own unit tests (genesis_verify.rs, tombstone.rs) see the module
+# regardless, via the module's `cfg(any(test, …))` gate.
+test-fixtures = []
+
+[dependencies]
+# fauna-protocol carries the did:key codec (`fauna_protocol::atproto`) and the
+# canonical DAG-CBOR encoder every PLC operation is signed and CID-hashed over.
+# `default-features = false` drops the native-only `p2p` feature so this crate
+# compiles to wasm32; native workspace builds re-enable `p2p` via Cargo feature
+# unification. The path form is required to override `default-features`
+# (mirrors fauna-client-inbox).
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+
+# The `rotation_key` module (S2 — the user-custodied senior PLC rotation key of
+# `atproto-pds-bridge.md` § State & data shape): the custody's value types,
+# P-256 keygen (the same curve + OsRng pattern as fauna-client-dns's ACME
+# account key; getrandom's `js` backend comes via the wasm target block
+# below). `default-features = false` on fauna-core drops its native `network`
+# stack for the SPA build (the fauna-client-dns pattern).
+fauna-core = { path = "../fauna-core", default-features = false }
+# `account_state` — the injected account-plane door
+# (`fauna.state.atproto-identity`) — and `port`, its crossing of web's account
+# port (the forwarder + `serve`, `fauna_devices_machine::port`'s shape).
+async-trait = "0.1"
+fauna-account-port = { workspace = true }
+# handle_binding (feeder #3): the cross-page critical-alert registry this
+# feeder posts to and clears from. Wasm-clean (its only dep is fauna-core's
+# `localized`), so it costs this crate's web build nothing.
+fauna-client-alerts = { path = "../fauna-client-alerts" }
+# One warn line at the moment a feeder raises its banner — the same place
+# `fauna_client_recovery::alerts` logs feeder #2's. Wasm-clean.
+tracing = { workspace = true }
+p256 = { workspace = true }
+# plc_chain: authenticating a PLC audit log needs BOTH did:plc rotation-key
+# curves — the user's senior key is P-256 (minted by `rotation_key`) but the
+# bridge signs its own ops with a K-256 key
+# (`bins/fauna-bridges/internal/atprotoid/plc.go`), so a P-256-only verifier
+# would fail to authenticate every operation the box ever wrote. Pure Rust,
+# so the web SPA's wasm build is unaffected.
+k256 = { workspace = true }
+# plc_chain: the sha2-256 half of a CIDv1 and of the did:plc derivation — the
+# hash that makes a did:plc log self-certifying against its own DID.
+sha2 = { workspace = true }
+
+# genesis_verify (S4-C): parse the PLC directory's JSON audit log + the one
+# direct-to-directory HTTPS fetch (no nest dependency by design). serde/serde_json
+# for the log shape; reqwest per-target below (the fauna-onboarding-machine
+# pattern — native rustls, wasm browser fetch; plc.directory serves CORS `*`).
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+# tombstone (S5 slice 5b — the terminal PLC identity retirement): base64url
+# for the op's `sig` field, in the same no-pad form the ACME ES256 JWS uses.
+# The P-256 signer itself comes from the `p256` dep above (`ecdsa` feature,
+# enabled workspace-wide).
+base64 = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# wasm: forward fauna-protocol's `js` feature (fauna-core's js-sys time
+# backend) so the transitive wasm build resolves. Off on native. Cargo merges
+# the two entries (features are additive).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+reqwest = { version = "0.12", default-features = false }
+
+[dev-dependencies]
+# The port tests wire forwarder → `serve` through the loopback transport.
+fauna-account-port = { workspace = true, features = ["test-helpers"] }
+# The rotation_key and port tests drive the async account-state seam.
+tokio = { version = "1", default-features = false, features = ["rt", "macros"] }

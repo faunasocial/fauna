@@ -1,0 +1,4027 @@
+table abuse_report_outbox
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col report_id TEXT notnull=1 default=- pk=0 hidden=0
+  col kind TEXT notnull=1 default=- pk=0 hidden=0
+  col peer_url TEXT notnull=1 default=- pk=0 hidden=0
+  col peer_nest_id TEXT notnull=0 default=- pk=0 hidden=0
+  col payload BLOB notnull=1 default=- pk=0 hidden=0
+  col attempts INTEGER notnull=1 default=0 pk=0 hidden=0
+  col next_attempt_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item attempts INTEGER NOT NULL DEFAULT 0
+  item created_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item kind TEXT NOT NULL
+  item next_attempt_at INTEGER NOT NULL
+  item payload BLOB NOT NULL
+  item peer_nest_id TEXT
+  item peer_url TEXT NOT NULL
+  item report_id TEXT NOT NULL
+table abuse_reports
+  col id TEXT notnull=0 default=- pk=1 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col reporter_actor BLOB notnull=0 default=- pk=0 hidden=0
+  col origin_nest_id TEXT notnull=0 default=- pk=0 hidden=0
+  col origin_report_ref TEXT notnull=0 default=- pk=0 hidden=0
+  col subject_kind TEXT notnull=1 default=- pk=0 hidden=0
+  col subject_id TEXT notnull=1 default=- pk=0 hidden=0
+  col subject_channel TEXT notnull=0 default=- pk=0 hidden=0
+  col subject_actor TEXT notnull=0 default=- pk=0 hidden=0
+  col reason TEXT notnull=1 default=- pk=0 hidden=0
+  col note TEXT notnull=0 default=- pk=0 hidden=0
+  col excerpt TEXT notnull=0 default=- pk=0 hidden=0
+  col block_author INTEGER notnull=1 default=0 pk=0 hidden=0
+  col forwarded_to TEXT notnull=0 default=- pk=0 hidden=0
+  col status TEXT notnull=1 default='open' pk=0 hidden=0
+  col outcome TEXT notnull=0 default=- pk=0 hidden=0
+  col resolved_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col resolved_by BLOB notnull=0 default=- pk=0 hidden=0
+  col forwarded_nest_id TEXT notnull=0 default=- pk=0 hidden=0
+  item block_author INTEGER NOT NULL DEFAULT 0
+  item created_at INTEGER NOT NULL
+  item excerpt TEXT
+  item forwarded_nest_id TEXT
+  item forwarded_to TEXT
+  item id TEXT PRIMARY KEY
+  item note TEXT
+  item origin_nest_id TEXT
+  item origin_report_ref TEXT
+  item outcome TEXT
+  item reason TEXT NOT NULL
+  item reporter_actor BLOB
+  item resolved_at INTEGER
+  item resolved_by BLOB
+  item status TEXT NOT NULL DEFAULT 'open'
+  item subject_actor TEXT
+  item subject_channel TEXT
+  item subject_id TEXT NOT NULL
+  item subject_kind TEXT NOT NULL
+table account_age_bands
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col band TEXT notnull=1 default=- pk=0 hidden=0
+  col provenance TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item band TEXT NOT NULL
+  item created_at INTEGER NOT NULL
+  item provenance TEXT NOT NULL
+table account_aliases
+  col alias_id BLOB notnull=0 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col local_domain TEXT notnull=1 default=- pk=0 hidden=0
+  col kind TEXT notnull=1 default=- pk=0 hidden=0
+  col pattern TEXT notnull=1 default=- pk=0 hidden=0
+  col forward_target TEXT notnull=0 default=- pk=0 hidden=0
+  col label TEXT notnull=1 default='' pk=0 hidden=0
+  col disabled INTEGER notnull=1 default=0 pk=0 hidden=0
+  col spam_threshold_override REAL notnull=0 default=- pk=0 hidden=0
+  col rate_limit_per_hour INTEGER notnull=0 default=- pk=0 hidden=0
+  col rate_limit_per_day INTEGER notnull=0 default=- pk=0 hidden=0
+  col uses_remaining INTEGER notnull=0 default=- pk=0 hidden=0
+  col expires_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col last_hit_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col hit_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  item UNIQUE (local_domain, pattern, kind)
+  item actor_id BLOB NOT NULL
+  item alias_id BLOB PRIMARY KEY
+  item created_at INTEGER NOT NULL
+  item disabled INTEGER NOT NULL DEFAULT 0
+  item expires_at INTEGER
+  item forward_target TEXT
+  item hit_count INTEGER NOT NULL DEFAULT 0
+  item kind TEXT NOT NULL
+  item label TEXT NOT NULL DEFAULT ''
+  item last_hit_at INTEGER
+  item local_domain TEXT NOT NULL
+  item pattern TEXT NOT NULL
+  item rate_limit_per_day INTEGER
+  item rate_limit_per_hour INTEGER
+  item spam_threshold_override REAL
+  item uses_remaining INTEGER
+table actor_channels
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col channel_id BLOB notnull=1 default=- pk=2 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, channel_id)
+  item actor_id BLOB NOT NULL
+  item channel_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+table actor_epoch_seal_keys
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col epoch INTEGER notnull=1 default=- pk=2 hidden=0
+  col mls_pubkey BLOB notnull=1 default=- pk=0 hidden=0
+  col mlkem_ek BLOB notnull=1 default=- pk=0 hidden=0
+  col published_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, epoch)
+  item actor_id BLOB NOT NULL
+  item epoch INTEGER NOT NULL
+  item mlkem_ek BLOB NOT NULL
+  item mls_pubkey BLOB NOT NULL
+  item published_at INTEGER NOT NULL
+table actor_index_pubkeys
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col index_pubkey BLOB notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item index_pubkey BLOB NOT NULL
+  item updated_at INTEGER NOT NULL
+table actor_last_ip
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col ip_address TEXT notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item ip_address TEXT NOT NULL
+  item updated_at INTEGER NOT NULL
+table actor_mail_serving
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col enabled INTEGER notnull=1 default=- pk=0 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
+  item set_at INTEGER NOT NULL
+table actor_message_dedup
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col dedup_key TEXT notnull=1 default=- pk=2 hidden=0
+  col message_uri TEXT notnull=1 default=- pk=0 hidden=0
+  col envelope_key TEXT notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, dedup_key)
+  item actor_id BLOB NOT NULL
+  item dedup_key TEXT NOT NULL
+  item envelope_key TEXT NOT NULL
+  item message_uri TEXT NOT NULL
+table actor_mls_pubkeys
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col mls_pubkey BLOB notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col mlkem_ek BLOB notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item mlkem_ek BLOB NOT NULL
+  item mls_pubkey BLOB NOT NULL
+  item updated_at INTEGER NOT NULL
+table actor_successions
+  col old_actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col new_actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col statement BLOB notnull=1 default=- pk=0 hidden=0
+  col seq INTEGER notnull=1 default=- pk=0 hidden=0
+  col succeeded_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item new_actor_id BLOB NOT NULL
+  item old_actor_id BLOB PRIMARY KEY
+  item seq INTEGER NOT NULL
+  item statement BLOB NOT NULL
+  item succeeded_at INTEGER NOT NULL
+table admin_actor_ids
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col added_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col role TEXT notnull=1 default='superadmin' pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item added_at INTEGER NOT NULL
+  item role TEXT NOT NULL DEFAULT 'superadmin'
+table alias_hits
+  col hit_id BLOB notnull=0 default=- pk=1 hidden=0
+  col alias_id BLOB notnull=1 default=- pk=0 hidden=0
+  col matched_address TEXT notnull=1 default=- pk=0 hidden=0
+  col sender_domain TEXT notnull=1 default='' pk=0 hidden=0
+  col received_at INTEGER notnull=1 default=- pk=0 hidden=0
+  fk alias_id -> account_aliases.alias_id update=NO ACTION delete=CASCADE
+  item alias_id BLOB NOT NULL REFERENCES account_aliases(alias_id) ON DELETE CASCADE
+  item hit_id BLOB PRIMARY KEY
+  item matched_address TEXT NOT NULL
+  item received_at INTEGER NOT NULL
+  item sender_domain TEXT NOT NULL DEFAULT ''
+table atproto_account_settings
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col external_apps_enabled INTEGER notnull=1 default=1 pk=0 hidden=0
+  col integration_level TEXT notnull=1 default='off' pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item external_apps_enabled INTEGER NOT NULL DEFAULT 1
+  item integration_level TEXT NOT NULL DEFAULT 'off'
+  item updated_at INTEGER NOT NULL
+table atproto_app_credentials
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col credential_id TEXT notnull=1 default=- pk=2 hidden=0
+  col label TEXT notnull=1 default=- pk=0 hidden=0
+  col verifier TEXT notnull=1 default=- pk=0 hidden=0
+  col dm_allowed INTEGER notnull=1 default=0 pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col last_used_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, credential_id)
+  item actor_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item credential_id TEXT NOT NULL
+  item dm_allowed INTEGER NOT NULL DEFAULT 0
+  item label TEXT NOT NULL
+  item last_used_at INTEGER
+  item verifier TEXT NOT NULL
+table atproto_authoring_keys
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col k_pub BLOB notnull=1 default=- pk=0 hidden=0
+  col k_secret_wrapped BLOB notnull=1 default=- pk=0 hidden=0
+  col cert BLOB notnull=0 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col cert_updated_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col last_used_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item cert BLOB
+  item cert_updated_at INTEGER
+  item created_at INTEGER NOT NULL
+  item k_pub BLOB NOT NULL
+  item k_secret_wrapped BLOB NOT NULL
+  item last_used_at INTEGER
+table atproto_blobs
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col cid TEXT notnull=1 default=- pk=2 hidden=0
+  col media_ref BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col referenced_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, cid)
+  item actor_id BLOB NOT NULL
+  item cid TEXT NOT NULL
+  item created_at INTEGER NOT NULL
+  item media_ref BLOB NOT NULL
+  item referenced_at INTEGER
+table atproto_consent_requests
+  col consent_id BLOB notnull=0 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=0 default=- pk=0 hidden=0
+  col code TEXT notnull=1 default=- pk=0 hidden=0
+  col client_id TEXT notnull=1 default=- pk=0 hidden=0
+  col client_name TEXT notnull=0 default=- pk=0 hidden=0
+  col scopes TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col expires_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col resolved_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col approved INTEGER notnull=0 default=- pk=0 hidden=0
+  col sets TEXT notnull=0 default=- pk=0 hidden=0
+  col consent_start TEXT notnull=0 default=- pk=0 hidden=0
+  col holder_x25519 BLOB notnull=0 default=- pk=0 hidden=0
+  col writer_ed25519 BLOB notnull=0 default=- pk=0 hidden=0
+  col fauna_manifest TEXT notnull=0 default=- pk=0 hidden=0
+  item actor_id BLOB
+  item approved INTEGER
+  item client_id TEXT NOT NULL
+  item client_name TEXT
+  item code TEXT NOT NULL
+  item consent_id BLOB PRIMARY KEY
+  item consent_start TEXT
+  item created_at INTEGER NOT NULL
+  item expires_at INTEGER NOT NULL
+  item fauna_manifest TEXT
+  item holder_x25519 BLOB
+  item resolved_at INTEGER
+  item scopes TEXT NOT NULL
+  item sets TEXT
+  item writer_ed25519 BLOB
+table atproto_identities
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col method TEXT notnull=1 default=- pk=0 hidden=0
+  col status TEXT notnull=1 default='pending' pk=0 hidden=0
+  col tombstone_requested INTEGER notnull=1 default=0 pk=0 hidden=0
+  col did TEXT notnull=0 default=- pk=0 hidden=0
+  col provenance TEXT notnull=0 default=- pk=0 hidden=0
+  col user_rotation_pub TEXT notnull=1 default='' pk=0 hidden=0
+  col signing_pub TEXT notnull=0 default=- pk=0 hidden=0
+  col bridge_rotation_pub TEXT notnull=0 default=- pk=0 hidden=0
+  col genesis_cid TEXT notnull=0 default=- pk=0 hidden=0
+  col history_backfill INTEGER notnull=1 default=0 pk=0 hidden=0
+  col projection_floor_micros INTEGER notnull=1 default=0 pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item bridge_rotation_pub TEXT
+  item created_at INTEGER NOT NULL
+  item did TEXT
+  item genesis_cid TEXT
+  item history_backfill INTEGER NOT NULL DEFAULT 0
+  item method TEXT NOT NULL CHECK (method IN ('plc', 'web'))
+  item projection_floor_micros INTEGER NOT NULL DEFAULT 0
+  item provenance TEXT
+  item signing_pub TEXT
+  item status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'active', 'deactivated', 'deleted', 'tombstoned'))
+  item tombstone_requested INTEGER NOT NULL DEFAULT 0
+  item updated_at INTEGER NOT NULL
+  item user_rotation_pub TEXT NOT NULL DEFAULT ''
+table atproto_identity_key_blobs
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col blob BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item blob BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+table atproto_native_records
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col collection TEXT notnull=1 default=- pk=2 hidden=0
+  col rkey TEXT notnull=1 default=- pk=3 hidden=0
+  col cid TEXT notnull=1 default=- pk=0 hidden=0
+  col record BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col deleted_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, collection, rkey)
+  item actor_id BLOB NOT NULL
+  item cid TEXT NOT NULL
+  item collection TEXT NOT NULL
+  item created_at INTEGER NOT NULL
+  item deleted_at INTEGER
+  item record BLOB NOT NULL
+  item rkey TEXT NOT NULL
+table atproto_oauth_grants
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col grant_id BLOB notnull=1 default=- pk=2 hidden=0
+  col client_id TEXT notnull=1 default=- pk=0 hidden=0
+  col client_name TEXT notnull=0 default=- pk=0 hidden=0
+  col scopes TEXT notnull=1 default=- pk=0 hidden=0
+  col dpop_jkt TEXT notnull=0 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col last_used_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col expires_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col revoked_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col sets TEXT notnull=0 default=- pk=0 hidden=0
+  col issuer TEXT notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, grant_id)
+  item actor_id BLOB NOT NULL
+  item client_id TEXT NOT NULL
+  item client_name TEXT
+  item created_at INTEGER NOT NULL
+  item dpop_jkt TEXT
+  item expires_at INTEGER
+  item grant_id BLOB NOT NULL
+  item issuer TEXT NOT NULL
+  item last_used_at INTEGER
+  item revoked_at INTEGER
+  item scopes TEXT NOT NULL
+  item sets TEXT
+table atproto_preferences
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col preferences BLOB notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item preferences BLOB NOT NULL
+  item updated_at INTEGER NOT NULL
+table atproto_retired_identities
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col method TEXT notnull=1 default=- pk=0 hidden=0
+  col did TEXT notnull=1 default=- pk=0 hidden=0
+  col provenance TEXT notnull=0 default=- pk=0 hidden=0
+  col user_rotation_pub TEXT notnull=1 default='' pk=0 hidden=0
+  col signing_pub TEXT notnull=0 default=- pk=0 hidden=0
+  col bridge_rotation_pub TEXT notnull=0 default=- pk=0 hidden=0
+  col genesis_cid TEXT notnull=0 default=- pk=0 hidden=0
+  col projection_floor_micros INTEGER notnull=1 default=0 pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col retired_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item bridge_rotation_pub TEXT
+  item created_at INTEGER NOT NULL
+  item did TEXT NOT NULL
+  item genesis_cid TEXT
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item method TEXT NOT NULL
+  item projection_floor_micros INTEGER NOT NULL DEFAULT 0
+  item provenance TEXT
+  item retired_at INTEGER NOT NULL
+  item signing_pub TEXT
+  item user_rotation_pub TEXT NOT NULL DEFAULT ''
+table atproto_session_secret_blobs
+  col bridge_role TEXT notnull=1 default=- pk=1 hidden=0
+  col bridge_id TEXT notnull=1 default=- pk=2 hidden=0
+  col blob BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (bridge_role, bridge_id)
+  item blob BLOB NOT NULL
+  item bridge_id TEXT NOT NULL
+  item bridge_role TEXT NOT NULL
+  item created_at INTEGER NOT NULL
+table atproto_sessions
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col session_id BLOB notnull=1 default=- pk=2 hidden=0
+  col plane TEXT notnull=1 default=- pk=0 hidden=0
+  col credential_id TEXT notnull=0 default=- pk=0 hidden=0
+  col client_note TEXT notnull=0 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col last_refreshed_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col expires_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col revoked_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col current_refresh_jti BLOB notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, session_id)
+  item actor_id BLOB NOT NULL
+  item client_note TEXT
+  item created_at INTEGER NOT NULL
+  item credential_id TEXT
+  item current_refresh_jti BLOB
+  item expires_at INTEGER NOT NULL
+  item last_refreshed_at INTEGER
+  item plane TEXT NOT NULL
+  item revoked_at INTEGER
+  item session_id BLOB NOT NULL
+table audit_log
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col ts INTEGER notnull=1 default=- pk=0 hidden=0
+  col action TEXT notnull=1 default=- pk=0 hidden=0
+  col target TEXT notnull=0 default=- pk=0 hidden=0
+  col detail TEXT notnull=0 default=- pk=0 hidden=0
+  col prev_hash TEXT notnull=1 default='' pk=0 hidden=0
+  col entry_hash TEXT notnull=1 default='' pk=0 hidden=0
+  col entry_hash_version INTEGER notnull=1 default=0 pk=0 hidden=0
+  col actor_id BLOB notnull=0 default=- pk=0 hidden=0
+  item action TEXT NOT NULL
+  item actor_id BLOB
+  item detail TEXT
+  item entry_hash TEXT NOT NULL DEFAULT ''
+  item entry_hash_version INTEGER NOT NULL DEFAULT 0
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item prev_hash TEXT NOT NULL DEFAULT ''
+  item target TEXT
+  item ts INTEGER NOT NULL
+table auto_reply_log
+  col recipient_id BLOB notnull=1 default=- pk=1 hidden=0
+  col sender_hash BLOB notnull=1 default=- pk=2 hidden=0
+  col last_sent_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (recipient_id, sender_hash)
+  item last_sent_at INTEGER NOT NULL
+  item recipient_id BLOB NOT NULL
+  item sender_hash BLOB NOT NULL
+table backup_custodian_checkins
+  col owner_actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col destination_id TEXT notnull=1 default=- pk=2 hidden=0
+  col high_water INTEGER notnull=1 default=- pk=0 hidden=0
+  col held_bytes INTEGER notnull=1 default=- pk=0 hidden=0
+  col cap_state TEXT notnull=1 default=- pk=0 hidden=0
+  col checked_in_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col caught_up_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col audit_state TEXT notnull=0 default=- pk=0 hidden=0
+  col last_audit_passed_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (owner_actor_id, destination_id)
+  item audit_state TEXT
+  item cap_state TEXT NOT NULL
+  item caught_up_at INTEGER
+  item checked_in_at INTEGER NOT NULL
+  item destination_id TEXT NOT NULL
+  item held_bytes INTEGER NOT NULL
+  item high_water INTEGER NOT NULL
+  item last_audit_passed_at INTEGER
+  item owner_actor_id BLOB NOT NULL
+table backup_custody
+  col uploader_actor BLOB notnull=1 default=- pk=0 hidden=0
+  col folder_id INTEGER notnull=1 default=- pk=1 hidden=0
+  col path_hash BLOB notnull=1 default=- pk=2 hidden=0
+  col manifest_hash BLOB notnull=0 default=- pk=0 hidden=0
+  col size_bytes INTEGER notnull=1 default=0 pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col path TEXT notnull=0 default=- pk=0 hidden=0
+  col thumbnail_hash TEXT notnull=0 default=- pk=0 hidden=0
+  col path_sealed BLOB notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (folder_id, path_hash)
+  item folder_id INTEGER NOT NULL
+  item manifest_hash BLOB
+  item path TEXT
+  item path_hash BLOB NOT NULL
+  item path_sealed BLOB
+  item size_bytes INTEGER NOT NULL DEFAULT 0
+  item thumbnail_hash TEXT
+  item updated_at INTEGER NOT NULL
+  item uploader_actor BLOB NOT NULL
+table backup_custody_generations
+  col uploader_actor BLOB notnull=1 default=- pk=0 hidden=0
+  col folder_id INTEGER notnull=1 default=- pk=1 hidden=0
+  col path_hash BLOB notnull=1 default=- pk=2 hidden=0
+  col manifest_hash BLOB notnull=1 default=- pk=3 hidden=0
+  col size_bytes INTEGER notnull=1 default=- pk=0 hidden=0
+  col superseded_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col path TEXT notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (folder_id, path_hash, manifest_hash)
+  item folder_id INTEGER NOT NULL
+  item manifest_hash BLOB NOT NULL
+  item path TEXT
+  item path_hash BLOB NOT NULL
+  item size_bytes INTEGER NOT NULL
+  item superseded_at INTEGER NOT NULL
+  item uploader_actor BLOB NOT NULL
+table backup_destination_folders
+  col owner_actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col destination_id TEXT notnull=1 default=- pk=2 hidden=0
+  col folder_id INTEGER notnull=1 default=- pk=3 hidden=0
+  col added_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (owner_actor_id, destination_id, folder_id)
+  item added_at INTEGER NOT NULL
+  item destination_id TEXT NOT NULL
+  item folder_id INTEGER NOT NULL
+  item owner_actor_id BLOB NOT NULL
+table backup_destinations
+  col owner_actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col destination_id TEXT notnull=1 default=- pk=2 hidden=0
+  col nest_url TEXT notnull=1 default=- pk=0 hidden=0
+  col nest_id BLOB notnull=1 default=- pk=0 hidden=0
+  col added_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col kind TEXT notnull=1 default='nest' pk=0 hidden=0
+  col custodian_device_id TEXT notnull=0 default=- pk=0 hidden=0
+  col capacity_cap_bytes INTEGER notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (owner_actor_id, destination_id)
+  item added_at INTEGER NOT NULL
+  item capacity_cap_bytes INTEGER
+  item custodian_device_id TEXT
+  item destination_id TEXT NOT NULL
+  item kind TEXT NOT NULL DEFAULT 'nest'
+  item nest_id BLOB NOT NULL
+  item nest_url TEXT NOT NULL
+  item owner_actor_id BLOB NOT NULL
+table backup_snapshots
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col blob_hash BLOB notnull=1 default=- pk=0 hidden=0
+  col size_bytes INTEGER notnull=1 default=- pk=0 hidden=0
+  col format TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item blob_hash BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item format TEXT NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item size_bytes INTEGER NOT NULL
+table backup_writer_grants
+  col owner_actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col writer_nest_id BLOB notnull=1 default=- pk=0 hidden=0
+  col granted_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col revoked INTEGER notnull=1 default=0 pk=0 hidden=0
+  col seated_at INTEGER notnull=1 default=0 pk=0 hidden=0
+  item granted_at INTEGER NOT NULL
+  item owner_actor_id BLOB NOT NULL PRIMARY KEY
+  item revoked INTEGER NOT NULL DEFAULT 0
+  item seated_at INTEGER NOT NULL DEFAULT 0
+  item writer_nest_id BLOB NOT NULL
+table blob_legal_withhold
+  col blob_hash BLOB notnull=1 default=- pk=1 hidden=0
+  item blob_hash BLOB NOT NULL PRIMARY KEY
+table blob_metadata
+  col hash BLOB notnull=0 default=- pk=1 hidden=0
+  col size_bytes INTEGER notnull=1 default=- pk=0 hidden=0
+  col content_type TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col last_accessed INTEGER notnull=1 default=- pk=0 hidden=0
+  col storage_local INTEGER notnull=1 default=1 pk=0 hidden=0
+  col storage_s3 INTEGER notnull=1 default=0 pk=0 hidden=0
+  col storage_nodes TEXT notnull=0 default=- pk=0 hidden=0
+  col ref_count INTEGER notnull=1 default=1 pk=0 hidden=0
+  col has_c2pa INTEGER notnull=0 default=- pk=0 hidden=0
+  col thumbnail_hash BLOB notnull=0 default=- pk=0 hidden=0
+  item content_type TEXT NOT NULL
+  item created_at INTEGER NOT NULL
+  item has_c2pa INTEGER
+  item hash BLOB PRIMARY KEY
+  item last_accessed INTEGER NOT NULL
+  item ref_count INTEGER NOT NULL DEFAULT 1
+  item size_bytes INTEGER NOT NULL
+  item storage_local INTEGER NOT NULL DEFAULT 1
+  item storage_nodes TEXT
+  item storage_s3 INTEGER NOT NULL DEFAULT 0
+  item thumbnail_hash BLOB
+table bounce_history
+  col original_sender TEXT notnull=1 default=- pk=1 hidden=0
+  col original_msgid TEXT notnull=1 default=- pk=2 hidden=0
+  col sent_at INTEGER notnull=1 default=- pk=3 hidden=0
+  item PRIMARY KEY (original_sender, original_msgid, sent_at)
+  item original_msgid TEXT NOT NULL
+  item original_sender TEXT NOT NULL
+  item sent_at INTEGER NOT NULL
+table bridge_audit_events
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col received_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col bridge_actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col credential_id TEXT notnull=1 default=- pk=0 hidden=0
+  col result TEXT notnull=1 default=- pk=0 hidden=0
+  col source_ip TEXT notnull=1 default=- pk=0 hidden=0
+  col occurred_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col reason TEXT notnull=0 default=- pk=0 hidden=0
+  col idempotency_hash BLOB notnull=0 default=- pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item bridge_actor_id BLOB NOT NULL
+  item credential_id TEXT NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item idempotency_hash BLOB
+  item occurred_at INTEGER NOT NULL
+  item reason TEXT
+  item received_at INTEGER NOT NULL
+  item result TEXT NOT NULL
+  item source_ip TEXT NOT NULL
+table bridge_authors
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col bridge TEXT notnull=1 default=- pk=0 hidden=0
+  col external_id TEXT notnull=1 default=- pk=0 hidden=0
+  col handle TEXT notnull=0 default=- pk=0 hidden=0
+  col display_name TEXT notnull=0 default=- pk=0 hidden=0
+  col avatar_url TEXT notnull=0 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item avatar_url TEXT
+  item bridge TEXT NOT NULL
+  item display_name TEXT
+  item external_id TEXT NOT NULL
+  item handle TEXT
+  item updated_at INTEGER NOT NULL
+table bridge_caldav_calendars
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col calendar_id BLOB notnull=1 default=- pk=2 hidden=0
+  col encrypted_metadata BLOB notnull=1 default=- pk=0 hidden=0
+  col ctag INTEGER notnull=1 default=0 pk=0 hidden=0
+  col highestmodseq INTEGER notnull=1 default=1 pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, calendar_id)
+  item actor_id BLOB NOT NULL
+  item calendar_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item ctag INTEGER NOT NULL DEFAULT 0
+  item encrypted_metadata BLOB NOT NULL
+  item highestmodseq INTEGER NOT NULL DEFAULT 1
+table bridge_caldav_events
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col calendar_id BLOB notnull=1 default=- pk=2 hidden=0
+  col event_id BLOB notnull=1 default=- pk=3 hidden=0
+  col uid_hash BLOB notnull=1 default=- pk=0 hidden=0
+  col encrypted_index_hint BLOB notnull=1 default=- pk=0 hidden=0
+  col etag TEXT notnull=1 default=- pk=0 hidden=0
+  col modseq INTEGER notnull=1 default=1 pk=0 hidden=0
+  col ciphertext_size INTEGER notnull=1 default=- pk=0 hidden=0
+  col internal_date INTEGER notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col encrypted_fauna_ext BLOB notnull=0 default=- pk=0 hidden=0
+  col record_cid BLOB notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, calendar_id, event_id)
+  item actor_id BLOB NOT NULL
+  item calendar_id BLOB NOT NULL
+  item ciphertext_size INTEGER NOT NULL
+  item created_at INTEGER NOT NULL
+  item encrypted_fauna_ext BLOB
+  item encrypted_index_hint BLOB NOT NULL
+  item etag TEXT NOT NULL
+  item event_id BLOB NOT NULL
+  item internal_date INTEGER NOT NULL
+  item modseq INTEGER NOT NULL DEFAULT 1
+  item record_cid BLOB
+  item uid_hash BLOB NOT NULL
+table bridge_caldav_expunged
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col calendar_id BLOB notnull=1 default=- pk=0 hidden=0
+  col event_id BLOB notnull=1 default=- pk=0 hidden=0
+  col uid_hash BLOB notnull=1 default=- pk=0 hidden=0
+  col modseq INTEGER notnull=1 default=- pk=0 hidden=0
+  col expunged_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item calendar_id BLOB NOT NULL
+  item event_id BLOB NOT NULL
+  item expunged_at INTEGER NOT NULL
+  item modseq INTEGER NOT NULL
+  item uid_hash BLOB NOT NULL
+table bridge_carddav_addressbooks
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col addressbook_id BLOB notnull=1 default=- pk=2 hidden=0
+  col encrypted_metadata BLOB notnull=1 default=- pk=0 hidden=0
+  col ctag INTEGER notnull=1 default=0 pk=0 hidden=0
+  col highestmodseq INTEGER notnull=1 default=1 pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, addressbook_id)
+  item actor_id BLOB NOT NULL
+  item addressbook_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item ctag INTEGER NOT NULL DEFAULT 0
+  item encrypted_metadata BLOB NOT NULL
+  item highestmodseq INTEGER NOT NULL DEFAULT 1
+table bridge_carddav_cards
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col addressbook_id BLOB notnull=1 default=- pk=2 hidden=0
+  col card_id BLOB notnull=1 default=- pk=3 hidden=0
+  col uid_hash BLOB notnull=1 default=- pk=0 hidden=0
+  col encrypted_index_hint BLOB notnull=1 default=- pk=0 hidden=0
+  col etag TEXT notnull=1 default=- pk=0 hidden=0
+  col modseq INTEGER notnull=1 default=1 pk=0 hidden=0
+  col ciphertext_size INTEGER notnull=1 default=- pk=0 hidden=0
+  col internal_date INTEGER notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col encrypted_fauna_ext BLOB notnull=0 default=- pk=0 hidden=0
+  col record_cid BLOB notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, addressbook_id, card_id)
+  item actor_id BLOB NOT NULL
+  item addressbook_id BLOB NOT NULL
+  item card_id BLOB NOT NULL
+  item ciphertext_size INTEGER NOT NULL
+  item created_at INTEGER NOT NULL
+  item encrypted_fauna_ext BLOB
+  item encrypted_index_hint BLOB NOT NULL
+  item etag TEXT NOT NULL
+  item internal_date INTEGER NOT NULL
+  item modseq INTEGER NOT NULL DEFAULT 1
+  item record_cid BLOB
+  item uid_hash BLOB NOT NULL
+table bridge_carddav_expunged
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col addressbook_id BLOB notnull=1 default=- pk=0 hidden=0
+  col card_id BLOB notnull=1 default=- pk=0 hidden=0
+  col uid_hash BLOB notnull=1 default=- pk=0 hidden=0
+  col modseq INTEGER notnull=1 default=- pk=0 hidden=0
+  col expunged_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item addressbook_id BLOB NOT NULL
+  item card_id BLOB NOT NULL
+  item expunged_at INTEGER NOT NULL
+  item modseq INTEGER NOT NULL
+  item uid_hash BLOB NOT NULL
+table bridge_conversation_messages
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col room_id BLOB notnull=1 default=- pk=0 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col direction TEXT notnull=1 default=- pk=0 hidden=0
+  col far_message_id TEXT notnull=0 default=- pk=0 hidden=0
+  col sender TEXT notnull=1 default=- pk=0 hidden=0
+  col sealed_content BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col received_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col receipt TEXT notnull=0 default=- pk=0 hidden=0
+  col undelivered_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item direction TEXT NOT NULL CHECK(direction IN ('in', 'out'))
+  item far_message_id TEXT
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item receipt TEXT CHECK(receipt IS NULL OR receipt IN ('delivered', 'read'))
+  item received_at INTEGER NOT NULL
+  item room_id BLOB NOT NULL
+  item sealed_content BLOB NOT NULL
+  item sender TEXT NOT NULL
+  item undelivered_at INTEGER
+table bridge_conversation_outbox
+  col message_id INTEGER notnull=0 default=- pk=1 hidden=0
+  col room_id BLOB notnull=1 default=- pk=0 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col bridge_principal_id BLOB notnull=1 default=- pk=0 hidden=0
+  col ciphertext BLOB notnull=1 default=- pk=0 hidden=0
+  col queued_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item bridge_principal_id BLOB NOT NULL
+  item ciphertext BLOB NOT NULL
+  item message_id INTEGER PRIMARY KEY
+  item queued_at INTEGER NOT NULL
+  item room_id BLOB NOT NULL
+table bridge_conversation_rooms
+  col room_id BLOB notnull=0 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col bridge_principal_id BLOB notnull=1 default=- pk=0 hidden=0
+  col bridge_id TEXT notnull=1 default=- pk=0 hidden=0
+  col far_room_id TEXT notnull=1 default=- pk=0 hidden=0
+  col label TEXT notnull=0 default=- pk=0 hidden=0
+  col participants TEXT notnull=1 default='[]' pk=0 hidden=0
+  col self_address TEXT notnull=0 default=- pk=0 hidden=0
+  col capabilities TEXT notnull=1 default=- pk=0 hidden=0
+  col bridge_x25519 BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col last_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item UNIQUE (actor_id, bridge_id, far_room_id)
+  item actor_id BLOB NOT NULL
+  item bridge_id TEXT NOT NULL
+  item bridge_principal_id BLOB NOT NULL
+  item bridge_x25519 BLOB NOT NULL
+  item capabilities TEXT NOT NULL
+  item created_at INTEGER NOT NULL
+  item far_room_id TEXT NOT NULL
+  item label TEXT
+  item last_at INTEGER NOT NULL
+  item participants TEXT NOT NULL DEFAULT '[]'
+  item room_id BLOB PRIMARY KEY
+  item self_address TEXT
+table bridge_feed_subscriptions
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col bridge TEXT notnull=1 default=- pk=0 hidden=0
+  col feed_uri TEXT notnull=1 default=- pk=0 hidden=0
+  col name TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item UNIQUE(actor_id, bridge, feed_uri)
+  item actor_id BLOB NOT NULL
+  item bridge TEXT NOT NULL
+  item created_at INTEGER NOT NULL
+  item feed_uri TEXT NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item name TEXT NOT NULL
+table bridge_imap_expunged
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col mailbox TEXT notnull=1 default=- pk=0 hidden=0
+  col uid INTEGER notnull=1 default=- pk=0 hidden=0
+  col modseq INTEGER notnull=1 default=- pk=0 hidden=0
+  col expunged_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item expunged_at INTEGER NOT NULL
+  item mailbox TEXT NOT NULL
+  item modseq INTEGER NOT NULL
+  item uid INTEGER NOT NULL
+table bridge_imap_mailbox_state
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col mailbox TEXT notnull=1 default=- pk=2 hidden=0
+  col uid_validity INTEGER notnull=1 default=1 pk=0 hidden=0
+  col uid_next INTEGER notnull=1 default=1 pk=0 hidden=0
+  col highestmodseq INTEGER notnull=1 default=1 pk=0 hidden=0
+  item PRIMARY KEY (actor_id, mailbox)
+  item actor_id BLOB NOT NULL
+  item highestmodseq INTEGER NOT NULL DEFAULT 1
+  item mailbox TEXT NOT NULL
+  item uid_next INTEGER NOT NULL DEFAULT 1
+  item uid_validity INTEGER NOT NULL DEFAULT 1
+table bridge_imap_messages
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col mailbox TEXT notnull=1 default=- pk=2 hidden=0
+  col uid INTEGER notnull=1 default=- pk=3 hidden=0
+  col message_id BLOB notnull=1 default=- pk=0 hidden=0
+  col flags TEXT notnull=1 default='' pk=0 hidden=0
+  col modseq INTEGER notnull=1 default=1 pk=0 hidden=0
+  col internal_date INTEGER notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col from_norm TEXT notnull=1 default='' pk=0 hidden=0
+  col to_norm TEXT notnull=1 default='' pk=0 hidden=0
+  col cc_norm TEXT notnull=1 default='' pk=0 hidden=0
+  col subject_norm TEXT notnull=1 default='' pk=0 hidden=0
+  item PRIMARY KEY (actor_id, mailbox, uid)
+  item actor_id BLOB NOT NULL
+  item cc_norm TEXT NOT NULL DEFAULT ''
+  item created_at INTEGER NOT NULL
+  item flags TEXT NOT NULL DEFAULT ''
+  item from_norm TEXT NOT NULL DEFAULT ''
+  item internal_date INTEGER NOT NULL
+  item mailbox TEXT NOT NULL
+  item message_id BLOB NOT NULL
+  item modseq INTEGER NOT NULL DEFAULT 1
+  item subject_norm TEXT NOT NULL DEFAULT ''
+  item to_norm TEXT NOT NULL DEFAULT ''
+  item uid INTEGER NOT NULL
+table bridge_imap_subscriptions
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col mailbox TEXT notnull=1 default=- pk=2 hidden=0
+  item PRIMARY KEY (actor_id, mailbox)
+  item actor_id BLOB NOT NULL
+  item mailbox TEXT NOT NULL
+table bridge_index_map
+  col content_type TEXT notnull=1 default=- pk=1 hidden=0
+  col natural_id TEXT notnull=1 default=- pk=2 hidden=0
+  col content_id BLOB notnull=1 default=- pk=0 hidden=0
+  col post_id BLOB notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (content_type, natural_id)
+  item content_id BLOB NOT NULL
+  item content_type TEXT NOT NULL
+  item natural_id TEXT NOT NULL
+  item post_id BLOB
+table bridge_mls_snapshot_blobs
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col blob BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item blob BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+table bridge_restore_divergence
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col snapshot_id INTEGER notnull=1 default=- pk=0 hidden=0
+  col observed_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col protocol TEXT notnull=1 default=- pk=0 hidden=0
+  col collection TEXT notnull=1 default=- pk=0 hidden=0
+  col mua_id TEXT notnull=0 default=- pk=0 hidden=0
+  col client_modseq INTEGER notnull=1 default=- pk=0 hidden=0
+  col server_modseq INTEGER notnull=1 default=- pk=0 hidden=0
+  col lost_event_count INTEGER notnull=1 default=- pk=0 hidden=0
+  fk snapshot_id -> snapshots.id update=NO ACTION delete=NO ACTION
+  item FOREIGN KEY (snapshot_id) REFERENCES snapshots(id)
+  item actor_id BLOB NOT NULL
+  item client_modseq INTEGER NOT NULL
+  item collection TEXT NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item lost_event_count INTEGER NOT NULL
+  item mua_id TEXT
+  item observed_at INTEGER NOT NULL
+  item protocol TEXT NOT NULL
+  item server_modseq INTEGER NOT NULL
+  item snapshot_id INTEGER NOT NULL
+table bridge_search_policy
+  col actor_id TEXT notnull=1 default=- pk=1 hidden=0
+  col bridge_id TEXT notnull=1 default=- pk=2 hidden=0
+  col show_in_search INTEGER notnull=1 default=- pk=0 hidden=0
+  col post_limit INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, bridge_id)
+  item actor_id TEXT NOT NULL
+  item bridge_id TEXT NOT NULL
+  item post_limit INTEGER NOT NULL
+  item show_in_search INTEGER NOT NULL
+table bridge_service_users
+  col ed25519_pubkey BLOB notnull=0 default=- pk=1 hidden=0
+  col x25519_pubkey BLOB notnull=0 default=- pk=0 hidden=0
+  col mlkem_ek BLOB notnull=0 default=- pk=0 hidden=0
+  col role TEXT notnull=1 default=- pk=0 hidden=0
+  col bridge_id TEXT notnull=1 default=- pk=0 hidden=0
+  col in_process INTEGER notnull=1 default=0 pk=0 hidden=0
+  col status TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col approved_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col revoked_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col approved_by_actor_id BLOB notnull=0 default=- pk=0 hidden=0
+  col confinement_uid INTEGER notnull=0 default=- pk=0 hidden=0
+  col confinement_sealed_store TEXT notnull=0 default=- pk=0 hidden=0
+  col confinement_landlock TEXT notnull=0 default=- pk=0 hidden=0
+  col confinement_seccomp TEXT notnull=0 default=- pk=0 hidden=0
+  col confinement_reported_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item approved_at INTEGER
+  item approved_by_actor_id BLOB
+  item bridge_id TEXT NOT NULL
+  item confinement_landlock TEXT
+  item confinement_reported_at INTEGER
+  item confinement_sealed_store TEXT
+  item confinement_seccomp TEXT
+  item confinement_uid INTEGER
+  item created_at INTEGER NOT NULL
+  item ed25519_pubkey BLOB PRIMARY KEY
+  item in_process INTEGER NOT NULL DEFAULT 0
+  item mlkem_ek BLOB
+  item revoked_at INTEGER
+  item role TEXT NOT NULL CHECK(role IN ('mta', 'mda', 'content-processor', 'atproto.pds'))
+  item status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'revoked'))
+  item x25519_pubkey BLOB
+table bridge_session_close_events
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col received_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col bridge_actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col credential_id TEXT notnull=1 default=- pk=0 hidden=0
+  col reason TEXT notnull=1 default=- pk=0 hidden=0
+  col occurred_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col idempotency_hash BLOB notnull=0 default=- pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item bridge_actor_id BLOB NOT NULL
+  item credential_id TEXT NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item idempotency_hash BLOB
+  item occurred_at INTEGER NOT NULL
+  item reason TEXT NOT NULL
+  item received_at INTEGER NOT NULL
+table bridge_submission_quota
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col day_bucket INTEGER notnull=1 default=- pk=2 hidden=0
+  col used INTEGER notnull=1 default=0 pk=0 hidden=0
+  item PRIMARY KEY (actor_id, day_bucket)
+  item actor_id BLOB NOT NULL
+  item day_bucket INTEGER NOT NULL
+  item used INTEGER NOT NULL DEFAULT 0
+table bridge_tls_cert_blobs
+  col bridge_role TEXT notnull=1 default=- pk=1 hidden=0
+  col bridge_id TEXT notnull=1 default=- pk=2 hidden=0
+  col domain TEXT notnull=1 default=- pk=3 hidden=0
+  col blob BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (bridge_role, bridge_id, domain)
+  item blob BLOB NOT NULL
+  item bridge_id TEXT NOT NULL
+  item bridge_role TEXT NOT NULL
+  item created_at INTEGER NOT NULL
+  item domain TEXT NOT NULL
+table bridge_webdav_keys_blobs
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col blob BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item blob BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+table bridge_wrapped_mls_blobs
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col credential_id TEXT notnull=1 default=- pk=2 hidden=0
+  col blob BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, credential_id)
+  item actor_id BLOB NOT NULL
+  item blob BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item credential_id TEXT NOT NULL
+table bridge_wrapped_submission_tokens
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col credential_id TEXT notnull=1 default=- pk=2 hidden=0
+  col blob BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, credential_id)
+  item actor_id BLOB NOT NULL
+  item blob BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item credential_id TEXT NOT NULL
+table caldav_enabled
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col enabled INTEGER notnull=1 default=- pk=0 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item set_at INTEGER NOT NULL
+table caldav_port
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col port INTEGER notnull=1 default=- pk=0 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item port INTEGER NOT NULL CHECK (port > 0 AND port < 65536)
+  item set_at INTEGER NOT NULL
+table capability_grants
+  col owner_actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col grant_id BLOB notnull=1 default=- pk=2 hidden=0
+  col holder_pubkey BLOB notnull=1 default=- pk=0 hidden=0
+  col blob BLOB notnull=1 default=- pk=0 hidden=0
+  col epoch_end INTEGER notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (owner_actor_id, grant_id)
+  item blob BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item epoch_end INTEGER NOT NULL
+  item grant_id BLOB NOT NULL
+  item holder_pubkey BLOB NOT NULL
+  item owner_actor_id BLOB NOT NULL
+table carddav_enabled
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col enabled INTEGER notnull=1 default=- pk=0 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item set_at INTEGER NOT NULL
+table channel_commit_watermark
+  col channel_id BLOB notnull=0 default=- pk=1 hidden=0
+  col last_commit_seq INTEGER notnull=1 default=- pk=0 hidden=0
+  col last_commit_sender BLOB notnull=0 default=- pk=0 hidden=0
+  item channel_id BLOB PRIMARY KEY
+  item last_commit_sender BLOB
+  item last_commit_seq INTEGER NOT NULL
+table channel_foreign_members
+  col channel_id BLOB notnull=1 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=2 hidden=0
+  col home_nest_id BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col nest_url TEXT notnull=0 default=- pk=0 hidden=0
+  col confirmed_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col handle TEXT notnull=0 default=- pk=0 hidden=0
+  col handle_domain TEXT notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (channel_id, actor_id)
+  item actor_id BLOB NOT NULL
+  item channel_id BLOB NOT NULL
+  item confirmed_at INTEGER
+  item created_at INTEGER NOT NULL
+  item handle TEXT
+  item handle_domain TEXT
+  item home_nest_id BLOB NOT NULL
+  item nest_url TEXT
+table contacts
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col peer_id BLOB notnull=1 default=- pk=2 hidden=0
+  col status TEXT notnull=1 default=- pk=0 hidden=0
+  col accepted_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, peer_id)
+  item accepted_at INTEGER
+  item actor_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item peer_id BLOB NOT NULL
+  item status TEXT NOT NULL
+table content
+  col id BLOB notnull=0 default=- pk=1 hidden=0
+  col schema TEXT notnull=1 default=- pk=0 hidden=0
+  col author BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col payload BLOB notnull=1 default=- pk=0 hidden=0
+  col expires_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col source TEXT notnull=1 default='fauna' pk=0 hidden=0
+  col blob_hash BLOB notnull=0 default=- pk=0 hidden=0
+  col origin_nest_url TEXT notnull=0 default=- pk=0 hidden=0
+  item author BLOB NOT NULL
+  item blob_hash BLOB
+  item created_at INTEGER NOT NULL
+  item expires_at INTEGER
+  item id BLOB PRIMARY KEY
+  item origin_nest_url TEXT
+  item payload BLOB NOT NULL
+  item schema TEXT NOT NULL
+  item source TEXT NOT NULL DEFAULT 'fauna'
+table content_fts
+  col title  notnull=0 default=- pk=0 hidden=0
+  col body  notnull=0 default=- pk=0 hidden=0
+  col author_name  notnull=0 default=- pk=0 hidden=0
+  col tags  notnull=0 default=- pk=0 hidden=0
+  col schema  notnull=0 default=- pk=0 hidden=0
+  col content_fts  notnull=0 default=- pk=0 hidden=1
+  col rank  notnull=0 default=- pk=0 hidden=1
+  item author_name
+  item body
+  item schema UNINDEXED
+  item tags
+  item title
+  item tokenize='porter unicode61'
+table content_fts_config
+  col k  notnull=1 default=- pk=1 hidden=0
+  col v  notnull=0 default=- pk=0 hidden=0
+  item k PRIMARY KEY
+  item v
+table content_fts_content
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col c0  notnull=0 default=- pk=0 hidden=0
+  col c1  notnull=0 default=- pk=0 hidden=0
+  col c2  notnull=0 default=- pk=0 hidden=0
+  col c3  notnull=0 default=- pk=0 hidden=0
+  col c4  notnull=0 default=- pk=0 hidden=0
+  item c0
+  item c1
+  item c2
+  item c3
+  item c4
+  item id INTEGER PRIMARY KEY
+table content_fts_data
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col block BLOB notnull=0 default=- pk=0 hidden=0
+  item block BLOB
+  item id INTEGER PRIMARY KEY
+table content_fts_docsize
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col sz BLOB notnull=0 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY
+  item sz BLOB
+table content_fts_idx
+  col segid  notnull=1 default=- pk=1 hidden=0
+  col term  notnull=1 default=- pk=2 hidden=0
+  col pgno  notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY(segid, term)
+  item pgno
+  item segid
+  item term
+table content_fts_map
+  col content_id BLOB notnull=0 default=- pk=1 hidden=0
+  col fts_rowid INTEGER notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=0 pk=0 hidden=0
+  item content_id BLOB PRIMARY KEY
+  item created_at INTEGER NOT NULL DEFAULT 0
+  item fts_rowid INTEGER NOT NULL
+table content_labels
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col content_type TEXT notnull=1 default=- pk=0 hidden=0
+  col content_id TEXT notnull=1 default=- pk=0 hidden=0
+  col category TEXT notnull=1 default=- pk=0 hidden=0
+  col confidence REAL notnull=1 default=- pk=0 hidden=0
+  col mechanism_type INTEGER notnull=1 default=- pk=0 hidden=0
+  col classifier_id BLOB notnull=1 default=- pk=0 hidden=0
+  col classifier_version INTEGER notnull=1 default=- pk=0 hidden=0
+  col attestation_type INTEGER notnull=1 default=- pk=0 hidden=0
+  col attestation_data BLOB notnull=0 default=- pk=0 hidden=0
+  col obligation_id BLOB notnull=0 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col scanner_id BLOB notnull=1 default=- pk=0 hidden=0
+  col signature BLOB notnull=1 default=- pk=0 hidden=0
+  item UNIQUE(content_type, content_id, category, classifier_id)
+  item attestation_data BLOB
+  item attestation_type INTEGER NOT NULL
+  item category TEXT NOT NULL
+  item classifier_id BLOB NOT NULL
+  item classifier_version INTEGER NOT NULL
+  item confidence REAL NOT NULL
+  item content_id TEXT NOT NULL
+  item content_type TEXT NOT NULL
+  item created_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item mechanism_type INTEGER NOT NULL
+  item obligation_id BLOB
+  item scanner_id BLOB NOT NULL
+  item signature BLOB NOT NULL
+table content_links
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col link_type TEXT notnull=1 default=- pk=0 hidden=0
+  col source_id BLOB notnull=0 default=- pk=0 hidden=0
+  col target_id BLOB notnull=0 default=- pk=0 hidden=0
+  col actor_id BLOB notnull=0 default=- pk=0 hidden=0
+  col status TEXT notnull=0 default=- pk=0 hidden=0
+  col metadata BLOB notnull=0 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col modseq BIGINT notnull=0 default=1 pk=0 hidden=0
+  item actor_id BLOB
+  item created_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item link_type TEXT NOT NULL
+  item metadata BLOB
+  item modseq BIGINT DEFAULT 1
+  item source_id BLOB
+  item status TEXT
+  item target_id BLOB
+  item updated_at INTEGER NOT NULL
+table content_meta
+  col content_id BLOB notnull=0 default=- pk=1 hidden=0
+  col score REAL notnull=1 default=0 pk=0 hidden=0
+  col has_media INTEGER notnull=1 default=0 pk=0 hidden=0
+  col is_reply INTEGER notnull=1 default=0 pk=0 hidden=0
+  col quote_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col gated_tier TEXT notnull=0 default=- pk=0 hidden=0
+  col gated_room BLOB notnull=0 default=- pk=0 hidden=0
+  col quarantined INTEGER notnull=1 default=0 pk=0 hidden=0
+  col suppressed INTEGER notnull=1 default=0 pk=0 hidden=0
+  col legal_takedown_ref TEXT notnull=0 default=- pk=0 hidden=0
+  col like_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col reply_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col repost_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col preview TEXT notnull=0 default=- pk=0 hidden=0
+  item content_id BLOB PRIMARY KEY
+  item gated_room BLOB
+  item gated_tier TEXT
+  item has_media INTEGER NOT NULL DEFAULT 0
+  item is_reply INTEGER NOT NULL DEFAULT 0
+  item legal_takedown_ref TEXT
+  item like_count INTEGER NOT NULL DEFAULT 0
+  item preview TEXT
+  item quarantined INTEGER NOT NULL DEFAULT 0
+  item quote_count INTEGER NOT NULL DEFAULT 0
+  item reply_count INTEGER NOT NULL DEFAULT 0
+  item repost_count INTEGER NOT NULL DEFAULT 0
+  item score REAL NOT NULL DEFAULT 0
+  item suppressed INTEGER NOT NULL DEFAULT 0
+table content_reports
+  col content_hash BLOB notnull=1 default=- pk=1 hidden=0
+  col factor TEXT notnull=1 default=- pk=2 hidden=0
+  col reporter BLOB notnull=1 default=- pk=3 hidden=0
+  col content_kind TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (content_hash, factor, reporter)
+  item content_hash BLOB NOT NULL
+  item content_kind TEXT NOT NULL
+  item created_at INTEGER NOT NULL
+  item factor TEXT NOT NULL
+  item reporter BLOB NOT NULL
+table content_scores
+  col content_id BLOB notnull=1 default=- pk=1 hidden=0
+  col content_kind TEXT notnull=1 default='mail' pk=0 hidden=0
+  col factor TEXT notnull=1 default=- pk=2 hidden=0
+  col score INTEGER notnull=1 default=- pk=0 hidden=0
+  col tier INTEGER notnull=1 default=- pk=0 hidden=0
+  col scorer_version INTEGER notnull=1 default=- pk=0 hidden=0
+  col scored_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col actor_id BLOB notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (content_id, factor)
+  item actor_id BLOB
+  item content_id BLOB NOT NULL
+  item content_kind TEXT NOT NULL DEFAULT 'mail'
+  item factor TEXT NOT NULL
+  item score INTEGER NOT NULL
+  item scored_at INTEGER NOT NULL
+  item scorer_version INTEGER NOT NULL
+  item tier INTEGER NOT NULL
+table conv_attachment_refs
+  col channel_id BLOB notnull=1 default=- pk=1 hidden=0
+  col seq INTEGER notnull=1 default=- pk=2 hidden=0
+  col blob_hash BLOB notnull=1 default=- pk=3 hidden=0
+  item PRIMARY KEY (channel_id, seq, blob_hash)
+  item blob_hash BLOB NOT NULL
+  item channel_id BLOB NOT NULL
+  item seq INTEGER NOT NULL
+table conv_record_authors
+  col channel_id BLOB notnull=1 default=- pk=1 hidden=0
+  col seq INTEGER notnull=1 default=- pk=2 hidden=0
+  col author BLOB notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (channel_id, seq)
+  item author BLOB NOT NULL
+  item channel_id BLOB NOT NULL
+  item seq INTEGER NOT NULL
+table current_key_blobs
+  col author_id BLOB notnull=1 default=- pk=1 hidden=0
+  col tier_name TEXT notnull=1 default=- pk=2 hidden=0
+  col key_version INTEGER notnull=1 default=- pk=3 hidden=0
+  col blob_hash BLOB notnull=1 default=- pk=0 hidden=0
+  col blob_data BLOB notnull=1 default=x'' pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  fk author_id -> subscription_tiers.author_id update=NO ACTION delete=NO ACTION
+  fk tier_name -> subscription_tiers.name update=NO ACTION delete=NO ACTION
+  item FOREIGN KEY (author_id, tier_name) REFERENCES subscription_tiers (author_id, name)
+  item PRIMARY KEY (author_id, tier_name, key_version)
+  item author_id BLOB NOT NULL
+  item blob_data BLOB NOT NULL DEFAULT x''
+  item blob_hash BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item key_version INTEGER NOT NULL
+  item tier_name TEXT NOT NULL
+table custody_hosting
+  col host_actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col grant_id BLOB notnull=1 default=- pk=2 hidden=0
+  col owner_actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col witness BLOB notnull=1 default=- pk=0 hidden=0
+  col owner_nest_url TEXT notnull=1 default=- pk=0 hidden=0
+  col owner_devices BLOB notnull=1 default=- pk=0 hidden=0
+  col retained_bytes_cap INTEGER notnull=1 default=- pk=0 hidden=0
+  col stopped INTEGER notnull=1 default=0 pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col held_bytes INTEGER notnull=1 default=0 pk=0 hidden=0
+  col last_receipt_at INTEGER notnull=1 default=0 pk=0 hidden=0
+  col last_receipt_degraded INTEGER notnull=1 default=0 pk=0 hidden=0
+  item PRIMARY KEY (host_actor_id, grant_id)
+  item grant_id BLOB NOT NULL
+  item held_bytes INTEGER NOT NULL DEFAULT 0
+  item host_actor_id BLOB NOT NULL
+  item last_receipt_at INTEGER NOT NULL DEFAULT 0
+  item last_receipt_degraded INTEGER NOT NULL DEFAULT 0
+  item owner_actor_id BLOB NOT NULL
+  item owner_devices BLOB NOT NULL
+  item owner_nest_url TEXT NOT NULL
+  item retained_bytes_cap INTEGER NOT NULL
+  item stopped INTEGER NOT NULL DEFAULT 0
+  item updated_at INTEGER NOT NULL
+  item witness BLOB NOT NULL
+table custody_receipts_staged
+  col owner_actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col grant_id BLOB notnull=1 default=- pk=2 hidden=0
+  col receipt BLOB notnull=1 default=- pk=0 hidden=0
+  col attested_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col staged_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (owner_actor_id, grant_id)
+  item attested_at INTEGER NOT NULL
+  item grant_id BLOB NOT NULL
+  item owner_actor_id BLOB NOT NULL
+  item receipt BLOB NOT NULL
+  item staged_at INTEGER NOT NULL
+table delivery_receipts
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col content_hash BLOB notnull=1 default=- pk=0 hidden=0
+  col server_nest BLOB(32) notnull=1 default=- pk=0 hidden=0
+  col requesting_nest BLOB(32) notnull=1 default=- pk=0 hidden=0
+  col bytes_served INTEGER notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item bytes_served INTEGER NOT NULL
+  item content_hash BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item requesting_nest BLOB(32) NOT NULL
+  item server_nest BLOB(32) NOT NULL
+table device_authorizations
+  col author_id BLOB notnull=1 default=- pk=1 hidden=0
+  col device_key BLOB notnull=1 default=- pk=0 hidden=0
+  col payload BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item author_id BLOB NOT NULL PRIMARY KEY
+  item created_at INTEGER NOT NULL
+  item device_key BLOB NOT NULL
+  item payload BLOB NOT NULL
+table domain_expiry
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col domain TEXT notnull=1 default=- pk=0 hidden=0
+  col expires_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col statuses TEXT notnull=1 default=- pk=0 hidden=0
+  col fetched_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col outcome TEXT notnull=1 default=- pk=0 hidden=0
+  col detail TEXT notnull=0 default=- pk=0 hidden=0
+  item detail TEXT
+  item domain TEXT NOT NULL
+  item expires_at INTEGER
+  item fetched_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item outcome TEXT NOT NULL
+  item statuses TEXT NOT NULL
+table email_domain_users
+  col domain TEXT notnull=1 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col local_part TEXT notnull=1 default=- pk=2 hidden=0
+  col created_at INTEGER notnull=1 default=0 pk=0 hidden=0
+  fk domain -> email_domains.domain update=NO ACTION delete=NO ACTION
+  item PRIMARY KEY (domain, local_part)
+  item UNIQUE (domain, actor_id)
+  item actor_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL DEFAULT 0
+  item domain TEXT NOT NULL REFERENCES email_domains(domain)
+  item local_part TEXT NOT NULL
+table email_domains
+  col domain TEXT notnull=0 default=- pk=1 hidden=0
+  col dkim_selector TEXT notnull=1 default='default' pk=0 hidden=0
+  col dkim_ed25519_selector TEXT notnull=1 default='ed25519' pk=0 hidden=0
+  col enabled INTEGER notnull=1 default=1 pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=0 pk=0 hidden=0
+  item created_at INTEGER NOT NULL DEFAULT 0
+  item dkim_ed25519_selector TEXT NOT NULL DEFAULT 'ed25519'
+  item dkim_selector TEXT NOT NULL DEFAULT 'default'
+  item domain TEXT PRIMARY KEY
+  item enabled INTEGER NOT NULL DEFAULT 1
+table email_filters
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col owner BLOB notnull=1 default=- pk=0 hidden=0
+  col name TEXT notnull=1 default='' pk=0 hidden=0
+  col rules BLOB notnull=1 default=- pk=0 hidden=0
+  col combination TEXT notnull=1 default='all' pk=0 hidden=0
+  col action TEXT notnull=1 default='discard' pk=0 hidden=0
+  col priority INTEGER notnull=1 default=0 pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col continue_on_match INTEGER notnull=1 default=0 pk=0 hidden=0
+  col forward_redirect INTEGER notnull=1 default=0 pk=0 hidden=0
+  item action TEXT NOT NULL DEFAULT 'discard'
+  item combination TEXT NOT NULL DEFAULT 'all'
+  item continue_on_match INTEGER NOT NULL DEFAULT 0
+  item created_at INTEGER NOT NULL
+  item forward_redirect INTEGER NOT NULL DEFAULT 0
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item name TEXT NOT NULL DEFAULT ''
+  item owner BLOB NOT NULL
+  item priority INTEGER NOT NULL DEFAULT 0
+  item rules BLOB NOT NULL
+table engagement_events
+  col event_id BLOB notnull=0 default=- pk=1 hidden=0
+  col content_id BLOB notnull=1 default=- pk=0 hidden=0
+  col actor_id BLOB notnull=0 default=- pk=0 hidden=0
+  col event_type TEXT notnull=1 default=- pk=0 hidden=0
+  col event_data BLOB notnull=0 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB
+  item content_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item event_data BLOB
+  item event_id BLOB PRIMARY KEY
+  item event_type TEXT NOT NULL
+table eviction_tokens
+  col token TEXT notnull=0 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col expires_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item expires_at INTEGER NOT NULL
+  item token TEXT PRIMARY KEY
+table exchange_peers
+  col nest_url TEXT notnull=0 default=- pk=1 hidden=0
+  col nest_id BLOB notnull=1 default=- pk=0 hidden=0
+  col last_success_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item created_at INTEGER NOT NULL
+  item last_success_at INTEGER NOT NULL
+  item nest_id BLOB NOT NULL
+  item nest_url TEXT PRIMARY KEY
+table export_sessions
+  col session_id TEXT notnull=0 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col format TEXT notnull=1 default=- pk=0 hidden=0
+  col scope_descriptor BLOB notnull=1 default=x'' pk=0 hidden=0
+  col state TEXT notnull=1 default=- pk=0 hidden=0
+  col started_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col last_progress_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col total_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col exported_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col skipped_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col errored_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col last_processed_message_id TEXT notnull=1 default='' pk=0 hidden=0
+  col error_reason TEXT notnull=1 default='' pk=0 hidden=0
+  col blob_path TEXT notnull=1 default='' pk=0 hidden=0
+  col blob_bytes INTEGER notnull=1 default=0 pk=0 hidden=0
+  col blob_decryption_key_wrapped_for_actor BLOB notnull=0 default=- pk=0 hidden=0
+  col expires_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col next_chunk_idx INTEGER notnull=1 default=0 pk=0 hidden=0
+  col stream_generation INTEGER notnull=1 default=0 pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item blob_bytes INTEGER NOT NULL DEFAULT 0
+  item blob_decryption_key_wrapped_for_actor BLOB
+  item blob_path TEXT NOT NULL DEFAULT ''
+  item error_reason TEXT NOT NULL DEFAULT ''
+  item errored_count INTEGER NOT NULL DEFAULT 0
+  item expires_at INTEGER NOT NULL
+  item exported_count INTEGER NOT NULL DEFAULT 0
+  item format TEXT NOT NULL
+  item last_processed_message_id TEXT NOT NULL DEFAULT ''
+  item last_progress_at INTEGER NOT NULL
+  item next_chunk_idx INTEGER NOT NULL DEFAULT 0
+  item scope_descriptor BLOB NOT NULL DEFAULT x''
+  item session_id TEXT PRIMARY KEY
+  item skipped_count INTEGER NOT NULL DEFAULT 0
+  item started_at INTEGER NOT NULL
+  item state TEXT NOT NULL CHECK (state IN ('running','paused','errored','completed','cancelled'))
+  item stream_generation INTEGER NOT NULL DEFAULT 0
+  item total_count INTEGER NOT NULL DEFAULT 0
+table feature_policies
+  col tier INTEGER notnull=1 default=- pk=1 hidden=0
+  col subject_id BLOB notnull=1 default=- pk=2 hidden=0
+  col feature TEXT notnull=1 default=- pk=3 hidden=0
+  col document BLOB notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (tier, subject_id, feature)
+  item document BLOB NOT NULL
+  item feature TEXT NOT NULL
+  item subject_id BLOB NOT NULL
+  item tier INTEGER NOT NULL
+  item updated_at INTEGER NOT NULL
+table feature_usage
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col feature TEXT notnull=1 default=- pk=2 hidden=0
+  col dimension TEXT notnull=1 default=- pk=3 hidden=0
+  col day INTEGER notnull=1 default=- pk=4 hidden=0
+  col amount INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, feature, dimension, day)
+  item actor_id BLOB NOT NULL
+  item amount INTEGER NOT NULL
+  item day INTEGER NOT NULL
+  item dimension TEXT NOT NULL
+  item feature TEXT NOT NULL
+table feed_contributors
+  col feed_id TEXT notnull=1 default=- pk=1 hidden=0
+  col nest_url TEXT notnull=1 default=- pk=2 hidden=0
+  col author_id BLOB notnull=1 default=x'' pk=3 hidden=0
+  col hit_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col last_seen INTEGER notnull=1 default=0 pk=0 hidden=0
+  col poll_priority TEXT notnull=1 default='hot' pk=0 hidden=0
+  col discovered_via TEXT notnull=1 default='seed' pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (feed_id, nest_url, author_id)
+  item author_id BLOB NOT NULL DEFAULT x''
+  item created_at INTEGER NOT NULL
+  item discovered_via TEXT NOT NULL DEFAULT 'seed'
+  item feed_id TEXT NOT NULL
+  item hit_count INTEGER NOT NULL DEFAULT 0
+  item last_seen INTEGER NOT NULL DEFAULT 0
+  item nest_url TEXT NOT NULL
+  item poll_priority TEXT NOT NULL DEFAULT 'hot'
+table feed_global_factors
+  col owner BLOB notnull=1 default=- pk=1 hidden=0
+  col factor TEXT notnull=1 default=- pk=2 hidden=0
+  col weight_permille INTEGER notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (owner, factor)
+  item factor TEXT NOT NULL
+  item owner BLOB NOT NULL
+  item updated_at INTEGER NOT NULL
+  item weight_permille INTEGER NOT NULL
+table feeds
+  col feed_id TEXT notnull=0 default=- pk=1 hidden=0
+  col owner BLOB notnull=1 default=- pk=0 hidden=0
+  col name TEXT notnull=1 default=- pk=0 hidden=0
+  col rules BLOB notnull=1 default=- pk=0 hidden=0
+  col combination TEXT notnull=1 default='all' pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col scope TEXT notnull=1 default='local' pk=0 hidden=0
+  col contributor_seeds TEXT notnull=1 default='[]' pk=0 hidden=0
+  col composition BLOB notnull=0 default=- pk=0 hidden=0
+  item combination TEXT NOT NULL DEFAULT 'all'
+  item composition BLOB
+  item contributor_seeds TEXT NOT NULL DEFAULT '[]'
+  item created_at INTEGER NOT NULL
+  item feed_id TEXT PRIMARY KEY
+  item name TEXT NOT NULL
+  item owner BLOB NOT NULL
+  item rules BLOB NOT NULL
+  item scope TEXT NOT NULL DEFAULT 'local'
+table first_party_bridge_keys
+  col bridge_id TEXT notnull=0 default=- pk=1 hidden=0
+  col secret_wrapped BLOB notnull=1 default=- pk=0 hidden=0
+  col x25519_public BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item bridge_id TEXT PRIMARY KEY
+  item created_at INTEGER NOT NULL
+  item secret_wrapped BLOB NOT NULL
+  item x25519_public BLOB NOT NULL
+table folder_channel_claims
+  col channel_id BLOB notnull=0 default=- pk=1 hidden=0
+  col claimed_by BLOB notnull=1 default=- pk=0 hidden=0
+  col claimed_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item channel_id BLOB PRIMARY KEY
+  item claimed_at INTEGER NOT NULL
+  item claimed_by BLOB NOT NULL
+table folder_content_keys
+  col channel_id BLOB notnull=0 default=- pk=1 hidden=0
+  col epoch INTEGER notnull=1 default=- pk=0 hidden=0
+  col sealed BLOB notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col current_version INTEGER notnull=1 default=- pk=0 hidden=0
+  item channel_id BLOB PRIMARY KEY
+  item current_version INTEGER NOT NULL
+  item epoch INTEGER NOT NULL
+  item sealed BLOB NOT NULL
+  item updated_at INTEGER NOT NULL
+table folder_deposit_inbox
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col folder_id INTEGER notnull=1 default=- pk=0 hidden=0
+  col principal_id BLOB notnull=1 default=- pk=0 hidden=0
+  col sealed BLOB notnull=1 default=- pk=0 hidden=0
+  col byte_length INTEGER notnull=1 default=- pk=0 hidden=0
+  col received_at INTEGER notnull=1 default=- pk=0 hidden=0
+  fk folder_id -> folders.id update=NO ACTION delete=CASCADE
+  item byte_length INTEGER NOT NULL
+  item folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item principal_id BLOB NOT NULL
+  item received_at INTEGER NOT NULL
+  item sealed BLOB NOT NULL
+table folder_member_access
+  col channel_id BLOB notnull=1 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=2 hidden=0
+  col access TEXT notnull=1 default=- pk=0 hidden=0
+  col byte_cap INTEGER notnull=0 default=- pk=0 hidden=0
+  col bytes_used INTEGER notnull=1 default=0 pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (channel_id, actor_id)
+  item access TEXT NOT NULL CHECK (access IN ('reader', 'writer'))
+  item actor_id BLOB NOT NULL
+  item byte_cap INTEGER
+  item bytes_used INTEGER NOT NULL DEFAULT 0
+  item channel_id BLOB NOT NULL
+  item updated_at INTEGER NOT NULL
+table folder_members
+  col folder_id INTEGER notnull=1 default=- pk=1 hidden=0
+  col device_id BLOB notnull=1 default=- pk=2 hidden=0
+  col originates INTEGER notnull=1 default=- pk=0 hidden=0
+  col accepts INTEGER notnull=1 default=- pk=0 hidden=0
+  col applies_deletes INTEGER notnull=1 default=- pk=0 hidden=0
+  fk folder_id -> folders.id update=NO ACTION delete=NO ACTION
+  item PRIMARY KEY (folder_id, device_id)
+  item accepts INTEGER NOT NULL
+  item applies_deletes INTEGER NOT NULL
+  item device_id BLOB NOT NULL
+  item folder_id INTEGER NOT NULL REFERENCES folders(id)
+  item originates INTEGER NOT NULL
+table folders
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col name TEXT notnull=0 default=- pk=0 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col mls_group_id BLOB notnull=0 default=- pk=0 hidden=0
+  col webdav_enabled INTEGER notnull=1 default=0 pk=0 hidden=0
+  col conflict_policy TEXT notnull=1 default='auto' pk=0 hidden=0
+  col web_paywall_tier TEXT notnull=0 default=- pk=0 hidden=0
+  col nest_snapshots INTEGER notnull=0 default=- pk=0 hidden=0
+  col nest_snapshot_quiet_secs INTEGER notnull=0 default=- pk=0 hidden=0
+  col version_retention TEXT notnull=0 default=- pk=0 hidden=0
+  col audience TEXT notnull=0 default=- pk=0 hidden=0
+  col website_enabled INTEGER notnull=1 default=0 pk=0 hidden=0
+  col public_floor_seq INTEGER notnull=1 default=0 pk=0 hidden=0
+  col nest_content_residency TEXT notnull=0 default=- pk=0 hidden=0
+  col exclusive_editing INTEGER notnull=1 default=0 pk=0 hidden=0
+  col audience_attestation BLOB notnull=0 default=- pk=0 hidden=0
+  col set_nonce BLOB notnull=0 default=- pk=0 hidden=0
+  col name_hash BLOB notnull=0 default=- pk=0 hidden=0
+  col name_sealed BLOB notnull=0 default=- pk=0 hidden=0
+  col include_paths_sealed BLOB notnull=0 default=- pk=0 hidden=0
+  col exclude_paths_sealed BLOB notnull=0 default=- pk=0 hidden=0
+  col retention_policy_sealed BLOB notnull=0 default=- pk=0 hidden=0
+  col node_cache INTEGER notnull=1 default=0 pk=0 hidden=0
+  col retention_policy TEXT notnull=0 default=- pk=0 hidden=0
+  col cached_snapshot_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col cached_total_bytes INTEGER notnull=1 default=0 pk=0 hidden=0
+  col cached_last_snapshot_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col include_paths TEXT notnull=0 default=- pk=0 hidden=0
+  col exclude_paths TEXT notnull=0 default=- pk=0 hidden=0
+  col high_cadence INTEGER notnull=1 default=0 pk=0 hidden=0
+  col custody_copy INTEGER notnull=1 default=0 pk=0 hidden=0
+  item CHECK (name IS NOT NULL OR (name_hash IS NOT NULL AND name_sealed IS NOT NULL))
+  item UNIQUE(name, actor_id)
+  item actor_id BLOB NOT NULL
+  item audience TEXT
+  item audience_attestation BLOB
+  item cached_last_snapshot_at INTEGER
+  item cached_snapshot_count INTEGER NOT NULL DEFAULT 0
+  item cached_total_bytes INTEGER NOT NULL DEFAULT 0
+  item conflict_policy TEXT NOT NULL DEFAULT 'auto'
+  item created_at INTEGER NOT NULL
+  item custody_copy INTEGER NOT NULL DEFAULT 0 CHECK (custody_copy = 0 OR substr(COALESCE(name, ''), 1, 2) = '__')
+  item exclude_paths TEXT
+  item exclude_paths_sealed BLOB
+  item exclusive_editing INTEGER NOT NULL DEFAULT 0
+  item high_cadence INTEGER NOT NULL DEFAULT 0
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item include_paths TEXT
+  item include_paths_sealed BLOB
+  item mls_group_id BLOB
+  item name TEXT
+  item name_hash BLOB
+  item name_sealed BLOB
+  item nest_content_residency TEXT
+  item nest_snapshot_quiet_secs INTEGER
+  item nest_snapshots INTEGER
+  item node_cache INTEGER NOT NULL DEFAULT 0
+  item public_floor_seq INTEGER NOT NULL DEFAULT 0
+  item retention_policy TEXT
+  item retention_policy_sealed BLOB
+  item set_nonce BLOB
+  item version_retention TEXT
+  item web_paywall_tier TEXT
+  item webdav_enabled INTEGER NOT NULL DEFAULT 0
+  item website_enabled INTEGER NOT NULL DEFAULT 0
+table foreign_recovery_heads
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col recovery_pubkey BLOB notnull=1 default=- pk=0 hidden=0
+  col seq INTEGER notnull=1 default=- pk=0 hidden=0
+  col learned_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col anchor_nest_id BLOB notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item anchor_nest_id BLOB NOT NULL
+  item learned_at INTEGER NOT NULL
+  item recovery_pubkey BLOB NOT NULL
+  item seq INTEGER NOT NULL
+table forward_queue
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col queued_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col source_message_id TEXT notnull=1 default=- pk=0 hidden=0
+  col original_sender TEXT notnull=1 default=- pk=0 hidden=0
+  col destination_address TEXT notnull=1 default=- pk=0 hidden=0
+  col rule_id_or_forward_all TEXT notnull=1 default=- pk=0 hidden=0
+  col raw_message BLOB notnull=1 default=- pk=0 hidden=0
+  col copy_mode TEXT notnull=0 default=- pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item copy_mode TEXT
+  item destination_address TEXT NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item original_sender TEXT NOT NULL
+  item queued_at INTEGER NOT NULL
+  item raw_message BLOB NOT NULL
+  item rule_id_or_forward_all TEXT NOT NULL
+  item source_message_id TEXT NOT NULL
+table generation_escrow_wraps
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col generation_id BLOB notnull=1 default=- pk=2 hidden=0
+  col wrap_hash BLOB notnull=1 default=- pk=3 hidden=0
+  col wrap BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, generation_id, wrap_hash)
+  item actor_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item generation_id BLOB NOT NULL
+  item wrap BLOB NOT NULL
+  item wrap_hash BLOB NOT NULL
+table greylist_tuples
+  col sender_domain TEXT notnull=1 default=- pk=1 hidden=0
+  col recipient TEXT notnull=1 default=- pk=2 hidden=0
+  col subnet TEXT notnull=1 default=- pk=3 hidden=0
+  col first_seen INTEGER notnull=1 default=- pk=0 hidden=0
+  col last_attempt INTEGER notnull=1 default=- pk=0 hidden=0
+  col accepted_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (sender_domain, recipient, subnet)
+  item accepted_at INTEGER
+  item first_seen INTEGER NOT NULL
+  item last_attempt INTEGER NOT NULL
+  item recipient TEXT NOT NULL
+  item sender_domain TEXT NOT NULL
+  item subnet TEXT NOT NULL
+table guardian_contact_requests
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col supervised_actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col peer_actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item UNIQUE (supervised_actor_id, peer_actor_id)
+  item created_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item peer_actor_id BLOB NOT NULL
+  item supervised_actor_id BLOB NOT NULL
+table guardian_content_notices
+  col supervised_actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col day INTEGER notnull=1 default=- pk=2 hidden=0
+  col category TEXT notnull=1 default=- pk=3 hidden=0
+  col count INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (supervised_actor_id, day, category)
+  item category TEXT NOT NULL
+  item count INTEGER NOT NULL
+  item day INTEGER NOT NULL
+  item supervised_actor_id BLOB NOT NULL
+table guardian_dm_peers
+  col supervised_actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col bridge_id TEXT notnull=1 default=- pk=2 hidden=0
+  col peer_id TEXT notnull=1 default=- pk=3 hidden=0
+  col verdict TEXT notnull=1 default=- pk=0 hidden=0
+  col added_by TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (supervised_actor_id, bridge_id, peer_id)
+  item added_by TEXT NOT NULL
+  item bridge_id TEXT NOT NULL
+  item created_at INTEGER NOT NULL
+  item peer_id TEXT NOT NULL
+  item supervised_actor_id BLOB NOT NULL
+  item verdict TEXT NOT NULL
+table guardian_feed_requests
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col supervised_actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col bridge_id TEXT notnull=1 default=- pk=0 hidden=0
+  col operation TEXT notnull=1 default=- pk=0 hidden=0
+  col target TEXT notnull=1 default=- pk=0 hidden=0
+  col label TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col approved_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item UNIQUE (supervised_actor_id, bridge_id, operation, target)
+  item approved_at INTEGER
+  item bridge_id TEXT NOT NULL
+  item created_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item label TEXT NOT NULL
+  item operation TEXT NOT NULL
+  item supervised_actor_id BLOB NOT NULL
+  item target TEXT NOT NULL
+table guardian_mail_allowlist
+  col supervised_actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col address TEXT notnull=1 default=- pk=2 hidden=0
+  col added_by TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (supervised_actor_id, address)
+  item added_by TEXT NOT NULL
+  item address TEXT NOT NULL
+  item created_at INTEGER NOT NULL
+  item supervised_actor_id BLOB NOT NULL
+table guardian_mail_correlated_origins
+  col supervised_actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col address TEXT notnull=1 default=- pk=2 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (supervised_actor_id, address)
+  item address TEXT NOT NULL
+  item created_at INTEGER NOT NULL
+  item supervised_actor_id BLOB NOT NULL
+table guardian_mail_holds
+  col message_id BLOB notnull=0 default=- pk=1 hidden=0
+  col supervised_actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col sender_address TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item created_at INTEGER NOT NULL
+  item message_id BLOB PRIMARY KEY
+  item sender_address TEXT NOT NULL
+  item supervised_actor_id BLOB NOT NULL
+table guardian_mail_sent_msgids
+  col supervised_actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col message_id TEXT notnull=1 default=- pk=2 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col correlation_budget INTEGER notnull=1 default=3 pk=0 hidden=0
+  item PRIMARY KEY (supervised_actor_id, message_id)
+  item correlation_budget INTEGER NOT NULL DEFAULT 3
+  item created_at INTEGER NOT NULL
+  item message_id TEXT NOT NULL
+  item supervised_actor_id BLOB NOT NULL
+table guardian_policies
+  col supervised_actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col contact_approval INTEGER notnull=1 default=0 pk=0 hidden=0
+  col unknown_sender_mail TEXT notnull=1 default='allow' pk=0 hidden=0
+  col federation_contact INTEGER notnull=1 default=1 pk=0 hidden=0
+  col feed_sources TEXT notnull=1 default='allow' pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col content_nsfw TEXT notnull=1 default='inherit' pk=0 hidden=0
+  col content_spam TEXT notnull=1 default='inherit' pk=0 hidden=0
+  col content_phishing TEXT notnull=1 default='inherit' pk=0 hidden=0
+  col content_commercial TEXT notnull=1 default='inherit' pk=0 hidden=0
+  col content_notify INTEGER notnull=1 default=0 pk=0 hidden=0
+  col screen_window_start INTEGER notnull=0 default=- pk=0 hidden=0
+  col screen_window_end INTEGER notnull=0 default=- pk=0 hidden=0
+  col screen_daily_minutes INTEGER notnull=0 default=- pk=0 hidden=0
+  col unknown_peer_dm TEXT notnull=1 default='allow' pk=0 hidden=0
+  col features_document BLOB notnull=0 default=- pk=0 hidden=0
+  item contact_approval INTEGER NOT NULL DEFAULT 0
+  item content_commercial TEXT NOT NULL DEFAULT 'inherit'
+  item content_notify INTEGER NOT NULL DEFAULT 0
+  item content_nsfw TEXT NOT NULL DEFAULT 'inherit'
+  item content_phishing TEXT NOT NULL DEFAULT 'inherit'
+  item content_spam TEXT NOT NULL DEFAULT 'inherit'
+  item features_document BLOB
+  item federation_contact INTEGER NOT NULL DEFAULT 1
+  item feed_sources TEXT NOT NULL DEFAULT 'allow'
+  item screen_daily_minutes INTEGER
+  item screen_window_end INTEGER
+  item screen_window_start INTEGER
+  item supervised_actor_id BLOB PRIMARY KEY
+  item unknown_peer_dm TEXT NOT NULL DEFAULT 'allow'
+  item unknown_sender_mail TEXT NOT NULL DEFAULT 'allow'
+  item updated_at INTEGER NOT NULL
+table guardian_transfers
+  col supervised_actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col proposed_guardian_actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col initiated_by BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item created_at INTEGER NOT NULL
+  item initiated_by BLOB NOT NULL
+  item proposed_guardian_actor_id BLOB NOT NULL
+  item supervised_actor_id BLOB PRIMARY KEY
+table guardian_usage
+  col supervised_actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col day INTEGER notnull=1 default=- pk=2 hidden=0
+  col minutes INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (supervised_actor_id, day)
+  item day INTEGER NOT NULL
+  item minutes INTEGER NOT NULL
+  item supervised_actor_id BLOB NOT NULL
+table guardianships
+  col supervised_actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col guardian_actor_id BLOB notnull=1 default=- pk=2 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col ward_utc_offset_minutes INTEGER notnull=1 default=0 pk=0 hidden=0
+  item PRIMARY KEY (supervised_actor_id, guardian_actor_id)
+  item created_at INTEGER NOT NULL
+  item guardian_actor_id BLOB NOT NULL
+  item supervised_actor_id BLOB NOT NULL
+  item ward_utc_offset_minutes INTEGER NOT NULL DEFAULT 0
+table handle_cooldowns
+  col handle TEXT notnull=0 default=- pk=1 hidden=0
+  col old_actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col released_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item handle TEXT PRIMARY KEY
+  item old_actor_id BLOB NOT NULL
+  item released_at INTEGER NOT NULL
+table hosted_plugins
+  col principal_id BLOB notnull=0 default=- pk=1 hidden=0
+  col client_id TEXT notnull=1 default=- pk=0 hidden=0
+  col module_digest TEXT notnull=1 default=- pk=0 hidden=0
+  col hosts TEXT notnull=1 default='[]' pk=0 hidden=0
+  col ingress TEXT notnull=1 default='[]' pk=0 hidden=0
+  col settings_schema TEXT notnull=0 default=- pk=0 hidden=0
+  col installed_by BLOB notnull=1 default=- pk=0 hidden=0
+  col installed_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item client_id TEXT NOT NULL UNIQUE
+  item hosts TEXT NOT NULL DEFAULT '[]'
+  item ingress TEXT NOT NULL DEFAULT '[]'
+  item installed_at INTEGER NOT NULL
+  item installed_by BLOB NOT NULL
+  item module_digest TEXT NOT NULL
+  item principal_id BLOB PRIMARY KEY
+  item settings_schema TEXT
+table import_sessions
+  col session_id TEXT notnull=0 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col source_descriptor TEXT notnull=1 default=- pk=0 hidden=0
+  col state TEXT notnull=1 default=- pk=0 hidden=0
+  col started_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col last_progress_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col total_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col imported_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col skipped_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col errored_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col cursors TEXT notnull=1 default='{}' pk=0 hidden=0
+  col error_reason TEXT notnull=1 default='' pk=0 hidden=0
+  col expires_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col source_hash BLOB notnull=0 default=- pk=0 hidden=0
+  col source_sealed BLOB notnull=0 default=- pk=0 hidden=0
+  col scope TEXT notnull=1 default='[]' pk=0 hidden=0
+  col date_from TEXT notnull=1 default='' pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item cursors TEXT NOT NULL DEFAULT '{}'
+  item date_from TEXT NOT NULL DEFAULT ''
+  item error_reason TEXT NOT NULL DEFAULT ''
+  item errored_count INTEGER NOT NULL DEFAULT 0
+  item expires_at INTEGER NOT NULL
+  item imported_count INTEGER NOT NULL DEFAULT 0
+  item last_progress_at INTEGER NOT NULL
+  item scope TEXT NOT NULL DEFAULT '[]'
+  item session_id TEXT PRIMARY KEY
+  item skipped_count INTEGER NOT NULL DEFAULT 0
+  item source_descriptor TEXT NOT NULL
+  item source_hash BLOB
+  item source_sealed BLOB
+  item started_at INTEGER NOT NULL
+  item state TEXT NOT NULL CHECK (state IN ('running','paused','errored','completed','cancelled'))
+  item total_count INTEGER NOT NULL DEFAULT 0
+table inbox_modes
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col mode TEXT notnull=1 default='allow_knock' pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item mode TEXT NOT NULL DEFAULT 'allow_knock'
+table invite_codes
+  col code TEXT notnull=0 default=- pk=1 hidden=0
+  col tier TEXT notnull=1 default=- pk=0 hidden=0
+  col uses_left INTEGER notnull=1 default=1 pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col guardian_actor BLOB notnull=0 default=- pk=0 hidden=0
+  col age_band TEXT notnull=0 default=- pk=0 hidden=0
+  fk tier -> tiers.name update=NO ACTION delete=NO ACTION
+  item age_band TEXT
+  item code TEXT PRIMARY KEY
+  item created_at INTEGER NOT NULL
+  item guardian_actor BLOB
+  item tier TEXT NOT NULL REFERENCES tiers(name)
+  item uses_left INTEGER NOT NULL DEFAULT 1
+table invite_requests
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col handle TEXT notnull=1 default=- pk=0 hidden=0
+  col message TEXT notnull=1 default='' pk=0 hidden=0
+  col status TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col decided_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col decided_by BLOB notnull=0 default=- pk=0 hidden=0
+  col denial_reason TEXT notnull=0 default=- pk=0 hidden=0
+  col age_band TEXT notnull=0 default=- pk=0 hidden=0
+  col age_provenance TEXT notnull=0 default=- pk=0 hidden=0
+  item actor_id BLOB NOT NULL UNIQUE
+  item age_band TEXT
+  item age_provenance TEXT
+  item created_at INTEGER NOT NULL
+  item decided_at INTEGER
+  item decided_by BLOB
+  item denial_reason TEXT
+  item handle TEXT NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item message TEXT NOT NULL DEFAULT ''
+  item status TEXT NOT NULL
+table key_packages
+  col id TEXT notnull=0 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col key_package_data BLOB notnull=1 default=- pk=0 hidden=0
+  col published_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col expires_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col last_resort INTEGER notnull=1 default=0 pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item expires_at INTEGER NOT NULL
+  item id TEXT PRIMARY KEY
+  item key_package_data BLOB NOT NULL
+  item last_resort INTEGER NOT NULL DEFAULT 0
+  item published_at INTEGER NOT NULL
+table knocks
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col sender_id BLOB notnull=1 default=- pk=0 hidden=0
+  col sender_node BLOB notnull=1 default=- pk=0 hidden=0
+  col summary TEXT notnull=1 default=- pk=0 hidden=0
+  col payload BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col delivered INTEGER notnull=1 default=0 pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item delivered INTEGER NOT NULL DEFAULT 0
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item payload BLOB NOT NULL
+  item sender_id BLOB NOT NULL
+  item sender_node BLOB NOT NULL
+  item summary TEXT NOT NULL
+table labeler_list_entries
+  col labeler_id BLOB notnull=1 default=- pk=1 hidden=0
+  col content_id BLOB notnull=1 default=- pk=2 hidden=0
+  col score INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (labeler_id, content_id)
+  item content_id BLOB NOT NULL
+  item labeler_id BLOB NOT NULL
+  item score INTEGER NOT NULL
+table labeler_subscriptions
+  col owner_actor BLOB notnull=1 default=- pk=1 hidden=0
+  col labeler_id BLOB notnull=1 default=- pk=2 hidden=0
+  col grant_id BLOB notnull=0 default=- pk=0 hidden=0
+  col subscribed_ver INTEGER notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (owner_actor, labeler_id)
+  item created_at INTEGER NOT NULL
+  item grant_id BLOB
+  item labeler_id BLOB NOT NULL
+  item owner_actor BLOB NOT NULL
+  item subscribed_ver INTEGER NOT NULL
+table labelers
+  col labeler_id BLOB notnull=1 default=- pk=1 hidden=0
+  col version INTEGER notnull=1 default=- pk=0 hidden=0
+  col publisher_actor BLOB notnull=1 default=- pk=0 hidden=0
+  col content_kind TEXT notnull=1 default=- pk=0 hidden=0
+  col factor TEXT notnull=1 default=- pk=0 hidden=0
+  col wasm_hash BLOB notnull=1 default=- pk=0 hidden=0
+  col wasm_size INTEGER notnull=1 default=- pk=0 hidden=0
+  col metadata_blob BLOB notnull=1 default=- pk=0 hidden=0
+  col wasm_bytes BLOB notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col caller_actor BLOB notnull=0 default=- pk=0 hidden=0
+  col artifact_kind TEXT notnull=1 default='wasm' pk=0 hidden=0
+  col artifact_version INTEGER notnull=1 default=0 pk=0 hidden=0
+  item artifact_kind TEXT NOT NULL DEFAULT 'wasm'
+  item artifact_version INTEGER NOT NULL DEFAULT 0
+  item caller_actor BLOB
+  item content_kind TEXT NOT NULL
+  item factor TEXT NOT NULL
+  item labeler_id BLOB NOT NULL PRIMARY KEY
+  item metadata_blob BLOB NOT NULL
+  item publisher_actor BLOB NOT NULL
+  item updated_at INTEGER NOT NULL
+  item version INTEGER NOT NULL
+  item wasm_bytes BLOB NOT NULL
+  item wasm_hash BLOB NOT NULL
+  item wasm_size INTEGER NOT NULL
+table legal_takedown_deleted_posts
+  col post_id BLOB notnull=1 default=- pk=1 hidden=0
+  col author_id BLOB notnull=1 default=- pk=0 hidden=0
+  col legal_reference TEXT notnull=1 default=- pk=0 hidden=0
+  col blob_digests BLOB notnull=1 default=- pk=0 hidden=0
+  col deleted_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item author_id BLOB NOT NULL
+  item blob_digests BLOB NOT NULL
+  item deleted_at INTEGER NOT NULL
+  item legal_reference TEXT NOT NULL
+  item post_id BLOB NOT NULL PRIMARY KEY
+table mail_account_settings
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col forward_all_to TEXT notnull=0 default=- pk=0 hidden=0
+  col forward_per_hour INTEGER notnull=1 default=100 pk=0 hidden=0
+  col spam_threshold_override INTEGER notnull=0 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item forward_all_to TEXT
+  item forward_per_hour INTEGER NOT NULL DEFAULT 100
+  item spam_threshold_override INTEGER
+  item updated_at INTEGER NOT NULL
+table mail_alias_policy
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col overrides_json TEXT notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item overrides_json TEXT NOT NULL
+table mail_auth_policy
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col overrides_json TEXT notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item overrides_json TEXT NOT NULL
+table mail_auto_enable_new_users
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col enabled INTEGER notnull=1 default=- pk=0 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item set_at INTEGER NOT NULL
+table mail_dkim_keys
+  col domain TEXT notnull=1 default=- pk=1 hidden=0
+  col selector TEXT notnull=1 default=- pk=2 hidden=0
+  col alg TEXT notnull=1 default=- pk=0 hidden=0
+  col key_wrapped BLOB notnull=1 default=- pk=0 hidden=0
+  col public_dns_value TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col carried_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (domain, selector)
+  item alg TEXT NOT NULL
+  item carried_at INTEGER
+  item created_at INTEGER NOT NULL
+  item domain TEXT NOT NULL
+  item key_wrapped BLOB NOT NULL
+  item public_dns_value TEXT NOT NULL
+  item selector TEXT NOT NULL
+table mail_domain_renames
+  col rename_id BLOB notnull=0 default=- pk=1 hidden=0
+  col old_primary_domain_id BLOB notnull=1 default=- pk=0 hidden=0
+  col new_primary_domain_id BLOB notnull=1 default=- pk=0 hidden=0
+  col state TEXT notnull=1 default=- pk=0 hidden=0
+  col started_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col grace_days INTEGER notnull=1 default=- pk=0 hidden=0
+  col cert_acquired_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col new_cert_fingerprint TEXT notnull=0 default=- pk=0 hidden=0
+  col flipped_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col grace_started_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col grace_ends_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col ready_to_complete_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col completed_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col aborted_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col abort_reason TEXT notnull=0 default=- pk=0 hidden=0
+  col initiated_by_actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  item CHECK (completed_at IS NULL OR aborted_at IS NULL)
+  item CHECK (old_primary_domain_id != new_primary_domain_id)
+  item abort_reason TEXT
+  item aborted_at INTEGER
+  item cert_acquired_at INTEGER
+  item completed_at INTEGER
+  item flipped_at INTEGER
+  item grace_days INTEGER NOT NULL
+  item grace_ends_at INTEGER
+  item grace_started_at INTEGER
+  item initiated_by_actor_id BLOB NOT NULL
+  item new_cert_fingerprint TEXT
+  item new_primary_domain_id BLOB NOT NULL
+  item old_primary_domain_id BLOB NOT NULL
+  item ready_to_complete_at INTEGER
+  item rename_id BLOB PRIMARY KEY
+  item started_at INTEGER NOT NULL
+  item state TEXT NOT NULL
+table mail_domains
+  col domain_id BLOB notnull=0 default=- pk=1 hidden=0
+  col domain_name TEXT notnull=1 default=- pk=0 hidden=0
+  col is_primary INTEGER notnull=1 default=0 pk=0 hidden=0
+  col added_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col removed_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col restored_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col dkim_selector TEXT notnull=0 default=- pk=0 hidden=0
+  col dkim_rotation_days INTEGER notnull=0 default=- pk=0 hidden=0
+  col dkim_algorithms TEXT notnull=1 default='["ed25519","rsa-2048"]' pk=0 hidden=0
+  col mta_sts_mode TEXT notnull=1 default='enforce' pk=0 hidden=0
+  col mta_sts_max_age_seconds INTEGER notnull=1 default=86400 pk=0 hidden=0
+  col mta_sts_cert_mode TEXT notnull=1 default='expand_primary' pk=0 hidden=0
+  col catch_all_actor_id BLOB notnull=0 default=- pk=0 hidden=0
+  col role_address_overrides TEXT notnull=0 default=- pk=0 hidden=0
+  col dmarc_overrides TEXT notnull=0 default=- pk=0 hidden=0
+  col spf_record TEXT notnull=1 default='v=spf1 mx ~all' pk=0 hidden=0
+  col dkim_selector_activated_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col catch_all_cleared_by_succession_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item added_at INTEGER NOT NULL
+  item catch_all_actor_id BLOB
+  item catch_all_cleared_by_succession_at INTEGER
+  item dkim_algorithms TEXT NOT NULL DEFAULT '["ed25519","rsa-2048"]'
+  item dkim_rotation_days INTEGER
+  item dkim_selector TEXT
+  item dkim_selector_activated_at INTEGER
+  item dmarc_overrides TEXT
+  item domain_id BLOB PRIMARY KEY
+  item domain_name TEXT NOT NULL
+  item is_primary INTEGER NOT NULL DEFAULT 0
+  item mta_sts_cert_mode TEXT NOT NULL DEFAULT 'expand_primary'
+  item mta_sts_max_age_seconds INTEGER NOT NULL DEFAULT 86400
+  item mta_sts_mode TEXT NOT NULL DEFAULT 'enforce'
+  item removed_at INTEGER
+  item restored_at INTEGER
+  item role_address_overrides TEXT
+  item spf_record TEXT NOT NULL DEFAULT 'v=spf1 mx ~all'
+table mail_enabled
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col enabled INTEGER notnull=1 default=- pk=0 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item set_at INTEGER NOT NULL
+table mail_export_policy
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col overrides_json TEXT notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item overrides_json TEXT NOT NULL
+table mail_heartbeat_state
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col last_outbound_delivered_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col last_inbound_accepted_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item last_inbound_accepted_at INTEGER
+  item last_outbound_delivered_at INTEGER
+table mail_imap_policy
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col overrides_json TEXT notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item overrides_json TEXT NOT NULL
+table mail_list_account_daily_counter
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col day INTEGER notnull=1 default=- pk=2 hidden=0
+  col recipients_sent INTEGER notnull=1 default=0 pk=0 hidden=0
+  item PRIMARY KEY (actor_id, day)
+  item actor_id BLOB NOT NULL
+  item day INTEGER NOT NULL
+  item recipients_sent INTEGER NOT NULL DEFAULT 0
+table mail_list_deployment_daily_counter
+  col day INTEGER notnull=0 default=- pk=1 hidden=0
+  col recipients_sent INTEGER notnull=1 default=0 pk=0 hidden=0
+  item day INTEGER PRIMARY KEY
+  item recipients_sent INTEGER NOT NULL DEFAULT 0
+table mail_list_members
+  col member_id BLOB notnull=0 default=- pk=1 hidden=0
+  col list_id BLOB notnull=1 default=- pk=0 hidden=0
+  col recipient_address TEXT notnull=1 default=- pk=0 hidden=0
+  col subscribed_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col unsubscribed_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col one_click_unsubscribe_token TEXT notnull=0 default=- pk=0 hidden=0
+  fk list_id -> mail_lists.list_id update=NO ACTION delete=CASCADE
+  item UNIQUE (list_id, recipient_address)
+  item list_id BLOB NOT NULL REFERENCES mail_lists(list_id) ON DELETE CASCADE
+  item member_id BLOB PRIMARY KEY
+  item one_click_unsubscribe_token TEXT
+  item recipient_address TEXT NOT NULL
+  item subscribed_at INTEGER NOT NULL
+  item unsubscribed_at INTEGER
+table mail_list_sends
+  col send_id BLOB notnull=0 default=- pk=1 hidden=0
+  col list_id BLOB notnull=1 default=- pk=0 hidden=0
+  col owner_actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col sent_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col recipient_count INTEGER notnull=1 default=- pk=0 hidden=0
+  col delivered_count INTEGER notnull=1 default=- pk=0 hidden=0
+  col unsubscribed_during_send INTEGER notnull=1 default=0 pk=0 hidden=0
+  fk list_id -> mail_lists.list_id update=NO ACTION delete=CASCADE
+  item delivered_count INTEGER NOT NULL
+  item list_id BLOB NOT NULL REFERENCES mail_lists(list_id) ON DELETE CASCADE
+  item owner_actor_id BLOB NOT NULL
+  item recipient_count INTEGER NOT NULL
+  item send_id BLOB PRIMARY KEY
+  item sent_at INTEGER NOT NULL
+  item unsubscribed_during_send INTEGER NOT NULL DEFAULT 0
+table mail_list_unsubscribe_secrets
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col secret BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item created_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item secret BLOB NOT NULL
+table mail_lists
+  col list_id BLOB notnull=0 default=- pk=1 hidden=0
+  col alias_id BLOB notnull=1 default=- pk=0 hidden=0
+  col owner_actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col list_friendly_name TEXT notnull=0 default=- pk=0 hidden=0
+  col description TEXT notnull=0 default=- pk=0 hidden=0
+  col list_help_url TEXT notnull=0 default=- pk=0 hidden=0
+  col list_archive_url TEXT notnull=0 default=- pk=0 hidden=0
+  col recipients_per_send INTEGER notnull=0 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col last_send_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col member_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col sends_today INTEGER notnull=1 default=0 pk=0 hidden=0
+  col recipients_today INTEGER notnull=1 default=0 pk=0 hidden=0
+  col counters_day INTEGER notnull=1 default=0 pk=0 hidden=0
+  fk alias_id -> account_aliases.alias_id update=NO ACTION delete=CASCADE
+  item alias_id BLOB NOT NULL REFERENCES account_aliases(alias_id) ON DELETE CASCADE
+  item counters_day INTEGER NOT NULL DEFAULT 0
+  item created_at INTEGER NOT NULL
+  item description TEXT
+  item last_send_at INTEGER
+  item list_archive_url TEXT
+  item list_friendly_name TEXT
+  item list_help_url TEXT
+  item list_id BLOB PRIMARY KEY
+  item member_count INTEGER NOT NULL DEFAULT 0
+  item owner_actor_id BLOB NOT NULL
+  item recipients_per_send INTEGER
+  item recipients_today INTEGER NOT NULL DEFAULT 0
+  item sends_today INTEGER NOT NULL DEFAULT 0
+table mail_mass_mailing_policy
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col overrides_json TEXT notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item overrides_json TEXT NOT NULL
+table mail_outbound_diagnostic_runs
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col ran_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col results_json TEXT notnull=1 default=- pk=0 hidden=0
+  col ran_by_actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item ran_at INTEGER NOT NULL
+  item ran_by_actor_id BLOB NOT NULL
+  item results_json TEXT NOT NULL
+table mail_outbound_policy
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col overrides_json TEXT notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item overrides_json TEXT NOT NULL
+table mail_outbound_self_blocklist_check
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col checked_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col results_json TEXT notnull=1 default=- pk=0 hidden=0
+  item checked_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item results_json TEXT NOT NULL
+table mail_outbound_warmup_state
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col first_outbound_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col current_day INTEGER notnull=1 default=1 pk=0 hidden=0
+  col mails_sent_today INTEGER notnull=1 default=0 pk=0 hidden=0
+  col mails_sent_total INTEGER notnull=1 default=0 pk=0 hidden=0
+  col counter_epoch_day INTEGER notnull=1 default=0 pk=0 hidden=0
+  col deferred_total INTEGER notnull=1 default=0 pk=0 hidden=0
+  col last_reset_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item counter_epoch_day INTEGER NOT NULL DEFAULT 0
+  item current_day INTEGER NOT NULL DEFAULT 1
+  item deferred_total INTEGER NOT NULL DEFAULT 0
+  item first_outbound_at INTEGER
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item last_reset_at INTEGER
+  item mails_sent_today INTEGER NOT NULL DEFAULT 0
+  item mails_sent_total INTEGER NOT NULL DEFAULT 0
+table mail_spam_policy
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col overrides_json TEXT notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item overrides_json TEXT NOT NULL
+table mail_srs_secrets
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col secret BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item created_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item secret BLOB NOT NULL
+table mail_submission_policy
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col overrides_json TEXT notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item overrides_json TEXT NOT NULL
+table media_ticket_secret
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col secret_wrapped BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item created_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY CHECK(id = 0)
+  item secret_wrapped BLOB NOT NULL
+table membership_tiers
+  col admin_id BLOB notnull=1 default=- pk=1 hidden=0
+  col tier_name TEXT notnull=1 default=- pk=2 hidden=0
+  col admin_tier TEXT notnull=1 default=- pk=0 hidden=0
+  col lapse_tier TEXT notnull=1 default='free' pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  fk admin_tier -> tiers.name update=NO ACTION delete=NO ACTION
+  fk lapse_tier -> tiers.name update=NO ACTION delete=NO ACTION
+  item PRIMARY KEY (admin_id, tier_name)
+  item admin_id BLOB NOT NULL
+  item admin_tier TEXT NOT NULL REFERENCES tiers(name)
+  item created_at INTEGER NOT NULL
+  item lapse_tier TEXT NOT NULL DEFAULT 'free' REFERENCES tiers(name)
+  item tier_name TEXT NOT NULL
+table message_scan_results
+  col message_id BLOB notnull=0 default=- pk=1 hidden=0
+  col received_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col direction TEXT notnull=1 default='inbound' pk=0 hidden=0
+  col clamav_verdict TEXT notnull=1 default=- pk=0 hidden=0
+  col clamav_signature TEXT notnull=0 default=- pk=0 hidden=0
+  col rspamd_score_raw INTEGER notnull=0 default=- pk=0 hidden=0
+  col rspamd_score_scaled INTEGER notnull=0 default=- pk=0 hidden=0
+  col rspamd_flagged_rules TEXT notnull=0 default=- pk=0 hidden=0
+  col rspamd_score_breakdown TEXT notnull=0 default=- pk=0 hidden=0
+  col scanned_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col action_taken TEXT notnull=1 default=- pk=0 hidden=0
+  col delivered_to_actor BLOB notnull=0 default=- pk=0 hidden=0
+  item action_taken TEXT NOT NULL
+  item clamav_signature TEXT
+  item clamav_verdict TEXT NOT NULL
+  item delivered_to_actor BLOB
+  item direction TEXT NOT NULL DEFAULT 'inbound'
+  item message_id BLOB PRIMARY KEY
+  item received_at INTEGER NOT NULL
+  item rspamd_flagged_rules TEXT
+  item rspamd_score_breakdown TEXT
+  item rspamd_score_raw INTEGER
+  item rspamd_score_scaled INTEGER
+  item scanned_at INTEGER NOT NULL
+table model_versions
+  col model_kind TEXT notnull=1 default=- pk=1 hidden=0
+  col version INTEGER notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item model_kind TEXT NOT NULL PRIMARY KEY
+  item updated_at INTEGER NOT NULL
+  item version INTEGER NOT NULL
+table namespace_entries
+  col namespace BLOB notnull=1 default=- pk=1 hidden=0
+  col entry_id BLOB notnull=1 default=- pk=2 hidden=0
+  col seq INTEGER notnull=1 default=- pk=0 hidden=0
+  col ciphertext BLOB notnull=1 default=- pk=0 hidden=0
+  col actor_sig BLOB notnull=1 default=- pk=0 hidden=0
+  col source TEXT notnull=1 default='local' pk=3 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (namespace, entry_id, source)
+  item actor_sig BLOB NOT NULL
+  item ciphertext BLOB NOT NULL
+  item entry_id BLOB NOT NULL
+  item namespace BLOB NOT NULL
+  item seq INTEGER NOT NULL
+  item source TEXT NOT NULL DEFAULT 'local'
+  item updated_at INTEGER NOT NULL
+table nest_addresses
+  col nest_id BLOB notnull=1 default=- pk=1 hidden=0
+  col nest_url TEXT notnull=1 default=- pk=2 hidden=0
+  col first_seen INTEGER notnull=1 default=- pk=0 hidden=0
+  col proven_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (nest_id, nest_url)
+  item first_seen INTEGER NOT NULL
+  item nest_id BLOB NOT NULL
+  item nest_url TEXT NOT NULL
+  item proven_at INTEGER
+table nest_age_verification_required
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col enabled INTEGER notnull=1 default=- pk=0 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item set_at INTEGER NOT NULL
+table nest_backup_keys
+  col owner_actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col backup_key BLOB notnull=1 default=- pk=0 hidden=0
+  col granted_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item backup_key BLOB NOT NULL
+  item granted_at INTEGER NOT NULL
+  item owner_actor_id BLOB NOT NULL PRIMARY KEY
+table nest_cors_origins
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col origins_json TEXT notnull=1 default=- pk=0 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item origins_json TEXT NOT NULL
+  item set_at INTEGER NOT NULL
+table nest_engagement_stats
+  col nest_id BLOB notnull=1 default=- pk=1 hidden=0
+  col event_type TEXT notnull=1 default=- pk=2 hidden=0
+  col event_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col last_seen INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (nest_id, event_type)
+  item event_count INTEGER NOT NULL DEFAULT 0
+  item event_type TEXT NOT NULL
+  item last_seen INTEGER NOT NULL
+  item nest_id BLOB NOT NULL
+table nest_host_address
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col nest_ipv4 TEXT notnull=1 default=- pk=0 hidden=0
+  col nest_ipv6 TEXT notnull=0 default=- pk=0 hidden=0
+  col mail_ipv4 TEXT notnull=1 default=- pk=0 hidden=0
+  col mail_ipv6 TEXT notnull=0 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item mail_ipv4 TEXT NOT NULL
+  item mail_ipv6 TEXT
+  item nest_ipv4 TEXT NOT NULL
+  item nest_ipv6 TEXT
+  item updated_at INTEGER NOT NULL
+table nest_keypair
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col secret_key BLOB notnull=1 default=- pk=0 hidden=0
+  col public_key BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item created_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item public_key BLOB NOT NULL
+  item secret_key BLOB NOT NULL
+table nest_max_storage_bytes
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col max_bytes INTEGER notnull=0 default=- pk=0 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item max_bytes INTEGER
+  item set_at INTEGER NOT NULL
+table nest_nat_mode
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col mode TEXT notnull=1 default=- pk=0 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item mode TEXT NOT NULL CHECK (mode IN ('public','private'))
+  item set_at INTEGER NOT NULL
+table nest_pairings
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col private_nest_id BLOB notnull=1 default=- pk=2 hidden=0
+  col capabilities TEXT notnull=1 default=- pk=0 hidden=0
+  col expires_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col nest_url TEXT notnull=0 default=- pk=0 hidden=0
+  col label TEXT notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, private_nest_id)
+  item actor_id BLOB NOT NULL
+  item capabilities TEXT NOT NULL
+  item created_at INTEGER NOT NULL
+  item expires_at INTEGER
+  item label TEXT
+  item nest_url TEXT
+  item private_nest_id BLOB NOT NULL
+table nest_region
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col region TEXT notnull=1 default=- pk=0 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item region TEXT NOT NULL
+  item set_at INTEGER NOT NULL
+table nest_registration_mode
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col mode TEXT notnull=1 default=- pk=0 hidden=0
+  col max_free_users INTEGER notnull=0 default=- pk=0 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item max_free_users INTEGER
+  item mode TEXT NOT NULL
+  item set_at INTEGER NOT NULL
+table nest_replica
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col replica_id BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item created_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item replica_id BLOB NOT NULL CHECK (length(replica_id) = 16)
+table nest_room_read_key
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col ikm_wrapped BLOB notnull=1 default=- pk=0 hidden=0
+  col public_key BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item created_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY CHECK(id = 0)
+  item ikm_wrapped BLOB NOT NULL
+  item public_key BLOB NOT NULL
+table nest_rotation_log
+  col seq INTEGER notnull=0 default=- pk=1 hidden=0
+  col old_actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col new_actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col statement BLOB notnull=1 default=- pk=0 hidden=0
+  col rotated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item new_actor_id BLOB NOT NULL
+  item old_actor_id BLOB NOT NULL
+  item rotated_at INTEGER NOT NULL
+  item seq INTEGER PRIMARY KEY
+  item statement BLOB NOT NULL
+table nest_subhandles
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col enabled INTEGER notnull=1 default=- pk=0 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item set_at INTEGER NOT NULL
+table nest_trust
+  col nest_id BLOB notnull=0 default=- pk=1 hidden=0
+  col trust_score REAL notnull=1 default=1.0 pk=0 hidden=0
+  col reason TEXT notnull=0 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item nest_id BLOB PRIMARY KEY
+  item reason TEXT
+  item trust_score REAL NOT NULL DEFAULT 1.0
+  item updated_at INTEGER NOT NULL
+table nest_web_app_origin
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col mode TEXT notnull=1 default=- pk=0 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item mode TEXT NOT NULL
+  item set_at INTEGER NOT NULL
+table notifications
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col notif_type TEXT notnull=1 default=- pk=0 hidden=0
+  col source TEXT notnull=1 default='fauna' pk=0 hidden=0
+  col sender_id BLOB notnull=0 default=- pk=0 hidden=0
+  col content_id BLOB notnull=0 default=- pk=0 hidden=0
+  col subject_uri TEXT notnull=0 default=- pk=0 hidden=0
+  col summary TEXT notnull=1 default=- pk=0 hidden=0
+  col is_read INTEGER notnull=1 default=0 pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col body_key TEXT notnull=0 default=- pk=0 hidden=0
+  col body_args TEXT notnull=0 default=- pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item body_args TEXT
+  item body_key TEXT
+  item content_id BLOB
+  item created_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item is_read INTEGER NOT NULL DEFAULT 0
+  item notif_type TEXT NOT NULL
+  item sender_id BLOB
+  item source TEXT NOT NULL DEFAULT 'fauna'
+  item subject_uri TEXT
+  item summary TEXT NOT NULL
+table oauth_client_blocks
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col client_id TEXT notnull=1 default=- pk=2 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, client_id)
+  item actor_id BLOB NOT NULL
+  item client_id TEXT NOT NULL
+  item created_at INTEGER NOT NULL
+table oauth_issuer_keys
+  col kid TEXT notnull=0 default=- pk=1 hidden=0
+  col secret_wrapped BLOB notnull=1 default=- pk=0 hidden=0
+  col x TEXT notnull=1 default=- pk=0 hidden=0
+  col y TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col retired_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item created_at INTEGER NOT NULL
+  item kid TEXT PRIMARY KEY
+  item retired_at INTEGER
+  item secret_wrapped BLOB NOT NULL
+  item x TEXT NOT NULL
+  item y TEXT NOT NULL
+table oauth_session_secret
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col secret_wrapped BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item created_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY CHECK(id = 0)
+  item secret_wrapped BLOB NOT NULL
+table obligation_action_records
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col content_type TEXT notnull=1 default=- pk=0 hidden=0
+  col content_id TEXT notnull=1 default=- pk=0 hidden=0
+  col author_hex TEXT notnull=1 default='' pk=0 hidden=0
+  col obligation_id BLOB notnull=1 default=- pk=0 hidden=0
+  col rule_index INTEGER notnull=1 default=- pk=0 hidden=0
+  col category TEXT notnull=1 default=- pk=0 hidden=0
+  col confidence REAL notnull=1 default=- pk=0 hidden=0
+  col action_taken INTEGER notnull=1 default=- pk=0 hidden=0
+  col label_id INTEGER notnull=0 default=- pk=0 hidden=0
+  col timestamp INTEGER notnull=1 default=- pk=0 hidden=0
+  col signature BLOB notnull=1 default=- pk=0 hidden=0
+  fk label_id -> content_labels.id update=NO ACTION delete=NO ACTION
+  item action_taken INTEGER NOT NULL
+  item author_hex TEXT NOT NULL DEFAULT ''
+  item category TEXT NOT NULL
+  item confidence REAL NOT NULL
+  item content_id TEXT NOT NULL
+  item content_type TEXT NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item label_id INTEGER REFERENCES content_labels(id)
+  item obligation_id BLOB NOT NULL
+  item rule_index INTEGER NOT NULL
+  item signature BLOB NOT NULL
+  item timestamp INTEGER NOT NULL
+table operation_locks
+  col lock_type TEXT notnull=1 default=- pk=0 hidden=0
+  col folder_id INTEGER notnull=1 default=- pk=0 hidden=0
+  col holder TEXT notnull=1 default=- pk=0 hidden=0
+  col acquired_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col expires_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item UNIQUE(lock_type, folder_id)
+  item acquired_at INTEGER NOT NULL
+  item expires_at INTEGER NOT NULL
+  item folder_id INTEGER NOT NULL
+  item holder TEXT NOT NULL
+  item lock_type TEXT NOT NULL
+table outbound_mail_queue
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col original_msgid TEXT notnull=1 default=- pk=0 hidden=0
+  col original_sender TEXT notnull=1 default=- pk=0 hidden=0
+  col recipient TEXT notnull=1 default=- pk=0 hidden=0
+  col raw_message BLOB notnull=1 default=- pk=0 hidden=0
+  col attempt_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col next_attempt_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col delay_warned_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col status TEXT notnull=1 default='pending' pk=0 hidden=0
+  col last_error TEXT notnull=0 default=- pk=0 hidden=0
+  col last_enhanced TEXT notnull=0 default=- pk=0 hidden=0
+  col inbound_spf TEXT notnull=1 default='' pk=0 hidden=0
+  col inbound_dmarc TEXT notnull=1 default='' pk=0 hidden=0
+  col inbound_dmarc_pol TEXT notnull=1 default='' pk=0 hidden=0
+  col is_forwarded INTEGER notnull=1 default=0 pk=0 hidden=0
+  col forward_actor_id BLOB notnull=0 default=- pk=0 hidden=0
+  col forward_rule_id TEXT notnull=0 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col submit_actor_id BLOB notnull=0 default=- pk=0 hidden=0
+  col forward_copy_mode TEXT notnull=0 default=- pk=0 hidden=0
+  item attempt_count INTEGER NOT NULL DEFAULT 0
+  item created_at INTEGER NOT NULL
+  item delay_warned_at INTEGER
+  item forward_actor_id BLOB
+  item forward_copy_mode TEXT
+  item forward_rule_id TEXT
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item inbound_dmarc TEXT NOT NULL DEFAULT ''
+  item inbound_dmarc_pol TEXT NOT NULL DEFAULT ''
+  item inbound_spf TEXT NOT NULL DEFAULT ''
+  item is_forwarded INTEGER NOT NULL DEFAULT 0
+  item last_enhanced TEXT
+  item last_error TEXT
+  item next_attempt_at INTEGER NOT NULL
+  item original_msgid TEXT NOT NULL
+  item original_sender TEXT NOT NULL
+  item raw_message BLOB NOT NULL
+  item recipient TEXT NOT NULL
+  item status TEXT NOT NULL DEFAULT 'pending'
+  item submit_actor_id BLOB
+table outbox
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col payload BLOB notnull=1 default=- pk=0 hidden=0
+  col entry_type TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col attempts INTEGER notnull=1 default=0 pk=0 hidden=0
+  col next_retry INTEGER notnull=1 default=0 pk=0 hidden=0
+  col author_id BLOB notnull=1 default=- pk=0 hidden=0
+  col last_error TEXT notnull=0 default=- pk=0 hidden=0
+  col last_attempt_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item attempts INTEGER NOT NULL DEFAULT 0
+  item author_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item entry_type TEXT NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item last_attempt_at INTEGER
+  item last_error TEXT
+  item next_retry INTEGER NOT NULL DEFAULT 0
+  item payload BLOB NOT NULL
+table payment_claim_codes
+  col code TEXT notnull=0 default=- pk=1 hidden=0
+  col author_id BLOB notnull=1 default=- pk=0 hidden=0
+  col tier_name TEXT notnull=1 default=- pk=0 hidden=0
+  col provider TEXT notnull=1 default=- pk=0 hidden=0
+  col external_ref TEXT notnull=1 default=- pk=0 hidden=0
+  col valid_until INTEGER notnull=0 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col redeemed_by BLOB notnull=0 default=- pk=0 hidden=0
+  col redeemed_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col voided_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item UNIQUE (author_id, provider, external_ref)
+  item author_id BLOB NOT NULL
+  item code TEXT PRIMARY KEY
+  item created_at INTEGER NOT NULL
+  item external_ref TEXT NOT NULL
+  item provider TEXT NOT NULL
+  item redeemed_at INTEGER
+  item redeemed_by BLOB
+  item tier_name TEXT NOT NULL
+  item valid_until INTEGER
+  item voided_at INTEGER
+table payment_providers
+  col author_id BLOB notnull=1 default=- pk=1 hidden=0
+  col kind TEXT notnull=1 default=- pk=2 hidden=0
+  col webhook_secret TEXT notnull=1 default=- pk=0 hidden=0
+  col tier_name TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col last_verified_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col last_rejected_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (author_id, kind)
+  item author_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item kind TEXT NOT NULL
+  item last_rejected_at INTEGER
+  item last_verified_at INTEGER
+  item tier_name TEXT NOT NULL
+  item webhook_secret TEXT NOT NULL
+table peer_content_reports
+  col content_hash BLOB notnull=1 default=- pk=1 hidden=0
+  col factor TEXT notnull=1 default=- pk=2 hidden=0
+  col peer_nest_id BLOB notnull=1 default=- pk=3 hidden=0
+  col claimed_count INTEGER notnull=1 default=- pk=0 hidden=0
+  col epoch INTEGER notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (content_hash, factor, peer_nest_id)
+  item claimed_count INTEGER NOT NULL
+  item content_hash BLOB NOT NULL
+  item epoch INTEGER NOT NULL
+  item factor TEXT NOT NULL
+  item peer_nest_id BLOB NOT NULL
+  item updated_at INTEGER NOT NULL
+table peer_content_trends
+  col content_id BLOB notnull=1 default=- pk=1 hidden=0
+  col peer_nest_id BLOB notnull=1 default=- pk=2 hidden=0
+  col score_pm INTEGER notnull=1 default=- pk=0 hidden=0
+  col engager_count INTEGER notnull=1 default=- pk=0 hidden=0
+  col epoch INTEGER notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (content_id, peer_nest_id)
+  item content_id BLOB NOT NULL
+  item engager_count INTEGER NOT NULL
+  item epoch INTEGER NOT NULL
+  item peer_nest_id BLOB NOT NULL
+  item score_pm INTEGER NOT NULL
+  item updated_at INTEGER NOT NULL
+table pending_actions
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col action_type TEXT notnull=1 default=- pk=0 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col target TEXT notnull=0 default=- pk=0 hidden=0
+  col payload TEXT notnull=0 default=- pk=0 hidden=0
+  col status TEXT notnull=1 default='pending' pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col execute_after INTEGER notnull=1 default=- pk=0 hidden=0
+  col executed_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col cancelled_by BLOB notnull=0 default=- pk=0 hidden=0
+  col cancelled_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col requires_quorum INTEGER notnull=1 default=0 pk=0 hidden=0
+  col approvals TEXT notnull=1 default='[]' pk=0 hidden=0
+  col ip_address TEXT notnull=0 default=- pk=0 hidden=0
+  col chain_hash BLOB notnull=0 default=- pk=0 hidden=0
+  col chain_hash_version INTEGER notnull=1 default=0 pk=0 hidden=0
+  item action_type TEXT NOT NULL
+  item actor_id BLOB NOT NULL
+  item approvals TEXT NOT NULL DEFAULT '[]'
+  item cancelled_at INTEGER
+  item cancelled_by BLOB
+  item chain_hash BLOB
+  item chain_hash_version INTEGER NOT NULL DEFAULT 0
+  item created_at INTEGER NOT NULL
+  item execute_after INTEGER NOT NULL
+  item executed_at INTEGER
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item ip_address TEXT
+  item payload TEXT
+  item requires_quorum INTEGER NOT NULL DEFAULT 0
+  item status TEXT NOT NULL DEFAULT 'pending'
+  item target TEXT
+table personalization_models
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col factor TEXT notnull=1 default=- pk=2 hidden=0
+  col sealed_blob BLOB notnull=1 default=- pk=0 hidden=0
+  col sample_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, factor)
+  item actor_id BLOB NOT NULL
+  item factor TEXT NOT NULL
+  item sample_count INTEGER NOT NULL DEFAULT 0
+  item sealed_blob BLOB NOT NULL
+  item updated_at INTEGER NOT NULL
+table plugin_state
+  col principal_id BLOB notnull=1 default=- pk=1 hidden=0
+  col key TEXT notnull=1 default=- pk=2 hidden=0
+  col value BLOB notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (principal_id, key)
+  item key TEXT NOT NULL
+  item principal_id BLOB NOT NULL
+  item value BLOB NOT NULL
+table push_subscriptions
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col device_id TEXT notnull=1 default=- pk=0 hidden=0
+  col transport TEXT notnull=1 default=- pk=0 hidden=0
+  col endpoint TEXT notnull=1 default=- pk=0 hidden=0
+  col key_p256dh TEXT notnull=0 default=- pk=0 hidden=0
+  col key_auth TEXT notnull=0 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item UNIQUE(actor_id, device_id)
+  item actor_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item device_id TEXT NOT NULL
+  item endpoint TEXT NOT NULL
+  item id INTEGER PRIMARY KEY
+  item key_auth TEXT
+  item key_p256dh TEXT
+  item transport TEXT NOT NULL
+table recovery_escrow
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col blob BLOB notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item blob BLOB NOT NULL
+  item updated_at INTEGER NOT NULL
+table recovery_pending_replacements
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col record BLOB notnull=1 default=- pk=0 hidden=0
+  col record_digest BLOB notnull=1 default=- pk=0 hidden=0
+  col new_recovery_pubkey BLOB notnull=1 default=- pk=0 hidden=0
+  col seq INTEGER notnull=1 default=- pk=0 hidden=0
+  col requested_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item new_recovery_pubkey BLOB NOT NULL
+  item record BLOB NOT NULL
+  item record_digest BLOB NOT NULL
+  item requested_at INTEGER NOT NULL
+  item seq INTEGER NOT NULL
+table recovery_registrations
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col seq INTEGER notnull=1 default=- pk=2 hidden=0
+  col recovery_pubkey BLOB notnull=1 default=- pk=0 hidden=0
+  col record BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, seq)
+  item actor_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item record BLOB NOT NULL
+  item recovery_pubkey BLOB NOT NULL
+  item seq INTEGER NOT NULL
+table region_artifacts
+  col region TEXT notnull=1 default=- pk=1 hidden=0
+  col payload_kind TEXT notnull=1 default=- pk=2 hidden=0
+  col sequence INTEGER notnull=1 default=- pk=0 hidden=0
+  col issued_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col key_id TEXT notnull=1 default=- pk=0 hidden=0
+  col authority_name TEXT notnull=1 default=- pk=0 hidden=0
+  col envelope BLOB notnull=1 default=- pk=0 hidden=0
+  col accepted_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (region, payload_kind)
+  item accepted_at INTEGER NOT NULL
+  item authority_name TEXT NOT NULL
+  item envelope BLOB NOT NULL
+  item issued_at INTEGER NOT NULL
+  item key_id TEXT NOT NULL
+  item payload_kind TEXT NOT NULL
+  item region TEXT NOT NULL
+  item sequence INTEGER NOT NULL
+table region_log_anchor
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col head BLOB notnull=1 default=- pk=0 hidden=0
+  col accepted_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item accepted_at INTEGER NOT NULL
+  item head BLOB NOT NULL
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+table region_refresh
+  col payload_kind TEXT notnull=1 default=- pk=1 hidden=0
+  col checked_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col ok INTEGER notnull=1 default=- pk=0 hidden=0
+  col detail TEXT notnull=0 default=- pk=0 hidden=0
+  col first_attempted_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col reached_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item checked_at INTEGER NOT NULL
+  item detail TEXT
+  item first_attempted_at INTEGER
+  item ok INTEGER NOT NULL
+  item payload_kind TEXT NOT NULL PRIMARY KEY
+  item reached_at INTEGER
+table region_relay_cache
+  col region TEXT notnull=1 default=- pk=1 hidden=0
+  col payload_kind TEXT notnull=1 default=- pk=2 hidden=0
+  col requested_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col envelope BLOB notnull=0 default=- pk=0 hidden=0
+  col evidence BLOB notnull=0 default=- pk=0 hidden=0
+  col sequence INTEGER notnull=0 default=- pk=0 hidden=0
+  col authority_name TEXT notnull=0 default=- pk=0 hidden=0
+  col accepted_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col attempted_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col reached_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col last_error TEXT notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (region, payload_kind)
+  item accepted_at INTEGER
+  item attempted_at INTEGER
+  item authority_name TEXT
+  item envelope BLOB
+  item evidence BLOB
+  item last_error TEXT
+  item payload_kind TEXT NOT NULL
+  item reached_at INTEGER
+  item region TEXT NOT NULL
+  item requested_at INTEGER NOT NULL
+  item sequence INTEGER
+table region_sequence_floor
+  col region TEXT notnull=1 default=- pk=1 hidden=0
+  col payload_kind TEXT notnull=1 default=- pk=2 hidden=0
+  col authority_name TEXT notnull=1 default=- pk=3 hidden=0
+  col sequence INTEGER notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (region, payload_kind, authority_name)
+  item authority_name TEXT NOT NULL
+  item payload_kind TEXT NOT NULL
+  item region TEXT NOT NULL
+  item sequence INTEGER NOT NULL
+  item updated_at INTEGER NOT NULL
+table restore_history
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col completed_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col snapshot_id INTEGER notnull=1 default=- pk=0 hidden=0
+  col kinds_restored TEXT notnull=1 default=- pk=0 hidden=0
+  col source_member_id BLOB notnull=0 default=- pk=0 hidden=0
+  fk snapshot_id -> snapshots.id update=NO ACTION delete=NO ACTION
+  item FOREIGN KEY (snapshot_id) REFERENCES snapshots(id)
+  item actor_id BLOB NOT NULL
+  item completed_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item kinds_restored TEXT NOT NULL
+  item snapshot_id INTEGER NOT NULL
+  item source_member_id BLOB
+table revoked_device_grants
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col auth_device_key BLOB notnull=1 default=- pk=2 hidden=0
+  col revoked_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, auth_device_key)
+  item actor_id BLOB NOT NULL
+  item auth_device_key BLOB NOT NULL
+  item revoked_at INTEGER NOT NULL
+table room_generation_wraps
+  col room_id BLOB notnull=1 default=- pk=1 hidden=0
+  col generation_id BLOB notnull=1 default=- pk=2 hidden=0
+  col entry_id BLOB notnull=1 default=- pk=3 hidden=0
+  col wrap BLOB notnull=1 default=- pk=0 hidden=0
+  fk room_id -> rooms.room_id update=NO ACTION delete=NO ACTION
+  item FOREIGN KEY (room_id) REFERENCES rooms(room_id)
+  item PRIMARY KEY (room_id, generation_id, entry_id)
+  item entry_id BLOB NOT NULL
+  item generation_id BLOB NOT NULL
+  item room_id BLOB NOT NULL
+  item wrap BLOB NOT NULL
+table room_generations
+  col room_id BLOB notnull=1 default=- pk=1 hidden=0
+  col generation_id BLOB notnull=1 default=- pk=2 hidden=0
+  col parent_id BLOB notnull=0 default=- pk=0 hidden=0
+  col key_commitment BLOB notnull=1 default=- pk=0 hidden=0
+  col minted_by BLOB notnull=1 default=- pk=0 hidden=0
+  col mint_blob BLOB notnull=1 default=- pk=0 hidden=0
+  col minted_at_ms INTEGER notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  fk room_id -> rooms.room_id update=NO ACTION delete=NO ACTION
+  item FOREIGN KEY (room_id) REFERENCES rooms(room_id)
+  item PRIMARY KEY (room_id, generation_id)
+  item created_at INTEGER NOT NULL
+  item generation_id BLOB NOT NULL
+  item key_commitment BLOB NOT NULL
+  item mint_blob BLOB NOT NULL
+  item minted_at_ms INTEGER NOT NULL
+  item minted_by BLOB NOT NULL
+  item parent_id BLOB
+  item room_id BLOB NOT NULL
+table room_invites
+  col room_id BLOB notnull=1 default=- pk=1 hidden=0
+  col invitee_id BLOB notnull=1 default=- pk=2 hidden=0
+  col inviter_id BLOB notnull=1 default=- pk=0 hidden=0
+  col role TEXT notnull=1 default=- pk=0 hidden=0
+  col invitee_node_url TEXT notnull=1 default='' pk=0 hidden=0
+  col signed_invite BLOB notnull=1 default=- pk=0 hidden=0
+  col invited_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col accepted_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col inbox_link_id INTEGER notnull=0 default=- pk=0 hidden=0
+  col invitee_nest_id BLOB notnull=0 default=- pk=0 hidden=0
+  fk room_id -> rooms.room_id update=NO ACTION delete=NO ACTION
+  item FOREIGN KEY (room_id) REFERENCES rooms(room_id)
+  item PRIMARY KEY (room_id, invitee_id)
+  item accepted_at INTEGER
+  item inbox_link_id INTEGER
+  item invited_at INTEGER NOT NULL
+  item invitee_id BLOB NOT NULL
+  item invitee_nest_id BLOB
+  item invitee_node_url TEXT NOT NULL DEFAULT ''
+  item inviter_id BLOB NOT NULL
+  item role TEXT NOT NULL CHECK(role IN ('admin', 'member'))
+  item room_id BLOB NOT NULL
+  item signed_invite BLOB NOT NULL
+table room_members
+  col room_id BLOB notnull=1 default=- pk=1 hidden=0
+  col principal_id BLOB notnull=1 default=- pk=2 hidden=0
+  col principal_kind TEXT notnull=1 default=- pk=0 hidden=0
+  col role TEXT notnull=0 default=- pk=0 hidden=0
+  col invited_by BLOB notnull=0 default=- pk=0 hidden=0
+  col home_node_url TEXT notnull=1 default='' pk=0 hidden=0
+  col joined_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col reported_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col removed_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col entry_id BLOB notnull=0 default=- pk=0 hidden=0
+  col reception_pubkey BLOB notnull=0 default=- pk=0 hidden=0
+  fk room_id -> rooms.room_id update=NO ACTION delete=NO ACTION
+  item FOREIGN KEY (room_id) REFERENCES rooms(room_id)
+  item PRIMARY KEY (room_id, principal_id)
+  item entry_id BLOB
+  item home_node_url TEXT NOT NULL DEFAULT ''
+  item invited_by BLOB
+  item joined_at INTEGER NOT NULL
+  item principal_id BLOB NOT NULL
+  item principal_kind TEXT NOT NULL CHECK(principal_kind IN ('user', 'nest', 'bridge'))
+  item reception_pubkey BLOB
+  item removed_at INTEGER
+  item reported_at INTEGER NOT NULL
+  item role TEXT CHECK(role IS NULL OR role IN ('owner', 'admin', 'member'))
+  item room_id BLOB NOT NULL
+table room_message_views
+  col room_id BLOB notnull=1 default=- pk=1 hidden=0
+  col seq INTEGER notnull=1 default=- pk=2 hidden=0
+  col doc_key BLOB notnull=1 default=- pk=0 hidden=0
+  col generation_id BLOB notnull=1 default=- pk=0 hidden=0
+  fk room_id -> rooms.room_id update=NO ACTION delete=NO ACTION
+  item FOREIGN KEY (room_id) REFERENCES rooms(room_id)
+  item PRIMARY KEY (room_id, seq)
+  item doc_key BLOB NOT NULL
+  item generation_id BLOB NOT NULL
+  item room_id BLOB NOT NULL
+  item seq INTEGER NOT NULL
+table room_policy_versions
+  col room_id BLOB notnull=1 default=- pk=1 hidden=0
+  col version INTEGER notnull=1 default=- pk=2 hidden=0
+  col policy_blob BLOB notnull=1 default=- pk=0 hidden=0
+  col stored_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (room_id, version)
+  item policy_blob BLOB NOT NULL
+  item room_id BLOB NOT NULL
+  item stored_at INTEGER NOT NULL
+  item version INTEGER NOT NULL
+table room_post_views
+  col room_id BLOB notnull=1 default=- pk=1 hidden=0
+  col post_id BLOB notnull=1 default=- pk=2 hidden=0
+  col doc_key BLOB notnull=1 default=- pk=0 hidden=0
+  col generation_id BLOB notnull=0 default=- pk=0 hidden=0
+  fk room_id -> rooms.room_id update=NO ACTION delete=NO ACTION
+  item FOREIGN KEY (room_id) REFERENCES rooms(room_id)
+  item PRIMARY KEY (room_id, post_id)
+  item doc_key BLOB NOT NULL
+  item generation_id BLOB
+  item post_id BLOB NOT NULL
+  item room_id BLOB NOT NULL
+table rooms
+  col room_id BLOB notnull=0 default=- pk=1 hidden=0
+  col class TEXT notnull=1 default=- pk=0 hidden=0
+  col home_node_url TEXT notnull=1 default='' pk=0 hidden=0
+  col owner_id BLOB notnull=0 default=- pk=0 hidden=0
+  col policy_version INTEGER notnull=0 default=- pk=0 hidden=0
+  col policy_blob BLOB notnull=0 default=- pk=0 hidden=0
+  col birth_salt BLOB notnull=0 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col labelers_version INTEGER notnull=0 default=- pk=0 hidden=0
+  col labelers_blob BLOB notnull=0 default=- pk=0 hidden=0
+  col roster_commit_seq INTEGER notnull=0 default=- pk=0 hidden=0
+  item birth_salt BLOB
+  item class TEXT NOT NULL CHECK(class IN ('end_to_end', 'community', 'transport_only'))
+  item created_at INTEGER NOT NULL
+  item home_node_url TEXT NOT NULL DEFAULT ''
+  item labelers_blob BLOB
+  item labelers_version INTEGER
+  item owner_id BLOB
+  item policy_blob BLOB
+  item policy_version INTEGER
+  item room_id BLOB PRIMARY KEY
+  item roster_commit_seq INTEGER
+  item updated_at INTEGER NOT NULL
+table rpc_idempotency
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col idem_key BLOB notnull=1 default=- pk=2 hidden=0
+  col kind TEXT notnull=1 default=- pk=0 hidden=0
+  col reply BLOB notnull=0 default=- pk=0 hidden=0
+  col ok INTEGER notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, idem_key)
+  item actor_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item idem_key BLOB NOT NULL
+  item kind TEXT NOT NULL
+  item ok INTEGER NOT NULL
+  item reply BLOB
+table schema_meta
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col schema_version INTEGER notnull=1 default=- pk=0 hidden=0
+  col min_reader_version INTEGER notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item min_reader_version INTEGER NOT NULL
+  item schema_version INTEGER NOT NULL
+  item updated_at INTEGER NOT NULL
+table segment_records
+  col scope_id BLOB notnull=1 default=- pk=1 hidden=0
+  col kind TEXT notnull=1 default=- pk=2 hidden=0
+  col segment_id INTEGER notnull=1 default=- pk=3 hidden=0
+  col record_cid BLOB notnull=1 default=- pk=4 hidden=0
+  col bucket TEXT notnull=1 default=- pk=0 hidden=0
+  col tombstoned INTEGER notnull=1 default=0 pk=0 hidden=0
+  col changed_seq INTEGER notnull=1 default=0 pk=0 hidden=0
+  col received_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col sender_dom TEXT notnull=0 default=- pk=0 hidden=0
+  col spam_disp TEXT notnull=0 default=- pk=0 hidden=0
+  col is_own_submission INTEGER notnull=0 default=- pk=0 hidden=0
+  col seq INTEGER notnull=0 default=- pk=0 hidden=0
+  col legal_takedown_ref TEXT notnull=0 default=- pk=0 hidden=0
+  col report_hash BLOB notnull=0 default=- pk=0 hidden=0
+  col continuation_role INTEGER notnull=1 default=0 pk=0 hidden=0
+  col stored_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (scope_id, kind, segment_id, record_cid)
+  item bucket TEXT NOT NULL
+  item changed_seq INTEGER NOT NULL DEFAULT 0
+  item continuation_role INTEGER NOT NULL DEFAULT 0
+  item is_own_submission INTEGER
+  item kind TEXT NOT NULL
+  item legal_takedown_ref TEXT
+  item received_at INTEGER
+  item record_cid BLOB NOT NULL
+  item report_hash BLOB
+  item scope_id BLOB NOT NULL
+  item segment_id INTEGER NOT NULL
+  item sender_dom TEXT
+  item seq INTEGER
+  item spam_disp TEXT
+  item stored_at INTEGER
+  item tombstoned INTEGER NOT NULL DEFAULT 0
+table sender_behavior
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col event_type TEXT notnull=1 default=- pk=0 hidden=0
+  col target_actor BLOB notnull=0 default=- pk=0 hidden=0
+  col timestamp INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item event_type TEXT NOT NULL
+  item target_actor BLOB
+  item timestamp INTEGER NOT NULL
+table serving_port
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col port INTEGER notnull=1 default=- pk=0 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item port INTEGER NOT NULL CHECK (port > 0 AND port < 65536)
+  item set_at INTEGER NOT NULL
+table share_tokens
+  col token_id BLOB notnull=0 default=- pk=1 hidden=0
+  col author BLOB notnull=1 default=- pk=0 hidden=0
+  col manifest_hash BLOB notnull=1 default=- pk=0 hidden=0
+  col expires_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col public INTEGER notnull=1 default=- pk=0 hidden=0
+  col revoked INTEGER notnull=1 default=0 pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col filename_sealed BLOB notnull=1 default=- pk=0 hidden=0
+  col key_envelope BLOB notnull=0 default=- pk=0 hidden=0
+  item author BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item expires_at INTEGER NOT NULL
+  item filename_sealed BLOB NOT NULL
+  item key_envelope BLOB
+  item manifest_hash BLOB NOT NULL
+  item public INTEGER NOT NULL
+  item revoked INTEGER NOT NULL DEFAULT 0
+  item token_id BLOB PRIMARY KEY
+table snapshot_files
+  col snapshot_id INTEGER notnull=1 default=- pk=1 hidden=0
+  col manifest_hash BLOB notnull=1 default=- pk=0 hidden=0
+  col size_bytes INTEGER notnull=1 default=- pk=0 hidden=0
+  col mtime INTEGER notnull=1 default=- pk=0 hidden=0
+  col path_hash BLOB notnull=0 default=- pk=2 hidden=0
+  col path_sealed BLOB notnull=0 default=- pk=0 hidden=0
+  col mode INTEGER notnull=1 default=0 pk=0 hidden=0
+  col file_type TEXT notnull=1 default='regular' pk=0 hidden=0
+  col symlink_target TEXT notnull=0 default=- pk=0 hidden=0
+  fk snapshot_id -> snapshots.id update=NO ACTION delete=CASCADE
+  item PRIMARY KEY (snapshot_id, path_hash)
+  item file_type TEXT NOT NULL DEFAULT 'regular'
+  item manifest_hash BLOB NOT NULL
+  item mode INTEGER NOT NULL DEFAULT 0
+  item mtime INTEGER NOT NULL
+  item path_hash BLOB
+  item path_sealed BLOB
+  item size_bytes INTEGER NOT NULL
+  item snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE
+  item symlink_target TEXT
+table snapshots
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col folder_id INTEGER notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col file_count INTEGER notnull=1 default=- pk=0 hidden=0
+  col total_bytes INTEGER notnull=1 default=- pk=0 hidden=0
+  col tag_hashes TEXT notnull=0 default=- pk=0 hidden=0
+  col tags_sealed BLOB notnull=0 default=- pk=0 hidden=0
+  col parent_id INTEGER notnull=0 default=- pk=0 hidden=0
+  col device_id BLOB notnull=0 default=- pk=0 hidden=0
+  col max_change_seq INTEGER notnull=0 default=- pk=0 hidden=0
+  col deletion_pending INTEGER notnull=1 default=0 pk=0 hidden=0
+  col soft_deleted INTEGER notnull=1 default=0 pk=0 hidden=0
+  col purge_after INTEGER notnull=0 default=- pk=0 hidden=0
+  col message_kind TEXT notnull=0 default=- pk=0 hidden=0
+  col message_manifest BLOB notnull=0 default=- pk=0 hidden=0
+  col placement_manifest BLOB notnull=0 default=- pk=0 hidden=0
+  fk folder_id -> folders.id update=NO ACTION delete=NO ACTION
+  fk parent_id -> snapshots.id update=NO ACTION delete=NO ACTION
+  item UNIQUE(folder_id, created_at)
+  item created_at INTEGER NOT NULL
+  item deletion_pending INTEGER NOT NULL DEFAULT 0
+  item device_id BLOB
+  item file_count INTEGER NOT NULL
+  item folder_id INTEGER NOT NULL REFERENCES folders(id)
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item max_change_seq INTEGER
+  item message_kind TEXT
+  item message_manifest BLOB
+  item parent_id INTEGER REFERENCES snapshots(id)
+  item placement_manifest BLOB
+  item purge_after INTEGER
+  item soft_deleted INTEGER NOT NULL DEFAULT 0
+  item tag_hashes TEXT
+  item tags_sealed BLOB
+  item total_bytes INTEGER NOT NULL
+table spam_baseline
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col model_json BLOB notnull=1 default=- pk=0 hidden=0
+  col ham_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col spam_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col contributors INTEGER notnull=1 default=0 pk=0 hidden=0
+  col published_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item contributors INTEGER NOT NULL DEFAULT 0
+  item ham_count INTEGER NOT NULL DEFAULT 0
+  item id INTEGER PRIMARY KEY CHECK (id = 0)
+  item model_json BLOB NOT NULL
+  item published_at INTEGER NOT NULL
+  item spam_count INTEGER NOT NULL DEFAULT 0
+table spam_baseline_inclusions
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col model_updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col departed INTEGER notnull=1 default=0 pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item departed INTEGER NOT NULL DEFAULT 0
+  item model_updated_at INTEGER NOT NULL
+table spam_baseline_run_state
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col purged_inclusions_since_publish INTEGER notnull=1 default=0 pk=0 hidden=0
+  col last_served_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col last_run_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col deferred INTEGER notnull=1 default=0 pk=0 hidden=0
+  col skipped_contributors INTEGER notnull=1 default=0 pk=0 hidden=0
+  col departures INTEGER notnull=1 default=0 pk=0 hidden=0
+  item deferred INTEGER NOT NULL DEFAULT 0
+  item departures INTEGER NOT NULL DEFAULT 0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item last_run_at INTEGER
+  item last_served_at INTEGER
+  item purged_inclusions_since_publish INTEGER NOT NULL DEFAULT 0
+  item skipped_contributors INTEGER NOT NULL DEFAULT 0
+table spam_model_holder_copies
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col holder_pubkey BLOB notnull=1 default=- pk=2 hidden=0
+  col sealed_copy BLOB notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, holder_pubkey)
+  item actor_id BLOB NOT NULL
+  item holder_pubkey BLOB NOT NULL
+  item sealed_copy BLOB NOT NULL
+  item updated_at INTEGER NOT NULL
+table spam_models
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col model_json BLOB notnull=1 default=- pk=0 hidden=0
+  col ham_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col spam_count INTEGER notnull=1 default=0 pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item ham_count INTEGER NOT NULL DEFAULT 0
+  item model_json BLOB NOT NULL
+  item spam_count INTEGER NOT NULL DEFAULT 0
+  item updated_at INTEGER NOT NULL
+table spam_preferences
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col spam_threshold REAL notnull=1 default=0.5 pk=0 hidden=0
+  col phishing_threshold REAL notnull=1 default=0.3 pk=0 hidden=0
+  col contribute_baseline INTEGER notnull=1 default=0 pk=0 hidden=0
+  col share_reports INTEGER notnull=1 default=0 pk=0 hidden=0
+  col share_signals INTEGER notnull=1 default=0 pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item contribute_baseline INTEGER NOT NULL DEFAULT 0
+  item phishing_threshold REAL NOT NULL DEFAULT 0.3
+  item share_reports INTEGER NOT NULL DEFAULT 0
+  item share_signals INTEGER NOT NULL DEFAULT 0
+  item spam_threshold REAL NOT NULL DEFAULT 0.5
+  item updated_at INTEGER NOT NULL
+table spam_training_history
+  col history_id BLOB notnull=0 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col message_id BLOB notnull=1 default=- pk=0 hidden=0
+  col mailbox TEXT notnull=1 default=- pk=0 hidden=0
+  col label TEXT notnull=1 default=- pk=0 hidden=0
+  col source TEXT notnull=1 default=- pk=0 hidden=0
+  col model_delta_applied BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col sealed_subject BLOB notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item history_id BLOB PRIMARY KEY
+  item label TEXT NOT NULL
+  item mailbox TEXT NOT NULL
+  item message_id BLOB NOT NULL
+  item model_delta_applied BLOB NOT NULL
+  item sealed_subject BLOB NOT NULL
+  item source TEXT NOT NULL
+table state_walk_marks
+  col folder_id INTEGER notnull=1 default=- pk=1 hidden=0
+  col walker BLOB notnull=1 default=- pk=2 hidden=0
+  col seq INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (folder_id, walker)
+  item folder_id INTEGER NOT NULL
+  item seq INTEGER NOT NULL
+  item walker BLOB NOT NULL
+table subscribe_requests
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col author_id BLOB notnull=1 default=- pk=0 hidden=0
+  col subscriber_id BLOB notnull=1 default=- pk=0 hidden=0
+  col tier_name TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col kind TEXT notnull=1 default='subscribe' pk=0 hidden=0
+  col mlkem_encaps_key BLOB notnull=0 default=- pk=0 hidden=0
+  col payment_entitled INTEGER notnull=1 default=0 pk=0 hidden=0
+  col valid_until INTEGER notnull=0 default=- pk=0 hidden=0
+  fk author_id -> subscription_tiers.author_id update=NO ACTION delete=NO ACTION
+  fk tier_name -> subscription_tiers.name update=NO ACTION delete=NO ACTION
+  item FOREIGN KEY (author_id, tier_name) REFERENCES subscription_tiers (author_id, name)
+  item UNIQUE (author_id, subscriber_id, tier_name, kind)
+  item author_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item kind TEXT NOT NULL DEFAULT 'subscribe' CHECK(kind IN ('subscribe', 'unsubscribe'))
+  item mlkem_encaps_key BLOB
+  item payment_entitled INTEGER NOT NULL DEFAULT 0
+  item subscriber_id BLOB NOT NULL
+  item tier_name TEXT NOT NULL
+  item valid_until INTEGER
+table subscribers
+  col author_id BLOB notnull=1 default=- pk=1 hidden=0
+  col subscriber_id BLOB notnull=1 default=- pk=2 hidden=0
+  col tier_name TEXT notnull=1 default=- pk=3 hidden=0
+  col approved_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col mlkem_encaps_key BLOB notnull=0 default=- pk=0 hidden=0
+  col valid_until INTEGER notnull=0 default=- pk=0 hidden=0
+  col admitted_tier TEXT notnull=0 default=- pk=0 hidden=0
+  col admitted_lapse_tier TEXT notnull=0 default=- pk=0 hidden=0
+  fk author_id -> subscription_tiers.author_id update=NO ACTION delete=NO ACTION
+  fk tier_name -> subscription_tiers.name update=NO ACTION delete=NO ACTION
+  item FOREIGN KEY (author_id, tier_name) REFERENCES subscription_tiers (author_id, name)
+  item PRIMARY KEY (author_id, subscriber_id, tier_name)
+  item admitted_lapse_tier TEXT
+  item admitted_tier TEXT
+  item approved_at INTEGER NOT NULL
+  item author_id BLOB NOT NULL
+  item mlkem_encaps_key BLOB
+  item subscriber_id BLOB NOT NULL
+  item tier_name TEXT NOT NULL
+  item valid_until INTEGER
+table subscription_tiers
+  col author_id BLOB notnull=1 default=- pk=1 hidden=0
+  col name TEXT notnull=1 default=- pk=2 hidden=0
+  col rank INTEGER notnull=1 default=- pk=0 hidden=0
+  col description TEXT notnull=0 default=- pk=0 hidden=0
+  col price_hint TEXT notnull=0 default=- pk=0 hidden=0
+  col payment_url TEXT notnull=0 default=- pk=0 hidden=0
+  col auto_approve INTEGER notnull=1 default=1 pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col unlocks_post TEXT notnull=0 default=- pk=0 hidden=0
+  col asking_price_value INTEGER notnull=0 default=- pk=0 hidden=0
+  col asking_price_unit TEXT notnull=0 default=- pk=0 hidden=0
+  col hidden INTEGER notnull=1 default=0 pk=0 hidden=0
+  item PRIMARY KEY (author_id, name)
+  item asking_price_unit TEXT
+  item asking_price_value INTEGER
+  item author_id BLOB NOT NULL
+  item auto_approve INTEGER NOT NULL DEFAULT 1
+  item created_at INTEGER NOT NULL
+  item description TEXT
+  item hidden INTEGER NOT NULL DEFAULT 0
+  item name TEXT NOT NULL
+  item payment_url TEXT
+  item price_hint TEXT
+  item rank INTEGER NOT NULL
+  item unlocks_post TEXT
+table succession_owed_nests
+  col old_actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col nest_id BLOB notnull=1 default=- pk=2 hidden=0
+  col nest_url TEXT notnull=0 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (old_actor_id, nest_id)
+  item created_at INTEGER NOT NULL
+  item nest_id BLOB NOT NULL
+  item nest_url TEXT
+  item old_actor_id BLOB NOT NULL
+table sync_changes
+  col seq INTEGER notnull=0 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col path_hash BLOB notnull=1 default=- pk=0 hidden=0
+  col manifest_hash BLOB notnull=0 default=- pk=0 hidden=0
+  col size_bytes INTEGER notnull=1 default=0 pk=0 hidden=0
+  col change_type TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col content_key_version INTEGER notnull=0 default=- pk=0 hidden=0
+  col thumbnail_hash TEXT notnull=0 default=- pk=0 hidden=0
+  col superseded_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col path_sealed BLOB notnull=0 default=- pk=0 hidden=0
+  col derived_through INTEGER notnull=0 default=- pk=0 hidden=0
+  col is_resolution INTEGER notnull=0 default=- pk=0 hidden=0
+  col is_retention INTEGER notnull=0 default=- pk=0 hidden=0
+  col item_class TEXT notnull=0 default=- pk=0 hidden=0
+  col origin_writer BLOB notnull=0 default=- pk=0 hidden=0
+  col origin_seq INTEGER notnull=0 default=- pk=0 hidden=0
+  col entry_sealed BLOB notnull=0 default=- pk=0 hidden=0
+  col signature BLOB notnull=0 default=- pk=0 hidden=0
+  col signer_key BLOB notnull=0 default=- pk=0 hidden=0
+  col prune_pending INTEGER notnull=0 default=- pk=0 hidden=0
+  col pruned_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col purge_after INTEGER notnull=0 default=- pk=0 hidden=0
+  col charged INTEGER notnull=1 default=1 pk=0 hidden=0
+  col folder_id INTEGER notnull=0 default=- pk=0 hidden=0
+  col device_id BLOB notnull=0 default=- pk=0 hidden=0
+  col path TEXT notnull=0 default=- pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item change_type TEXT NOT NULL
+  item charged INTEGER NOT NULL DEFAULT 1
+  item content_key_version INTEGER
+  item created_at INTEGER NOT NULL
+  item derived_through INTEGER
+  item device_id BLOB
+  item entry_sealed BLOB
+  item folder_id INTEGER
+  item is_resolution INTEGER
+  item is_retention INTEGER
+  item item_class TEXT
+  item manifest_hash BLOB
+  item origin_seq INTEGER
+  item origin_writer BLOB
+  item path TEXT
+  item path_hash BLOB NOT NULL
+  item path_sealed BLOB
+  item prune_pending INTEGER
+  item pruned_at INTEGER
+  item purge_after INTEGER
+  item seq INTEGER PRIMARY KEY AUTOINCREMENT
+  item signature BLOB
+  item signer_key BLOB
+  item size_bytes INTEGER NOT NULL DEFAULT 0
+  item superseded_at INTEGER
+  item thumbnail_hash TEXT
+table sync_conflict_candidates
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col conflict_id INTEGER notnull=1 default=- pk=0 hidden=0
+  col manifest_hash BLOB notnull=1 default=- pk=0 hidden=0
+  col device_id BLOB notnull=1 default=- pk=0 hidden=0
+  col size_bytes INTEGER notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col content_key_version INTEGER notnull=0 default=- pk=0 hidden=0
+  fk conflict_id -> sync_conflicts.id update=NO ACTION delete=CASCADE
+  item conflict_id INTEGER NOT NULL REFERENCES sync_conflicts(id) ON DELETE CASCADE
+  item content_key_version INTEGER
+  item created_at INTEGER NOT NULL
+  item device_id BLOB NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item manifest_hash BLOB NOT NULL
+  item size_bytes INTEGER NOT NULL
+table sync_conflicts
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col folder_id INTEGER notnull=1 default=- pk=0 hidden=0
+  col device_id BLOB notnull=1 default=- pk=0 hidden=0
+  col path TEXT notnull=1 default=- pk=0 hidden=0
+  col conflict_type TEXT notnull=1 default=- pk=0 hidden=0
+  col details TEXT notnull=0 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col resolved_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col path_hash BLOB notnull=1 default=- pk=0 hidden=0
+  col path_sealed BLOB notnull=0 default=- pk=0 hidden=0
+  col details_sealed BLOB notnull=0 default=- pk=0 hidden=0
+  col winning_manifest_hash BLOB notnull=0 default=- pk=0 hidden=0
+  col resolution TEXT notnull=0 default=- pk=0 hidden=0
+  fk folder_id -> folders.id update=NO ACTION delete=CASCADE
+  item conflict_type TEXT NOT NULL
+  item created_at INTEGER NOT NULL
+  item details TEXT
+  item details_sealed BLOB
+  item device_id BLOB NOT NULL
+  item folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item path TEXT NOT NULL
+  item path_hash BLOB NOT NULL
+  item path_sealed BLOB
+  item resolution TEXT
+  item resolved_at INTEGER
+  item winning_manifest_hash BLOB
+table sync_devices
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col device_id BLOB notnull=1 default=- pk=2 hidden=0
+  col label TEXT notnull=1 default='' pk=0 hidden=0
+  col registered_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col last_seen INTEGER notnull=1 default=- pk=0 hidden=0
+  col guardian_marked INTEGER notnull=1 default=0 pk=0 hidden=0
+  col auth_device_key BLOB notnull=0 default=- pk=0 hidden=0
+  col auth_grant BLOB notnull=0 default=- pk=0 hidden=0
+  col label_sealed BLOB notnull=0 default=- pk=0 hidden=0
+  col capabilities TEXT notnull=1 default='read,write' pk=0 hidden=0
+  col p2p_participation TEXT notnull=0 default=- pk=0 hidden=0
+  col p2p_off_requested INTEGER notnull=1 default=0 pk=0 hidden=0
+  item PRIMARY KEY (actor_id, device_id)
+  item actor_id BLOB NOT NULL
+  item auth_device_key BLOB
+  item auth_grant BLOB
+  item capabilities TEXT NOT NULL DEFAULT 'read,write'
+  item device_id BLOB NOT NULL
+  item guardian_marked INTEGER NOT NULL DEFAULT 0
+  item label TEXT NOT NULL DEFAULT ''
+  item label_sealed BLOB
+  item last_seen INTEGER NOT NULL
+  item p2p_off_requested INTEGER NOT NULL DEFAULT 0
+  item p2p_participation TEXT
+  item registered_at INTEGER NOT NULL
+table sync_signer_certs
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col device_key BLOB notnull=1 default=- pk=2 hidden=0
+  col cert_actor_id BLOB notnull=1 default=- pk=3 hidden=0
+  col cert BLOB notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, device_key, cert_actor_id)
+  item actor_id BLOB NOT NULL
+  item cert BLOB NOT NULL
+  item cert_actor_id BLOB NOT NULL
+  item device_key BLOB NOT NULL
+  item updated_at INTEGER NOT NULL
+table third_party_principals
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col principal_id BLOB notnull=1 default=- pk=2 hidden=0
+  col client_id TEXT notnull=1 default=- pk=0 hidden=0
+  col holder_x25519 BLOB notnull=0 default=- pk=0 hidden=0
+  col execution_form TEXT notnull=1 default=- pk=0 hidden=0
+  col declared_kinds TEXT notnull=1 default='[]' pk=0 hidden=0
+  col granted_scopes TEXT notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col last_used_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col label TEXT notnull=0 default=- pk=0 hidden=0
+  col publisher_key BLOB notnull=0 default=- pk=0 hidden=0
+  col writer_ed25519 BLOB notnull=0 default=- pk=0 hidden=0
+  col declared_bridge TEXT notnull=0 default=- pk=0 hidden=0
+  col declared_service_auth TEXT notnull=1 default='[]' pk=0 hidden=0
+  col events_uri TEXT notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, principal_id)
+  item UNIQUE (actor_id, client_id)
+  item actor_id BLOB NOT NULL
+  item client_id TEXT NOT NULL
+  item created_at INTEGER NOT NULL
+  item declared_bridge TEXT
+  item declared_kinds TEXT NOT NULL DEFAULT '[]'
+  item declared_service_auth TEXT NOT NULL DEFAULT '[]'
+  item events_uri TEXT
+  item execution_form TEXT NOT NULL
+  item granted_scopes TEXT NOT NULL
+  item holder_x25519 BLOB
+  item label TEXT
+  item last_used_at INTEGER
+  item principal_id BLOB NOT NULL
+  item publisher_key BLOB
+  item writer_ed25519 BLOB
+table tiers
+  col name TEXT notnull=0 default=- pk=1 hidden=0
+  col max_inbox_bytes INTEGER notnull=1 default=- pk=0 hidden=0
+  col max_storage_bytes INTEGER notnull=1 default=- pk=0 hidden=0
+  col max_devices INTEGER notnull=1 default=- pk=0 hidden=0
+  col max_blob_size INTEGER notnull=1 default=- pk=0 hidden=0
+  col max_feeds INTEGER notnull=1 default=5 pk=0 hidden=0
+  item max_blob_size INTEGER NOT NULL
+  item max_devices INTEGER NOT NULL
+  item max_feeds INTEGER NOT NULL DEFAULT 5
+  item max_inbox_bytes INTEGER NOT NULL
+  item max_storage_bytes INTEGER NOT NULL
+  item name TEXT PRIMARY KEY
+table tlsrpt_outbound_reports
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col report_id TEXT notnull=1 default=- pk=0 hidden=0
+  col recipient_domain TEXT notnull=1 default=- pk=0 hidden=0
+  col report_date TEXT notnull=1 default=- pk=0 hidden=0
+  col transport TEXT notnull=1 default=- pk=0 hidden=0
+  col destination_uri TEXT notnull=1 default=- pk=0 hidden=0
+  col payload_json BLOB notnull=1 default=- pk=0 hidden=0
+  col submitted_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item UNIQUE (recipient_domain, report_date, transport, destination_uri)
+  item destination_uri TEXT NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item payload_json BLOB NOT NULL
+  item recipient_domain TEXT NOT NULL
+  item report_date TEXT NOT NULL
+  item report_id TEXT NOT NULL
+  item submitted_at INTEGER NOT NULL
+  item transport TEXT NOT NULL
+table transport_policy
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col overrides_json TEXT notnull=1 default=- pk=0 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item overrides_json TEXT NOT NULL
+table upload_leases
+  col folder_id INTEGER notnull=1 default=- pk=0 hidden=0
+  col device_id BLOB notnull=1 default=- pk=0 hidden=0
+  col acquired_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col expires_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col heartbeat_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  item acquired_at INTEGER NOT NULL
+  item actor_id BLOB NOT NULL
+  item device_id BLOB NOT NULL
+  item expires_at INTEGER NOT NULL
+  item folder_id INTEGER NOT NULL UNIQUE
+  item heartbeat_at INTEGER NOT NULL
+table users
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col tier TEXT notnull=1 default=- pk=0 hidden=0
+  col label TEXT notnull=1 default='' pk=0 hidden=0
+  col suspended INTEGER notnull=1 default=0 pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col inbox_bytes_used INTEGER notnull=1 default=0 pk=0 hidden=0
+  col storage_bytes_used INTEGER notnull=1 default=0 pk=0 hidden=0
+  col handle TEXT notnull=1 default='' pk=0 hidden=0
+  col eviction_status TEXT notnull=1 default='' pk=0 hidden=0
+  col eviction_reason TEXT notnull=1 default='' pk=0 hidden=0
+  col eviction_category TEXT notnull=1 default='' pk=0 hidden=0
+  col eviction_warned_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col eviction_suspend_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col eviction_delete_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col locked_until INTEGER notnull=0 default=- pk=0 hidden=0
+  fk tier -> tiers.name update=NO ACTION delete=NO ACTION
+  item actor_id BLOB PRIMARY KEY
+  item created_at INTEGER NOT NULL
+  item eviction_category TEXT NOT NULL DEFAULT ''
+  item eviction_delete_at INTEGER
+  item eviction_reason TEXT NOT NULL DEFAULT ''
+  item eviction_status TEXT NOT NULL DEFAULT ''
+  item eviction_suspend_at INTEGER
+  item eviction_warned_at INTEGER
+  item handle TEXT DEFAULT '' NOT NULL
+  item inbox_bytes_used INTEGER NOT NULL DEFAULT 0
+  item label TEXT NOT NULL DEFAULT ''
+  item locked_until INTEGER
+  item storage_bytes_used INTEGER NOT NULL DEFAULT 0
+  item suspended INTEGER NOT NULL DEFAULT 0
+  item tier TEXT NOT NULL REFERENCES tiers(name)
+table vapid_keypair
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col pem BLOB notnull=1 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item created_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item pem BLOB NOT NULL
+table video_cache_sources
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col content_hash BLOB notnull=1 default=- pk=0 hidden=0
+  col nest_url TEXT notnull=1 default=- pk=0 hidden=0
+  col bytes_served INTEGER notnull=1 default=0 pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item bytes_served INTEGER NOT NULL DEFAULT 0
+  item content_hash BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item nest_url TEXT NOT NULL
+table web_apex_actor
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=0 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB NOT NULL
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item set_at INTEGER NOT NULL
+table web_domains
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col domain TEXT notnull=1 default=- pk=2 hidden=0
+  col verify_token TEXT notnull=1 default=- pk=0 hidden=0
+  col status TEXT notnull=1 default='pending' pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col verified_at INTEGER notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, domain)
+  item actor_id BLOB NOT NULL
+  item created_at INTEGER NOT NULL
+  item domain TEXT NOT NULL UNIQUE
+  item status TEXT NOT NULL DEFAULT 'pending'
+  item verified_at INTEGER
+  item verify_token TEXT NOT NULL
+table web_files
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col path TEXT notnull=1 default=- pk=2 hidden=0
+  col blob_hash BLOB notnull=1 default=- pk=0 hidden=0
+  col content_type TEXT notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col folder_id INTEGER notnull=0 default=- pk=0 hidden=0
+  col content_key_version INTEGER notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, path)
+  item actor_id BLOB NOT NULL
+  item blob_hash BLOB NOT NULL
+  item content_key_version INTEGER
+  item content_type TEXT NOT NULL
+  item folder_id INTEGER
+  item path TEXT NOT NULL
+  item updated_at INTEGER NOT NULL
+table web_render_generation
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col generation INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY NOT NULL
+  item generation INTEGER NOT NULL
+table web_render_owed
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col nonce INTEGER notnull=1 default=- pk=0 hidden=0
+  col owed_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY NOT NULL
+  item nonce INTEGER NOT NULL
+  item owed_at INTEGER NOT NULL
+table web_render_staged
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col blob_hash BLOB notnull=1 default=- pk=2 hidden=0
+  item PRIMARY KEY (actor_id, blob_hash)
+  item actor_id BLOB NOT NULL
+  item blob_hash BLOB NOT NULL
+table web_rendered
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col path TEXT notnull=1 default=- pk=2 hidden=0
+  col blob_hash BLOB notnull=1 default=- pk=0 hidden=0
+  col content_type TEXT notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, path)
+  item actor_id BLOB NOT NULL
+  item blob_hash BLOB NOT NULL
+  item content_type TEXT NOT NULL
+  item path TEXT NOT NULL
+  item updated_at INTEGER NOT NULL
+table web_rendered_sealed
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col path TEXT notnull=1 default=- pk=2 hidden=0
+  col blob_hash BLOB notnull=1 default=- pk=0 hidden=0
+  col content_type TEXT notnull=1 default=- pk=0 hidden=0
+  col tier TEXT notnull=1 default=- pk=0 hidden=0
+  col post_id BLOB notnull=1 default=- pk=0 hidden=0
+  col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, path)
+  item actor_id BLOB NOT NULL
+  item blob_hash BLOB NOT NULL
+  item content_type TEXT NOT NULL
+  item path TEXT NOT NULL
+  item post_id BLOB NOT NULL
+  item tier TEXT NOT NULL
+  item updated_at INTEGER NOT NULL
+table web_restore_owed
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col nonce INTEGER notnull=1 default=- pk=0 hidden=0
+  col owed_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY NOT NULL
+  item nonce INTEGER NOT NULL
+  item owed_at INTEGER NOT NULL
+table web_subdomain_enabled
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item set_at INTEGER NOT NULL
+table webdav_enabled
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  col enabled INTEGER notnull=1 default=- pk=0 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
+  item set_at INTEGER NOT NULL
+table worker_replication
+  col payload_type TEXT notnull=1 default=- pk=1 hidden=0
+  col payload_key BLOB notnull=1 default=- pk=2 hidden=0
+  col inbox_row_id INTEGER notnull=0 default=- pk=3 hidden=0
+  col replicated_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (payload_type, payload_key, inbox_row_id)
+  item inbox_row_id INTEGER
+  item payload_key BLOB NOT NULL
+  item payload_type TEXT NOT NULL
+  item replicated_at INTEGER NOT NULL
+index idx_abuse_report_outbox_due: CREATE INDEX idx_abuse_report_outbox_due ON abuse_report_outbox(next_attempt_at)
+index idx_abuse_reports_origin_ref: CREATE UNIQUE INDEX idx_abuse_reports_origin_ref ON abuse_reports(origin_nest_id, origin_report_ref) WHERE origin_report_ref IS NOT NULL
+index idx_abuse_reports_reporter: CREATE INDEX idx_abuse_reports_reporter ON abuse_reports(reporter_actor, created_at)
+index idx_abuse_reports_status: CREATE INDEX idx_abuse_reports_status ON abuse_reports(status, created_at)
+index idx_ac_actor: CREATE INDEX idx_ac_actor ON actor_channels(actor_id)
+index idx_account_aliases_actor_kind: CREATE INDEX idx_account_aliases_actor_kind ON account_aliases(actor_id, kind)
+index idx_account_aliases_disposable: CREATE INDEX idx_account_aliases_disposable ON account_aliases(local_domain, pattern) WHERE kind = 'disposable'
+index idx_account_aliases_exact: CREATE UNIQUE INDEX idx_account_aliases_exact ON account_aliases(local_domain, pattern) WHERE kind = 'exact'
+index idx_account_aliases_forwarder: CREATE UNIQUE INDEX idx_account_aliases_forwarder ON account_aliases(local_domain, pattern) WHERE kind = 'forwarder'
+index idx_actor_successions_new: CREATE INDEX idx_actor_successions_new ON actor_successions(new_actor_id)
+index idx_alias_hits_alias_time: CREATE INDEX idx_alias_hits_alias_time ON alias_hits(alias_id, received_at DESC)
+index idx_atproto_consent_pending: CREATE INDEX idx_atproto_consent_pending ON atproto_consent_requests(actor_id, expires_at)
+index idx_atproto_identities_did: CREATE UNIQUE INDEX idx_atproto_identities_did ON atproto_identities(did) WHERE did IS NOT NULL
+index idx_atproto_retired_identities_actor: CREATE INDEX idx_atproto_retired_identities_actor ON atproto_retired_identities(actor_id)
+index idx_atproto_sessions_credential: CREATE INDEX idx_atproto_sessions_credential ON atproto_sessions(actor_id, credential_id)
+index idx_audit_ts: CREATE INDEX idx_audit_ts ON audit_log(ts DESC)
+index idx_backup_custody_gen_actor: CREATE INDEX idx_backup_custody_gen_actor ON backup_custody_generations(uploader_actor)
+index idx_backup_custody_gen_expiry: CREATE INDEX idx_backup_custody_gen_expiry ON backup_custody_generations(superseded_at)
+index idx_backup_writer_grants_writer: CREATE INDEX idx_backup_writer_grants_writer ON backup_writer_grants(writer_nest_id)
+index idx_bounce_history_window: CREATE INDEX idx_bounce_history_window ON bounce_history(original_sender, original_msgid, sent_at)
+index idx_bridge_audit_actor: CREATE INDEX idx_bridge_audit_actor ON bridge_audit_events(actor_id, received_at DESC)
+index idx_bridge_audit_bridge: CREATE INDEX idx_bridge_audit_bridge ON bridge_audit_events(bridge_actor_id, received_at DESC)
+index idx_bridge_audit_idempotency: CREATE UNIQUE INDEX idx_bridge_audit_idempotency ON bridge_audit_events(idempotency_hash) WHERE idempotency_hash IS NOT NULL
+index idx_bridge_caldav_events_modseq: CREATE INDEX idx_bridge_caldav_events_modseq ON bridge_caldav_events(actor_id, calendar_id, modseq)
+index idx_bridge_caldav_events_record_cid: CREATE INDEX idx_bridge_caldav_events_record_cid ON bridge_caldav_events(actor_id, record_cid)
+index idx_bridge_caldav_events_uid: CREATE INDEX idx_bridge_caldav_events_uid ON bridge_caldav_events(actor_id, calendar_id, uid_hash)
+index idx_bridge_caldav_expunged_modseq: CREATE INDEX idx_bridge_caldav_expunged_modseq ON bridge_caldav_expunged(actor_id, calendar_id, modseq)
+index idx_bridge_carddav_cards_modseq: CREATE INDEX idx_bridge_carddav_cards_modseq ON bridge_carddav_cards(actor_id, addressbook_id, modseq)
+index idx_bridge_carddav_cards_record_cid: CREATE INDEX idx_bridge_carddav_cards_record_cid ON bridge_carddav_cards(actor_id, record_cid)
+index idx_bridge_carddav_cards_uid: CREATE INDEX idx_bridge_carddav_cards_uid ON bridge_carddav_cards(actor_id, addressbook_id, uid_hash)
+index idx_bridge_carddav_expunged_modseq: CREATE INDEX idx_bridge_carddav_expunged_modseq ON bridge_carddav_expunged(actor_id, addressbook_id, modseq)
+index idx_bridge_conversation_messages_actor: CREATE INDEX idx_bridge_conversation_messages_actor ON bridge_conversation_messages(actor_id, id)
+index idx_bridge_conversation_messages_far: CREATE UNIQUE INDEX idx_bridge_conversation_messages_far ON bridge_conversation_messages(room_id, far_message_id) WHERE far_message_id IS NOT NULL
+index idx_bridge_conversation_messages_room: CREATE INDEX idx_bridge_conversation_messages_room ON bridge_conversation_messages(room_id, id)
+index idx_bridge_conversation_outbox_principal: CREATE INDEX idx_bridge_conversation_outbox_principal ON bridge_conversation_outbox(actor_id, bridge_principal_id, message_id)
+index idx_bridge_conversation_rooms_principal: CREATE INDEX idx_bridge_conversation_rooms_principal ON bridge_conversation_rooms(actor_id, bridge_principal_id)
+index idx_bridge_feed_subs_actor: CREATE INDEX idx_bridge_feed_subs_actor ON bridge_feed_subscriptions(actor_id, created_at DESC)
+index idx_bridge_imap_expunged_modseq: CREATE INDEX idx_bridge_imap_expunged_modseq ON bridge_imap_expunged(actor_id, mailbox, modseq)
+index idx_bridge_imap_msgs_modseq: CREATE INDEX idx_bridge_imap_msgs_modseq ON bridge_imap_messages(actor_id, mailbox, modseq)
+index idx_bridge_imap_msgs_msgid: CREATE INDEX idx_bridge_imap_msgs_msgid ON bridge_imap_messages(actor_id, message_id)
+index idx_bridge_index_map_content: CREATE INDEX idx_bridge_index_map_content ON bridge_index_map(content_id)
+index idx_bridge_session_close_actor: CREATE INDEX idx_bridge_session_close_actor ON bridge_session_close_events(actor_id, received_at DESC)
+index idx_bridge_session_close_idempotency: CREATE UNIQUE INDEX idx_bridge_session_close_idempotency ON bridge_session_close_events(idempotency_hash) WHERE idempotency_hash IS NOT NULL
+index idx_bridge_su_role_bridge_id: CREATE UNIQUE INDEX idx_bridge_su_role_bridge_id ON bridge_service_users(role, bridge_id) WHERE status != 'revoked'
+index idx_bridge_submission_quota_day: CREATE INDEX idx_bridge_submission_quota_day ON bridge_submission_quota(day_bucket)
+index idx_capability_grants_holder: CREATE INDEX idx_capability_grants_holder ON capability_grants(holder_pubkey)
+index idx_content_author: CREATE INDEX idx_content_author ON content(author, created_at DESC)
+index idx_content_expires: CREATE INDEX idx_content_expires ON content(expires_at) WHERE expires_at IS NOT NULL
+index idx_content_fts_map_created: CREATE INDEX idx_content_fts_map_created ON content_fts_map(created_at DESC)
+index idx_content_labels_category: CREATE INDEX idx_content_labels_category ON content_labels(category, confidence)
+index idx_content_labels_ref: CREATE INDEX idx_content_labels_ref ON content_labels(content_type, content_id)
+index idx_content_reports_reporter: CREATE INDEX idx_content_reports_reporter ON content_reports(reporter)
+index idx_content_schema: CREATE INDEX idx_content_schema ON content(schema, created_at DESC)
+index idx_content_scores_actor: CREATE INDEX idx_content_scores_actor ON content_scores(actor_id, scored_at)
+index idx_content_scores_factor_version: CREATE INDEX idx_content_scores_factor_version ON content_scores(factor, scorer_version)
+index idx_content_source: CREATE INDEX idx_content_source ON content(source, created_at DESC)
+index idx_delivery_receipts_content: CREATE INDEX idx_delivery_receipts_content ON delivery_receipts(content_hash)
+index idx_email_filters_owner: CREATE INDEX idx_email_filters_owner ON email_filters(owner, priority)
+index idx_engagement_actor: CREATE INDEX idx_engagement_actor ON engagement_events(actor_id, created_at DESC)
+index idx_engagement_content: CREATE INDEX idx_engagement_content ON engagement_events(content_id, created_at DESC)
+index idx_export_sessions_actor: CREATE INDEX idx_export_sessions_actor ON export_sessions(actor_id, state)
+index idx_export_sessions_expiry: CREATE INDEX idx_export_sessions_expiry ON export_sessions(expires_at)
+index idx_feed_contributors_feed: CREATE INDEX idx_feed_contributors_feed ON feed_contributors(feed_id, poll_priority)
+index idx_feeds_owner: CREATE INDEX idx_feeds_owner ON feeds(owner)
+index idx_folder_deposit_inbox_folder: CREATE INDEX idx_folder_deposit_inbox_folder ON folder_deposit_inbox(folder_id, id)
+index idx_folders_name_hash: CREATE UNIQUE INDEX idx_folders_name_hash ON folders(name_hash, actor_id)
+index idx_forward_queue_actor_fifo: CREATE INDEX idx_forward_queue_actor_fifo ON forward_queue(actor_id, id)
+index idx_greylist_tuples_last_attempt: CREATE INDEX idx_greylist_tuples_last_attempt ON greylist_tuples(last_attempt)
+index idx_guardian_mail_holds_ward: CREATE INDEX idx_guardian_mail_holds_ward ON guardian_mail_holds(supervised_actor_id)
+index idx_guardian_mail_sent_msgids_age: CREATE INDEX idx_guardian_mail_sent_msgids_age ON guardian_mail_sent_msgids(supervised_actor_id, created_at)
+index idx_guardian_transfers_proposed: CREATE INDEX idx_guardian_transfers_proposed ON guardian_transfers(proposed_guardian_actor_id)
+index idx_guardianships_guardian: CREATE INDEX idx_guardianships_guardian ON guardianships(guardian_actor_id)
+index idx_import_sessions_actor: CREATE INDEX idx_import_sessions_actor ON import_sessions(actor_id, state)
+index idx_import_sessions_source_hash_lock: CREATE UNIQUE INDEX idx_import_sessions_source_hash_lock ON import_sessions(actor_id, source_hash) WHERE state IN ('running','paused')
+index idx_invite_requests_status: CREATE INDEX idx_invite_requests_status ON invite_requests(status, created_at DESC)
+index idx_knocks_recipient: CREATE INDEX idx_knocks_recipient ON knocks(actor_id, delivered)
+index idx_kp_actor: CREATE INDEX idx_kp_actor ON key_packages(actor_id)
+index idx_labeler_list_entries_content: CREATE INDEX idx_labeler_list_entries_content ON labeler_list_entries(content_id)
+index idx_labeler_subs_labeler: CREATE INDEX idx_labeler_subs_labeler ON labeler_subscriptions(labeler_id)
+index idx_legal_takedown_deleted_posts_author: CREATE INDEX idx_legal_takedown_deleted_posts_author ON legal_takedown_deleted_posts (author_id)
+index idx_links_actor: CREATE INDEX idx_links_actor ON content_links(actor_id, link_type, created_at DESC)
+index idx_links_source: CREATE INDEX idx_links_source ON content_links(source_id, link_type)
+index idx_links_target: CREATE INDEX idx_links_target ON content_links(target_id, link_type)
+index idx_links_type: CREATE INDEX idx_links_type ON content_links(link_type, created_at DESC)
+index idx_links_unique_attendee: CREATE UNIQUE INDEX idx_links_unique_attendee ON content_links(source_id, actor_id) WHERE link_type = 'attendee'
+index idx_links_unique_bridge_delivery: CREATE UNIQUE INDEX idx_links_unique_bridge_delivery ON content_links(source_id, actor_id) WHERE link_type = 'bridge_delivery'
+index idx_links_unique_calendar_member: CREATE UNIQUE INDEX idx_links_unique_calendar_member ON content_links(source_id, target_id) WHERE link_type = 'calendar_member'
+index idx_links_unique_channel_seq: CREATE UNIQUE INDEX idx_links_unique_channel_seq ON content_links(source_id, target_id) WHERE link_type = 'channel_seq'
+index idx_links_unique_co_host: CREATE UNIQUE INDEX idx_links_unique_co_host ON content_links(source_id, actor_id) WHERE link_type = 'co_host'
+index idx_links_unique_deleted: CREATE UNIQUE INDEX idx_links_unique_deleted ON content_links(source_id, actor_id) WHERE link_type = 'deleted'
+index idx_links_unique_delivery: CREATE UNIQUE INDEX idx_links_unique_delivery ON content_links(source_id, actor_id) WHERE link_type = 'delivery'
+index idx_links_unique_event_group: CREATE UNIQUE INDEX idx_links_unique_event_group ON content_links(source_id, target_id) WHERE link_type = 'event_group'
+index idx_links_unique_label: CREATE UNIQUE INDEX idx_links_unique_label ON content_links(source_id, actor_id, status) WHERE link_type = 'label'
+index idx_links_unique_quote: CREATE UNIQUE INDEX idx_links_unique_quote ON content_links(source_id, target_id) WHERE link_type = 'quote'
+index idx_links_unique_recurrence_exception: CREATE UNIQUE INDEX idx_links_unique_recurrence_exception ON content_links(source_id, target_id) WHERE link_type = 'recurrence_exception'
+index idx_links_unique_reminder: CREATE UNIQUE INDEX idx_links_unique_reminder ON content_links(source_id, actor_id) WHERE link_type = 'reminder'
+index idx_links_unique_tag: CREATE UNIQUE INDEX idx_links_unique_tag ON content_links(source_id, status) WHERE link_type = 'tag'
+index idx_links_unique_web_published: CREATE UNIQUE INDEX idx_links_unique_web_published ON content_links(actor_id, status) WHERE link_type = 'web_published'
+index idx_mail_domain_renames_active: CREATE UNIQUE INDEX idx_mail_domain_renames_active ON mail_domain_renames((1)) WHERE state NOT IN ('completed', 'aborted')
+index idx_mail_domain_renames_actor_started: CREATE INDEX idx_mail_domain_renames_actor_started ON mail_domain_renames(initiated_by_actor_id, started_at DESC)
+index idx_mail_domain_renames_grace_ends: CREATE INDEX idx_mail_domain_renames_grace_ends ON mail_domain_renames(grace_ends_at) WHERE state = 'grace'
+index idx_mail_domains_active_name: CREATE UNIQUE INDEX idx_mail_domains_active_name ON mail_domains(domain_name) WHERE removed_at IS NULL
+index idx_mail_domains_active_primary: CREATE UNIQUE INDEX idx_mail_domains_active_primary ON mail_domains(is_primary) WHERE removed_at IS NULL AND is_primary = 1
+index idx_mail_list_members_list_unsub: CREATE INDEX idx_mail_list_members_list_unsub ON mail_list_members(list_id, unsubscribed_at)
+index idx_mail_list_members_token: CREATE INDEX idx_mail_list_members_token ON mail_list_members(one_click_unsubscribe_token)
+index idx_mail_list_sends_list: CREATE INDEX idx_mail_list_sends_list ON mail_list_sends(list_id, sent_at)
+index idx_mail_lists_alias: CREATE INDEX idx_mail_lists_alias ON mail_lists(alias_id)
+index idx_mail_lists_owner: CREATE INDEX idx_mail_lists_owner ON mail_lists(owner_actor_id)
+index idx_mail_outbound_diagnostic_runs_time: CREATE INDEX idx_mail_outbound_diagnostic_runs_time ON mail_outbound_diagnostic_runs(ran_at)
+index idx_mail_outbound_self_blocklist_check_time: CREATE INDEX idx_mail_outbound_self_blocklist_check_time ON mail_outbound_self_blocklist_check(checked_at)
+index idx_message_scan_results_actor: CREATE INDEX idx_message_scan_results_actor ON message_scan_results(delivered_to_actor, received_at)
+index idx_message_scan_results_clamav: CREATE INDEX idx_message_scan_results_clamav ON message_scan_results(clamav_verdict, received_at)
+index idx_message_scan_results_received: CREATE INDEX idx_message_scan_results_received ON message_scan_results(received_at)
+index idx_namespace_seq: CREATE INDEX idx_namespace_seq ON namespace_entries(namespace, seq)
+index idx_nest_addresses_lookup: CREATE INDEX idx_nest_addresses_lookup ON nest_addresses(nest_id, first_seen)
+index idx_nest_rotation_log_old: CREATE INDEX idx_nest_rotation_log_old ON nest_rotation_log(old_actor_id)
+index idx_nest_stats_nest: CREATE INDEX idx_nest_stats_nest ON nest_engagement_stats(nest_id)
+index idx_notif_actor: CREATE INDEX idx_notif_actor ON notifications(actor_id, created_at DESC)
+index idx_notif_actor_unread: CREATE INDEX idx_notif_actor_unread ON notifications(actor_id, is_read) WHERE is_read = 0
+index idx_notif_dedup: CREATE INDEX idx_notif_dedup ON notifications(actor_id, notif_type, sender_id, content_id)
+index idx_obligation_actions_author: CREATE INDEX idx_obligation_actions_author ON obligation_action_records(author_hex)
+index idx_obligation_actions_content: CREATE INDEX idx_obligation_actions_content ON obligation_action_records(content_type, content_id)
+index idx_obligation_actions_obligation: CREATE INDEX idx_obligation_actions_obligation ON obligation_action_records(obligation_id)
+index idx_outbound_mail_queue_due: CREATE INDEX idx_outbound_mail_queue_due ON outbound_mail_queue(status, next_attempt_at)
+index idx_outbound_mail_queue_msgid: CREATE INDEX idx_outbound_mail_queue_msgid ON outbound_mail_queue(original_msgid, recipient)
+index idx_outbound_mail_queue_sender: CREATE INDEX idx_outbound_mail_queue_sender ON outbound_mail_queue(original_sender, created_at)
+index idx_outbound_mail_queue_submit_actor: CREATE INDEX idx_outbound_mail_queue_submit_actor ON outbound_mail_queue(submit_actor_id, created_at)
+index idx_payment_claim_codes_author: CREATE INDEX idx_payment_claim_codes_author ON payment_claim_codes (author_id)
+index idx_peer_content_reports_peer: CREATE INDEX idx_peer_content_reports_peer ON peer_content_reports(peer_nest_id, updated_at)
+index idx_peer_content_trends_peer: CREATE INDEX idx_peer_content_trends_peer ON peer_content_trends(peer_nest_id, updated_at)
+index idx_peer_content_trends_updated: CREATE INDEX idx_peer_content_trends_updated ON peer_content_trends(updated_at)
+index idx_pending_actions_actor: CREATE INDEX idx_pending_actions_actor ON pending_actions (actor_id, status)
+index idx_pending_actions_status: CREATE INDEX idx_pending_actions_status ON pending_actions (status, execute_after)
+index idx_push_subs_actor: CREATE INDEX idx_push_subs_actor ON push_subscriptions(actor_id)
+index idx_restore_divergence_snapshot_actor: CREATE INDEX idx_restore_divergence_snapshot_actor ON bridge_restore_divergence(snapshot_id, actor_id)
+index idx_restore_history_actor: CREATE INDEX idx_restore_history_actor ON restore_history(actor_id, completed_at)
+index idx_room_generations_room: CREATE INDEX idx_room_generations_room ON room_generations(room_id, minted_at_ms)
+index idx_room_invites_invitee: CREATE INDEX idx_room_invites_invitee ON room_invites(invitee_id) WHERE accepted_at IS NULL
+index idx_room_members_principal: CREATE INDEX idx_room_members_principal ON room_members(principal_id) WHERE removed_at IS NULL
+index idx_room_message_views_doc: CREATE INDEX idx_room_message_views_doc ON room_message_views(room_id, doc_key)
+index idx_room_post_views_doc: CREATE INDEX idx_room_post_views_doc ON room_post_views(room_id, doc_key)
+index idx_room_post_views_post: CREATE INDEX idx_room_post_views_post ON room_post_views(post_id)
+index idx_rpc_idempotency_created: CREATE INDEX idx_rpc_idempotency_created ON rpc_idempotency(created_at)
+index idx_segment_records_record_cid: CREATE INDEX idx_segment_records_record_cid ON segment_records(record_cid, kind)
+index idx_segment_records_scope_kind_bucket: CREATE INDEX idx_segment_records_scope_kind_bucket ON segment_records(scope_id, kind, bucket)
+index idx_sender_behavior_actor: CREATE INDEX idx_sender_behavior_actor ON sender_behavior(actor_id, timestamp DESC)
+index idx_share_tokens_author: CREATE INDEX idx_share_tokens_author ON share_tokens(author)
+index idx_snapshot_files_path_hash: CREATE INDEX idx_snapshot_files_path_hash ON snapshot_files(snapshot_id, path_hash)
+index idx_snapshot_files_snapshot_id: CREATE INDEX idx_snapshot_files_snapshot_id ON snapshot_files(snapshot_id)
+index idx_snapshots_created_at: CREATE INDEX idx_snapshots_created_at ON snapshots(created_at DESC)
+index idx_snapshots_folder_id: CREATE INDEX idx_snapshots_folder_id ON snapshots(folder_id)
+index idx_snapshots_message_kind_scope: CREATE INDEX idx_snapshots_message_kind_scope ON snapshots(message_kind, folder_id, created_at)
+index idx_spam_model_holder_copies_holder: CREATE INDEX idx_spam_model_holder_copies_holder ON spam_model_holder_copies (holder_pubkey)
+index idx_spam_training_history_actor: CREATE INDEX idx_spam_training_history_actor ON spam_training_history (actor_id, created_at DESC, history_id DESC)
+index idx_subscribe_requests_author: CREATE INDEX idx_subscribe_requests_author ON subscribe_requests (author_id)
+index idx_subscribers_author_tier: CREATE INDEX idx_subscribers_author_tier ON subscribers (author_id, tier_name)
+index idx_sync_changes_actor: CREATE INDEX idx_sync_changes_actor ON sync_changes(actor_id, seq)
+index idx_sync_changes_path: CREATE INDEX idx_sync_changes_path ON sync_changes(path_hash, seq)
+index idx_sync_changes_state_entry: CREATE INDEX idx_sync_changes_state_entry ON sync_changes(folder_id, path_hash, origin_writer, seq)
+index idx_sync_changes_writer_coordinate_unique: CREATE UNIQUE INDEX idx_sync_changes_writer_coordinate_unique ON sync_changes(folder_id, origin_writer, origin_seq)
+index idx_sync_conflict_candidates_cid: CREATE INDEX idx_sync_conflict_candidates_cid ON sync_conflict_candidates(conflict_id)
+index idx_sync_conflicts_fs: CREATE INDEX idx_sync_conflicts_fs ON sync_conflicts(folder_id, resolved_at)
+index idx_sync_devices_auth_device_key: CREATE INDEX idx_sync_devices_auth_device_key ON sync_devices(auth_device_key) WHERE auth_device_key IS NOT NULL
+index idx_third_party_principals_holder: CREATE UNIQUE INDEX idx_third_party_principals_holder ON third_party_principals(actor_id, holder_x25519) WHERE holder_x25519 IS NOT NULL
+index idx_third_party_principals_writer: CREATE UNIQUE INDEX idx_third_party_principals_writer ON third_party_principals(actor_id, writer_ed25519) WHERE writer_ed25519 IS NOT NULL
+index idx_tlsrpt_outbound_retention: CREATE INDEX idx_tlsrpt_outbound_retention ON tlsrpt_outbound_reports(submitted_at)
+index idx_users_handle: CREATE UNIQUE INDEX idx_users_handle ON users(handle) WHERE handle != ''
+index idx_video_cache_sources_hash: CREATE INDEX idx_video_cache_sources_hash ON video_cache_sources(content_hash)
+index idx_video_cache_sources_unique: CREATE UNIQUE INDEX idx_video_cache_sources_unique ON video_cache_sources(content_hash, nest_url)

@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Fauna</title>
+    <welcome file="welcome.html"/>
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="13.0"/>
+        </allowed-os-versions>
+    </volume-check>
+    <options customize="always" require-scripts="false"
+            hostArchitectures="arm64"/>
+    <!-- The floors are PER-COMPONENT by design (installers/macos.md § Implementation
+         status today — the floors note): the service components run on 13.0, which is
+         why the volume-check above admits it and a headless services-only install
+         still reaches an older Mac mini. The desktop app is built against macOS 15
+         (Package.swift .macOS(.v15), MACOSX_DEPLOYMENT_TARGET 15.0) and its bundle
+         declares LSMinimumSystemVersion 15.0, so on an older box Finder simply
+         refuses to open it. Gate the app CHOICE rather than raising the volume-check:
+         raising it would lock services-only installs out of Ventura for no reason. -->
+    <script><![CDATA[
+function appComponentSupported() {
+    return system.compareVersions(system.version.ProductVersion, '15.0') >= 0;
+}
+]]></script>
+    <choices-outline>
+        <line choice="social.fauna.app"/>
+        <line choice="social.fauna.sync"/>
+        <line choice="social.fauna.tui"/>
+        <line choice="social.fauna.nest"/>
+        <line choice="social.fauna.bridge"/>
+    </choices-outline>
+    <!-- Desktop App is the native macOS client: default SELECTED (the common macOS
+         case is "just the client" — app + sync, services unticked), mirroring the
+         Windows "Fauna Desktop App" feature (default ON). Untick it for a headless,
+         services-only / Mac-mini-server install. Installs Fauna.app to /Applications
+         (installers/macos.md § Distribution Channels; windows.md § Feature Tree). -->
+    <choice id="social.fauna.app"
+            title="Fauna Desktop App"
+            start_enabled="appComponentSupported()"
+            start_selected="appComponentSupported()"
+            description="The native macOS Fauna app. Installs Fauna.app to your Applications folder; updates automatically via Sparkle. Requires macOS 15 or later.">
+        <pkg-ref id="social.fauna.app"/>
+    </choice>
+    <!-- Nest + Bridge are SERVER components: default UNSELECTED (start_selected="false").
+         The macOS desktop is primarily a client; selecting a server component is the
+         install-time opt-in to self-host, matching Windows "Nest Service default OFF"
+         (installers/macos.md § launchd jobs → Default state; windows.md § Feature Tree).
+         A selected component's postinstall installs its daemon enabled + auto-started. -->
+    <choice id="social.fauna.nest"
+            title="Nest Service"
+            start_selected="false"
+            description="Private API server for the Fauna protocol. Stores messages, manages identity, and serves the web UI.">
+        <pkg-ref id="social.fauna.nest"/>
+    </choice>
+    <choice id="social.fauna.sync"
+            title="Sync Service"
+            description="Background file sync agent. Keeps your synced folders uploading and downloading even when the Fauna app is closed.">
+        <pkg-ref id="social.fauna.sync"/>
+    </choice>
+    <!-- The terminal app: default SELECTED, mirroring the Windows "Fauna Terminal
+         App" feature (default ON). The same fauna-tui binary the per-OS release
+         archive carries, here Developer ID-signed and notarized with the rest, so
+         the Keychain identity it shares with the desktop app is stable across
+         updates (installers/tui.md § The ratified channel, user ruling 2026-09-26).
+         Installs to /usr/local/bin beside the sync component's agent. -->
+    <choice id="social.fauna.tui"
+            title="Fauna Terminal App"
+            description="The terminal (text-mode) Fauna app, usable over SSH. Installs fauna-tui to /usr/local/bin.">
+        <pkg-ref id="social.fauna.tui"/>
+    </choice>
+    <choice id="social.fauna.bridge"
+            title="Bridge Service"
+            start_selected="false"
+            description="Mail-access service (MDA role). Lets standard calendar and email clients (Calendar.app, Mail.app, Thunderbird) read your Fauna calendar over CalDAV and your mailbox over IMAP. Does not send outbound mail (no SMTP relay — that stays on a public nest).">
+        <pkg-ref id="social.fauna.bridge"/>
+    </choice>
+    <pkg-ref id="social.fauna.app" version="__VERSION__"
+             installKBytes="__SIZE_APP__">fauna-app.pkg</pkg-ref>
+    <pkg-ref id="social.fauna.nest" version="__VERSION__"
+             installKBytes="__SIZE_NODE__">fauna-nest.pkg</pkg-ref>
+    <pkg-ref id="social.fauna.sync" version="__VERSION__"
+             installKBytes="__SIZE_SYNC__">fauna-sync.pkg</pkg-ref>
+    <pkg-ref id="social.fauna.bridge" version="__VERSION__"
+             installKBytes="__SIZE_BRIDGE__">fauna-bridge.pkg</pkg-ref>
+    <pkg-ref id="social.fauna.tui" version="__VERSION__"
+             installKBytes="__SIZE_TUI__">fauna-tui.pkg</pkg-ref>
+</installer-gui-script>

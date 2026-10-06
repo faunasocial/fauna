@@ -1,0 +1,275 @@
+[package]
+name = "fauna-client-conversations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Escape hatch keeping the `FAUNA_E2E_SUPPRESS_CONV_PUSH` push-arm kill-switch
+# (`conv_push_source`) in a --release e2e build — a debug build reaches it via
+# that fn's own `debug_assertions` arm. Never default-on; consumers forward it
+# from their own e2e feature (linux/tui `e2e-agent`, fauna-ffi `test-helpers`),
+# never on a dependency line (convention 15 rule (b),
+# `docs/goal/architecture/e2e-automation-surface-gating.md`). Same shape and
+# rationale as `fauna-sync-engine`'s / `fauna-credential-store`'s `e2e-agent`.
+e2e-agent = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("e2e-agent"))'] }
+
+[dependencies]
+# default-features = false on fauna-core to keep wasm builds clean
+# (mirrors fauna-client-bridges / fauna-client-mail-settings). The generic
+# `ConversationsClient<R: RpcRequester>` itself depends only on these
+# target-agnostic crates; the concrete transport + the `ConversationsRpc` seam
+# impl that wraps it are added per target below.
+fauna-core = { path = "../fauna-core", default-features = false }
+# default-features = false drops fauna-protocol's `p2p` default (tokio-net →
+# mio, native-only) so the wasm build stays clean — same shape as the sibling
+# generic client crates (fauna-client-bridges / fauna-client-email). The typed
+# `fauna.conversations.*` + discovery wire types aren't behind `p2p`.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+serde_bytes = "0.11"
+# The room plane spells its 32-byte ids as hex on the wire (generation ids,
+# roster entry ids), and this crate is where they become the byte arrays the
+# wrap AAD is bound to.
+hex = { workspace = true }
+# The `ConversationsRpc` seam trait `NestConversationsRpc` / `WsConversationsRpc`
+# implement — built on both targets (its own per-target table self-enables
+# `fauna-mls/native` off-wasm and `fauna-mls/js` on wasm).
+fauna-conversations = { path = "../fauna-conversations", default-features = false }
+async-trait = "0.1"
+# Both targets: the generic `EmailClient<R>` backs `NestOutboundMailSink<R>` — the
+# shared outbound-mail send sink (native `Arc<NestClient>` + wasm `WsRpcClient`,
+# the send twin of `NestMailInboundSource`) — as well as the native-only
+# `NestMailInboundSource` below. Wasm-clean with default features (same as the
+# sibling generic client crates fauna-client-bridges / fauna-client-email).
+fauna-client-email = { path = "../fauna-client-email" }
+# The `fauna.linkpreview.resolve` typed call (render-model.md § D4) backing the
+# `LinkPreviewRpc` seam (used by BOTH the native `NestConversationsRpc` and the wasm
+# `WsConversationsRpc` impls) — the conversations twin of the feed's link-preview resolve.
+# Self-contained wasm `js`-feature forwarding (same bare form as fauna-feed).
+fauna-client-linkpreview = { path = "../fauna-client-linkpreview" }
+# The `MlsReplicaTransport` seam + its `rpc_transport_{get,put}` wire helpers, the
+# `fauna.mls.{get,put}` replica plane (cross-device MLS group-state sync, devices.md
+# § Cross-device MLS group-state sync). Both targets: the native `NestMlsReplicaTransport`
+# adapter (over `Arc<NestClient>`) and the wasm `WsMlsReplicaTransport` twin (over
+# `WsRpcClient`) both delegate to the shared helpers. Built on both targets — its own
+# per-target table self-enables `fauna-mls/native` off-wasm and `fauna-mls/js` on wasm,
+# exactly like `fauna-conversations` above.
+fauna-client-mls-sync = { path = "../fauna-client-mls-sync" }
+# The single-actor contact-status read (`fauna.contacts.status`) the recipient
+# contact gate issues — auto/knock/suppress for a cross-user shared folder
+# Welcome (`folders.md` § Sharing). BOTH targets: the generic
+# `NestFolderGate<R>` is the one gate implementation all 7 apps run (native
+# over `Arc<NestClient>`, web over `WsRpcClient` from the wasm receive arm).
+fauna-client-contacts = { path = "../fauna-client-contacts" }
+# `UploadSidecar` + `AudienceClass::Conversation` — the canonical DAG-CBOR
+# sidecar shape every app's blob upload encodes through (priority #1).
+# default-features = false: only the wire types (fauna-core/fauna-mls/serde/
+# fauna-cbor), none of the `image`/`c2pa` on-device processing pipeline.
+# BOTH targets since 2026-07-31: the wasm `blob_put` encodes the same sidecar as
+# native, which is what the nest's strict multipart verifier requires.
+fauna-media = { path = "../fauna-media", default-features = false }
+# Both targets — the gate's knock-on-lookup-failure diagnostic (a no-op on wasm,
+# where no subscriber is installed).
+tracing = { workspace = true }
+
+# Native seam impl: `NestConversationsRpc` over `ConversationsClient<Arc<NestClient>>`
+# (reqwest + tokio-tungstenite). Cross-nest discovery (Spec Y2 slice 3) is
+# anonymous WS-RPC to the peer nest + the pure domain→base-URL probe — these
+# live ONLY in this seam impl, never in `fauna-conversations`, keeping that
+# crate protocol-agnostic.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Zeroize-on-drop for `MailKeys`, the native shared mail-key cache (it holds the
+# MSEK itself). Native-only because the cache is — the browser drives its own
+# mail poll loop and never builds one.
+zeroize = { workspace = true }
+fauna-client = { workspace = true }
+fauna-anon-client = { path = "../fauna-anon-client" }
+fauna-provisioning = { path = "../fauna-provisioning" }
+# The nest-backed inbound-mail read-feed source (`NestMailInboundSource`, the
+# canonical native twin every native app shares — INBOX + Sent over the
+# shared `EmailClient` above, the two-layer `open_inbound_record` decrypt, and
+# the detached organizer iTIP-REPLY merge). Native-only — the browser drives its
+# own JS mail poll loop. `fauna-mail/segments-receive` is the inbound
+# `open_inbound_record` decrypt; `fauna-mls/native` derives the recipient HPKE
+# secret from the MSEK.
+fauna-client-config = { path = "../fauna-client-config" }
+# The custody-ceremony machine (W8.4 (account-data-plane.md § Workstreams)): `StoreCustodyCeremonySink` wires
+# `custody_ceremony::ingest_payload` + the `fauna.state.custody-ceremony` capture
+# into the session's CustodyCeremonySink seam, and `SessionCustodyPoster` feeds
+# `drive_ceremonies`' post door. Native-only for now (web's ceremony wiring
+# rides the web leg). Safe direction — capabilities has no
+# conversations dep, so the edge cannot cycle.
+fauna-client-capabilities = { path = "../fauna-client-capabilities" }
+fauna-client-caldav = { path = "../fauna-client-caldav" }
+# The verified succession walk `NestSchedulingSink`'s resolver runs when an
+# inbound scheduling message's author misses the event's organizer binding
+# (`caldav-server.md` § Who may mutate an existing event over the inbound rail →
+# *A succeeded organizer*): `witness::walk_at_nest_url`, the one bounded native
+# dial. Featureless on purpose — the walk needs none of the crate's optional
+# stacks. Safe direction: recovery reaches `fauna-conversations` (the seam
+# crate) only, never this crate or caldav, so the edge cannot cycle.
+fauna-client-recovery = { path = "../fauna-client-recovery" }
+# The CardDAV read surface the content-index contacts arm walks: `list_addressbooks`
+# (ctag precheck) + `query_cards` (whole-book corpus). Native-only, alongside the
+# rest of the launcher. Safe direction — carddav has no conversations dep, so the
+# edge cannot cycle (`content-index.md` § Ingest triggers, v1 — the contacts ruling).
+fauna-client-carddav = { path = "../fauna-client-carddav" }
+# The posts reconcile walk (`fauna.posts.list` paging) + the query-time resolver
+# (`fauna.posts.get` per hit). Same safe direction as carddav above — a thin
+# transport wrapper with no conversations dep (`content-index.md` § Ingest
+# triggers, v1 — the posts ruling).
+fauna-client-posts = { path = "../fauna-client-posts" }
+# The File arm's enumeration door + query-time resolver, both a `fauna.media.list`
+# drain (`content-index.md` § Ingest triggers, v1 — the files/media ruling).
+# Same safe direction again: `fauna-client-media` depends on nothing but
+# fauna-protocol + fauna-core, so the edge cannot cycle.
+#
+# ⚠ `fauna-client-folders` — which owns `NestFolderKeyResolver` — is NOT usable
+# here and cannot be: it depends on THIS crate under its `mls` feature, so the
+# edge would cycle. The launcher therefore derives owner label custody in-crate
+# from the identity seed and takes a shared-set resolver by injection
+# (`fauna_core::folder_keys::FolderKeyResolver`, an interface with no such
+# edge). See `NestMailIndexLauncher::set_folder_key_resolver`.
+fauna-client-media = { path = "../fauna-client-media" }
+# The File arm's reader half (writer-signed change records, ruling (3)): every
+# `fauna.media.list` item is judged by `fauna_client_sync::row_judge` before the
+# walk stages it or the drain resolves a hit. Safe direction: `fauna-client-sync`
+# reaches nothing above the protocol/credential layer.
+fauna-client-sync = { path = "../fauna-client-sync" }
+# The contacts-walk corpus marker: a digest over each book's `(id, ctag)`, so an
+# unchanged address book is recognized without re-reading it.
+blake3 = { workspace = true }
+# The durable inbox-apply drain (`fauna_client_inbox::drain` + the `InboxApply`
+# trait) the native `NestInboxDrainSource` backstop runs — the missed-push
+# recovery rail (`api-layers.md` § Inbox & Messaging, layer 3); the browser
+# drives its own JS-timer drain but reads the same crate's
+# room-invitation peek, so it is a dependency of BOTH targets (below).
+fauna-client-inbox = { path = "../fauna-client-inbox" }
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["native"] }
+# `segments-receive` = the inbound `open_inbound_record` decrypt; `spam-classifier`
+# = the wasm-safe shared n-gram scorer (`fauna_mail::spam::{BayesianKnobs,
+# combined_spam_score_milli, ...}`) the on-device INBOX scorer runs post-decrypt.
+fauna-mail = { workspace = true, features = ["segments-receive", "spam-classifier", "body-ref-resolve"] }
+# The on-device INBOX spam scorer wired into `NestMailInboundSource` — the native
+# twin of the web `WasmConversationsManager` scoring at ingest (mail-spam.md §
+# Scoring placement, the Fauna-app position). `InboxSpamScorer` is the shared
+# accumulator; `MailAccountClient` fetches the sealed per-user model + the
+# admin-effective policy (`fetch_spam_model` / `get_spam_scoring_policy`), and the
+# `EmailClient` above flushes the `apply_spam_disposition`. Native-only, like the
+# source itself (the browser scores in its own JS poll loop).
+fauna-client-mail-settings = { path = "../fauna-client-mail-settings", default-features = false }
+fauna-client-bridges = { path = "../fauna-client-bridges" }
+# The multipart `sidecar` + `bytes` blob-upload shape `NestConversationsRpc
+# ::blob_put` posts to `POST /api/v1/blob` (the nest's strict-multipart
+# verifier rejects any other Content-Type — `bins/fauna-nest/src
+# /blob_routes.rs::upload_blob`). `client` (default) gives `NestContentApi` +
+# `ReqwestNestContentApi`; built from the same `AuthClient::bearer()` the
+# WS-RPC path already authenticates with, so no separate token mint.
+fauna-nest-http = { path = "../fauna-nest-http" }
+# The foreign home nest's byte plane (`NestConversationsRpc::foreign_http`) — a
+# plain WebPKI client, the `ForeignPublicChunkFetcher` posture one rail over.
+reqwest = { workspace = true }
+# `NestConversationsPush` selects over two kind-filtered push subscribers behind a
+# `tokio::sync::Mutex` (`select!` + `sync`); the mail source spawns the detached
+# reply-merge (`rt`). Native-only (the push seam has no wasm twin — the browser
+# drives its own poll loop), so wasm stays tokio-free here.
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+# The content-index builder the `NestMailIndexLauncher` resumes at login. Native
+# only, and structurally so: there is no browser tantivy, so the web SPA
+# registers no index launcher (`content-index.md` § Where queries run).
+fauna-client-index = { path = "../fauna-client-index" }
+# The `LocalSearchIndex` seam the launcher's query-side twin hands back
+# (`NestMailIndexLauncher::local_search_index`). Native only, for the same
+# structural reason as the builder above.
+fauna-client-search = { path = "../fauna-client-search" }
+# `CancellationToken` — ends the builder's flush-debounce driver when the
+# session (and with it the launcher) drops.
+tokio-util = { workspace = true }
+# The advisory task lease the content-index builder heartbeats for the lifetime
+# of its attachment (`participants.md` § Coordination primitive → *The `index`
+# kind under the lease*). `driver` is the `LeaseCoordinator::run` async loop — the
+# same feature `fauna-ffi` takes for `backup-upload`, and native-only for the same
+# reason (it is a tokio timer loop). This crate is the right host because the
+# launcher beside it already owns the one `NestClient` the lease's
+# observe/heartbeat rendezvous rides, so tui, linux and the UniFFI factory each
+# get the loop from one place rather than three (priority #2).
+fauna-client-delegation = { path = "../fauna-client-delegation", features = ["driver"] }
+
+# Wasm seam impl: `WsConversationsRpc` over `ConversationsClient<WsRpcClient>`
+# (the browser gloo-net `WebSocket` transport). This is the Track E unblock —
+# the wasm `ConversationsRpc` impl the web SPA registers on its `FaunaMlsBackend`
+# (its `!Send` futures satisfy the `#[async_trait(?Send)]` wasm arm of the seam).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# The room-invitation peek behind `RoomCeremonyRpc::room_pending_invitations`:
+# an invitation is delivered on the inbox plane (`conversation-rooms.md` § Join
+# rules and invites), so the web glue reads it exactly as the native one does
+# rather than declaring an absence the other six apps would not share
+# (priority #1). The apply-side drain stays native — `fauna-wasm` runs its own.
+fauna-client-inbox = { path = "../fauna-client-inbox" }
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm" }
+# The bridged rail's glue (`NestBridgedGlue`) on the browser's transport: the
+# family's user-side client, the seal to the bridge's key and to the account's
+# own, and the inbox open under the mail keys — the same three the native
+# table names, in their wasm-clean spellings.
+fauna-client-bridges = { path = "../fauna-client-bridges" }
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"] }
+fauna-mail = { path = "../fauna-mail", default-features = false, features = ["segments-receive"] }
+# Cross-nest discovery from the browser: `AnonymousWsRpcClient` (in fauna-rpc-wasm
+# above) opens the anon hop to the peer nest; `resolve_handle_domain` (the pure
+# domain→base-URL probe — wasm-clean with default-features = false, mirroring
+# fauna-onboarding-machine / fauna-wasm-onboarding) derives the relay `nest_url`.
+fauna-provisioning = { path = "../fauna-provisioning", default-features = false }
+# Forward fauna-protocol's `js` feature on wasm (fauna-core's js-sys time
+# backend); mirrors fauna-client-bridges / fauna-client-email.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+# And forward it on our OWN fauna-core edge, now that `observe_own_post` reads
+# the clock through `Timestamp` directly: the transitive activation above is
+# incidental and can be refactored away silently, so the direct line is the
+# contract (`build-system.md` § Wall-clock reads in a crate that can reach wasm).
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+# Browser `fetch` for the FaunaMls-rail attachment blob client's `blob_get` (the
+# public GET-by-hash half of the nest's content-addressed `/api/v1/blob` HTTP
+# surface, NOT WS-RPC — the canonical shape is native
+# `NestConversationsRpc::blob_get`). gloo-net is otherwise only a transitive dep
+# here (via fauna-rpc-wasm's WebSocket transport); the `http` feature is the
+# direct need. The `blob_put` half no longer needs its own JS glue (`js-sys`
+# dropped 2026-07-31): it posts through `fauna_rpc_wasm::post_multipart_blob`.
+gloo-net = { version = "0.6", default-features = false, features = ["http"] }
+
+[dev-dependencies]
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# `FakeMailStore` — the mail custody double the key-cache consumers are built
+# over in the integration tests.
+fauna-client-config = { path = "../fauna-client-config", features = ["test-helpers"] }
+# The mint-classification tests assert that a refusal's user sentence IS the
+# shared i18n constant `error::AUTHORIZATION` — the one `RpcError::localized()`
+# resolves `forbidden` to — rather than a copy of its English pasted into the
+# test, which would still pass if the seam started hand-writing its own. Dev-only:
+# the crate itself renders nothing, it classifies (`fauna-protocol` owns the
+# lookup and already depends on this).
+fauna-i18n = { path = "../fauna-i18n" }
+# Names the serde bounds the `RpcRequester::request` method requires, for the
+# wire-contract tests' `RecordingRequester` mock impl. No `derive` needed
+# (trait paths only); mirrors fauna-client-events / -snapshots / -sync.
+serde = { workspace = true }
+# The drain-side Welcome-ingest-failure test's tracing capture — a crate-local
+# copy of fauna-client-mls-sync's test_tracing.rs (its own doc: equivalents
+# stay crate-local by design, not a shared test-support crate).
+tracing-subscriber = { workspace = true }
+# `index_lease_first_decision_tests` drives the REAL `NestMailIndexLauncher`
+# over a real `NestClient` on the in-memory transport, with a fake nest that
+# holds the lease's first observe reply: the race it pins is between two of the
+# launcher's own round trips, which no `RpcRequester` double can exhibit. Same
+# shape as fauna-client-mail-settings's `hydrate_waits_for_socket`.
+fauna-client = { path = "../fauna-client", features = ["test-util"] }
+# `Supervisor` / `run_supervisor` — driven directly so the test controls exactly
+# when the connection lands.
+fauna-ws-substrate = { path = "../fauna-ws-substrate", features = ["test-util"] }
+# `start_paused` for the ceiling test (the paused clock elapses the launcher's
+# wait ceiling without the test naming it) plus a runtime for the fake nest.
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }

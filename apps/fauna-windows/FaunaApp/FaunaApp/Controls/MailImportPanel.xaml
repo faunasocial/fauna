@@ -1,0 +1,275 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FaunaApp.Controls.MailImportPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Controls"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Loaded="Panel_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- User-facing mail-import wizard (docs/goal/behavior/mailbox-migration.md § UX
+         shape / § Wizard steps / § Credential handling): a five-step wizard
+         (Source → Scope → Confirm → Progress → Done) that pulls a person's existing
+         mail off a foreign IMAP server and into their own nest. Dumb renderer of the
+         shared fauna_client_mail_settings::MailImportMachine (exposed over UniFFI by
+         build_mail_import_machine) — the wizard FSM lives in shared Rust (priority #2).
+         Lifts apps/fauna-linux/src/settings/mail_import.rs and mirrors this app's own
+         MailExportPanel.
+
+         Unlike the export twin the backend is REAL end to end, so Connect/Start/Pause/
+         Resume/Cancel drive a genuine import_sessions row against a genuine foreign
+         IMAP source; a rejection is a real answer routed onto the host page's
+         error-message, never a fake-green.
+
+         All five steps' mail-import-* elements live in one tree, shown conditionally by
+         step, so every ui.yaml ID is statically present. The step gating is ALSO what
+         keeps the shared wizard-back-button / wizard-next-button ids unique: Scope
+         carries Back+Next and Confirm carries Back, so two of each id exist in markup
+         and exactly one of each is addressable at a time. A Collapsed element is absent
+         from the UIA tree entirely (not merely offscreen), so the non-Source groups are
+         Collapsed HERE, in markup, rather than being left visible until the first
+         render hides them — that build-to-first-hydrate window would otherwise have two
+         of each id addressable, a real flake. -->
+    <StackPanel Spacing="12">
+
+        <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                   Text="{loc:Localize Key=mail_import/title}" />
+        <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                   Text="{loc:Localize Key=mail_import/description}" />
+
+        <ProgressRing x:Name="LoadingRing"
+                      IsActive="False" Visibility="Collapsed"
+                      HorizontalAlignment="Left" />
+
+        <!-- ════ Step 1 — Source ════ -->
+        <StackPanel x:Name="SourceGroup" Spacing="8">
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=mail_import/source_title}" />
+
+            <!-- mail-import-source-picker — 4-way provider picker (driver.select, which
+                 matches a ComboBoxItem by its exact UIA Name). Its ItemsSource is filled
+                 from the shared importSourceKindLabel in code-behind rather than hard-coded
+                 ComboBoxItems: the exportFormatLabel precedent, so a seventh app cannot
+                 hand-roll a sixth copy of the same four-arm vocabulary. -->
+            <ComboBox x:Name="SourcePicker"
+                      AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportSourcePicker}"
+                      AutomationProperties.Name="Source"
+                      SelectionChanged="SourcePicker_SelectionChanged" />
+
+            <!-- Gmail / iCloud: app password + the provider's help line. -->
+            <PasswordBox x:Name="AppPasswordInput"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportSourceAppPassword}"
+                         Header="{loc:Localize Key=mail_import/source_app_password_label}" />
+            <TextBlock x:Name="AppPasswordHelp"
+                       Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
+
+            <!-- Outlook only. Painted because ui.yaml requires the element exist, but
+                 never actuable — no app wires the Microsoft Graph dance yet
+                 (mailbox-migration.md's own "Not in scope" list). The IMAP fallback
+                 fields beside it are the real, working path for an Outlook account. -->
+            <Button x:Name="OauthButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportSourceOauthButton}"
+                    IsEnabled="False"
+                    Content="{loc:Localize Key=mail_import/source_oauth_button}" />
+
+            <!-- Generic IMAP, and Outlook's fallback. -->
+            <TextBox x:Name="HostInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportSourceHost}"
+                     PlaceholderText="{loc:Localize Key=mail_import/source_host_placeholder}" />
+            <TextBox x:Name="PortInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportSourcePort}"
+                     PlaceholderText="{loc:Localize Key=mail_import/source_port_placeholder}" />
+            <ComboBox x:Name="TlsModePicker"
+                      AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportSourceTlsMode}"
+                      AutomationProperties.Name="TLS mode"
+                      SelectionChanged="TlsModePicker_SelectionChanged" />
+            <TextBox x:Name="UsernameInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportSourceUsername}"
+                     PlaceholderText="{loc:Localize Key=mail_import/source_username_placeholder}" />
+            <PasswordBox x:Name="PasswordInput"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportSourcePassword}"
+                         PlaceholderText="{loc:Localize Key=mail_import/source_password_placeholder}" />
+
+            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportConnectButton}"
+                    Style="{StaticResource AccentButtonStyle}"
+                    Content="{loc:Localize Key=mail_import/connect_button}"
+                    Click="Connect_Click" />
+        </StackPanel>
+
+        <!-- ════ Step 2 — Scope ════ -->
+        <StackPanel x:Name="ScopeGroup" Spacing="8" Visibility="Collapsed">
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=mail_import/scope_title}" />
+
+            <TextBlock Opacity="0.7"
+                       Text="{loc:Localize Key=mail_import/scope_mailboxes_label}" />
+
+            <!-- mail-import-scope-mailboxes — multi-select container. Border-wrapped with
+                 a non-empty Name + non-virtualizing panel so FlaUI realizes it and every
+                 row (a bare layout root carrying only an AutomationId is pruned from the
+                 UIA tree, and a virtualizing panel only realizes what is on screen). -->
+            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportScopeMailboxes}"
+                    AutomationProperties.Name="Mailboxes"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="12">
+                <StackPanel Spacing="4">
+                    <TextBlock x:Name="MailboxesEmpty" Opacity="0.5" TextWrapping="Wrap"
+                               Visibility="Collapsed"
+                               Text="{loc:Localize Key=mail_import/scope_mailboxes_empty}" />
+                    <ItemsControl x:Name="MailboxesList">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Vertical" Spacing="4" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:MailImportMailboxRow">
+                                <!-- The indexed mail-import-scope-mailbox-item. A CheckBox,
+                                     not a Border: it is a real control, so it keeps its own
+                                     automation peer, its Content gives get_text the mailbox
+                                     name, and click drives it through TogglePattern rather
+                                     than a foreground-dependent physical mouse click. It
+                                     carries NO static AutomationProperties.Name — that would
+                                     win over the Content-derived one and freeze get_text.
+                                     HelpText is the `state` attribute the cross-app walk
+                                     reads; Click (not Checked/Unchecked) fires only on user
+                                     action, so the OneTime IsChecked bind never echoes a
+                                     dispatch back. -->
+                                <CheckBox AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportScopeMailboxItem}"
+                                          AutomationProperties.HelpText="{x:Bind State}"
+                                          Content="{x:Bind Name}"
+                                          IsChecked="{x:Bind Selected}"
+                                          Tag="{x:Bind Name}"
+                                          Click="Mailbox_Click" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+
+            <TextBox x:Name="DateFromInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportScopeDateFrom}"
+                     PlaceholderText="{loc:Localize Key=mail_import/scope_date_from_placeholder}" />
+            <TextBox x:Name="MaxSizeInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportScopeMaxSize}"
+                     Header="{loc:Localize Key=mail_import/scope_max_size_label}" />
+
+            <!-- Informational only: no MailImportAction changes the destination mapping,
+                 and the goal doc names no control for it either (§ Wizard steps step 3 —
+                 mailboxes map 1:1 by name, unmatched names are created). -->
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportScopeMailboxMapping}"
+                       Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=mail_import/scope_mailbox_mapping_label}" />
+
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardBackButton}"
+                        Content="{loc:Localize Key=mail_import/back}" Click="Back_Click" />
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardNextButton}"
+                        Content="{loc:Localize Key=mail_import/next}" Click="ScopeNext_Click" />
+            </StackPanel>
+        </StackPanel>
+
+        <!-- ════ Step 3 — Confirm ════ -->
+        <StackPanel x:Name="ConfirmGroup" Spacing="8" Visibility="Collapsed">
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=mail_import/confirm_title}" />
+            <TextBlock x:Name="ConfirmSummary"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportConfirmSummary}"
+                       TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardBackButton}"
+                        Content="{loc:Localize Key=mail_import/back}" Click="Back_Click" />
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportStartButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Content="{loc:Localize Key=mail_import/start_button}"
+                        Click="Start_Click" />
+            </StackPanel>
+        </StackPanel>
+
+        <!-- ════ Step 4 — Progress ════ -->
+        <StackPanel x:Name="ProgressGroup" Spacing="8" Visibility="Collapsed">
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=mail_import/progress_title}" />
+            <TextBlock x:Name="ProgressSummary"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportProgressSummary}"
+                       TextWrapping="Wrap" />
+            <ProgressBar x:Name="ImportProgressBar"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportProgressBar}"
+                         Minimum="0" Maximum="1" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button x:Name="PauseButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportPauseButton}"
+                        Content="{loc:Localize Key=mail_import/pause_button}"
+                        Click="Pause_Click" />
+                <Button x:Name="ResumeButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportResumeButton}"
+                        Content="{loc:Localize Key=mail_import/resume_button}"
+                        Click="Resume_Click" />
+                <Button x:Name="CancelButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportCancelButton}"
+                        Content="{loc:Localize Key=mail_import/cancel_button}"
+                        Click="Cancel_Click" />
+            </StackPanel>
+            <TextBlock Opacity="0.7" FontSize="12"
+                       Text="{loc:Localize Key=mail_import/error_log_title}" />
+            <TextBlock x:Name="ErrorLog"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportErrorLog}"
+                       Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
+
+            <!-- mail-import-mailbox-progress-list — per-mailbox rows, one per SELECTED
+                 source mailbox. The machine tracks only global counts (no mailboxProgress
+                 field the way export's snapshot has), so each row shows its planned
+                 message count rather than a live per-mailbox fraction — the tui lead
+                 app's own accurate-to-what-exists simplification. -->
+            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportMailboxProgressList}"
+                    AutomationProperties.Name="Mailbox progress"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="12">
+                <ItemsControl x:Name="MailboxProgressList">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Vertical" Spacing="4" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:MailImportMailboxProgressRow">
+                            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportMailboxProgressListItem}"
+                                    AutomationProperties.Name="{x:Bind Name}"
+                                    Padding="4">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportMailboxProgressListItemName}"
+                                               Text="{x:Bind Name}" />
+                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportMailboxProgressListItemProgress}"
+                                               Text="{x:Bind Progress}" Opacity="0.7" />
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Border>
+        </StackPanel>
+
+        <!-- ════ Step 5 — Done ════ -->
+        <StackPanel x:Name="DoneGroup" Spacing="8" Visibility="Collapsed">
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=mail_import/done_title}" />
+            <TextBlock x:Name="DoneSummary"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportDoneSummary}"
+                       TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportViewImportedButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Content="{loc:Localize Key=mail_import/view_imported_button}"
+                        Click="ViewImported_Click" />
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportReviewSkippedButton}"
+                        Content="{loc:Localize Key=mail_import/review_skipped_button}"
+                        Click="ReviewSkipped_Click" />
+            </StackPanel>
+        </StackPanel>
+    </StackPanel>
+</UserControl>

@@ -1,0 +1,338 @@
+[package]
+name = "fauna-sync-agent"
+description = "Cross-platform per-user sync+backup agent — file synchronization, local IPC control plane, and file-status introspection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The cross-platform agent binary: the ONE package that produces
+# `fauna-sync-agent(.exe)` on every platform, the shipped windows artifact
+# included (the MSI stages this crate's own bin). The windows-only wrapper crate
+# that used to produce the windows exe was retired 2026-10-02.
+[[bin]]
+name = "fauna-sync-agent"
+path = "src/main.rs"
+
+# The platform-neutral core, so every platform shell is a thin `main()` calling
+# `run_main` (sync-agent.md § crate generalization).
+[lib]
+name = "fauna_sync_agent"
+path = "src/lib.rs"
+
+# The unix full-stack D8 harness: spawns the REAL `fauna-sync-agent` binary
+# (`CARGO_BIN_EXE_` — why this is an integration test, not a src module),
+# provisions it over the real per-user unix socket, kills + respawns the
+# PROCESS, and asserts resume from the persisted capability. Same opt-in
+# feature gate as the windows `versions_tier3`/`restore_byteplane_tier3`
+# src modules; `required-features` keeps it out of the default test loop.
+[[test]]
+name = "agent_process_tier3"
+required-features = ["tier3-nest"]
+
+# The two-nest CLIENT-STACK capstone. Same shape and gate as
+# `agent_process_tier3` (the real binary over the real socket), but against TWO
+# in-process nests: a cross-nest `writer` grant must reach this agent as real
+# key material + routing, round-trip bytes both ways, and park fail-closed on
+# demotion. `required-features` keeps its heavy client dev-deps (MLS, the
+# conversations backend) off the default test loop.
+[[test]]
+name = "cross_nest_agent_capstone"
+required-features = ["tier3-nest"]
+
+# The same-nest remote-change push-nudge proof. Same real-binary /
+# real-socket / real-nest shape and gate, one topology INWARD of the capstone:
+# ONE nest, one user, two devices, an owner-only set. Proves the one link the
+# nudge stack never ran end-to-end — engine wake -> pull -> materialize — driven
+# by a genuine `PushEvent::SyncChanged` the test-as-app receives and translates
+# to `PullFolderNow`, and RED-guards that without the nudge the save waits out
+# the rescan tick.
+[[test]]
+name = "same_nest_push_nudge"
+required-features = ["tier3-nest"]
+
+# The agent resolves its own content keys (`on-demand-files.md` § Shared sets on
+# a capability host → *One mechanism*). Same real-binary / real-socket /
+# real-nest shape and gate: an owner's rotation from another seat re-keys the
+# agent with no app push, and a member's agent HOLDS its writes behind the
+# content-key floor until custody holds the generation — re-keyed by its own
+# pre-seal row read when the custody-change nudge is lost.
+[[test]]
+name = "agent_custody_rekey"
+required-features = ["tier3-nest"]
+
+[features]
+# The cross-user share plane's INGEST half (slice E — p2p.md § Cross-user
+# shared-set transfer): the engine's provisional ingest door + the
+# ShareIngest engine command. Default-ON at this flavor root per the excision
+# spine (dynamic-features.md § Compile-time excision); a store-safe agent
+# build excludes it with --no-default-features. Serving stays app-side
+# (cross-process WAL read) — this binary carries only the state-writing half.
+default = ["p2p-share"]
+p2p-share = ["fauna-sync-engine/p2p-share"]
+
+# The test-only custodian pass poke (`RequestMethod::CustodianRunPassNow`) and
+# the live-host slot it reads. Debug builds carry it through the
+# `debug_assertions` arm, which is what the e2e harness actually uses (it builds
+# this binary in debug alongside fauna-tui); this feature exists so a
+# RELEASE-profile e2e build can still carry the seam, exactly as tui's
+# `e2e-agent` does for its automation surface. A plain `--release` artifact
+# enables neither and compiles the whole surface out (testing.md convention 15).
+# Forwards the wire half rather than declaring a sibling gate, so the variant and
+# its handler can never be present on only one side of the seam.
+test-helpers = ["fauna-ipc/test-helpers"]
+
+# Opt-in, heavy tier_3 harness (like tier_4): pulls the whole `fauna-nest` crate
+# so `src/versions_tier3.rs` can drive the Version-history + Restore path against
+# a REAL in-process nest (`AppState::for_test` + `RpcRouter` real handlers), not
+# an in-memory fake. Off by default so the agent's inner test loop never builds
+# the nest; run the tier_3 test explicitly with `--features tier3-nest`. The
+# `versions_tier3`/`restore_byteplane_tier3` src modules are additionally
+# `cfg(windows)`-gated (cfapi byte plane); the unix process-level harness is the
+# `agent_process_tier3` integration test (see `[[test]]` below).
+#
+# `fauna-nest/test-helpers` is FORWARDED here rather than named on the
+# `fauna-nest` dependency line — e2e-automation-surface-gating.md § rule (b):
+# a dep line turns the feature on unconditionally for every build of this crate,
+# a forward turns it on only for the build that asks for `tier3-nest`. It buys
+# `fauna_nest::test_support`, the shared in-process test-nest builders these
+# harnesses used to hand-copy.
+tier3-nest = ["dep:fauna-nest", "fauna-nest/test-helpers", "dep:axum"]
+
+# Opt-in live harness for the linux on-demand root (`src/fuse_live_integration.rs`):
+# the agent's own FUSE host over a real mount in a temp dir, asserted from other
+# processes. Off by default because it mounts — it needs an openable `/dev/fuse`
+# and the distro `fuse3` package's `fusermount3`. Enables no code in the shipped
+# binary; it only compiles the test module.
+fuse-live = []
+
+# Forward the engine's `e2e-agent` escape hatch (testing.md convention 15) so a
+# --release-profile build of THIS binary compiles the `FAUNA_E2E_DEBOUNCE_MS`
+# override rather than the constant-only arm. Load-bearing precisely here: this
+# is the process that runs the debounce loop and reads the variable, so the two
+# app-side forwards (`apps/fauna-tui`, `apps/fauna-linux`) do not cover it —
+# without this line a release-profile e2e run silently gets the 2000 ms
+# production debounce while the harness believes it set a huge one, turning
+# `test_filesync_delete_declined_debounce.py`'s deterministic precondition into
+# the wall-clock race the standing user plea calls defunct. Direction is
+# fail-safe either way (more compiled-out than intended, never less).
+e2e-agent = [
+    "fauna-sync-engine/e2e-agent",
+    # The FAUNA_E2E_CREDENTIAL_DIR store redirect: this binary constructs
+    # `CredentialStore::new` for its capability persistence, so a
+    # release-profile e2e agent without this forward writes the run's bearer
+    # into the box's real keyring instead of the per-launch file store.
+    "fauna-credential-store/e2e-agent",
+    # `test-helpers` above, which is what compiles the `CustodianRunPassNow`
+    # HANDLER in. It is not optional here and its absence does not degrade
+    # gracefully — it fails the BUILD. The variant's presence is decided by
+    # `fauna-ipc`'s feature, which cargo unifies across the whole build, and the
+    # app turns it on for reasons of its own: `fauna-linux/e2e-agent` →
+    # `fauna-client-sync/test-helpers` → `fauna-ipc/test-helpers`. So in the one
+    # command the flatpak e2e flavour actually runs — `cargo build --release -p
+    # fauna-linux -p fauna-sync-agent --features
+    # fauna-linux/e2e-agent,fauna-sync-agent/e2e-agent` — the variant EXISTS
+    # while this crate's `any(test, debug_assertions, feature = "test-helpers")`
+    # arm is compiled out, and `pipe_server.rs`'s match stops being exhaustive
+    # (E0004). Convention 15 rule (b)'s own words are the fix: a consumer
+    # "forwards it from its own `e2e-agent` feature"
+    # (`e2e-automation-surface-gating.md`).
+    "test-helpers",
+]
+
+[dependencies]
+fauna-core.workspace = true
+# `account-runtime` (W5 (account-data-plane.md § Workstreams).5b): this process hosts the account-store runtime as the
+# always-on engine singleton (`account-data-plane.md` R2 (account-data-plane.md § The ratified decisions) — "replica freshness
+# while no app runs"). The feature pulls the preference bridge + the T10
+# credential slot + the delegation/personalization registry surfaces.
+# `engine-lifecycle` is the one builder every agent engine is built through
+# (`on-demand-files.md` § Shared sets on a capability host → *One mechanism*);
+# it takes only the base, fauna-mls-free `fauna-client-folders` resolvers, so
+# the bearer-only agent still links no conversations/MLS graph
+# (`crate::account_host` holds that line, and its MLS-carve-out pin is what
+# proves the outbox drain here refuses MLS-sealed intents).
+fauna-sync-engine = { workspace = true, features = ["account-runtime", "engine-lifecycle"] }
+# The peer-leg transport (the agent is the machine's steady-state
+# engine-singleton, so once it carries a factory the listener + dial pass run
+# app-dead too; `account_host.rs` wraps `fauna_iroh::peer_leg_transport`, the
+# same one-closure shape tui carries).
+fauna-iroh = { workspace = true, features = ["quic"] }
+fauna-ipc.workspace = true
+# Bearer-only nest auth for the on-demand hydration host (no identity keypair).
+fauna-client.workspace = true
+# The shared typed `fauna.sync.*` / `fauna.files.versions.*` call surface (priority
+# #2 — one adapter, lifted by every app). The shell extension's Version-history
+# verb consumes `SyncClient::{versions_list, versions_get, restore_version}` rather
+# than hand-rolling kinds or the restore record. Path dep (not a root workspace
+# alias), matching fauna-nest-http.
+fauna-client-sync = { path = "../../libs/fauna-client-sync" }
+# The shared `fauna.folders.*` call surface + the `rescan_interval_for` cadence
+# resolver (priority #2/#3 — the same nest-authoritative `rescan_interval_secs`
+# every device honors; linux's engine loop reads it through the same helper). No
+# `mls` feature: this host is bearer-only and builds its engines `mls: None`, so
+# the base (fauna-mls-free) crate is exactly what it needs.
+fauna-client-folders = { path = "../../libs/fauna-client-folders" }
+# The shared account-store crate — the store seams and helpers this host still uses
+# (e.g. `enroll_client_custodian`).
+fauna-client-config = { path = "../../libs/fauna-client-config" }
+# `PlaneFolderKeys` — the account's folder-key custody (`fauna.state.folder-keys`)
+# read through the store the account host mounts: the agent resolves every
+# set's content keys itself (`content_keys.rs`; `on-demand-files.md` § Shared
+# sets on a capability host, decision 1′).
+fauna-account-seams = { path = "../../libs/fauna-account-seams" }
+# The shared `fauna.backup.*` call surface. The custodian host reads this
+# device's own destination row back from the nest registry
+# (`crate::custodian`) — the only source a bearer-only process can reach, and
+# the one `sync-agent.md` § Control plane split prescribes for destinations.
+fauna-client-backup = { path = "../../libs/fauna-client-backup" }
+fauna-protocol.workspace = true
+tokio-util.workspace = true
+# `BearerSource` / `ApiError` for `CapabilityBearer` (path, not a workspace alias —
+# every other consumer references fauna-nest-http by path too).
+fauna-nest-http = { path = "../../libs/fauna-nest-http" }
+async-trait = "0.1"
+tokio.workspace = true
+# `FuturesUnordered` — the on-demand root's hydration batch runs several
+# downloads at once on the driving thread (`bridge::serve_materialize_batch`);
+# the engines it drives are `!Sync`, so a spawned task set cannot hold them.
+# Already in the graph through `fauna-sync-engine`.
+futures-util.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+# Shared logging stack (ring + daily-rolling file + stderr). The FILE sink is the
+# reason: the shipped agent is GUI-subsystem (no console at logon → stderr is
+# discarded), so the on-disk log is the only diagnostics that survive production —
+# same rationale as `fauna-nest-service`.
+fauna-log = { path = "../../libs/fauna-log" }
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+# Home-directory resolution for the per-user production base dir. NOT
+# (`dirs` moved with the per-OS base resolution to `fauna-account-store`'s
+# `root` module at W6 — the passwd-fallback rationale lives on its macOS arm.)
+hex.workspace = true
+reqwest.workspace = true
+toml = "0.8"
+zeroize.workspace = true
+# Capability persistence (sync-agent.md § Credential model): the per-user
+# platform secure store, namespace `fauna-sync-agent`.
+fauna-credential-store.workspace = true
+# The `SecretStore` trait `CredentialStore` implements (get/set/delete).
+fauna-client-accounts.workspace = true
+# Agent-side bearer renewal: the one-shot anonymous `fauna.auth.device_handshake`
+# mint (+ TLS channel-binding graduation) the renewal loop drives app-dead.
+fauna-anon-client = { path = "../../libs/fauna-anon-client" }
+ed25519-dalek.workspace = true
+# Canonical dag-cbor for the persisted capability record (`src/credentials.rs`)
+# — the same codec the IPC wire uses. (Also used by the versions.rs test fake.)
+fauna-cbor.workspace = true
+# Optional, opt-in via the `tier3-nest` feature ONLY (never in the shipped
+# binary — a client sync agent must not link the server). Its sole use is the
+# in-process nest harness in `src/versions_tier3.rs`. Direct path dep with
+# `default-features = false` (the minimal-feature convention the nested windows
+# workspace used) — the root `fauna-nest` alias defaults its features on.
+fauna-nest = { path = "../../bins/fauna-nest", default-features = false, optional = true }
+# `axum::serve` — the tier3-nest byte-plane harness (`restore_byteplane_tier3.rs`)
+# binds `fauna_nest::build_router` on an ephemeral port. Optional, `tier3-nest`-only.
+axum = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Test builds never reach the live OS keyring — see the `no-live-keyring`
+# feature in libs/fauna-credential-store/Cargo.toml (dev-dependencies ONLY).
+fauna-credential-store = { workspace = true, features = ["no-live-keyring"] }
+tempfile.workspace = true
+# `fauna_sync_engine::test_support::MockNest` — the shared wiremock byte-plane
+# double (chunk/manifest/blob mounts), reused here rather than hand-rolled, for
+# the conformance test proving `build_sync_engine` threads a pushed
+# `retired_content_keys` generation into a real `reseal_predecessor_sealed`
+# pass. The crate is already in the graph via the normal dependency above
+# (mirroring the `fauna-account-store` entry below); this only turns its
+# test-only module on for this crate's own test build.
+fauna-sync-engine = { workspace = true, features = ["account-runtime", "test-helpers"] }
+# `locks::EngineLock` — the W5.1 election's own primitive, used by
+# `agent_process_tier3` as the EXTERNAL observable that the agent process
+# mounted the shared account store (a held `flock` is a causal fact no timing
+# assertion can fake). The crate is already in the graph via `fauna-sync-engine`;
+# this only makes it nameable from the test.
+fauna-account-store = { path = "../../libs/fauna-account-store" }
+# A stand-in nest **byte plane** for the two-way on-demand tests. An upload has nowhere
+# to go without a nest, and the whole point of those tests is that the bytes really leave:
+# they assert the real `SyncEngine::upload_file`'s chunk/manifest POSTs land.
+wiremock = "0.6"
+# `tokio::time::pause()` — the re-pull-loop tests drive the rescan tick on a paused
+# clock, so a 300 s cadence is asserted in microseconds and nothing sleeps.
+tokio = { workspace = true, features = ["test-util"] }
+# The capstone initializes a real subscriber so BOTH in-process nests' logs
+# (federation relay refusals, record gates) are visible when an assertion
+# fails — the agent child's stderr rides its own RUST_LOG separately.
+tracing-subscriber = { workspace = true }
+
+# ── `cross_nest_agent_capstone` / `agent_custody_rekey` (tier3-nest) only ────
+# These play the identity-holding APPS' role beside the real agent process: they
+# own the actors' seeds and drive the production owner share, member accept and
+# rotate-on-removal (`FoldersAuthor`). None of these crates depends on
+# `fauna-sync-agent`, so no cycle.
+#
+# ⚠ `fauna-client-folders` is a normal dep of this crate WITHOUT `mls` (the
+# shipped agent is bearer-only and must not link MLS — its own content-key
+# resolver is in the base crate). Cargo unifies dev-dep features into the same
+# crate instance, so the binary built *for tests* does link it. That is a
+# test-build-only widening — the agent's own code never calls an mls-gated path
+# — and it is the price of driving the real owner ceremonies here rather than
+# hand-rolling fixtures, which is exactly the substitution the fix exists to stop.
+fauna-client-folders = { path = "../../libs/fauna-client-folders", features = ["mls"] }
+# The member's accept path (`join_folder_welcome`) + the owner's share ride the
+# production conversations backend over a real `NestClient`, not a hand-written
+# welcome: the grant this capstone asserts is *carried* by that relay.
+fauna-conversations = { path = "../../libs/fauna-conversations" }
+fauna-client-conversations = { path = "../../libs/fauna-client-conversations" }
+# Both actors run a real MLS engine — the set's content keys are M2 material the
+# member can only obtain by genuinely joining the group.
+fauna-mls = { path = "../../libs/fauna-mls" }
+# The shared account-store crate — the store seams the folders author reads.
+# `test-helpers`: `FakeMailStore`, the (empty) mail custody the author holds.
+fauna-client-config = { path = "../../libs/fauna-client-config", features = ["test-helpers"] }
+getrandom.workspace = true
+
+# `kill(2)` — the SIGTERM shutdown proof (`tests/agent_sigterm.rs`) signals the
+# real agent binary and reads its exit status, which is the only thing that
+# tells a handled SIGTERM from the default disposition. Unix-wide here for the
+# tests (the shipped agent takes it directly on linux only, for the FUSE root —
+# below), and windows has no SIGTERM concept (its stop is the service control
+# path — `sync-agent.md`).
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
+# The `ws-device` push arm's linux sink (`push_arm.rs`; `common.md` § Push
+# Notifications → *Transports*): the freedesktop notification daemon. The same
+# crate fauna-linux and fauna-tui already link (approved by the user
+# 2026-09-26, crates.io, under `cargo vet`); linux-only here because the agent's
+# windows sink is the WinRT toast through its existing `windows` crate and its
+# macOS sink is not built.
+[target.'cfg(target_os = "linux")'.dependencies]
+# The on-demand root's FUSE binding (`src/fuse_host.rs`; `on-demand-files.md`
+# § Linux FUSE binding): the pure-Rust `/dev/fuse` protocol. Approved by the user
+# 2026-09-26 — crates.io, under `cargo vet`. `default-features = false` is
+# load-bearing: no libfuse is linked, and mounting goes through the distro `fuse3`
+# package's setuid `fusermount3`, since the agent never runs as root.
+fuser = { version = "0.18", default-features = false }
+# `fstatvfs(2)` and the `open(2)` flag constants for the FUSE root's pass-through
+# I/O (`src/fuse_host.rs`: `statfs`, the access mode and `O_NOFOLLOW` of an
+# open). Already locked and vetted (the dev-dependency above, and the graph's
+# own); this makes it a direct dependency of the shipped linux agent.
+libc = "0.2"
+notify-rust = "4"
+
+[target.'cfg(windows)'.dependencies]
+fauna-cfapi = { workspace = true }
+windows = { workspace = true, features = [
+    # `InstanceLock`'s named mutex (pipe_server.rs) + the cfapi live harness's
+    # CreateMutexW/WaitForSingleObject.
+    "Win32_System_Threading",
+    # OVERLAPPED, referenced by the cfapi callback structs below.
+    "Win32_System_IO",
+    # cfapi callbacks (cfapi_host.rs): CF_CALLBACK_INFO / CF_CALLBACK_PARAMETERS /
+    # CF_CONNECTION_KEY; CF_CALLBACK_INFO references CORRELATION_VECTOR.
+    "Win32_Storage_CloudFilters",
+    "Win32_System_CorrelationVector",
+] }

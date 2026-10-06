@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.AdminFilesPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+      The flat admin-files page (admin.md § Files; webdav-server.md
+      § Independent enablement; ui.yaml admin-files). The WebDAV-enable files
+      sibling of admin-contacts's CardDAV-enable toggle: email + calendar +
+      contacts + files are four independently enableable features of one MDA
+      bridge, so each gets its own admin toggle. A dumb renderer of the shared
+      fauna_client_mail_settings::WebdavPolicyMachine through the testable
+      AdminFilesViewModel (FaunaApp.Core), consumed over the UniFFI
+      IWebdavPolicyMachine seam (machine-as-seam). The VM owns the
+      get_mail_config hydrate (its webdav_enabled field) + the
+      set_webdav_enabled write + the re-read-after-write (priority #2); this page
+      renders the toggle and forwards the gesture. No port field — WebDAV rides
+      the shared DAV listener admin-calendar's port input already governs. Static
+      labels localize in XAML via {loc:Localize Key=...}. No ConfigureAwait(false)
+      in these handlers (off-thread bound-state mutation throws a silent
+      COMException). The admin-nav-back affordance lives in the shared AdminShell
+      header, NOT on this page. Mirrors AdminCalendarPage / AdminContactsPage
+      (machine build over the shared INestRpcClient seam + the _syncing render
+      guard), minus the port StackPanel.
+    -->
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="16" MaxWidth="640" HorizontalAlignment="Left">
+
+            <!-- App-wide error surface (also mirrored below for the state protocol) -->
+            <controls:CopyableInfoBar x:Name="ErrorBar"
+                     Severity="Error" IsOpen="False" IsClosable="True" />
+
+            <!-- Header (admin-files-heading per ui.yaml) -->
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminFilesHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=admin/files_page/title}" />
+            <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=admin/files_page/description}" />
+
+            <ProgressRing x:Name="LoadProgress" IsActive="False"
+                          Visibility="Collapsed" HorizontalAlignment="Left" />
+
+            <!-- Hidden mirror keeps the app-wide error-message ID present for infra
+                 (state-protocol read; memory reference_windows_error_read_via_state). -->
+            <TextBlock x:Name="ErrorTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+                       AutomationProperties.Name=" " Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+
+            <!-- ════ WebDAV-enable master toggle (set_webdav_enabled) ════ -->
+            <StackPanel Spacing="2">
+                <ToggleSwitch x:Name="EnabledToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminFilesWebdavEnabledToggle}"
+                              Toggled="EnabledToggle_Toggled"
+                              Header="{loc:Localize Key=admin/files_page/enabled_label}" />
+                <TextBlock Opacity="0.6" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/files_page/enabled_subtitle}" />
+            </StackPanel>
+
+        </StackPanel>
+    </ScrollViewer>
+</Page>

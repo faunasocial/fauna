@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Shared with Fauna-iOS-FileProvider.appex: the app provisions the app-dead
+       capability (BackupKey + bearer) into this group's Keychain and the
+       extension reads it back (FileProviderCredentialStore); the group container
+       also holds the unified sync state dir (SyncStateDir). Same group as macOS
+       — the id is per-account, not per-platform. -->
+  <key>com.apple.security.application-groups</key>
+  <array>
+    <string>group.social.fauna.shared</string>
+  </array>
+</dict>
+</plist>

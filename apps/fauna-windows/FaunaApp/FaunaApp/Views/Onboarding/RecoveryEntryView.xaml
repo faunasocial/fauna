@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FaunaApp.Views.Onboarding.RecoveryEntryView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:controls="using:FaunaApp.Controls"
+    xmlns:loc="using:FaunaApp.Markup"
+    mc:Ignorable="d"
+    xmlns:ids="using:FaunaApp.UiIds">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <Grid Padding="48" HorizontalAlignment="Center" MaxWidth="600">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <!-- Every refusal the restore gives (the shared
+                 RecoveryEntryOutcomeMessage table) renders here. -->
+            <controls:CopyableInfoBar
+                Grid.Row="0"
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="{Binding HasError, Mode=OneWay}"
+                Message="{Binding ErrorMessage, Mode=OneWay}"
+                IsClosable="True"
+                Margin="0,0,0,16" />
+
+            <StackPanel Grid.Row="1" Spacing="12" VerticalAlignment="Center">
+                <TextBlock Text="{loc:Localize Key=onboarding/recovery_entry/title}"
+                           Style="{StaticResource TitleTextBlockStyle}" />
+                <TextBlock Text="{loc:Localize Key=onboarding/recovery_entry/desc}"
+                           TextWrapping="Wrap"
+                           Opacity="0.7" />
+                <TextBlock Text="{loc:Localize Key=onboarding/recovery_entry/account_hint}"
+                           TextWrapping="Wrap"
+                           Opacity="0.7" />
+
+                <!-- A PasswordBox, like identity_import's paste field: the phrase
+                     outranks the identity secret itself. No MaxLength — the field
+                     takes the fauna://recovery URI as well as the bare 64-hex; the
+                     ceremony owns validation. -->
+                <PasswordBox
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryEntryPhraseField}"
+                    Header="{loc:Localize Key=onboarding/recovery_entry/phrase_label}"
+                    Password="{Binding RecoveryPhrase, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <!-- The shared common/handle label: the same field concept as
+                     handle_entry's, which a successful restore pre-fills. -->
+                <TextBox
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryEntryAccountField}"
+                    Header="{loc:Localize Key=common/handle}"
+                    Text="{Binding RecoveryAccount, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,16,0,0">
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryEntryBackButton}"
+                            Content="{loc:Localize Key=common/back}"
+                            Command="{Binding BackCommand}" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryEntrySubmitButton}"
+                            Content="{loc:Localize Key=onboarding/recovery_entry/submit}"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Command="{Binding SubmitRecoveryEntryCommand}" />
+                </StackPanel>
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</UserControl>

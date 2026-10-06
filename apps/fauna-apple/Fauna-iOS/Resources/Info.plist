@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Must match BackgroundScheduler.uploadTaskId / .custodianPullTaskId /
+         .widgetRefreshTaskId exactly, both ways — a registered-but-unpermitted
+         identifier is a runtime failure, and a permitted-but-unregistered one
+         lets a pending request launch into no handler. -->
+    <key>BGTaskSchedulerPermittedIdentifiers</key>
+    <array>
+        <string>social.fauna.sync.upload</string>
+        <string>social.fauna.sync.custodian</string>
+        <string>social.fauna.widget.refresh</string>
+    </array>
+    <!-- One mode per BGTask kind, or `BGTaskScheduler.submit` refuses the request
+         (BGTaskSchedulerErrorCodeNotPermitted): `fetch` gates the widget-refresh
+         BGAppRefreshTask (the home-screen widget's count, kept current without the
+         app open); `processing` gates the two BGProcessingTasks (photo backup,
+         custodian pull). test_apple_identifier_pins.py pins the set both ways. -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>fetch</string>
+        <string>processing</string>
+    </array>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>Fauna backs up your photos to your personal node.</string>
+    <!-- Export compliance: Fauna ships its own encryption (MLS, sealed-at-rest),
+         not merely OS-provided facilities, so ITSAppUsesNonExemptEncryption is
+         YES under Apple's own exemption test. Posture ratified 2026-08-23,
+         publicly-available-source route (no BIS filing owed) —
+         docs/goal/architecture/export-compliance.md § What each store form
+         answers; effective-date stamp pending publication (§ Implementation
+         status today). The actual App Store Connect questionnaire answer is a
+         legal attestation only the org's representative may give — this key
+         only stops ASC re-asking at every upload. -->
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <true/>
+    <!-- Product version — must equal the root Cargo.toml [workspace.package]
+         version (product-version.md; version-lockstep merge gate). Before these
+         keys existed the iOS bundle silently inherited the pbxproj's
+         MARKETING_VERSION (then 0.0.0). CFBundleVersion is PINNED at 1: a store
+         re-upload mints a new product patch version instead (§ Reships). -->
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.2</string>
+    <!-- URL scheme for deep links (the FP context actions' fauna:// links —
+         FaunaDeepLink; mirrors Fauna-macOS/Resources/Info.plist). -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>fauna</string>
+            </array>
+            <key>CFBundleURLName</key>
+            <string>social.fauna.fauna</string>
+        </dict>
+    </array>
+</dict>
+</plist>

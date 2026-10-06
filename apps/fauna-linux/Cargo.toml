@@ -1,0 +1,723 @@
+[package]
+name = "fauna-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# ── the flavor split (`dynamic-features.md` § Platform-family surface excision) ─
+# An app binary IS a flavor root, so the switch belongs here rather than on a
+# dep line. Same two-halves shape as fauna-tui (the reference leg) and the
+# library roots `fauna-ffi` / `fauna-wasm` / `fauna-nest`: `default` = the
+# store-safe complement PLUS the registry members a flavor may excise, so a new
+# non-registry surface is added to `store-safe` once and is in `default` by
+# construction — there is no second list to keep in sync, which is precisely how
+# an escape hatch is found broken on the day it is needed.
+#
+# The excised flavor is `--no-default-features --features store-safe`
+# (`just linux-store-safe` / the `linux-store-safe-check` witness).
+default = ["store-safe", "payments", "zaps", "p2p-share"]
+# Every fauna-desktop surface that is NOT a gated-feature-registry member.
+# Empty, like fauna-tui's: nothing on this crate sits behind a feature that is
+# not a registry member.
+store-safe = []
+# ── the `payments` registry member (dynamic-features.md § Charter members) ────
+# The money plane's linux surface: the author's payment-provider config and
+# manual claim codes (profile Tiers §§4-5), and the buyer's claim redemption
+# (Settings → Subscriptions).
+#
+# Rule (b) of the two-halves spine: the member forwards from HERE rather than
+# riding its dep lines, so `--no-default-features` genuinely drops the plane
+# instead of re-acquiring it through cargo's unconditional dep-line features.
+# `fauna-feed/payments` gates one thing there — `FeedManager::resolve_post_tips`
+# — which is what makes `PostSummary.tips` stay `None` forever in this flavor;
+# the field itself is ungated and inert by design, so any tip RENDER must carry
+# its own `#[cfg]` too. An inert record whose ids still ship is exactly the trap
+# § What "completely compiled away" means item 1 names: criterion 1 is a
+# `strings`-grep for ELEMENT IDS, and a dead render still carries them.
+payments = ["dep:fauna-client-payments", "fauna-feed/payments"]
+# ── the `zaps` registry member (dynamic-features.md § Charter members) ────────
+# A SUBSET member of `payments`: the NIP-57 Lightning plane's linux surface —
+# the payee's zap-signer trust root on the Nostr page (`monetization.md` §
+# Zap receipts — the trust model). It requires `payments` because a zap's only
+# consequences ARE payments-plane surfaces, so excising the money plane excises
+# this with it; excising `zaps` alone keeps provider-rail payments, which is
+# the finer-grained hatch the Damus precedent shows a store actually demands.
+# Mirrors fauna-tui's block exactly (the reference leg).
+#
+# Rule (b) of the two-halves spine again: the shared client's own `zaps`
+# feature forwards from HERE, not from its dep line, so
+# `--no-default-features` genuinely drops the plane instead of re-acquiring it
+# through cargo's unconditional dep-line features. `fauna-client-nostr/zaps`
+# carries the `fauna.nostr.zap_signers.*` client AND (via `fauna-protocol/zaps`)
+# the wire types, so both halves ride the one switch.
+#
+# The excision criterion that bites is the one `payments` documents above: a
+# dead render still carries its ELEMENT IDS into a `strings`-grep, so the
+# render site carries `#[cfg]` too, not just the glue. ui.yaml's
+# `gated_features:` block declares the `nostr-zap-signer-` prefix that names
+# them.
+zaps = ["payments", "fauna-client-nostr/zaps"]
+# ── the `p2p-share` registry member (dynamic-features.md § Charter members) ───
+# The co-present offline share-initiation ceremony's linux surface (`p2p.md`
+# § Offline share initiation) — `crate::offline_share` and the Folders page's
+# eight `offline-{share,receive}-*` elements. Mirrors fauna-tui's block
+# exactly (the reference leg); `fauna-iroh` stays an unconditional dep above
+# (the same-account peer-sync leg already needs it), so it is not named here.
+#
+# Rule (b) again: forwards from HERE, not from the dep line, so
+# `--no-default-features` genuinely drops the plane. `dynamic-features.md`
+# § Which element IDs belong to a gated feature: Rust needs no gated EMISSION
+# (an unreferenced `pub const` carries no bytes), so this feature's only job
+# is excising the GLUE — every render still carries its own `#[cfg]` per that
+# doc's § Platform-family surface excision warning.
+p2p-share = [
+    "fauna-client-capabilities/p2p-share",
+    "fauna-sync-engine/p2p-share",
+    "fauna-client-folders/p2p-share",
+    "dep:fauna-peer-share",
+    # The host's shared half (`ShareHostSeams` + the durable sink), lifted out
+    # of `share_glue.rs` 2026-08-27 — a leaf only share-plane hosts link, so it
+    # rides this feature exactly as `fauna-peer-share` does.
+    "dep:fauna-client-share-host",
+]
+# Opt-in tests that talk to a live D-Bus session bus + Secret Service
+# provider. Off by default because these prerequisites are absent on most
+# CI runners; CI explicitly enables it where available. Re-allows the live
+# keyring that every test build otherwise refuses (`no-live-keyring`).
+live-secret-service = ["fauna-credential-store/allow-live-keyring"]
+# Escape hatch to build the e2e test-agent/automation surface into a
+# --release profile (debug_assertions off). Never default-on; a release-
+# profile e2e build turns this on explicitly (testing.md convention 15).
+# Forwards to fauna-client-backup so its native_store clock-offset seam is
+# also compiled in (backup_audit.rs re-exports it), and to fauna-sync-engine so
+# the FAUNA_E2E_DEBOUNCE_MS override (always_resident.rs) is compiled in too.
+#
+# The shared crates' `test-helpers` seams forward from here too, rather than
+# riding their dep lines unconditionally: a debug build reaches them through each
+# crate's own `debug_assertions` arm (which is what `just linux-debug` and the e2e
+# harness rely on — they pass no features), so naming them here is what makes a
+# **release-profile** e2e build possible while a plain `--release` build strips
+# them from the binary. `docs/goal/architecture/testing.md` convention 15.
+e2e-agent = [
+    # The agent itself: the HTTP server this crate's `automation` module hosts,
+    # the op routing, and the actuation gate with its three `FAUNA_E2E_*` reads.
+    # The dep line below stays unconditional (a debug build must reach the agent
+    # and Cargo cannot condition a dependency on `debug_assertions`), so this
+    # forward is the ONLY thing that puts the surface into a release-profile e2e
+    # build — and its absence is what keeps a plain `--release` fauna-desktop
+    # from linking the agent at all, rather than trusting `--gc-sections` to
+    # drop it.
+    "fauna-e2e-agent/e2e-agent",
+    "fauna-client-backup/e2e-agent",
+    "fauna-sync-engine/e2e-agent",
+    # The Nests trust facet's render clock (`trust_facet_advance_clock`) —
+    # `trust_clock`'s setter gates on `debug_assertions OR e2e-agent`, so a
+    # RELEASE-profile e2e build needs this forward (convention 15).
+    "fauna-client-capabilities/e2e-agent",
+    # The FAUNA_E2E_CREDENTIAL_DIR store redirect — where the identity secret
+    # is read and written. Without this forward a release-profile e2e run
+    # silently falls back to libsecret and writes into the box's real keyring.
+    "fauna-credential-store/e2e-agent",
+    # The PLC-directory override the custody-alarm e2e points at a fake
+    # directory. A debug build keeps it via `debug_assertions`; this forward is
+    # what keeps a RELEASE-profile e2e build working (convention 15).
+    "fauna-atproto-settings-machine/e2e-agent",
+    # The nest **dial** override — which URL the authenticated session opens a
+    # socket to for a stored `nest_url`. Named explicitly even though
+    # `fauna-onboarding-machine/test-helpers` below already forwards it, because
+    # this crate calls `resolved_dial_url` at its own two client-construction
+    # sites: the forward must not become implicit on a sibling's feature list.
+    "fauna-launch-machine/e2e-agent",
+    # The FAUNA_E2E_SUPPRESS_CONV_PUSH push-arm kill-switch (`conv_push_source`)
+    # — the layer-5 missed-push proof's only lever. A debug build keeps it via
+    # `debug_assertions`; this forward is what keeps a RELEASE-profile e2e build
+    # able to run the drain-alone shape (convention 15).
+    "fauna-client-conversations/e2e-agent",
+    # The region plane's test-capable-build seams — the registry seed and the
+    # declared-region override (`fauna-client-region`'s `e2e-agent`,
+    # convention 15), forwarded like tui's.
+    "fauna-client-region/e2e-agent",
+    # `ScreenLockCore::advance_test_clock`/`advance_test_clock_silently` —
+    # convention 14's fake clock for the screen-time lock (shared with tui).
+    "fauna-core/e2e-agent",
+    # `device_set_state_json` — the fleet-removal convergence read the
+    # `device_set_state` bridge command uses. A debug
+    # build keeps it via `debug_assertions`; this forward is what keeps a
+    # RELEASE-profile e2e build working (convention 15).
+    "fauna-client-account-runtime/e2e-agent",
+    # The critical-alert re-sweep loop with its wait raceable
+    # (`run_alert_sweep_loop_wakeable`, behind `fauna_e2e_agent::ALERT_SWEEP_WAKE`)
+    # and the reconnect pace (`NestClient::set_reconnect_backoff_for_test`,
+    # behind `fauna_e2e_agent::RECONNECT_BACKOFF`). A debug build reaches both
+    # through `debug_assertions`; these forwards keep a RELEASE-profile e2e build
+    # able to drive them (convention 15).
+    "fauna-client-alert-sweep/test-helpers",
+    "fauna-client/e2e-agent",
+    "fauna-client-sync/test-helpers",
+    "fauna-conversations/test-helpers",
+    "fauna-feed/test-helpers",
+    "fauna-client-search/test-helpers",
+    "fauna-onboarding-machine/test-helpers",
+    "fauna-onboarding-machine/test-observer",
+]
+
+[[bin]]
+name = "fauna-desktop"
+path = "src/main.rs"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(feature, values("e2e-agent", "store-safe", "payments", "p2p-share"))',
+] }
+
+[dependencies]
+# Core — direct Rust dependency, no FFI boundary
+fauna-core = { path = "../../libs/fauna-core", features = ["qr_render", "local-clock"] }
+# Generated element-id constants (build-system.md § Generated element-id constants).
+fauna-ui-ids = { path = "../../libs/fauna-ui-ids" }
+# Shared string table generated from i18n/strings/en.yaml (`just i18n-generate`),
+# re-exported as `crate::i18n::strings` (see `src/i18n/mod.rs`). linux consumes
+# the shared crate directly — no per-app generated strings file (priority #2;
+# it used to carry a byte-identical twin of this crate's emit_rust output).
+fauna-i18n = { path = "../../libs/fauna-i18n" }
+# Anonymous (pre-identity) WS-RPC connector — used for the discovery kinds
+# `fauna.nest.resolve` / `fauna.actor.by_handle` in the contacts find-user path
+# (replacing the deleted `GET /api/v1/{resolve-node,actor/by-handle}` twins).
+fauna-anon-client = { path = "../../libs/fauna-anon-client" }
+# The shared recovery ceremonies. Three callers: verifying a succession on the
+# launch `superseded` screen, so it can name the successor as fact rather than as
+# the nest's claim (`identity-succession.md` § Propagation → *Own device fleet*);
+# behind `conversations-witness`, the member-side in-group witness plus its
+# peer-anchor harvest sweep that `conversations::conv_backend` registers at login
+# (`succession-aftermath.md` § Propagation → *MLS groups*); and behind
+# `aftermath`, the ordered post-succession pass `succession_aftermath` drives at
+# every sign-in (`succession-aftermath.md` § Re-key scope).
+fauna-client-recovery = { path = "../../libs/fauna-client-recovery", features = [
+    "conversations-witness",
+    "aftermath",
+] }
+# Shared tracing capture: installs the process-global subscriber (in-memory
+# ring buffer for the Settings → Logs page + a rolling on-disk file) so client
+# errors are logged, not eprintln!'d into the void. See observability.md.
+fauna-log = { path = "../../libs/fauna-log" }
+# Emit client lifecycle/errors through tracing (captured by fauna-log's ring +
+# file). The print→tracing sweep grows this usage.
+tracing = { workspace = true }
+
+# Audience-keyed seal + media upload pipeline. `default-features = true` (the
+# `process_media` feature) so the native build runs the real EXIF/IPTC strip +
+# MIME sniff + thumbnail derivation + C2PA detect on the upload path. Reached
+# via `client.rs::upload_staged_blob` → `fauna_client::upload_public_post_blob`
+# → `process_and_seal`, which seals blobs by audience and emits the multipart
+# `UploadSidecar` wire shape (encrypted-mode media-at-rest conformance).
+# This is linux's ONLY metadata strip: the former `src/exif.rs` shelled out to
+# `exiftool` (silently a no-op when uninstalled, and lossy when not) and was
+# retired 2026-07-20 as a strictly-weaker duplicate of the strip above.
+fauna-media = { path = "../../libs/fauna-media" }
+
+# Per-user content search index (FTS via Tantivy). Direct dep, not FFI:
+# Linux desktop links shared Rust as a normal cargo dep (design tracked
+# internally).
+fauna-index = { workspace = true }
+
+# Client-core — Bayesian spam classifier, chunking, scan
+fauna-client-core = { path = "../../libs/fauna-client-core" }
+
+# Shared feed-rendering logic — post `source` field → `SourceKind` classifier
+# (B3). Direct cargo dep, no FFI hop; the per-app icon map (GTK symbolic
+# names) keys off `SourceKind::id()`.
+# `FeedManager::set_feed_snapshot_for_test` + the `test_support` snapshot builder
+# back the `feed_inject_posts` e2e command (`handle_feed_inject_posts`). They are
+# NOT enabled here: a debug build gets them from the crate's own
+# `debug_assertions` arm and a release-profile e2e build opts in via this crate's
+# `e2e-agent` feature, so a plain `--release` binary carries neither
+# (testing.md convention 15 — a runtime-inert seam still ships the code).
+#
+# `payments` turns on `FeedManager::resolve_post_tips`, the tip surface's one
+# gated member (`dynamic-features.md` § Charter members — tips are a buy-side
+# gate surface). It is NOT named here any more: the flavor switch landed
+# 2026-08-14, so this crate's own `payments` feature
+# forwards it — an app binary IS a flavor root, and rule (b) of the two-halves
+# spine keeps the forward off the dep line so `--no-default-features` genuinely
+# drops the plane instead of re-acquiring it here.
+fauna-feed = { workspace = true }
+
+# Direct VPS/DNS provider APIs for nest provisioning
+fauna-provisioning = { path = "../../libs/fauna-provisioning" }
+
+# Handle-first onboarding state machine. `test-helpers`/`test-observer` are
+# NOT enabled here: a debug build gets them from the crate's own
+# `debug_assertions` arm and a release-profile e2e build opts in via this
+# crate's `e2e-agent` feature, so a plain `--release` binary carries neither
+# (testing.md convention 15).
+fauna-onboarding-machine = { path = "../../libs/fauna-onboarding-machine" }
+
+# Folder creation wizard state machine. The Devices page holds an
+# `Arc<FolderWizardMachine>` and renders off its per-step snapshots, exactly
+# as onboarding does with `OnboardingMachine`. `rpc-glue` for the native
+# `build_folder_wizard_machine` constructor — `submit()` drives
+# `fauna.folders.create` + `members.add` over the session's WS-RPC
+# `NestClient`. See docs/goal/ui/devices.md § Where logic lives.
+fauna-folders-machine = { path = "../../libs/fauna-folders-machine", features = ["rpc-glue"] }
+
+# DevicesMachine: the page-level Devices state machine (devices + folders +
+# conflicts + embedded wizard + page error), rendered by views/peers/. `rpc-glue`
+# for the native `build_devices_machine` constructor over the session's WS-RPC
+# `NestClient` (no client-side HTTP). See docs/goal/ui/devices.md § State & data shape.
+fauna-devices-machine = { path = "../../libs/fauna-devices-machine", features = ["rpc-glue"] }
+
+# BackupsMachine: the page-level Backups state machine — the SNAPSHOT half of
+# the Backups page (folder selector + snapshot list + create/delete/prune/
+# check + detail). The destination half keeps its own `fauna-client-config`
+# seams. `rpc-glue` for the native `build_backups_machine` constructor over the
+# session's WS-RPC `NestClient`, custody-wired so a sealed set's paths open.
+# See docs/goal/ui/backups.md § Snapshot-list shape.
+fauna-backups-machine = { path = "../../libs/fauna-backups-machine", features = ["rpc-glue"] }
+
+# MediaMachine: the page-level Media state machine (the cross-set all-media
+# explorer — content plane, read-only). Observer-driven snapshot over the shared
+# `fauna.media.list` pager; rendered by views/media/. `rpc-glue` for the native
+# `build_media_machine` constructor over the session's WS-RPC `NestClient` (no
+# client-side HTTP). See docs/goal/ui/media.md § State & data shape.
+fauna-media-machine = { path = "../../libs/fauna-media-machine", features = ["rpc-glue"] }
+
+# LabelerCatalogMachine: the page-level community-labeler-catalog state machine
+# (browse / inspect-before-subscribe / (un)subscribe), rendered by
+# views/personalization/. `rpc-glue` for the native
+# `build_labeler_catalog_machine_with_grants` constructor over the session's WS-RPC
+# `NestClient` (no client-side HTTP).
+# See docs/goal/architecture/content-moderation-and-ranking.md § Tier-3.
+fauna-labeler-catalog-machine = { path = "../../libs/fauna-labeler-catalog-machine", features = ["rpc-glue"] }
+
+# AtprotoSettingsMachine: the page-level Bluesky/ATProto login-plane settings
+# state machine (app credentials + connected-app sessions + external-apps
+# kill-switch), rendered by settings/atproto.rs. `rpc-glue` for the native
+# `build_atproto_settings_machine` constructor over the session's WS-RPC
+# `NestClient` (no client-side HTTP). See
+# docs/goal/behavior/atproto-pds-full.md § App surface.
+fauna-atproto-settings-machine = { path = "../../libs/fauna-atproto-settings-machine", features = ["rpc-glue"] }
+fauna-client-alerts = { path = "../../libs/fauna-client-alerts" }
+
+# LaunchMachine: app-launch decision tree + bearer-token refresh +
+# 401-reactive handling. See docs/goal/behavior/login.md and
+# docs/goal/behavior/onboarding.md § App-launch routing. Wired into build_ui
+# in a follow-on commit.
+fauna-launch-machine = { path = "../../libs/fauna-launch-machine" }
+
+# Native nest-HTTP crate — the `NestContentApi` trait + `ReqwestNestContentApi`
+# (401-reactive token refresh) + `ApiError` + path constants. `src/nest_content_api/`
+# is a thin re-export of it + the LaunchMachine→BearerSource wiring; FaunaClient
+# constructs `ReqwestNestContentApi<LaunchMachineBearer>`. `launch-machine` feature
+# pulls in the LaunchMachineBearer impl (design tracked internally).
+fauna-nest-http = { path = "../../libs/fauna-nest-http", features = ["launch-machine"] }
+
+# WS-RPC façade — `NestClient` (subprotocol-bearer handshake, DAG-CBOR frames,
+# typed `request*` + `subscribe_pushes`) over a shared `AuthClient`. The Linux
+# WS-RPC adoption (tracked internally) wires this in alongside the existing
+# HTTP `ReqwestNestContentApi` so HTTP endpoints
+# can be retired slice-by-slice as their RPC kinds ship.
+fauna-client = { path = "../../libs/fauna-client" }
+# Wire types for raw WS-RPC kinds the typed client crates don't wrap — e.g.
+# `fauna.nest.info` (discovery::NestInfoRequest/Reply) for the Status node panel.
+fauna-protocol = { path = "../../libs/fauna-protocol" }
+# Typed `fauna.bridges.*` + `fauna.email.*` WS-RPC seams (the user-facing
+# Layer-3 bridge-management + mail-server-adjacent surfaces). The
+# `bridges_ui` / `email` modules these crates re-export from
+# `fauna-protocol` are also the DataMessage payload types — no
+# `serde_json::Value` re-shimmer at the WS-RPC seam.
+fauna-client-bridges = { path = "../../libs/fauna-client-bridges" }
+# Typed `fauna.nostr.bunker.*` WS-RPC seam — the NIP-46 bunker *Connected
+# apps* roster (mint/list/revoke a third-party app's signing connection) on
+# the standalone Nostr page (`nostr.md` § The nest as the user's NIP-46
+# signer). `NostrBunkerClient` mirrors `BridgesClient`'s thin-wrapper shape.
+fauna-client-nostr = { path = "../../libs/fauna-client-nostr" }
+# Typed `fauna.moderation.*` WS-RPC seam (queue read + train correction) for the
+# standalone Moderation page, plus the shared `content_label_badge` /
+# `obligation_action_label` category/action → LocalizedText maps the queue rows
+# resolve natively (moderation.md § Where logic lives).
+fauna-client-moderation = { path = "../../libs/fauna-client-moderation" }
+# Typed `bluesky.feed.thread` WS-RPC seam — the one protocol-unique
+# consume-side Bluesky surface (the crossposted-post thread view shown on
+# post-detail). `BlueskyClient`; re-exports `fauna_protocol::bluesky::{BlueskyPost,...}` (the
+# DataMessage payload types). bridges.md § Bluesky-native thread view.
+fauna-client-bluesky = { path = "../../libs/fauna-client-bluesky" }
+# Typed `fauna.admin.*` WS-RPC seam — the admin surface (user list +
+# eviction + tier change + invite-code minting/delete + invite-request
+# approve/deny). The `AdminClient` mirrors `BridgesClient`; its re-exported
+# `Admin*` shapes are the DataMessage payload types for the consolidated
+# `admin-users` page (no `/admin/api/*` HTTP twin, no `serde_json::Value`
+# re-shimmer at the seam). admin.md § Users.
+fauna-client-admin = { path = "../../libs/fauna-client-admin" }
+# Typed `fauna.family.*` WS-RPC seam — the family-safety surface
+# (`family-safety.md` § App surface): the guardian side (wards + the reach-
+# policy editor + the approvals queue + contact pre-approval + graduate) and the
+# supervised side (the `fauna.family.status` read behind the global
+# `supervised-indicator` and the gated `family-tab`). Same `AdminClient`-shaped
+# thin typed wrapper; linux consumes it directly over `Arc<NestClient>` (no FFI).
+fauna-client-family = { path = "../../libs/fauna-client-family" }
+# Typed `fauna.{knocks,contacts,inbox.mode}.*` WS-RPC seam — the
+# Typed `fauna.account.*` / `fauna.quota.get` / `fauna.profile.handle.change`
+# WS-RPC seam (account state, quota, admin-UI gate, handle change, account
+# deletion). Replaces the legacy `/api/v1/{account,quota,am-i-admin}` +
+# `/api/v1/profile/handle` HTTP call-sites.
+fauna-client-account = { path = "../../libs/fauna-client-account" }
+# Typed `fauna.features.*` WS-RPC seam — the gated-feature plane's
+# transparency read (`feature-limits-section`, `dynamic-features.md` §
+# Transparency & auditability). `FeaturesClient::rows()` is the one call: it
+# joins `fauna.features.status` with `fauna.nest.info`'s capability set and
+# folds both into ready-to-render rows, same as tui.
+fauna-client-features = { path = "../../libs/fauna-client-features" }
+# The region content plane's app side (src/region.rs) — the shared plane tui
+# leads with; linux paints it.
+fauna-client-region = { path = "../../libs/fauna-client-region" }
+# Multi-account registry (Stage 1): `AccountRegistry` over the logical-keyed
+# `SecretStore` seam + the `RegistryLaunchPersistence` adapter that reconciles
+# `fauna_launch_machine::LaunchPersistence` onto the active account. Linux
+# provides the `CredentialStore` glue (client.rs). NB: singular
+# `fauna-client-account` above is a different crate (account-state WS-RPC).
+# See docs/goal/architecture/long-term-store.md § Multi-account evolution.
+fauna-client-accounts = { path = "../../libs/fauna-client-accounts" }
+# Shared freedesktop credential primitives + the libsecret/file SecretStore
+# (lifted from this client's client.rs when fauna-tui became the 2nd consumer).
+fauna-credential-store = { workspace = true }
+# connection-management surface (knocks inbox, contacts roster, inbox-acceptance
+# policy). Replaces the legacy `fauna_nest_http::paths::{knocks,contacts}` +
+# `inbox::mode_for_actor` HTTP call-sites.
+fauna-client-contacts = { path = "../../libs/fauna-client-contacts" }
+fauna-client-conversations = { path = "../../libs/fauna-client-conversations" }
+# The T16 custody facet's shared PURE half (`ui/devices.md` § Custody facet):
+# the three folds + `fold_custody_facet`, and the receipt-status / held-bytes
+# resolve DOORS the i18n module forwards to linux's string table. The render
+# never re-derives a fold or a string. `local-clock`
+# for `custody_receipt_status_text`/`custody_held_bytes_text` — the same
+# feature this crate already turns on directly on `fauna-core` below,
+# forwarded one hop.
+fauna-client-capabilities = { path = "../../libs/fauna-client-capabilities", features = ["local-clock"] }
+# The custody ACT half — `run_custody_act` (this leg drives the owner-side
+# revoke) + `load_custody_facet`. Native-only glue that sits above both
+# fauna-sync-engine and fauna-client-conversations; see its crate docs for why
+# it cannot live in fauna-client-capabilities.
+fauna-client-custody = { path = "../../libs/fauna-client-custody" }
+fauna-client-inbox = { path = "../../libs/fauna-client-inbox" }
+# The shared account-store seams + helpers (`dav_store_context`, the folder
+# destination and member-review helpers). The inbound mail poll reads the
+# `fauna.state.mail` msek through it to derive the recipient HPKE
+# secret (`fauna_mls::derive_recipient_hpke_keypair`). `fauna-client-mail-settings`
+# already pulls it transitively; this direct dep lets the inbound glue read the
+# store without standing up a full machine.
+fauna-client-config = { path = "../../libs/fauna-client-config" }
+# The sealed personalization-model plane (`fauna.personalization.model.*`) —
+# the Trained-topics facet reads each factor's advisory `sample_count` for its
+# example-count column and pairs a registry delete with the nest-side model
+# delete (topic-factors.md § Wire & registry / § Delete semantics).
+fauna-client-personalization = { path = "../../libs/fauna-client-personalization" }
+# Task-delegation READ surface (`TaskDelegationView` + `DelegationClient`,
+# participants.md § Task delegation) for the Settings → Task delegation page.
+# The `driver` feature (the `LeaseCoordinator::run` async loop) is deliberately
+# NOT enabled: this app ran it only to contend for the `backup-upload` lease,
+# and the slice-5 flip (2026-07-29) retired the in-app upload driver entirely.
+# Re-enable it only if this app ever ships a runner loop for some task kind.
+fauna-client-delegation = { path = "../../libs/fauna-client-delegation" }
+# The Connected apps page machine (`ui/connected-apps.md`): the one roster, the
+# Requests tray, the typed-code start and the per-row revoke verb. `rpc-glue`
+# brings the production WS-RPC seam, consumed directly as Rust (tui's shape).
+fauna-client-connected-apps = { path = "../../libs/fauna-client-connected-apps", features = [
+    "rpc-glue",
+] }
+# `DraftsSync<Arc<NestClient>>` — the shared client half of draft-persistence v2
+# (file-sync.md § Drafts Sync): seal + `fauna.drafts.{get,put}` + the launch gate
+# / last-saved baseline. `conversations::drafts` wires the load-on-launch +
+# debounced-autosave triggers around it.
+fauna-client-drafts = { path = "../../libs/fauna-client-drafts" }
+# Cross-device MLS group-state sync (devices.md § Cross-device MLS group-state
+# sync, slice 5): the `MlsStateSync` replica wrapper + the `FaunaCommitGate` /
+# `BackendCatchUp` / `MlsSyncCursor` device-owned-epoch assembly that
+# `conversations::conv_backend` wires on login. Pulls fauna-conversations +
+# fauna-mls, both already linux deps.
+fauna-client-mls-sync = { path = "../../libs/fauna-client-mls-sync" }
+# Profile read + publish (profile.md § Where logic lives): `ProfileClient`
+# (fauna.profile.get/set), `build_profile` (sign), and the shared
+# `decode_profile` (verify-then-bare) the header + edit form use.
+fauna-client-profile = { path = "../../libs/fauna-client-profile" }
+# Subscriptions author-management (profile Tiers tab, SELF view — monetization.md
+# § Pillar 1): the thin `SubscriptionsClient` reads + the `SubscriptionsAuthor`
+# mint+upload orchestration (period-key custody + KeyBlob mint on approve/remove).
+fauna-client-subscriptions = { path = "../../libs/fauna-client-subscriptions" }
+# Payment-provider config + claim redemption (monetization.md § Pillar 3): the
+# thin `PaymentsClient` (providers.{set,list,remove} for the Tiers-tab §4
+# provider section; claims.redeem for the subscription-settings page) + the
+# `known_kinds` registry the §4 kind select enumerates.
+#
+# OPTIONAL: reached only through this crate's own `payments` feature, so the
+# store-safe flavor drops the plane instead of re-acquiring it through an
+# unconditional dep line. Its absence is what makes a HALF-excised build a
+# compile error rather than a silent leak (`dynamic-features.md`
+# § Platform-family surface excision).
+fauna-client-payments = { path = "../../libs/fauna-client-payments", optional = true }
+# Shared encrypted-CalDAV client (events.md Decision B) — `CalDavClient` over the
+# `fauna.bridges.*` calendar RPCs against the `bridge_caldav_*` store + client-side
+# seal/unseal (`fauna_mls::wrapped_blob`, the SAME scheme the MDA uses) + the
+# `generate_ical`/`parse_ical` writer/parser + the asymmetric `interested↔TENTATIVE`
+# RSVP projection. The Events page (views/events) reads via `query_events_decoded`
+# and writes via `seal_and_put_event`, replacing the legacy plaintext `content`-table
+# REST path; no calendar logic is authored in this client (priority #2 — the other
+# 5 clients lift the same glue). Native read path (parser) is `cfg(not(wasm32))`.
+fauna-client-caldav = { path = "../../libs/fauna-client-caldav" }
+# Shared encrypted-CardDAV read crate — `CardDavClient` + `list_addressbooks_decoded`
+# / `query_cards_decoded` + the WASM-safe vCard parser. The Contacts page's Address
+# Book segment (views/contacts/address_book.rs) calls it DIRECTLY (linux is Rust-native,
+# like Events uses fauna-client-caldav), NOT via the FFI. Read-only in slice 4b; all
+# seal/parse logic is shared (priority #2 — the per-app shell is a thin adapter).
+fauna-client-carddav = { path = "../../libs/fauna-client-carddav" }
+# Shared unified-DNS state machine — `DnsManagementMachine` + `DnsSnapshot` +
+# `DnsAction` + the `DnsNest` seam + the typed `DnsAdminClient` over the
+# Admin-only `fauna.dns.{list_records,verify_records}` WS-RPC. The admin DNS
+# page (views/admin.rs `admin-dns`) renders the snapshot; no DNS logic here.
+# `local-clock` for `cert_status_text`'s expiry-date rendering.
+fauna-client-dns = { path = "../../libs/fauna-client-dns", features = ["local-clock"] }
+fauna-client-email = { path = "../../libs/fauna-client-email" }
+# Typed `fauna.feed.*` WS-RPC seam (feed CRUD/list/get/update/delete + the
+# feed-posts + local-posts queries + discovery contributors). First native
+# consumer (priority #1/#2 — the other 5 clients lift it).
+fauna-client-feed = { path = "../../libs/fauna-client-feed" }
+# Thin `fauna.labelers.list` seam — the create-feed dialog's factor-weight
+# editor reads the caller's subscribed labeler factors to populate the
+# `feed-factor-select` picker (content-moderation-and-ranking.md §
+# Composition). Already a transitive dep via `fauna-labeler-catalog-machine`;
+# direct here since the factor picker needs only the bare list call, not the
+# full catalog machine's inspect/re-verify machinery.
+fauna-client-labelers = { path = "../../libs/fauna-client-labelers" }
+# Shared mail-settings state machine — `MailSettingsMachine` + `MailSettingsSnapshot`
+# + `MailSettingsAction` + the 4 client seams (NestClient / MailStore /
+# MlsSnapshotProvider / IdentitySigner). The user-facing Mail settings page
+# (settings/mail.rs) renders the snapshot and dispatches actions; no mail logic
+# is authored in this client. Wired into the page in Slice 2 (Slice 1 lands the static skeleton only).
+fauna-client-mail-settings = { path = "../../libs/fauna-client-mail-settings", features = ["rpc-glue"] }
+# Typed `fauna.notifications.*` WS-RPC seam — the unified notifications
+# list/mark-read/count plane. Linux only calls `notifications_list`; replaces
+# the legacy `fauna_nest_http::paths::notifications` HTTP call-site.
+fauna-client-notifications = { path = "../../libs/fauna-client-notifications" }
+# Shared per-user nest-pairing ("Linked nests") machine — snapshot + Refresh/
+# Link/Unlink dispatch over `fauna.pair.{list,add,revoke}`. The user-settings
+# Linked-nests page (settings/linked_nests.rs) renders the snapshot and
+# dispatches actions; no pairing logic is authored in this client (priority #2).
+# Native default features (no `uniffi` — that's only for the fauna-ffi consumer).
+fauna-client-pair = { path = "../../libs/fauna-client-pair" }
+# The client-side backup audit loop (`audit::run_audit_pass` + the
+# `AuditStateStore` seam this client backs with a JSON file) driving the Backups
+# page's `backup-destination-last-audit-time` / `backup-audit-alert` surface.
+# All verdict logic is shared Rust; this client supplies persistence + rendering.
+# `local-clock`: `row_text`'s resolved-row-text helpers (native-only).
+fauna-client-backup = { path = "../../libs/fauna-client-backup", features = ["local-clock"] }
+# Typed `fauna.posts.*` WS-RPC seam (create / get / interact). The
+# create-post path keeps the HTTP blob/sidecar upload (content_api) and
+# swaps only the final signed-post submission onto `posts_create`.
+fauna-client-posts = { path = "../../libs/fauna-client-posts" }
+fauna-client-search = { path = "../../libs/fauna-client-search" }
+# Typed `fauna.filesync.snapshot.*` WS-RPC seam (Backups restore surfaces:
+# snapshot list, restore history + divergence reads, the restore action).
+# First native consumer of this shared crate (priority #1/#2 — the other 5
+# clients lift it rather than reimplement the kind-composition).
+fauna-client-snapshots = { path = "../../libs/fauna-client-snapshots" }
+# Typed `fauna.folders.*` WS-RPC seam (Devices-page folder row CRUD —
+# list / members / selective-sync update / delete). First native consumer;
+# the other 5 clients + the wizard's eventual HTTP→WS-RPC migration lift it.
+# `mls` flips on the real `FolderGroupCrypto` adapter (`impl … for Arc<MlsEngine>`)
+# so the owner-side Sharing UI can drive `FoldersAuthor::{share_set,remove_member}`
+# over the conversations rail's shared per-actor engine (folders.md § Sharing).
+# Pulls fauna-mls + fauna-client-conversations, both already linux deps.
+fauna-client-folders = { path = "../../libs/fauna-client-folders", features = ["mls", "mail-settings"] }
+# Typed `fauna.sync.*` WS-RPC seam (Backups "last backed up" per-set status,
+# the device-sync control plane). Lifted from the web migration; linux is the second native consumer.
+fauna-client-sync = { path = "../../libs/fauna-client-sync" }
+# Typed `fauna.web.*` WS-RPC seam + shared web-hosting view logic (apex picker,
+# subdomain toggle). web-content-hosting.md § Admin apex hosting / § Published-post management.
+fauna-client-web = { path = "../../libs/fauna-client-web" }
+fauna-client-spam = { path = "../../libs/fauna-client-spam" }
+# Session-start critical-alert sweep (critical-alerts.md § Mechanism → Who runs
+# the detector) — the shared entry point tui's `session::establish` already
+# calls; this is linux's leg.
+fauna-client-alert-sweep = { path = "../../libs/fauna-client-alert-sweep" }
+
+# P2P networking. iroh is the substrate (behind the `fauna-transport` seam,
+# driven by `fauna-peer-channel`'s `PeerNode`) and since 2026-08-23 the only
+# one — the parked WireGuard fallback it used to sit beside was deleted whole
+# (`docs/goal/behavior/p2p.md`). `fauna-peer` stays for the contact /
+# connection-quality storage.
+fauna-transport = { path = "../../libs/fauna-transport" }
+fauna-iroh = { path = "../../libs/fauna-iroh", features = ["quic"] }
+fauna-peer-channel = { path = "../../libs/fauna-peer-channel" }
+fauna-peer = { path = "../../libs/fauna-peer" }
+# LAN interface enumeration (`discover_lan_candidates`) for the P2P page's
+# "LAN Addresses" row — already a transitive dep via `fauna-peer-channel`, made
+# direct so `p2p_tab.rs` (unconditional, no feature gate) can call it without
+# re-deriving the RFC-1918 arithmetic a second time.
+fauna-peer-sync = { path = "../../libs/fauna-peer-sync" }
+# The share plane's client crate — `p2p-share` only, mirroring fauna-tui.
+fauna-peer-share = { path = "../../libs/fauna-peer-share", optional = true }
+# The share-plane host's shared half (`p2p.md` § Cross-user shared-set transfer
+# → *What a leg still writes*): `ShareHostSeams` + the durable sink. Same gate.
+fauna-client-share-host = { path = "../../libs/fauna-client-share-host", optional = true }
+
+# MLS end-to-end encryption (native = SQLite persistence)
+fauna-mls = { path = "../../libs/fauna-mls", features = ["native"] }
+openmls = { workspace = true }
+
+# (The inbound-mail RECEIVE crypto bridge `fauna-mail` dep was removed when linux's
+# bespoke `conversations::mail_sink` inbound poll was folded into the shared
+# `ConversationsSession::start_receive_loop`; the decrypt now lives in the shared
+# `fauna_client_conversations::NestMailInboundSource`, so linux no longer deps
+# `fauna-mail` directly.)
+
+# Unified conversations page — multi-rail thread management. Direct dep,
+# no FFI hop (linux is in-process Rust). The `test-helpers` seams
+# (inject_inbound_for_test / create_mls_group / install_mock_backends_for_test /
+# inject_send_failure_for_test / inject_page_error_for_test / clear_for_test) let
+# the e2e bridge drive scenarios without real per-rail I/O — reached in debug via
+# the crate's `debug_assertions` arm, and in a release-profile e2e build via this
+# crate's `e2e-agent` feature. Deliberately NOT enabled unconditionally: that put
+# them in every shipped release binary (testing.md convention 15).
+fauna-conversations = { path = "../../libs/fauna-conversations" }
+
+# GTK4 + libadwaita
+gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
+adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
+glib = "0.20"
+gio = "0.20"
+
+# Async channels (replacement for removed glib::MainContext::channel)
+async-channel = "2"
+
+# In-process e2e automation server (gated by FAUNA_E2E_AGENT_PORT) — serves the
+# /element/* contract by direct GTK access, replacing the external AT-SPI bridge.
+# Blocking, dependency-light; its own thread (design tracked internally).
+# Shared in-process e2e automation agent (HTTP front-end + op types); linux
+# supplies the GTK perform/link halves. Also hosted by the cli client.
+#
+# UNCONDITIONAL on purpose, and NOT a rule-(b) violation: the dep line names no
+# feature. A debug build reaches the agent through the crate's own
+# `debug_assertions` arm; a release-profile e2e build opts in through THIS
+# crate's `e2e-agent` feature, which forwards `fauna-e2e-agent/e2e-agent` above.
+# A plain `--release` build gets the ungated half only (testing.md convention 15).
+fauna-e2e-agent = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+# Cancellation tokens for the in-process sync engine tasks (crate::sync)
+tokio-util = { workspace = true }
+# join_all for driving the per-folder sync engine loops concurrently
+futures-util = { workspace = true }
+# The shared cross-target retry combinator backing `async_helper::hydrate_with_retry`.
+fauna-sleep = { workspace = true }
+
+# HTTP client
+reqwest = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# File sync — the shared conflict-aware engine, driven in-process (crate::sync).
+# Same engine the per-user sync agent runs (apps/linux.md § File Sync).
+# `engine-lifecycle`: the build-one-engine-from-nest-state + fail-closed
+# content-key binding decision, shared with the apple FfiSyncEngineHost.
+# Post-A3 the app hosts no resident engine — this dep remains for the state-dir
+# helpers (`load_location_map`/`load_device_id`) and the Backups page's ephemeral
+# segment-backup coordinator.
+fauna-sync-engine = { path = "../../libs/fauna-sync-engine", features = [
+    "engine-lifecycle",
+] }
+
+# The W3 (account-data-plane.md § Workstreams) account-store runtime this app hosts (`crate::account_runtime`) — the
+# shared seed-holding-app assembly, one implementation for every native app
+# (`account-data-plane.md` § The account store → The client-side lifecycle).
+# Enables `fauna-sync-engine/account-runtime` through feature unification; the
+# peer leg stays off here (it needs `fauna-iroh`, a separate tranche).
+fauna-client-account-runtime = { path = "../../libs/fauna-client-account-runtime" }
+
+# The local IPC seam to the external per-user `fauna-sync-agent` (unix socket
+# transport + wire types); driven through the shared control client in
+# `fauna-client-sync::agent` (`crate::sync_agent`).
+fauna-ipc = { path = "../../libs/fauna-ipc" }
+
+# File sync — directory watching (default features enable inotify on Linux)
+notify = "8"
+
+# System tray (D-Bus StatusNotifierItem). Vendored + locally patched fork of
+# ksni 0.2.2 that implements `ProvideXdgActivationToken` so a GNOME/Wayland tray
+# host can hand us the activation token needed to raise the window from the tray
+# (close-to-tray "Open Fauna"). See libs/ksni/PATCH.md and src/tray.rs.
+ksni = { path = "../../libs/ksni" }
+
+# Desktop notifications (freedesktop)
+notify-rust = "4"
+
+# Credential storage (freedesktop Secret Service)
+secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
+
+# Hex encoding for actor IDs
+hex = { workspace = true }
+
+# Content hashing (blake3) used in sync download path
+blake3 = { workspace = true }
+
+# Crypto (for auth request signing)
+ed25519-dalek = { workspace = true }
+
+# Byte buffers (used by API response helpers)
+bytes = { workspace = true }
+
+# async fn in the NestContentApi trait (dyn-dispatched behind Arc<dyn>)
+async-trait = "0.1"
+
+# Error handling
+anyhow = { workspace = true }
+
+# Base64 encoding (used for SMTP send)
+base64 = { workspace = true }
+
+# System time / locale (used in time_utils.rs)
+libc = "0.2"
+
+# UUID generation (event UIDs)
+uuid = { workspace = true }
+
+# Content authenticity (C2PA manifest reading)
+c2pa = { workspace = true, features = ["file_io"] }
+
+[dev-dependencies]
+# Test builds never reach the live OS keyring — see the `no-live-keyring`
+# feature in libs/fauna-credential-store/Cargo.toml (dev-dependencies ONLY).
+fauna-credential-store = { workspace = true, features = ["no-live-keyring"] }
+# `app_settings` round-trips its JSON store through a scratch dir rather than
+# the real `$XDG_CONFIG_HOME`.
+tempfile = { workspace = true }
+# `locks::ServingLock` — a sibling app serving an account out of the shared
+# store root, for the startup re-sweep's leave-it-alone test.
+fauna-account-store = { workspace = true }
+# The shared `zaps` row test fixture (`test_fixtures::zaps_row`) — same
+# fixture fauna-tui's own tests use, one canonical body.
+fauna-client-features = { path = "../../libs/fauna-client-features", features = [
+    "test-fixtures",
+] }
+# `fixtures` — the synthetic registry and signed documents src/region.rs's
+# tests hold a plane over (the same request fauna-tui makes).
+fauna-client-region = { path = "../../libs/fauna-client-region", features = [
+    "test-fixtures",
+] }
+# `fauna_client_mail_settings::testing::a_mail_import_snapshot` — the shared
+# mail-import wizard test fixture (also used by fauna-tui).
+fauna-client-mail-settings = { path = "../../libs/fauna-client-mail-settings", features = [
+    "test-helpers",
+] }
+# `fauna_media::test_fixtures::build_png` — a real, decodable image for the
+# `post-image` cache tests (`views::feed::post_list`), the same builder
+# fauna-tui's tests and `libs/fauna-media`'s own use.
+fauna-media = { path = "../../libs/fauna-media", features = ["test-fixtures"] }
+# `FakeDevicesNestApi`/`FakeWizardFactory` — so the Devices page's fleet-removal
+# door pin (`views/devices_folders/mod.rs`) can build a real `DevicesMachine`
+# without a transport, mirroring the crate's own dev-dependency self-forward.
+fauna-devices-machine = { path = "../../libs/fauna-devices-machine", features = [
+    "test-helpers",
+] }

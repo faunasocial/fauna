@@ -1,0 +1,53 @@
+#!/command/with-contenv /bin/bash
+# fauna-mail-bridge MTA role — SMTP MX (25 inbound) + submission (465 implicit
+# TLS, 587 STARTTLS). Down by default; nest brings it up via the supervisor
+# sidekick socket (fauna.bridges.set_mail_enabled → s6-svc -u) once the admin
+# enables mail. The flag guard re-downs the service if it is started before the
+# /data/imap-enabled flag exists (a spurious up).
+#
+# The bridge LOADS its Ed25519 service-user keypair from
+# /data/keys/mta/mta.key (mode 0600, in the fauna-mta-owned 0700 subdir —
+# security.md § UID isolation). The ARTIFACT (entrypoint.sh) mints it AS ROOT
+# before this service starts — the bridge is LOAD-ONLY on the image path: the entrypoint also publishes the matching blessed pubkey so nest's
+# request_enrollment can require this bridge to prove possession of it. (A
+# non-artifact/dev run still auto-generates on first load.) The bridge then dials
+# nest on the loopback and discovers its role via whoami — there is NO --mode flag
+# (a product invariant: the bridge's role is deployment wiring, not a human-set
+# knob). --nest-endpoint is the loopback BASE url; the bridge itself
+# appends /api/v1/ws/{actor_id} (internal/wsrpc/client.go buildWSURL). Privileged
+# ports are bound via CAP_NET_BIND_SERVICE (setcap in the Dockerfile) under the
+# non-root `fauna-mta` user. See
+# docs/goal/behavior/mail-bridge-lifecycle.md § Cold boot, § Multi-role.
+#
+# Private NAT axis (home-relay box): the perimeter parser is NEVER started — a
+# private home box receives inbound over federation from its paired public relay
+# and submits/MX-delivers outbound through that relay, so it terminates no SMTP.
+# This is the durable (across-restart) half of the nest-side `mta_should_run`
+# gate: even when /data/imap-enabled is present (the admin enabled mail to serve
+# the MDA's LAN IMAP/CalDAV), the MTA s6 service stays down on FAUNA_MODE=private.
+# Per docs/goal/architecture/nest/deployment-home-with-public-relay.md
+# § Plaintext-mode behavior ("Perimeter parser process: NOT started").
+if [ "${FAUNA_MODE:-public}" = "private" ]; then
+    exec s6-svc -d /run/service/fauna-mail-bridge-mta
+fi
+if [ ! -e /data/imap-enabled ]; then
+    exec s6-svc -d /run/service/fauna-mail-bridge-mta
+fi
+# Re-bless from the current keyfile (root, pre-drop): after an admin key
+# rotation the bridge regenerated its keypair, but only root may update the
+# blessed registry — this closes the strict-mode re-key loop
+# (mail-bridge-lifecycle.md § Service-user re-keying; no-op on a normal start).
+/usr/local/bin/rebless-bridge-key.sh mta
+# The hostile-MIME SMTP parser (inbound internet mail on :25) runs under
+# fauna-sandbox's `bridge` profile: Landlock (fs default-deny — only
+# /data/keys/mta + operator-hatch granted, so the sealed store is kernel-
+# unreadable even on in-container priv-esc) + seccomp. fauna-sandbox raises
+# CAP_NET_BIND_SERVICE into the ambient set so the bridge still binds 25/465/587
+# under no_new_privs (security.md § UID isolation, slice 4).
+exec s6-setuidgid fauna-mta \
+  fauna-sandbox bridge -- \
+  fauna-mail-bridge \
+    --keypair-file /data/keys/mta/mta.key \
+    --nest-endpoint "https://127.0.0.1:${FAUNA_PORT:-3000}" \
+    --data-dir /data \
+    --log-level "${FAUNA_LOG_LEVEL:-info}"

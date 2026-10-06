@@ -1,0 +1,32 @@
+[package]
+name = "fauna-mls-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone fuzz crate; not part of the parent workspace. The empty
+# [workspace] table tells cargo to stop walking upward for a workspace
+# root. Combined with `exclude = ["libs/fauna-mls/fuzz"]` in the root
+# Cargo.toml, this keeps the fuzz crate isolated from workspace builds
+# (per cargo-fuzz convention).
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+fauna-mls = { path = ".." }
+arbitrary = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "unseal_random_bytes"
+path = "fuzz_targets/unseal_random_bytes.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "seal_unseal_roundtrip"
+path = "fuzz_targets/seal_unseal_roundtrip.rs"
+test = false
+doc = false

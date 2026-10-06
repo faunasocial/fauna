@@ -1,0 +1,614 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.BackupsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:FaunaApp.Controls"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:models="using:FaunaApp.Core.Models"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- Root: snapshot/detail area (fills) over the backup-destinations band.
+         Both are Grid rows (not a ScrollViewer), so the Auto destinations band
+         always fits on-screen below the *-sized snapshot area — FlaUI is_visible
+         needs the add-button + status rows in the viewport without a scroll. -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- ══ Snapshots + detail (two columns) ══ -->
+        <Grid Grid.Row="0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="320" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Left: Snapshot list -->
+            <Grid Grid.Column="0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <StackPanel Grid.Row="0" Padding="16,12" Spacing="8">
+                    <TextBlock x:Name="BackupsTitle" AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="BackupNowButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.SnapshotCreateButton}"
+                                Click="BackupNow_Click" />
+                        <Button x:Name="PruneButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.SnapshotPruneButton}"
+                                Click="PruneSnapshots_Click" />
+                        <Button x:Name="CheckButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.SnapshotCheckButton}"
+                                Click="CheckSnapshots_Click" />
+                        <ProgressRing x:Name="CreateProgress" IsActive="False"
+                                      Width="20" Height="20" Visibility="Collapsed" />
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <!-- Pick the folder whose snapshots the list shows
+                             (backups.md § User actions). A ComboBox, matching
+                             linux's dropdown — the shape the shared e2e's
+                             driver.select() drives on every native client.
+                             Items are built in code-behind so each ComboBoxItem's
+                             AutomationProperties.Name can carry the WIRE set name
+                             (windows select matches Name EXACTLY) while its
+                             Content shows the display label. -->
+                        <ComboBox x:Name="FolderSelector" MinWidth="160"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupFolderSelector}"
+                                  SelectionChanged="FolderSelector_SelectionChanged" />
+                        <TextBlock x:Name="LastBackedUpText"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.LastBackedUp}"
+                                   Opacity="0.6" FontSize="12" VerticalAlignment="Center" />
+                    </StackPanel>
+
+                    <!-- Single-flight indicator: while an op runs EVERY mutating
+                         control is disabled, so the page states WHICH one rather
+                         than leaving dead buttons unexplained (backups.md
+                         § Snapshot-list shape → *Create*). Untagged chrome. -->
+                    <TextBlock x:Name="BusyText" Opacity="0.7" FontSize="12"
+                               TextWrapping="Wrap" Visibility="Collapsed" />
+
+                    <!-- The check VERDICT — a result surface, never error-message
+                         (§ Architectural rules, rule 6). -->
+                    <TextBlock x:Name="CheckResultText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.SnapshotCheckResult}"
+                               TextWrapping="Wrap" FontSize="12"
+                               Visibility="Collapsed" />
+
+                    <!-- The prune dry-run. Execute is offered ONLY from here
+                         (§ *Prune* ruling — structural, not a UI convention), and
+                         the two no-op policy states say WHY nothing would be
+                         pruned rather than showing an empty success. -->
+                    <StackPanel x:Name="PrunePreviewPanel"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.SnapshotPrunePreview}"
+                                AutomationProperties.Name="snapshot-prune-preview"
+                                Spacing="4" Visibility="Collapsed"
+                                BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                                BorderThickness="1" CornerRadius="4" Padding="8">
+                        <TextBlock x:Name="PrunePreviewTitle" FontWeight="SemiBold" FontSize="12" />
+                        <StackPanel x:Name="PrunePreviewLines" Spacing="2" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button x:Name="PruneExecuteButton"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.SnapshotPruneExecuteButton}"
+                                    Click="PruneExecute_Click" />
+                            <Button x:Name="PruneCancelButton"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.SnapshotPruneCancelButton}"
+                                    Click="PruneCancel_Click" />
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+
+                <ListView x:Name="SnapshotList" Grid.Row="1"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.SnapshotList}"
+                          SelectionChanged="SnapshotList_SelectionChanged">
+                    <!-- snapshot-item lives on the ListViewItem CONTAINER, not the
+                         DataTemplate root: only the container exposes the UIA
+                         SelectionItem pattern, so the e2e bridge's click can
+                         Select() it (non-physical, foreground-independent) and
+                         SnapshotList_SelectionChanged actually fires. A bare-Grid
+                         template root carries no invoke/selection pattern at all
+                         (the addressbook-item/media-item trap; those pages used a
+                         Button root because they don't need selection state). -->
+                    <ListView.ItemContainerStyle>
+                        <Style TargetType="ListViewItem">
+                            <Setter Property="AutomationProperties.AutomationId"
+                                    Value="snapshot-item" />
+                        </Style>
+                    </ListView.ItemContainerStyle>
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="models:SnapshotDisplayRow">
+                            <!-- The root keeps a Name so this layout Grid (and its
+                                 subtree: the row text + delete buttons) survives
+                                 UIA-tree pruning; the snapshot-item id itself is on
+                                 the container above. The visible text is the
+                                 machine-projected row line: formatted date, file
+                                 count, formatted size — never the raw record dump
+                                 this page used to bind (the row's snapshot id now
+                                 rides the immediate-delete button's HelpText, below). -->
+                            <Grid AutomationProperties.Name="{x:Bind Text}"
+                                  Padding="4" ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="2">
+                                    <TextBlock Text="{x:Bind Text}" VerticalAlignment="Center"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4">
+                                    <!-- Recovery is offered ONLY out of SoftDeleted
+                                         (backups.md § *Soft-deleted rows*) — the
+                                         control's PRESENCE is the row-state
+                                         observable, the same shape as
+                                         snapshot-prune-execute-button. The machine
+                                         refuses the gesture for any other row, so
+                                         this render guard is the affordance rule,
+                                         never the enforcement. No confirm — same
+                                         shape as android/web/linux. -->
+                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.SnapshotUndeleteButton}"
+                                            Visibility="{x:Bind local:BackupsPage.BoolToVisibility(Recoverable)}"
+                                            Content="&#xE7A7;" FontFamily="Segoe MDL2 Assets"
+                                            FontSize="10" Padding="4,2"
+                                            IsEnabled="{x:Bind ActionsEnabled}"
+                                            Tag="{x:Bind}" Click="UndeleteSnapshot_Click"
+                                            ToolTipService.ToolTip="{loc:Localize Key=backups/snapshot_undelete_button}" />
+                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.SnapshotDeleteButton}"
+                                            Content="&#xE74D;" FontFamily="Segoe MDL2 Assets"
+                                            FontSize="10" Padding="4,2"
+                                            IsEnabled="{x:Bind ActionsEnabled}"
+                                            Tag="{x:Bind}" Click="DeleteSnapshot_Click"
+                                            ToolTipService.ToolTip="{loc:Localize Key=backups/delete_snapshot}" />
+                                    <!-- HelpText carries this row's snapshot id: the
+                                         windows arm of the cross-app row-id contract,
+                                         and WEB's shape (data-snapshot-id on the same
+                                         per-row button). It rides the BUTTON, not the
+                                         row container, because a scoped FlaUI read
+                                         resolves by FindAllDescendants from the scope
+                                         element — a container is not its own
+                                         descendant, so an id stamped there would be
+                                         unreadable at scope="snapshot-item[i]". -->
+                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.SnapshotImmediateDeleteButton}"
+                                            AutomationProperties.HelpText="{x:Bind IdText}"
+                                            Content="&#xE7BA;" FontFamily="Segoe MDL2 Assets"
+                                            FontSize="10" Padding="4,2"
+                                            IsEnabled="{x:Bind ActionsEnabled}"
+                                            Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                            Tag="{x:Bind}" Click="ImmediateDelete_Click"
+                                            ToolTipService.ToolTip="{loc:Localize Key=backups/immediate_delete_button}" />
+                                </StackPanel>
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+
+                <TextBlock x:Name="EmptyText" Grid.Row="1"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           Visibility="Collapsed" />
+                <ProgressRing x:Name="LoadProgress" Grid.Row="1"
+                              IsActive="False" Visibility="Collapsed" />
+            </Grid>
+
+            <!-- Right: restore surface (history + local-restore) over the
+                 selected-snapshot file detail. Auto/Auto/Auto rows (was Auto/Auto/*,
+                 changed 2026-09-09) inside a ScrollViewer:
+                 restore-history + local-restore keep the restore surface's must-be-visible IDs
+                 (restore-history-section, restore-snapshot-select, the per-row
+                 restore-divergence-banner) reachable at the top with no scroll, but
+                 their combined Auto height can grow past the viewport (more history
+                 rows, a revealed warning/divergence banner) and used to starve the
+                 file-detail row to zero when it did — a Grid row cannot reveal what
+                 doesn't fit. The ScrollViewer + BringIntoViewAfterLayout(FileList) in
+                 UpdateFileList give the file-detail pane somewhere to scroll TO, the
+                 same fix already used for AtprotoPage/PersonalizationPage/
+                 SettingsAccountPage's revealed-but-offscreen panels. -->
+            <Grid Grid.Column="1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                  BorderThickness="1,0,0,0">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <!-- ══ Restore history (read side) ══ backups.md § Restore history -->
+                <StackPanel Grid.Row="0" Padding="16,12" Spacing="6"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreHistorySection}"
+                            AutomationProperties.Name="restore-history-section">
+                    <TextBlock x:Name="RestoreHistoryHeader"
+                               Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <!-- Rows rebuilt in code-behind (non-virtualizing StackPanel so
+                         FlaUI count-all sees every row; each carries the indexed
+                         AutomationId + Name, and its divergence banner as a child). -->
+                    <ScrollViewer MaxHeight="180" VerticalScrollBarVisibility="Auto">
+                        <StackPanel x:Name="RestoreHistoryContainer" Spacing="6"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreHistoryList}"
+                                    AutomationProperties.Name="restore-history-list" />
+                    </ScrollViewer>
+                    <TextBlock x:Name="RestoreHistoryEmpty" Opacity="0.5"
+                               FontSize="12" Visibility="Collapsed" />
+                </StackPanel>
+
+                <!-- ══ Local restore action ══ backups.md § Restore from backup destination -->
+                <StackPanel Grid.Row="1" Padding="16,8" Spacing="8"
+                            BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                            BorderThickness="0,1,0,0">
+                    <TextBlock x:Name="RestoreLocalHeader"
+                               Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <!-- restore-source-select: disabled at zero destinations
+                         (cross-location pull = fauna-sync Plan 4). -->
+                    <ComboBox x:Name="RestoreSourceSelect"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreSourceSelect}"
+                              IsEnabled="False" HorizontalAlignment="Stretch" />
+                    <!-- restore-snapshot-select: the wired local message-kind picker. -->
+                    <ComboBox x:Name="RestoreSnapshotSelect"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreSnapshotSelect}"
+                              DisplayMemberPath="Label" HorizontalAlignment="Stretch"
+                              SelectionChanged="RestoreSnapshotSelect_SelectionChanged" />
+                    <StackPanel Orientation="Horizontal" Spacing="16"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreKindsCheckboxes}"
+                                AutomationProperties.Name="restore-kinds-checkboxes">
+                        <CheckBox x:Name="RestoreKindMail" IsChecked="True"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreKindCheckbox}" />
+                        <CheckBox x:Name="RestoreKindCalendar" IsChecked="True"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreKindCheckbox}" />
+                    </StackPanel>
+                    <TextBox x:Name="RestoreConfirmInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreConfirmInput}"
+                             TextChanged="RestoreConfirmInput_TextChanged" />
+                    <Button x:Name="RestoreConfirmButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreConfirmButton}"
+                            IsEnabled="False" Click="RestoreConfirm_Click"
+                            Style="{StaticResource AccentButtonStyle}" />
+                    <TextBlock x:Name="RestoreProgress"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreProgress}"
+                               Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
+                    <TextBlock x:Name="RestoreWarningText"
+                               Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                               TextWrapping="Wrap" FontSize="12" Visibility="Collapsed" />
+                </StackPanel>
+
+                <!-- ══ Selected-snapshot file detail ══ -->
+                <Grid Grid.Row="2" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                      BorderThickness="0,1,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <TextBlock x:Name="DetailHeader" Grid.Row="0" Padding="16,12"
+                               Style="{StaticResource SubtitleTextBlockStyle}" />
+
+                    <!-- MinHeight/MaxHeight bound this row like restore-history-list's
+                         own ScrollViewer (180) above. MinHeight matters even for a
+                         ZERO-file snapshot: an Auto-height ListView with no items has
+                         near-zero desired size, which itself reads as IsOffscreen —
+                         MinHeight keeps the (still Visible) empty list a real,
+                         on-screen target. MaxHeight keeps a many-file snapshot on its
+                         own internal scroll instead of stretching the outer
+                         ScrollViewer's content past reason. -->
+                    <ListView x:Name="FileList" Grid.Row="1" MinHeight="150" MaxHeight="320"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.SnapshotDetailFiles}">
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="models:SnapshotFileDisplayRow">
+                                <!-- The row root carries a Name (like snapshot-item's) — a bare
+                                     layout Grid is pruned from the UIA tree WITH its subtree, so
+                                     FlaUI would count 0 download buttons. -->
+                                <Grid ColumnSpacing="8" Padding="4"
+                                      AutomationProperties.Name="{x:Bind Path}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="{x:Bind Path}" VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="1" Text="{x:Bind SizeText}"
+                                               VerticalAlignment="Center" Opacity="0.6" FontSize="12" />
+                                    <!-- Single-file restore (backup-restore.md § 3): fetch this
+                                         file's bytes + save via the ISnapshotFileSaver seam.
+                                         Painted only for a REGULAR file — a directory or symlink
+                                         row gets no dead affordance (tui's shape, inherited via
+                                         the § Snapshot-list shape reconciliation ledger). -->
+                                    <Button Grid.Column="2"
+                                            AutomationProperties.AutomationId="{x:Bind ids:Ids.SnapshotFileDownloadButton}"
+                                            Content="&#xE896;" FontFamily="Segoe MDL2 Assets"
+                                            FontSize="10" Padding="4,2"
+                                            Visibility="{x:Bind local:BackupsPage.BoolToVisibility(CanDownload)}"
+                                            Tag="{x:Bind}" Click="DownloadSnapshotFile_Click"
+                                            ToolTipService.ToolTip="{loc:Localize Key=backups/download}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+
+                    <TextBlock x:Name="NoFilesText" Grid.Row="1"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </Grid>
+                </Grid>
+                </ScrollViewer>
+            </Grid>
+
+            <controls:CopyableInfoBar x:Name="ErrorBar" IsOpen="False" Severity="Error"
+                     Grid.ColumnSpan="2" VerticalAlignment="Bottom" />
+        </Grid>
+
+        <!-- ══ Backup destinations (management) ══
+             backups.md § Manage backup destinations. Add button + indexed
+             status rows (built in code-behind off BackupsViewModel.Destinations);
+             the add/edit + remove-confirm modals are ContentDialogs below. -->
+        <StackPanel Grid.Row="1" Padding="16,8,16,12" Spacing="8"
+                    BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                    BorderThickness="0,1,0,0">
+            <!-- backup-audit-alert — loud audit-failure banners, one per failing
+                 destination, mounted above the destination rows (backups.md §
+                 Audit-alert surface; the restore-divergence-banner idiom). A
+                 non-virtualizing StackPanel so FlaUI count-all sees every banner;
+                 empty (no children) while every destination's last audit passed. -->
+            <StackPanel x:Name="DestinationsAuditAlerts" Spacing="4" />
+            <!-- backup-sole-client-destination-warning — standing warning while EVERY
+                 configured destination is a client device (backups.md § Third
+                 destination kind → Durability + labeling; user-approved 2026-08-02). -->
+            <TextBlock x:Name="SoleClientDestinationWarning" TextWrapping="Wrap"
+                       Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupSoleClientDestinationWarning}"
+                       Visibility="Collapsed" />
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <TextBlock x:Name="DestinationsHeader"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           VerticalAlignment="Center" />
+                <Button x:Name="DestinationAddButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupDestinationAddButton}"
+                        Click="DestinationAdd_Click" />
+            </StackPanel>
+            <TextBlock x:Name="DestinationsDesc" Opacity="0.6" TextWrapping="Wrap"
+                       FontSize="12" />
+            <!-- Status rows rebuilt here off the VM (non-virtualizing StackPanel
+                 so FlaUI count-all sees every row). -->
+            <StackPanel x:Name="DestinationsContainer" Spacing="6" />
+            <TextBlock x:Name="DestinationsEmpty" Opacity="0.5" Visibility="Collapsed" />
+            <!-- backup-orphaned-store-row — this device still holds a full sealed
+                 backup copy that no destination row uses any more (backups.md §
+                 Manage backup destinations → *Reclaim this device's copy*).
+                 Removing a client-device destination deliberately KEEPS the local
+                 store (it is the owner's only offline copy), so an orphaned store
+                 is an ordinary state with its own row — and this row is what keeps
+                 the disk space recoverable from the app at all.
+
+                 Painted off the VM's CACHED verdict (BackupsViewModel.
+                 OrphanedStoreText); the verdict itself is never computed on a
+                 render path — it costs an agent IPC round trip on top of the
+                 agent's disk walk. AutomationProperties.Name is required on the
+                 bare StackPanel or FlaUI never realizes it
+                 (reference_winui_flaui_datatemplate_name). -->
+            <StackPanel x:Name="OrphanedStoreRow" Orientation="Horizontal" Spacing="8"
+                        Visibility="Collapsed"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupOrphanedStoreRow}"
+                        AutomationProperties.Name="backup-orphaned-store-row">
+                <TextBlock x:Name="OrphanedStoreText" TextWrapping="Wrap"
+                           VerticalAlignment="Center" />
+                <!-- backup-destination-reseed-button — the restore, ahead of the
+                     reclaim (backups.md § Restore after losing the nest): a rebuilt
+                     nest's registry is empty, so the device's copy usually reads as
+                     orphaned there. Painted iff the shared backup_reseed_rows names
+                     this row (BackupsViewModel.ReseedOnOrphanedStore). -->
+                <Button x:Name="OrphanedReseedButton" Visibility="Collapsed"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupDestinationReseedButton}"
+                        Click="DestinationReseed_Click" />
+                <Button x:Name="DestinationReclaimButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupDestinationReclaimButton}"
+                        Click="DestinationReclaim_Click" />
+            </StackPanel>
+            <!-- backup-destination-reseed-result — present only after a run: the
+                 running line, then the shared driver's result lines (verdict
+                 first). AutomationId only, no static Name, so get_text reads the
+                 live text (reference: a dynamic get_text label carries no Name). -->
+            <TextBlock x:Name="ReseedResultText" TextWrapping="Wrap"
+                       Visibility="Collapsed"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupDestinationReseedResult}" />
+        </StackPanel>
+
+        <!-- Add / edit destination dialog (backup-destination-add-modal). -->
+        <ContentDialog x:Name="DestinationDialog">
+            <StackPanel x:Name="DestinationModal" Spacing="12" MinWidth="380"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupDestinationAddModal}"
+                        AutomationProperties.Name="backup-destination-add-modal">
+                <!-- backup-destination-kind-select — which kind this add composes
+                     (backups.md § Third destination kind). Items are built in
+                     code-behind from the shared kind catalog: Content = the
+                     localized label, AutomationProperties.Name = the WIRE value
+                     (the e2e driver.select contract on windows, ComboBoxItem.Name
+                     EXACTLY — reference_windows_flaui_select_exact_name). Add-only:
+                     disabled (not hidden) in edit mode, since the kind is not an
+                     editable property. -->
+                <ComboBox x:Name="DestinationKindSelect"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupDestinationKindSelect}"
+                          SelectionChanged="DestinationKindSelect_SelectionChanged" />
+                <TextBox x:Name="DestinationUrlBox"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupDestinationUrlInput}" />
+                <TextBox x:Name="DestinationNameBox"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupDestinationNameInput}" />
+                <!-- backup-destination-capacity-input — the client-device kind's only
+                     knob; painted only for that kind (the swap, never disabled-URL). -->
+                <TextBox x:Name="DestinationCapacityBox"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupDestinationCapacityInput}"
+                         Visibility="Collapsed" />
+                <!-- The § Threat model statement, at opt-in (untagged — not a new id). -->
+                <TextBlock x:Name="DestinationCustodianExposureNote" TextWrapping="Wrap"
+                           Opacity="0.6" FontSize="12" Visibility="Collapsed" />
+                <TextBlock x:Name="DestinationDialogError" TextWrapping="Wrap"
+                           Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                           Visibility="Collapsed" />
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button x:Name="DestinationCancelButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupDestinationAddCancelButton}"
+                            Click="DestinationCancel_Click" />
+                    <Button x:Name="DestinationConfirmButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupDestinationAddConfirmButton}"
+                            Click="DestinationConfirm_Click"
+                            Style="{StaticResource AccentButtonStyle}" />
+                </StackPanel>
+            </StackPanel>
+        </ContentDialog>
+
+        <!-- Remove-confirm dialog (backup-destination-remove-confirm-modal). -->
+        <ContentDialog x:Name="DestinationRemoveDialog">
+            <StackPanel x:Name="DestinationRemoveModal" Spacing="12" MinWidth="360"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupDestinationRemoveConfirmModal}"
+                        AutomationProperties.Name="backup-destination-remove-confirm-modal">
+                <TextBlock x:Name="DestinationRemoveText" TextWrapping="Wrap" />
+                <!-- backup-destination-remove-reclaim-checkbox — opt-in: also free
+                     this device's copy now, at the moment the intent forms
+                     (backups.md § Manage backup destinations → *Remove* /
+                     *Reclaim this device's copy*). Painted ONLY for client-device
+                     rows, decided by the shared destination_row_is_a_client_device
+                     predicate — never a raw kind compare here. Unchecked on every
+                     open: this deletes the owner's only offline copy, so it is
+                     never a sticky choice. -->
+                <CheckBox x:Name="DestinationRemoveReclaimCheckBox"
+                          Visibility="Collapsed"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupDestinationRemoveReclaimCheckbox}" />
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button x:Name="DestinationRemoveCancelButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupDestinationRemoveCancelButton}"
+                            Click="DestinationRemoveCancel_Click" />
+                    <Button x:Name="DestinationRemoveConfirmButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupDestinationRemoveConfirmButton}"
+                            Click="DestinationRemoveConfirm_Click"
+                            Style="{StaticResource AccentButtonStyle}" />
+                </StackPanel>
+            </StackPanel>
+        </ContentDialog>
+
+        <!-- backup-reclaim-confirm-modal — the standalone reclaim's confirm, off
+             backup-orphaned-store-row. A PLAIN confirm, deliberately no re-type:
+             reclaiming ends this device's standalone-restore property (the reason
+             there is a modal at all), but the store is re-buildable from a fresh
+             pull whenever the device re-enrolls — unlike the declassify-style
+             confirms elsewhere in this app, which guard irreversible acts. -->
+        <ContentDialog x:Name="ReclaimConfirmDialog">
+            <StackPanel x:Name="ReclaimConfirmModal" Spacing="12" MinWidth="360"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupReclaimConfirmModal}"
+                        AutomationProperties.Name="backup-reclaim-confirm-modal">
+                <TextBlock x:Name="ReclaimConfirmTitle" TextWrapping="Wrap"
+                           Style="{StaticResource SubtitleTextBlockStyle}" />
+                <TextBlock x:Name="ReclaimConfirmBody" TextWrapping="Wrap" />
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button x:Name="ReclaimCancelButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupReclaimCancelButton}"
+                            Click="ReclaimCancel_Click" />
+                    <Button x:Name="ReclaimConfirmButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupReclaimConfirmButton}"
+                            Click="ReclaimConfirm_Click"
+                            Style="{StaticResource AccentButtonStyle}" />
+                </StackPanel>
+            </StackPanel>
+        </ContentDialog>
+
+        <!-- backup-destination-reseed-confirm-modal — a PLAIN confirm, no re-type:
+             the ceremony deletes nothing on either side and refuses a lived-in
+             target by itself (target_not_empty, no force arm). backups.md §
+             Restore after losing the nest. -->
+        <ContentDialog x:Name="ReseedConfirmDialog">
+            <StackPanel x:Name="ReseedConfirmModal" Spacing="12" MinWidth="360"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupDestinationReseedConfirmModal}"
+                        AutomationProperties.Name="backup-destination-reseed-confirm-modal">
+                <TextBlock x:Name="ReseedConfirmTitle" TextWrapping="Wrap"
+                           Style="{StaticResource SubtitleTextBlockStyle}" />
+                <TextBlock x:Name="ReseedConfirmBody" TextWrapping="Wrap" />
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button x:Name="ReseedCancelButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupDestinationReseedCancelButton}"
+                            Click="ReseedCancel_Click" />
+                    <Button x:Name="ReseedConfirmButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupDestinationReseedConfirmButton}"
+                            Click="ReseedConfirm_Click"
+                            Style="{StaticResource AccentButtonStyle}" />
+                </StackPanel>
+            </StackPanel>
+        </ContentDialog>
+
+        <!-- Delete confirmation for the ordinary (48 h soft) delete. Client glue,
+             deliberately untagged: backups.md § Snapshot-list shape → *Delete*
+             makes the confirm a per-app affordance ("windows and iOS ship no
+             confirm today and gain one; the other four keep theirs"), and ui.yaml
+             scopes it no id. NOT the friction bar — that is the separate
+             immediate-delete modal below, which the nest re-checks. -->
+        <ContentDialog x:Name="DeleteSnapshotDialog">
+            <TextBlock x:Name="DeleteSnapshotText" TextWrapping="Wrap" MinWidth="320" />
+        </ContentDialog>
+
+        <!-- Immediate-delete confirmation (immediate-delete-confirm-modal).
+             backups.md § User actions + the behavioural invariant (never one-click):
+             the confirm button enables ONLY when BOTH inputs match exactly. A
+             ContentDialog like the destination add/edit modal — its inputs are
+             FlaUI-drivable (the destination-CRUD e2e proves it); the e2e wait_fors
+             the modal after the row click rather than asserting it synchronously. -->
+        <ContentDialog x:Name="ImmediateDeleteDialog">
+            <StackPanel x:Name="ImmediateDeleteModal" Spacing="12" MinWidth="420"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ImmediateDeleteConfirmModal}"
+                        AutomationProperties.Name="immediate-delete-confirm-modal">
+                <TextBlock x:Name="ImmediateDeleteWarning" TextWrapping="Wrap"
+                           Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+                <TextBox x:Name="ImmediateDeleteConfirmInput"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ImmediateDeleteConfirmInput}"
+                         TextChanged="ImmediateDeleteConfirmInput_TextChanged" />
+                <TextBlock x:Name="ImmediateDeleteAckPrompt" TextWrapping="Wrap" FontSize="12" />
+                <TextBlock x:Name="ImmediateDeleteAckPhrase" TextWrapping="Wrap"
+                           FontFamily="Consolas" IsTextSelectionEnabled="True" />
+                <TextBox x:Name="ImmediateDeleteAcknowledgeInput"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ImmediateDeleteAcknowledgeInput}"
+                         TextChanged="ImmediateDeleteAcknowledgeInput_TextChanged" />
+                <TextBlock x:Name="ImmediateDeleteDialogError" TextWrapping="Wrap"
+                           Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                           Visibility="Collapsed" />
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button x:Name="ImmediateDeleteCancelButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ImmediateDeleteCancelButton}"
+                            Click="ImmediateDeleteCancel_Click" />
+                    <Button x:Name="ImmediateDeleteConfirmButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ImmediateDeleteConfirmButton}"
+                            IsEnabled="False" Click="ImmediateDeleteConfirm_Click"
+                            Style="{StaticResource AccentButtonStyle}" />
+                </StackPanel>
+            </StackPanel>
+        </ContentDialog>
+
+        <!-- Forensic restore-divergence details (restore-divergence-details-modal).
+             An INLINE overlay (not a ContentDialog) so its Visibility flips
+             SYNCHRONOUSLY on the banner click — the shared e2e asserts is_visible
+             immediately after the click (no wait_for), and a ContentDialog's async
+             open transition loses that race. Living in the main visual tree also
+             lets is_visible compute IsOffscreen normally. RowSpan=2 + last child ⇒
+             scrim over the whole page; close-only (server state won the restore). -->
+        <Grid x:Name="DivergenceOverlay" Grid.RowSpan="2" Visibility="Collapsed"
+              Background="{ThemeResource SmokeFillColorDefaultBrush}">
+            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreDivergenceDetailsModal}"
+                    AutomationProperties.Name="restore-divergence-details-modal"
+                    Background="{ThemeResource LayerFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="8" Padding="20"
+                    MaxWidth="460" MaxHeight="440"
+                    HorizontalAlignment="Center" VerticalAlignment="Center">
+                <StackPanel Spacing="12">
+                    <TextBlock x:Name="DivergenceTitle"
+                               Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <ScrollViewer MaxHeight="240" VerticalScrollBarVisibility="Auto">
+                        <StackPanel x:Name="DivergenceContainer" Spacing="6" />
+                    </ScrollViewer>
+                    <TextBlock x:Name="DivergenceFooter" Opacity="0.6" FontSize="12"
+                               TextWrapping="Wrap" />
+                    <Button x:Name="DivergenceCloseButton" HorizontalAlignment="Right"
+                            Click="DivergenceClose_Click" />
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Grid>
+</Page>

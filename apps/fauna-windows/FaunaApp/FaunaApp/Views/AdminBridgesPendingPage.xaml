@@ -1,0 +1,262 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.AdminBridgesPendingPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <Grid>
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="16" MaxWidth="600" HorizontalAlignment="Left">
+
+            <!-- Error bar -->
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="False"
+                IsClosable="True" />
+
+            <!-- Header -->
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=admin/bridges_pending/title}" />
+            <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=admin/bridges_pending/description}" />
+
+            <!-- Loading -->
+            <ProgressRing
+                x:Name="LoadProgress"
+                IsActive="False"
+                Visibility="Collapsed"
+                HorizontalAlignment="Left" />
+
+            <!-- Pending section (admin.md § Approved-bridges roster: the pending
+                 cards above, the approved roster below, in one scroll). -->
+            <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                       Text="{loc:Localize Key=admin/bridges_pending/pending_section}" />
+
+            <!-- Empty state -->
+            <TextBlock x:Name="EmptyText" Visibility="Collapsed" Opacity="0.5" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=admin/bridges_pending/empty}" />
+
+            <!-- Pending-bridge approval cards -->
+            <ItemsControl x:Name="CardsList">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="local:PendingBridgeItem">
+                        <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesPendingCard}"
+                                AutomationProperties.Name="{x:Bind RequestedRole}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1" CornerRadius="6"
+                                Padding="12" Margin="0,4">
+                            <StackPanel Spacing="6">
+
+                                <!-- Friendly per-role display name (admin.md § Bridge
+                                     display naming): the MDA serves IMAP + CalDAV, the
+                                     MTA serves SMTP only. The technical role still
+                                     renders below in admin-bridges-pending-requested-role. -->
+                                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesPendingCardName}"
+                                           AutomationProperties.Name="{x:Bind DisplayName}"
+                                           Text="{x:Bind DisplayName}"
+                                           Style="{StaticResource BodyStrongTextBlockStyle}"
+                                           TextWrapping="Wrap" />
+
+                                <!-- Role -->
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="110" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{x:Bind RoleCaption}" Opacity="0.6" />
+                                    <TextBlock Grid.Column="1"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesPendingRequestedRole}"
+                                               Text="{x:Bind RequestedRole}" TextWrapping="Wrap" />
+                                </Grid>
+
+                                <!-- Public key -->
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="110" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{x:Bind PubkeyCaption}" Opacity="0.6" />
+                                    <TextBlock Grid.Column="1"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesPendingPubkeyHex}"
+                                               Text="{x:Bind PubkeyHex}" FontFamily="Consolas"
+                                               IsTextSelectionEnabled="True" TextWrapping="Wrap" />
+                                </Grid>
+
+                                <!-- Source IP -->
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="110" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{x:Bind SourceIpCaption}" Opacity="0.6" />
+                                    <TextBlock Grid.Column="1"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesPendingSourceIp}"
+                                               Text="{x:Bind SourceIp}" TextWrapping="Wrap" />
+                                </Grid>
+
+                                <!-- First seen -->
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="110" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{x:Bind FirstSeenCaption}" Opacity="0.6" />
+                                    <TextBlock Grid.Column="1"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesPendingFirstSeenAt}"
+                                               Text="{x:Bind FirstSeenAt}" TextWrapping="Wrap" />
+                                </Grid>
+
+                                <!-- Actions -->
+                                <StackPanel Orientation="Horizontal" Spacing="8"
+                                            HorizontalAlignment="Right" Margin="0,4,0,0">
+                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesPendingRejectButton}"
+                                            Content="{x:Bind RejectLabel}"
+                                            Click="RejectButton_Click" />
+                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesPendingApproveButton}"
+                                            Content="{x:Bind ApproveLabel}"
+                                            Style="{StaticResource AccentButtonStyle}"
+                                            Click="ApproveButton_Click" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <!-- Approved-bridges roster (admin.md § Approved-bridges roster). Fed by
+                 list_service_users(status="approved") through the shared machine's
+                 snapshot.approved; each card carries the rotate-service-user-key
+                 affordance. Mirrors linux build_approved_bridge_card. -->
+            <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                       Text="{loc:Localize Key=admin/bridges_pending/approved_section}" />
+            <TextBlock x:Name="ApprovedEmptyText" Visibility="Collapsed" Opacity="0.5" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=admin/bridges_pending/approved_empty}" />
+
+            <ItemsControl x:Name="ApprovedList">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="local:ApprovedBridgeItem">
+                        <!-- AutomationProperties.Name is load-bearing: without it a
+                             DataTemplate row Border is not surfaced to FlaUI and the
+                             e2e's count()/get_text() see zero cards. -->
+                        <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesApprovedCard}"
+                                AutomationProperties.Name="{x:Bind Role}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1" CornerRadius="6"
+                                Padding="12" Margin="0,4">
+                            <StackPanel Spacing="6">
+
+                                <!-- Same friendly per-role display name as the pending
+                                     card (shared bridge_display_name). -->
+                                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesApprovedCardName}"
+                                           AutomationProperties.Name="{x:Bind DisplayName}"
+                                           Text="{x:Bind DisplayName}"
+                                           Style="{StaticResource BodyStrongTextBlockStyle}"
+                                           TextWrapping="Wrap" />
+
+                                <!-- Role -->
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="110" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{x:Bind RoleCaption}" Opacity="0.6" />
+                                    <TextBlock Grid.Column="1"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesApprovedRole}"
+                                               Text="{x:Bind Role}" TextWrapping="Wrap" />
+                                </Grid>
+
+                                <!-- Public key -->
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="110" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{x:Bind PubkeyCaption}" Opacity="0.6" />
+                                    <TextBlock Grid.Column="1"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesApprovedPubkeyHex}"
+                                               Text="{x:Bind PubkeyHex}" FontFamily="Consolas"
+                                               IsTextSelectionEnabled="True" TextWrapping="Wrap" />
+                                </Grid>
+
+                                <!-- Approved at -->
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="110" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{x:Bind ApprovedAtCaption}" Opacity="0.6" />
+                                    <TextBlock Grid.Column="1"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesApprovedApprovedAt}"
+                                               Text="{x:Bind ApprovedAt}" TextWrapping="Wrap" />
+                                </Grid>
+
+                                <!-- Rotate -->
+                                <StackPanel Orientation="Horizontal" Spacing="8"
+                                            HorizontalAlignment="Right" Margin="0,4,0,0">
+                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesApprovedRotateButton}"
+                                            Content="{x:Bind RotateLabel}"
+                                            Click="RotateButton_Click" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <!-- TextBlock mirrors for E2E (see MainPage.UpdateTestMessages) -->
+            <TextBlock x:Name="ErrorTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+                       AutomationProperties.Name=" "
+                       Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+            <TextBlock x:Name="WarningTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.WarningMessage}"
+                       AutomationProperties.Name=" "
+                       Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+        </StackPanel>
+    </ScrollViewer>
+
+    <!-- admin-bridges-rotate-confirm. An INLINE overlay (not a ContentDialog) so
+         its Visibility flips SYNCHRONOUSLY on the rotate click — the shared e2e
+         asserts is_visible on the warning text immediately after the click (no
+         wait_for), and a ContentDialog's async open transition loses that race
+         (same reason as BackupsPage's restore-divergence overlay). Living in the
+         main visual tree also lets is_visible compute IsOffscreen normally.
+         No DKIM warning for any role: the nest holds every DKIM key
+         (mail-bridge-lifecycle.md § Service-user re-keying). -->
+    <Grid x:Name="RotateOverlay" Visibility="Collapsed"
+          Background="{ThemeResource SmokeFillColorDefaultBrush}">
+        <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesRotateConfirm}"
+                AutomationProperties.Name="admin-bridges-rotate-confirm"
+                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                BorderThickness="1" CornerRadius="8" Padding="20"
+                MaxWidth="460"
+                HorizontalAlignment="Center" VerticalAlignment="Center">
+            <StackPanel Spacing="12">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/bridges_rotate/title}" />
+                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesRotateWarningText}"
+                           TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/bridges_rotate/warning}" />
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesRotateCancelButton}"
+                            Content="{loc:Localize Key=admin/bridges_rotate/cancel}"
+                            Click="RotateCancel_Click" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesRotateConfirmButton}"
+                            Content="{loc:Localize Key=admin/bridges_rotate/confirm}"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Click="RotateConfirm_Click" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+    </Grid>
+    </Grid>
+</Page>

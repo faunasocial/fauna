@@ -1,0 +1,16 @@
+# A public relay nest that accepts a forwarded post ONLY from a nest the
+# author has paired for `post_forward` — the `paired_only` submission policy
+# (`docs/goal/architecture/nest/private-mode.md` § Post Forwarding, step 2).
+# The counterpart of `test-private-paired.toml`: a private nest forwarding to
+# this relay is refused until the user links the two, which is the state the
+# forward-queue journey (`tests/e2e-unified/tests/test_forward_queue.py`)
+# starts from. Test-only; the shipped default stays `open` (`default.toml`).
+
+[nest]
+mode = "public"
+listen = "0.0.0.0:3000"
+db_path = "/data/nest.db"
+blob_dir = "/data/blobs"
+
+[submission]
+policy = "paired_only"

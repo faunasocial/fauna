@@ -1,0 +1,27 @@
+[package]
+name = "fauna-client-linkpreview"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# fauna-protocol carries the typed `fauna.linkpreview.resolve` wire types + the
+# `RpcRequester` seam this crate is generic over (mirrors fauna-client-posts).
+# `default-features = false` drops native-only features so this crate compiles to
+# wasm32; native workspace builds re-enable them via Cargo feature unification.
+# The path form is required to override `default-features`.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+
+# wasm: forward fauna-protocol's `js` feature (fauna-core's js-sys time backend)
+# so the transitive wasm build resolves. Off on native.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# Names the serde bounds the `RpcRequester::request` method requires, for the
+# construction smoke test's mock impl. No `derive` needed (trait paths only).
+serde = { workspace = true }
+# The shared `block_on` single-poll executor + `FailingRequester` test double
+# — wasm-clean (see that crate's own docs), so it keeps this crate's dev-deps
+# wasm32-testable.
+fauna-client-testkit = { path = "../fauna-client-testkit" }

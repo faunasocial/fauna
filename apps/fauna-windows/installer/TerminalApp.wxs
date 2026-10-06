@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  Fauna terminal app — fauna-tui.exe.
+
+  The terminal app's channel is the per-OS release archive (fauna-tui +
+  fauna-sync-agent, docs/goal/architecture/installers/tui.md § The ratified
+  channel); the MSI additionally carries the SAME binary so a Windows user who
+  installs the package gets it with a trusted signature and beside the agent
+  it drives (user ruling 2026-09-26; the Store MSIX does NOT carry it).
+
+  Lands in INSTALLFOLDER — beside fauna-sync-agent.exe — because that is how
+  the app finds its agent: agent_spawner::agent_binary_absolute resolves the
+  sibling first, then PATH. The Sync feature ships the agent; the TerminalApp
+  feature (Package.wxs) ships this file. A TerminalApp-without-Sync install
+  is legal and runs (the app only needs the agent for the sync pages).
+
+  The PATH entry is what makes an installed terminal app usable from a shell:
+  `fauna-tui` typed anywhere, not a quoted Program Files path. Machine-wide
+  (System="yes") because the install is perMachine; Part="last" appends;
+  removed with the component on uninstall (WiX removes Environment rows it
+  wrote). Nothing else in the package touches PATH.
+-->
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Fragment>
+    <ComponentGroup Id="TerminalAppComponents" Directory="INSTALLFOLDER">
+
+      <Component Id="FaunaTuiExe" Guid="4a7b8c00-0060-4d3a-b5c6-d7e8f9a0b1c2">
+        <File Id="FaunaTuiExe"
+              Source="$(var.TuiBin)"
+              KeyPath="yes"
+              Name="fauna-tui.exe" />
+
+        <Environment Id="FaunaTuiPath"
+                     Name="PATH"
+                     Value="[INSTALLFOLDER]"
+                     Permanent="no"
+                     Part="last"
+                     Action="set"
+                     System="yes" />
+      </Component>
+
+    </ComponentGroup>
+  </Fragment>
+
+</Wix>

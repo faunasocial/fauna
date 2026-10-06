@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.AdminLogsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:logs="using:FaunaApp.Core.Logs"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+      admin-logs (observability.md § Surfaces) — the admin view of the NEST's
+      fauna-log ring, fetched once over the admin WS-RPC fauna.admin.logs
+      (AdminLogsViewModel over the INestRpcClient seam → FfiAdminClient.Logs) and
+      rendered with the SAME LogsFormat / LogRow / log-entry shape as the client's own
+      Settings → Logs page. The filter narrows the held source IN MEMORY (no refetch);
+      there is NO clear (no admin RPC to wipe the nest ring). admin-nav-back is the
+      shared shell PaneHeader button (AdminShellPage), not a per-page control. Mirrors
+      linux views/admin.rs build_admin_logs_page.
+    -->
+
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="16" MaxWidth="720" HorizontalAlignment="Left">
+
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error" IsOpen="False" IsClosable="True" />
+
+            <TextBlock x:Name="Heading"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminLogsHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=admin/logs_page/title}" />
+            <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=admin/logs_page/description}" />
+
+            <ProgressRing x:Name="LoadProgress" IsActive="False" Visibility="Collapsed"
+                          HorizontalAlignment="Left" />
+
+            <!-- Severity filter + copy (NO clear — nest ring is read-only here). -->
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <ComboBox x:Name="FilterCombo" Grid.Column="0"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.LogLevelFilter}"
+                          Header="{loc:Localize Key=logs/filter_label}"
+                          SelectedIndex="0"
+                          SelectionChanged="FilterCombo_SelectionChanged">
+                    <ComboBoxItem Content="{loc:Localize Key=logs/filter_all}" />
+                    <ComboBoxItem Content="{loc:Localize Key=logs/level_error}" />
+                    <ComboBoxItem Content="{loc:Localize Key=logs/level_warn}" />
+                    <ComboBoxItem Content="{loc:Localize Key=logs/level_info}" />
+                    <ComboBoxItem Content="{loc:Localize Key=logs/level_debug}" />
+                    <ComboBoxItem Content="{loc:Localize Key=logs/level_trace}" />
+                </ComboBox>
+                <Button x:Name="CopyButton" Grid.Column="1" VerticalAlignment="Bottom"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.LogCopyButton}"
+                        Click="CopyButton_Click"
+                        Content="{loc:Localize Key=logs/copy_button}" />
+            </Grid>
+
+            <TextBlock x:Name="EmptyPlaceholder" Opacity="0.6" Visibility="Collapsed"
+                       Text="{loc:Localize Key=admin/logs_page/empty}" />
+
+            <!-- log-entry rows, newest-first (same shape as the client Logs page). -->
+            <ItemsControl x:Name="LogList">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="logs:LogRow">
+                        <StackPanel AutomationProperties.AutomationId="{x:Bind ids:Ids.LogEntry}"
+                                    AutomationProperties.Name="{x:Bind Line}"
+                                    Spacing="2" Padding="0,6">
+                            <TextBlock Text="{x:Bind Message}" TextWrapping="Wrap" />
+                            <TextBlock Text="{x:Bind Subtitle}" Opacity="0.6" FontSize="12" />
+                        </StackPanel>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

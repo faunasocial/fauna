@@ -1,0 +1,38 @@
+[package]
+name = "fauna-router"
+description = "Multi-nest routing proxy for Fauna"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fauna-protocol.workspace = true
+# Canonical 32-byte-hex decoder (`fauna_core::hex32::decode`) for actor_id / nest_id
+# parsing; already in the build closure transitively via `fauna-protocol`.
+fauna-core.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+axum.workspace = true
+tower-http.workspace = true
+tower-layer.workspace = true
+tower-service.workspace = true
+reqwest.workspace = true
+rusqlite.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+toml.workspace = true
+clap.workspace = true
+governor.workspace = true
+bytes.workspace = true
+hyper-util.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"
+# Real in-process backend nest for the health-poll tests (`/internal/router-status`).
+fauna-nest.workspace = true

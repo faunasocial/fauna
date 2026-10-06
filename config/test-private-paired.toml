@@ -1,0 +1,10 @@
+# Private nest for pairing/forwarding tests: the pre-claim private NAT seed.
+# Which nest it syncs from and whether a user's posts are forwarded there are
+# that user's pairing row (`fauna.pair.add`), never this file.
+
+[nest]
+mode = "private"
+listen = "0.0.0.0:3000"
+db_path = "/data/nest.db"
+blob_dir = "/data/blobs"
+require_registration = false

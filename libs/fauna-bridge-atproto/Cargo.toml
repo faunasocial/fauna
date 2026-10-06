@@ -1,0 +1,108 @@
+[package]
+name = "fauna-bridge-atproto"
+description = "ATProto (Bluesky) bridge library for Fauna"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["client"]
+# UniFFI derives on the pure `authz` types (D8), so the Go atproto.pds bridge
+# consumes them over the tracked binding without a duplicate mirror type in
+# fauna-ffi. Optional so the crate stays wasm-clean and dependency-light for
+# every other consumer — the `fauna-mail` pattern.
+uniffi = ["dep:uniffi"]
+# Exposes `test_support` (the record_refs/reverse_translate fixture
+# encode/CID helpers) to a downstream crate's own test builds — e.g.
+# fauna-nest's bluesky test fixtures, via a `[dev-dependencies]` re-declaration
+# (the fauna-acme-http01 pattern).
+test-helpers = []
+# The heavy consume-side (OAuth, XRPC client, DM poller, media proxy, session
+# store) — everything that drags reqwest/tokio/atrium/dashmap. fauna-nest's
+# `bluesky` feature consumes the default (= full) crate; fauna-ffi consumes
+# `default-features = false` to get ONLY the pure host-direction core
+# (`outbound` + `types` + `authz`) so the Go mail-bridge FFI build stays free
+# of the async client stack.
+client = [
+    "dep:atrium-api",
+    "dep:chrono",
+    "dep:atrium-common",
+    "dep:atrium-identity",
+    "dep:atrium-oauth",
+    "dep:atrium-xrpc",
+    "dep:atrium-xrpc-client",
+    "dep:jose-jwk",
+    "dep:p256",
+    "dep:reqwest",
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:dashmap",
+    "dep:tracing",
+    "dep:anyhow",
+    "dep:url",
+    "dep:urlencoding",
+]
+
+[dependencies]
+# Path dep (not `workspace = true`): the workspace-level entry implies
+# fauna-core's default `network` feature (redb, tokio, hickory-resolver),
+# which this crate's always-on core never uses (only `data`/`identity`/
+# `encoding`/`web`/`caltime`/the pure half of `resolve`) — and which drags
+# `mio` into any wasm32 build reachable through this crate
+# (fauna-atproto-settings-machine -> fauna-wasm-atproto-settings), since mio
+# doesn't support wasm32-unknown-unknown (`IoSource<UdpSocket>` lacks `Source`
+# there). Native consumers that need `network` (fauna-nest, fauna-client)
+# enable it on their own edge; same fix shape as fauna-ffi's own
+# fauna-bridge-atproto edge.
+fauna-core = { path = "../fauna-core", default-features = false }
+# Lowercase-hex post ids for the projection's reference extraction. Pure and
+# wasm-clean, so it lives in the always-on core; it is the SAME call nest makes
+# to build the `fetch_public_posts` wire id (`hex::encode(row.id)`), which is
+# what keeps the extracted id byte-identical to the bridge's post_map key.
+hex.workspace = true
+# The JOSE segment encoding a DPoP proof arrives in (F4 slice 4, `dpop`).
+# ALWAYS-ON, and free: `fauna-core` already pulls it into every consumer's
+# tree, so the FFI cdylib and the wasm build gain nothing new.
+base64.workspace = true
+atrium-api = { workspace = true, optional = true }
+# RFC 3339 parsing for the reverse-translate path's `createdAt` (client-gated
+# only — the pure core stays wasm-clean). Same use and same call as the
+# sibling bridge's `fauna_bridge_activitypub::translate`.
+chrono = { workspace = true, optional = true }
+# Decodes the dag-cbor record bytes an external write carries. ALWAYS-ON, not
+# client-gated: `record_refs` (the reference extraction the Go bridge reaches
+# over FFI, F2.2 slice 4b) must decode the same bytes `reverse_translate` does,
+# with the same decoder, from the pure core. Its whole direct-dep set is
+# cbor4ii + ipld-core + scopeguard + serde — pure and wasm-clean, so the FFI
+# cdylib stays free of the async client stack the `client` feature carries.
+serde_ipld_dagcbor.workspace = true
+# The generic IPLD value `record_refs` walks. Comes in with the decoder above.
+ipld-core = { version = "0.4", features = ["serde"] }
+atrium-common = { workspace = true, optional = true }
+atrium-identity = { workspace = true, optional = true }
+atrium-oauth = { workspace = true, optional = true }
+atrium-xrpc = { workspace = true, optional = true }
+atrium-xrpc-client = { workspace = true, optional = true }
+jose-jwk = { workspace = true, optional = true }
+p256 = { workspace = true, optional = true }
+reqwest = { workspace = true, features = ["stream"], optional = true }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["time", "sync"], optional = true }
+tokio-util = { workspace = true, optional = true }
+dashmap = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+# Deterministic-TID disambiguator (first 10 bits of BLAKE3(PostId)) in the
+# always-on pure core (outbound.rs).
+blake3.workspace = true
+unicode-segmentation.workspace = true
+uniffi = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+urlencoding = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util", "macros"] }
+# Test-only (outbound.rs pubkey-leak guard assertions).
+hex.workspace = true

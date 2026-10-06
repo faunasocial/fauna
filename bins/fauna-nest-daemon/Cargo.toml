@@ -1,0 +1,48 @@
+[package]
+name = "fauna-nest-daemon"
+description = "macOS nest service shell (`social.fauna.nest` LaunchDaemon, runs as `_fauna`): resolves the system data-dir layout + serving-port seed, then runs the nest IN-PROCESS via the shared cross-OS serve-and-restart loop `fauna_nest::desktop_serve::run_serve_loop` (the same loop the Windows `fauna-nest-service` SCM shell drives; priority #2/#3), with launchd SIGTERM shutdown. Inherits the privileged `:443` via launchd socket activation (`launch_activate_socket` → the loop's pre-bound-listener seam) so the non-root `_fauna` daemon serves it; off launchd (a foreground / dev run, no `Sockets` dict) the direct-bind path covers the as-built `0.0.0.0:3000` seed. The plist `Sockets` dict + `.pkg` packaging are tracked internally (S3); the live fd inheritance needs a maintainer-run e2e."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fauna-nest-daemon"
+path = "src/main.rs"
+
+[features]
+# Convention 15 flavor split. `desktop_serve::run_serve_loop` — this daemon's whole
+# body — carries a `test-hooks`-gated plain-HTTP escape (`FAUNA_INSECURE_DISABLE_TLS`)
+# that the tier_3 e2e harness needs and no deployment may contain. Features are NOT
+# inherited from a dependency, so without this forward the shipped daemon would be
+# the escape-free flavor by accident rather than by construction, and no e2e path
+# could ever reach the escape. Naming it here makes both facts explicit and gives
+# the e2e build path something to ask for.
+#
+# ⚠ Forwarded as a FEATURE, never named on the `fauna-nest` dep line: naming it on
+# the dep would turn the escape ON for every build of this crate, release included,
+# which is exactly the shape convention 15 forbids.
+#
+# Release paths must NOT pass this (`installer/macos/build.sh` is this daemon's
+# actual release path — `.github/workflows/release.yml` never builds
+# `fauna-nest-daemon` at all — and it builds with no features; that is the
+# security boundary). Witness: a release `fauna-nest-daemon` contains no
+# `FAUNA_INSECURE_DISABLE_TLS` string.
+test-hooks = ["fauna-nest/test-hooks"]
+
+[dependencies]
+# The macOS daemon runs the nest IN-PROCESS via the shared cross-OS serve loop
+# `fauna_nest::desktop_serve::run_serve_loop` (the same loop the Windows SCM shell
+# drives; priority #2/#3). The serving-port reconcile policy it needs lives one
+# level down in `fauna-nest-supervisor`, pulled in transitively via `fauna-nest`.
+fauna-nest.workspace = true
+# `parse_dir_override` for the FAUNA_DATA_DIR env convention shared with
+# fauna-nest / fauna-bridge-supervisor — zero-dependency, already transitive
+# via fauna-nest, so this direct edge adds nothing to the build.
+fauna-deployment-flags.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# The shared logging stack (ring + size-capped file + stderr) — the daemon's
+# only persistent log, since its LaunchDaemon plist redirects nothing
+# (observability.md § Persistence & privacy). Already transitive via fauna-nest.
+fauna-log = { path = "../../libs/fauna-log" }
+dirs.workspace = true

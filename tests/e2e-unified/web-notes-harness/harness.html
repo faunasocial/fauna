@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Notes WYSIWYG editor — browser harness</title>
+    <style>
+      :root {
+        --bg: #fff;
+        --text: #111;
+        --text-muted: #777;
+        --border: #ccc;
+        --accent: #2563eb;
+      }
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem;
+      }
+      #mount {
+        max-width: 40rem;
+      }
+    </style>
+    <script>
+      // Capture console errors so assertion 1 (no JS/console errors on load) can
+      // read them. The favicon 404 is excluded by the driver, not here.
+      window.__consoleErrors = [];
+      window.addEventListener('error', (e) => window.__consoleErrors.push(String(e.message)));
+      window.addEventListener('unhandledrejection', (e) =>
+        window.__consoleErrors.push(String(e.reason)),
+      );
+      const _err = console.error.bind(console);
+      console.error = (...args) => {
+        window.__consoleErrors.push(args.map(String).join(' '));
+        _err(...args);
+      };
+    </script>
+  </head>
+  <body>
+    <h1>Notes WYSIWYG editor — browser harness</h1>
+    <p>Drives the shipping <code>notesEditorExtensions()</code> over the real wasm bundle.</p>
+    <div id="mount"></div>
+    <h2>Compose hide-mode editor</h2>
+    <p>Drives the shipping <code>composeHideExtension()</code> (compose default + toggle).</p>
+    <div id="compose-mount"></div>
+    <script type="module" src="./harness.bundle.js"></script>
+  </body>
+</html>

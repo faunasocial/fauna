@@ -1,0 +1,84 @@
+[package]
+name = "fauna-wasm-folders"
+description = "WASM bindings for the Fauna Devices page: the page-level DevicesMachine + its embedded folder creation wizard (FolderWizardMachine)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Forwards to fauna-folders-machine/test-helpers (none exposed on the wasm
+# surface yet; present for parity with fauna-wasm-onboarding and future E2E
+# snapshot setters).
+test-helpers = ["fauna-folders-machine/test-helpers"]
+
+# wasm32-scoped on purpose: this crate builds only for wasm32, and a plain
+# [dependencies] table would leak its wasm-only feature activations (js,
+# wasm_js, …) into every HOST build's resolution under
+# resolver.feature-unification = "workspace". Add new deps here, never in a
+# plain [dependencies] table.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `js` so fauna-core's wasm build gets a getrandom backend (mirrors
+# fauna-wasm-onboarding); the wizard machine itself only uses the pure
+# `localized` module, but feature unification needs *some* crate to request it.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+# `rpc-glue` for the wasm `build_folder_wizard_machine` (over `WsRpcClient`).
+fauna-folders-machine = { path = "../fauna-folders-machine", default-features = false, features = ["rpc-glue"] }
+# `FolderMember` + the `placeRows`/`toggled` projection over it. The projection
+# lives HERE, not in fauna-folders-machine, because fauna-ffi's unconditional
+# `folders_client.rs` needs it too and the mail-bridge build drops the `folders`
+# feature that would gate it (measured 2026-08-28: E0433 in the bridge regen).
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+# `rpc-glue` for the wasm `build_devices_machine` (the page-level machine, over
+# the same `WsRpcClient`). Folded into this crate rather than a separate
+# fauna-wasm-devices (priority #2: the web Devices page loads one chunk for both
+# the page machine and its embedded wizard).
+fauna-devices-machine = { path = "../fauna-devices-machine", default-features = false, features = ["rpc-glue", "account-port"] }
+# The account port's consumer half (`DevicesMachine.setAccountPort`): the JS
+# binding over the SPA's `SharedAccountPort` the fleet seam's forwarder calls
+# through (`fauna-devices-machine`'s `account-port` feature above). A thin
+# transport crate — this chunk links no plane or store code because of it
+# (account-client-lifecycle.md § The client-side lifecycle → The account port).
+fauna-account-port = { workspace = true }
+# `NestFolderKeyResolver` (gated behind `mls`, same as fauna-wasm/fauna-wasm-backups'
+# own use of it) for `DevicesMachine::setLabelCustody` — sealed device labels need
+# the owner's label custody wired, the same way linux's `machine.set_label_custody
+# (fauna_client.label_custody())` does.
+fauna-client-folders = { path = "../fauna-client-folders", features = ["mls"] }
+# The browser WS-RPC transport the wizard's `submit()` rides; `connect()` opens
+# the connection from the JS-passed nest URL + actor id + token provider.
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm" }
+# The T16 custody facet's shared halves: `view_model::fold_custody_facet` (the
+# pure three-family fold), `custody_view::CustodyFacetView` (the boundary rows —
+# read here through serde, and by the native apps through the SAME types'
+# `uniffi::Record` derives), and `custody_acts::revoke_custody` (the one custody
+# act that needs nothing native, so web shares the native ordering rather than
+# re-deriving it). ⚠ Its `uniffi` feature stays OFF here — that is what keeps the
+# crate wasm-clean and this chunk free of UniFFI scaffolding.
+fauna-client-capabilities = { path = "../fauna-client-capabilities" }
+# The facet's two account-store reads, both lent by the core chunk: the
+# custody-ceremony records over the account port (the seam's forwarder,
+# `custody_port` — feature `account-port`) and the grant log over the interim
+# ledger port. Wasm-clean.
+fauna-client-config = { path = "../fauna-client-config", features = ["account-port"] }
+# Installed at module init (`#[wasm_bindgen(start)]` in src/lib.rs) — each wasm
+# chunk is its own runtime, so this must be installed per-chunk. See the crate
+# doc comment.
+fauna-wasm-panic-hook = { path = "../fauna-wasm-panic-hook" }
+wasm-bindgen.workspace = true
+wasm-bindgen-futures = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+serde-wasm-bindgen = "0.6"
+getrandom = { workspace = true, features = ["wasm_js"] }
+# 0.2 alias: fauna-core's crypto stack (chacha20poly1305 / aes-gcm / ed25519
+# → rand_core) transitively pulls getrandom 0.2, which needs its `js` feature
+# to compile for wasm. Same shape as fauna-wasm / fauna-wasm-content-index.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+js-sys.workspace = true
+
+[dev-dependencies]
+wasm-bindgen-test.workspace = true

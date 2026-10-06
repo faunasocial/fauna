@@ -1,0 +1,15 @@
+#!/command/with-contenv /bin/bash
+# Supervisor sidekick: the nest→s6 control socket for the flag-gated
+# mail-bridge services. Runs as root (no s6-setuidgid) because it must call
+# s6-svc and chown the socket to `fauna` so nest — which runs as `fauna` — can
+# write up/down commands to it. The action set (up/down) and the service
+# allowlist (fauna-mail-bridge-mta / -mda) are fixed in the binary, so the
+# socket is a narrow control surface, not a general s6-svc proxy.
+#
+# Wire shape: docs/goal/architecture/installers/docker.md § Supervisor sidekick
+# socket. Lifecycle: docs/goal/behavior/mail-bridge-lifecycle.md
+# § Default-off on first claim, § Why the supervisor sidekick socket.
+exec fauna-supervisor \
+  --socket /run/fauna-supervisor.sock \
+  --s6-service-dir /run/service \
+  --socket-owner fauna

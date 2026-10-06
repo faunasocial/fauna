@@ -1,0 +1,11 @@
+{
+  "name": "Fauna",
+  "short_name": "Fauna",
+  "description": "Decentralized social platform with encrypted messaging",
+  "start_url": "/app/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#3b82f6",
+  "scope": "/app/",
+  "categories": ["social", "communication"]
+}

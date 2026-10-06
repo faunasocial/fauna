@@ -1,0 +1,13 @@
+[package]
+name = "fauna-nest-supervisor"
+description = "Platform-agnostic serving-port supervision logic for the fauna-nest direct-listener deployments (Windows SCM service, macOS LaunchDaemon): read the admin-set serving-port the nest materializes in its data dir, resolve the effective bind port over the deployment's default, and decide when the supervisor must restart the nest to rebind. Consumed by the per-OS service shells; std-only (no fauna-nest dependency from a service shell)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Pure policy: std-only. The single dependency is fauna-deployment-flags, which
+# is itself dependency-free and exists precisely so a service shell can hold the
+# nest↔supervisor flag-name contract without depending on the whole fauna-nest
+# crate, which would be backwards.
+[dependencies]
+fauna-deployment-flags.workspace = true

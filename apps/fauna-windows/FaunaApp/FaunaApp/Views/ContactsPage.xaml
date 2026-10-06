@@ -1,0 +1,451 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.ContactsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:models="using:FaunaApp.Core.Models"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- The page root is a ScrollViewer (the shared windows page idiom — e.g.
+         AdminCalendarPage / SettingsAccountPage), so every region — including the
+         Add-contact panel below the lists — is reachable on a short window. The
+         former fixed-row Grid let the contacts list (Height="*") eat all vertical
+         space, shoving the Add-contact panel below the fold with no scrollable
+         ancestor, so its lookup button failed is_visible and couldn't be scrolled
+         into view (contacts.md § Layout & flow region 3 "Add-contact panel";
+         matches linux views/contacts/list.rs wrapping knocks+contacts in a
+         ScrolledWindow). The ListViews carry a MaxHeight so they scroll internally
+         instead of measuring to infinity inside the ScrollViewer. -->
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="16"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactsView}"
+                    AutomationProperties.Name="contacts-view">
+
+            <!-- Error bar -->
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="False"
+                IsClosable="True" />
+
+            <!-- Contacts | Address Book segment toggle (carddav-server.md § Independent
+                 enablement; contacts.md § Address Book segment, slice 4b). Switches the
+                 page body between the social contact graph (PeopleView) and the
+                 read-only CardDAV Address Book master-detail (AddressBookView) — a
+                 SEPARATE store from the social contacts above. Mirrors the windows
+                 segmented-toggle idiom (events-view-toggle): a StackPanel of plain
+                 Buttons, not a SegmentedControl/RadioButtons. -->
+            <StackPanel Orientation="Horizontal" Spacing="2"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactsViewSegment}"
+                        AutomationProperties.Name="contacts-view-segment">
+                <Button x:Name="PeopleSegmentButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactsSegmentPeople}"
+                        Content="{loc:Localize Key=common/contacts}"
+                        Padding="8,4" Click="PeopleSegment_Click" />
+                <Button x:Name="AddressBookSegmentButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactsSegmentAddressbook}"
+                        Content="{loc:Localize Key=contacts/address_book/title}"
+                        Padding="8,4" Click="AddressBookSegment_Click" />
+            </StackPanel>
+
+            <StackPanel x:Name="PeopleView" Spacing="16">
+
+            <!-- Knocks section -->
+            <StackPanel Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=contacts/pending_requests}" />
+
+                <ListView
+                    x:Name="KnocksList"
+                    SelectionMode="None"
+                    MaxHeight="250">
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="models:KnockInfo">
+                            <!-- Name is load-bearing, not decoration: a Grid root with no
+                                 AutomationProperties.Name is pruned from UI Automation, so
+                                 knock-card counts 0 while its buttons still resolve. It used to
+                                 bind Handle, which fauna.knocks.list never supplies, and
+                                 FallbackValue does not cover a null value. SenderLabel is
+                                 never empty. -->
+                            <Grid Padding="8" ColumnSpacing="8"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.KnockCard}"
+                                  AutomationProperties.Name="{x:Bind SenderLabel}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+
+                                <TextBlock
+                                    Grid.Row="0" Grid.Column="0"
+                                    Text="{x:Bind SenderLabel}"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.KnockSender}"
+                                    Style="{StaticResource BodyStrongTextBlockStyle}" />
+
+                                <TextBlock
+                                    Grid.Row="1" Grid.Column="0"
+                                    Text="{x:Bind Summary, FallbackValue=''}"
+                                    Opacity="0.6"
+                                    TextTrimming="CharacterEllipsis"
+                                    MaxLines="1" />
+
+                                <Button
+                                    Grid.Row="0" Grid.RowSpan="2" Grid.Column="1"
+                                    Content="{loc:Localize Key=common/accept}"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactsAcceptButton}"
+                                    Tag="{x:Bind ActorId}"
+                                    Click="AcceptKnock_Click"
+                                    VerticalAlignment="Center" />
+
+                                <Button
+                                    Grid.Row="0" Grid.RowSpan="2" Grid.Column="2"
+                                    Content="{loc:Localize Key=common/block}"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactsBlockButton}"
+                                    Tag="{x:Bind ActorId}"
+                                    Click="BlockKnock_Click"
+                                    VerticalAlignment="Center" />
+
+                                <Button
+                                    Grid.Row="0" Grid.RowSpan="2" Grid.Column="3"
+                                    Content="{loc:Localize Key=common/dismiss}"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.KnockDismiss}"
+                                    Tag="{x:Bind ActorId}"
+                                    Click="DismissKnock_Click"
+                                    VerticalAlignment="Center" />
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+
+                <TextBlock
+                    x:Name="NoKnocksText"
+                    Opacity="0.5"
+                    Visibility="Collapsed"
+                    Text="{loc:Localize Key=contacts/no_pending}" />
+            </StackPanel>
+
+            <!-- Contacts header -->
+            <TextBlock
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                Style="{StaticResource SubtitleTextBlockStyle}"
+                Text="{loc:Localize Key=common/contacts}" />
+
+            <AutoSuggestBox AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactsSearchField}"
+                            TextChanged="ContactSearch_TextChanged"
+                            PlaceholderText="{loc:Localize Key=contacts/find_placeholder}" />
+
+            <!-- Loading indicator (flow sibling, not overlaid: an empty list has no
+                 height to center an overlay ring in). -->
+            <ProgressRing
+                x:Name="LoadProgress"
+                IsActive="False"
+                Visibility="Collapsed"
+                HorizontalAlignment="Center" />
+
+            <!-- Contacts list. Rows are tap-through to the peer's profile (matching
+                 linux app.rs open_profile; profile.md § Layout & flow → Another's
+                 profile). The tap rides SelectionChanged (not ItemClick) + a
+                 per-row actor-id stamped on the ListViewItem container, exactly like
+                 ConversationsPage: the e2e/UIA SelectionItem.Select() path fires the
+                 nav without a physical mouse click (ItemClick would need SendInput,
+                 which the FlaUI bridge can't drive when the window isn't foreground —
+                 "SendInput: Access is denied"). The shared open_contact_profile(hex)
+                 resolves the row by that container actor-id. The per-row buttons
+                 (confirm / copy) still handle their own taps. MaxHeight bounds the
+                 list so it scrolls internally inside the page ScrollViewer instead of
+                 measuring to infinity. -->
+            <ListView
+                x:Name="ContactsList"
+                MaxHeight="480"
+                SelectionChanged="ContactsList_SelectionChanged"
+                ContainerContentChanging="ContactsList_ContainerContentChanging">
+                <ListView.ItemTemplate>
+                    <DataTemplate x:DataType="models:ContactInfo">
+                        <!-- Name must never be empty, or UI Automation prunes this Grid
+                             root and contact-row counts 0 (see the knock template above).
+                             DisplayLabel falls back to the short id for a handle-less
+                             (federated) peer. -->
+                        <Grid Padding="8" ColumnSpacing="12"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactRow}"
+                              AutomationProperties.Name="{x:Bind DisplayLabel}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <!-- Status badge -->
+                            <Ellipse
+                                Grid.Column="0"
+                                Width="10" Height="10"
+                                VerticalAlignment="Center"
+                                Fill="{x:Bind local:ContactsPage.StatusToBrush(Status)}" />
+
+                            <StackPanel Grid.Column="1" Spacing="2">
+                                <TextBlock
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactName}"
+                                    Text="{x:Bind DisplayLabel}"
+                                    Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <TextBlock
+                                    Text="{x:Bind ActorId}"
+                                    FontSize="11"
+                                    Opacity="0.4"
+                                    IsTextSelectionEnabled="True"
+                                    TextTrimming="CharacterEllipsis" />
+                                <!-- Post-succession review badge (succession-aftermath.md §
+                                     Propagation) — badge only, no Keep/Remove pair here; that
+                                     decision lives on the group member chip, where removal
+                                     already exists. Visibility toggled per-row in
+                                     ContactsList_ContainerContentChanging (the cached
+                                     MemberReviewRoster, never re-derived here); starts
+                                     Collapsed so an unreviewed contact never flashes it. -->
+                                <TextBlock
+                                    x:Name="UnattestedMarkText"
+                                    Text="{loc:Localize Key=contacts/unattested_mark}"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactUnattestedMark}"
+                                    Visibility="Collapsed"
+                                    Opacity="0.6"
+                                    FontSize="10" />
+                            </StackPanel>
+
+                            <TextBlock
+                                Grid.Column="2"
+                                Text="{x:Bind StatusLabel}"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactStatus}"
+                                VerticalAlignment="Center"
+                                Opacity="0.6"
+                                FontSize="12" />
+
+                            <Button Grid.Column="3"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactConfirm}"
+                                    Content="&#xE8FB;" FontFamily="Segoe MDL2 Assets"
+                                    ToolTipService.ToolTip="{loc:Localize Key=common/confirm}"
+                                    Padding="4,2" FontSize="12"
+                                    Visibility="{x:Bind local:ContactsPage.StatusToConfirmVisibility(Status)}"
+                                    Tag="{x:Bind ActorId}"
+                                    Click="ContactConfirm_Click"
+                                    VerticalAlignment="Center" />
+                            <Button Grid.Column="3"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactActorIdCopyBtn}"
+                                    Content="&#xE8C8;" FontFamily="Segoe MDL2 Assets"
+                                    FontSize="10" Padding="4,2"
+                                    Tag="{x:Bind ActorId}"
+                                    Click="CopyContactActorId_Click"
+                                    ToolTipService.ToolTip="{loc:Localize Key=common/copy}"
+                                    VerticalAlignment="Center" />
+                        </Grid>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+
+            <!-- case (c) search-no-results (contacts.md § Errors & edge cases): a
+                 NON-EMPTY roster narrowed by a non-empty query to zero visible rows —
+                 distinct from the true-empty-roster state, which uses no banner here
+                 (matches every other client's plain unfiltered-list gate for cases
+                 a/b). Sibling to the list, never a list placeholder (the linux
+                 placement trap this section documents: a placeholder-parented label
+                 stays UIA-reachable even while the list holds filtered-out rows). -->
+            <TextBlock
+                x:Name="NoMatchesText"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactsNoMatches}"
+                Opacity="0.5"
+                Visibility="Collapsed"
+                Text="{loc:Localize Key=contacts/no_matching_contacts}" />
+
+            <!-- Add Contact — federated find-user (contacts.md § Layout & flow region 3):
+                 type a 64-hex actor-id OR a user@domain handle → FIND resolves it via
+                 the shared classify → resolve_nest → resolve_handle FFI seam into a single
+                 contact-actor-id-result row whose KNOCK button knocks the RESOLVED actor id.
+                 No cross-nest URL field — the handle's domain drives the home-nest SRV
+                 resolve (matching linux/android; windows was the lone client lacking the
+                 handle branch). -->
+            <StackPanel Spacing="8" MaxWidth="400" HorizontalAlignment="Left">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=contacts/add_contact}" />
+                <TextBox x:Name="AddContactActorId"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactActorIdField}"
+                         PlaceholderText="{loc:Localize Key=contacts/handle_or_actor_id}" />
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactActorIdLookup}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="LookUpContact_Click"
+                        Content="{loc:Localize Key=contacts/find_user/find}" />
+                <InfoBar x:Name="AddContactError"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactFindError}"
+                         Severity="Error"
+                         IsOpen="False"
+                         IsClosable="True" />
+                <InfoBar x:Name="AddContactSuccess"
+                         Severity="Success"
+                         IsOpen="False"
+                         IsClosable="True"
+                         Message="{loc:Localize Key=contacts/request_sent}" />
+
+                <!-- Resolved find-user result (shown after a successful look up): the
+                     resolved handle@domain (or the bare actor id) + the actor id, with an
+                     Add button that knocks the RESOLVED actor id. -->
+                <ListView x:Name="SearchResultsList"
+                          SelectionMode="None" Visibility="Collapsed"
+                          MaxHeight="240">
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="models:ContactInfo">
+                            <Grid Padding="4" ColumnSpacing="8"
+                                  AutomationProperties.Name="{x:Bind ActorId}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                                    <TextBlock Text="{x:Bind Handle, FallbackValue=''}"
+                                               Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                    <TextBlock Text="{x:Bind ActorId}"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactActorIdResult}"
+                                               FontSize="11" Opacity="0.4"
+                                               TextTrimming="CharacterEllipsis" />
+                                </StackPanel>
+                                <Button Grid.Column="1"
+                                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactsAddButton}"
+                                        Content="{loc:Localize Key=contacts/knock}" Click="AddFoundContact_Click"
+                                        Tag="{x:Bind ActorId}"
+                                        VerticalAlignment="Center" />
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </StackPanel>
+
+            </StackPanel>
+            <!-- /PeopleView -->
+
+            <!-- Address Book (CardDAV vCards — read-only master-detail, slice 4b):
+                 book picker (addressbook-item) → card list (vcard-card / vcard-card-fn).
+                 Opening a card navigates to CardDetailPage (real Frame navigation, the
+                 windows master→detail convention — see EventsPage → EventDetailPage).
+                 Mirrors linux views/contacts/address_book.rs + web's addressbook
+                 segment. Rows ride ListView SelectionChanged (not ItemClick/Button
+                 Invoke) — same SendInput-avoidance idiom as ContactsList above. -->
+            <StackPanel x:Name="AddressBookView" Spacing="12" Visibility="Collapsed">
+
+                <controls:CopyableInfoBar
+                    x:Name="AddressBookErrorBar"
+                    Severity="Error"
+                    IsOpen="False"
+                    IsClosable="True" />
+
+                <ProgressRing
+                    x:Name="AddressBookLoadProgress"
+                    IsActive="False"
+                    Visibility="Collapsed"
+                    HorizontalAlignment="Center" />
+
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=contacts/address_book/title}" />
+
+                <!-- Address book picker. Each row is a flat full-width Button (the
+                     EventsPage event-card idiom), not a ListView SelectionChanged row:
+                     a Grid DataTemplate root's own AutomationId collapses into its
+                     ListViewItem container (reference_windows_flaui_state_attr_helptext
+                     sibling gotcha) and doesn't itself expose a UIA invocation pattern,
+                     forcing the FlaUI bridge's physical-SendInput fallback — which fails
+                     "Access is denied" whenever the window isn't foreground. A Button
+                     unconditionally supports InvokePattern, so the bridge always takes
+                     the foreground-independent path. SelectionMode="None" (no visual
+                     selection state needed — clicking loads the card list directly). -->
+                <ListView
+                    x:Name="AddressbooksList"
+                    MaxHeight="200"
+                    SelectionMode="None">
+                    <ListView.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <!-- Non-virtualizing panel so count("addressbook-item") sees
+                                 every row even when offscreen (memory: bounded count-all
+                                 lists). -->
+                            <StackPanel />
+                        </ItemsPanelTemplate>
+                    </ListView.ItemsPanel>
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="models:AddressbookInfo">
+                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AddressbookItem}"
+                                    AutomationProperties.Name="{x:Bind Name}"
+                                    Tag="{x:Bind}" Click="AddressbookItem_Click"
+                                    Background="Transparent" BorderThickness="0" Padding="8"
+                                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{x:Bind Name}"
+                                               Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                    <TextBlock Grid.Column="1" Text="{x:Bind CardCount}"
+                                               Opacity="0.6" FontSize="12"
+                                               VerticalAlignment="Center" />
+                                </Grid>
+                            </Button>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+                <TextBlock
+                    x:Name="NoAddressbooksText"
+                    Opacity="0.5"
+                    Visibility="Collapsed"
+                    Text="{loc:Localize Key=contacts/address_book/no_addressbooks}" />
+
+                <!-- Card list for the selected book. Opening a card navigates to
+                     CardDetailPage. Flat full-width Button rows (EventsPage event-card
+                     idiom — see the AddressbooksList comment above for why: a Grid
+                     DataTemplate root has no UIA invocation pattern of its own and
+                     forces the FlaUI bridge's foreground-dependent physical-click
+                     fallback). SelectionMode="None" — no visual selection state needed,
+                     the Button click navigates directly. -->
+                <ListView
+                    x:Name="CardsList"
+                    MaxHeight="300"
+                    SelectionMode="None">
+                    <ListView.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <!-- Non-virtualizing panel so count("vcard-card"/"vcard-card-fn")
+                                 sees every row even when offscreen. -->
+                            <StackPanel />
+                        </ItemsPanelTemplate>
+                    </ListView.ItemsPanel>
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="models:CardInfo">
+                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.VcardCard}"
+                                    AutomationProperties.Name="{x:Bind FormattedName}"
+                                    Tag="{x:Bind}" Click="CardItem_Click"
+                                    Background="Transparent" BorderThickness="0" Padding="8"
+                                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                                <!-- vcard-card-fn: AutomationId ONLY, no static Name — a
+                                     dynamic-text TextBlock's e2e get_text must read the
+                                     bound Text via the WinUI auto-derived Name, which a
+                                     hardcoded Name would shadow (reference_windows_flaui_
+                                     gettext_dynamic_label_no_name). -->
+                                <TextBlock Text="{x:Bind FormattedName}"
+                                           AutomationProperties.AutomationId="{x:Bind ids:Ids.VcardCardFn}"
+                                           HorizontalAlignment="Left" />
+                            </Button>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+                <TextBlock
+                    x:Name="NoCardsText"
+                    Opacity="0.5"
+                    Visibility="Collapsed"
+                    Text="{loc:Localize Key=contacts/address_book/no_cards}" />
+
+            </StackPanel>
+            <!-- /AddressBookView -->
+
+        </StackPanel>
+    </ScrollViewer>
+</Page>

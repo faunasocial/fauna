@@ -1,0 +1,52 @@
+[package]
+name = "fauna-archive"
+description = "Platform-neutral model of a social-network export archive and the parsers that fill it (docs/goal/behavior/archive-import.md)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# The generated fixture corpus as zips (`src/testing.rs`), for this crate's
+# own tests and downstream consumers' — the import machine's fakes, the
+# `fauna-ffi` integration tests, the tui walk. No extra dependencies: the
+# `zip` writer is already in the crate.
+test-helpers = []
+
+# ⚠ crates.io dependencies ONLY — no `fauna-*` crate. This crate is meant to
+# be reusable by other projects as it stands (user ruling 2026-09-07,
+# `docs/goal/behavior/archive-import.md` § Architectural rules): the model
+# carries its own epoch-micros `Timestamp` (byte-identical on the wire to
+# Fauna's), its own platform token constants (pinned equal to Fauna's
+# vocabulary by a test in `fauna-archive-import-machine`), and the frozen ID
+# derivation calls the IPLD dag-cbor codec directly — the same codec Fauna's
+# own canonical encoder wraps, so the golden IDs are unchanged. Anything
+# Fauna-specific belongs in the machine crate, never here.
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+# Canonical IPLD dag-cbor for the frozen external-ID derivation (the encoding
+# `h:<blake3>` hashes) and for a consumer that stores the model the way Fauna
+# does. Map keys sorted length-first then bytewise, shortest-form integers, no
+# floats — deterministic by construction.
+serde_ipld_dagcbor = { workspace = true }
+# The IPLD data model — what a model record this build cannot read is carried
+# as (`model::UnknownEntity`), so it re-encodes byte for byte; also the
+# intermediate `ReactionKind`'s decoder reads a tag through. The same crate and
+# version `fauna-cbor` and `serde_ipld_dagcbor` already use.
+ipld-core = { version = "0.4", features = ["serde"] }
+# The export format is JSON; parsed into `serde_json::Value` per member.
+serde_json = { workspace = true }
+# External-ID derivation (`h:<blake3-hex>`) and media hashing.
+blake3 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+# The workspace entry is already `default-features = false, features = ["deflate"]`
+# (Cargo.toml § [workspace.dependencies]) — pure-Rust inflate, wasm-clean.
+zip = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Self-dev-dependency: turns `test-helpers` on for this package's own test
+# targets, so `tests/common/mod.rs` can re-export `fauna_archive::testing`
+# instead of carrying a second copy of the fixture zipper.
+fauna-archive = { path = ".", features = ["test-helpers"] }

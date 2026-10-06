@@ -1,0 +1,143 @@
+[package]
+name = "fauna-client-pair"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# UniFFI scaffolding for the consumer in fauna-ffi (Apple/Android/Windows). Off
+# by default — the Go mail-bridge FFI build drops it. Forwards `fauna-core/uniffi`
+# so `fauna_core::localized::LocalizedText` — the shell-facing labels'
+# (`scope_label`, `status_label`, `backup_status_label`, `mint_option_label`)
+# return type — gets its `uniffi::Record` derive registered. Mirrors
+# fauna-client-mail-settings.
+uniffi = ["dep:uniffi", "fauna-core/uniffi", "dep:fauna-uniffi-async"]
+
+[dependencies]
+# `fauna.pair.*` request/reply types (`fauna_protocol::pair`) + the shared
+# RpcRequester / RpcErrorClass / MaybeSendSync seams. `default-features = false`
+# drops fauna-protocol's `p2p` default (native-only wireguard → tokio net),
+# which would break the wasm build; the `js` time backend is forwarded on wasm
+# below. Path form (not `workspace = true`) is required to override
+# default-features. Mirrors fauna-client-dns.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# Trust facet (Nests page): the shared client-side mint + signed grant-event
+# log + Now/History folds (`mint_grant`, `grant_log`, `view_model`,
+# `CapabilitiesClient`) and the bridges roster used to discover a nest's
+# content-processor holder pubkeys (`list_service_users` + `fetch_bridge_pubkey`).
+# Both are wasm-clean and do NOT depend back on fauna-client-pair (one-directional
+# — verified, no cycle), so pair stays wasm-buildable.
+fauna-client-capabilities = { path = "../fauna-client-capabilities" }
+# The period-key store seam (`SharedPeriodKeyStore`) the trust facet reads a
+# post-tier grant's key through (`fauna.state.subscriptions`). Wasm-clean.
+fauna-client-subscriptions = { path = "../fauna-client-subscriptions" }
+# The backup half of the trust facet: the pure `BackupTrustRow` projection + the
+# `BackupNestSeam` / `BackupDestinationConnector` seams behind
+# `nest-trust-backup-item`. Wasm-clean and transport-generic; does NOT depend
+# back on pair (one-directional — no cycle).
+fauna-client-backup = { path = "../fauna-client-backup" }
+fauna-client-bridges = { path = "../fauna-client-bridges" }
+# The shared account-store seam traits + `StoreError` the trust facet's
+# grant-event log persists through (`fauna_client_config::{SuccessionLedgerStore,
+# BackupStateStore, StoreError}`, re-exported from `trust.rs`/`error.rs`).
+# Transport-generic + wasm-clean (handles its own `js` forward via its own target table),
+# and does NOT depend back on pair (one-directional — no cycle). Mirrors dns/mail.
+fauna-client-config = { path = "../fauna-client-config" }
+# `GrantEvent` / `GrantUnattestedMark` (the signer + ledger-store seams name them) +
+# `ActorKeypair` (native seam). `default-features = false` keeps the wasm build
+# clean (drops fauna-core's network/redb/tokio default); native workspace builds
+# re-enable the full feature set via fauna-client's edge (Cargo feature union).
+# `js` forwarded on wasm below. Mirrors fauna-client-capabilities.
+fauna-core = { path = "../fauna-core", default-features = false }
+# `GrantWindow` / `ScopeTuple` / `GrantBlob::to_canonical_bytes` (the mint
+# composition) + `WrapError` (dispatch error mapping). `default-features = false`
+# drops the native-only `rusqlite` default → wasm-clean; `js` forwarded below.
+fauna-mls = { path = "../fauna-mls", default-features = false }
+# `nest_trust::read_login_binding` — the possession proof `bound_nest_id` falls
+# back to where no pin exists for the connection's origin (a plaintext loopback
+# nest), over the connection's own `RpcRequester`. Wasm-clean (the web SPA's
+# login path runs the same reader); does NOT depend back on pair.
+fauna-client-core = { path = "../fauna-client-core", default-features = false, features = ["auth-ceremony"] }
+# `PairDispatchError::RecoveryKeysDiffer`'s `Display` renders through the
+# `nests.link_recovery_keys_differ` string — a zero-cost edge (fauna-i18n has
+# no dependencies of its own), as in fauna-client-recovery.
+fauna-i18n = { path = "../fauna-i18n" }
+async-trait = "0.1"
+thiserror = { workspace = true }
+# The trust-facet glue's `GrantEventSigner` holds the user's Ed25519
+# `SigningKey` (cloned from the `ActorKeypair`) to sign each `GrantEvent` — the
+# raw key never crosses the machine's FFI boundary. Mirrors mail-settings'
+# `RpcIdentitySigner`. (Was dev-only; now a base dep for the real signer.)
+ed25519-dalek = { workspace = true }
+# The `TrustPlatform` glue mints a 16-byte CSPRNG `grant_id`
+# (`rand::thread_rng().fill_bytes`) — cross-target: on wasm it uses getrandom's
+# `wasm_js` backend (added below), exactly as mail-settings' MSEK CSPRNG does.
+rand = { workspace = true }
+# Snapshot/action serde — the wasm consumer crosses the snapshot to JS and the
+# action enum from JS via `serde_wasm_bindgen`.
+serde = { workspace = true }
+# Producer-side error logging: the dispatch error transition logs the banner
+# message once (observability.md § Log on the *event*, not the *paint*).
+# wasm-safe — a no-op without a subscriber; web installs `RingLayer` at boot.
+tracing = { workspace = true }
+
+# UniFFI scaffolding for the machine + its snapshot/action/error types. The
+# `tokio` feature backs the `async_runtime = "tokio"` exports on `hydrate` /
+# `dispatch`. Mirrors fauna-client-dns.
+uniffi = { workspace = true, optional = true, features = ["tokio"] }
+# `#[fauna_uniffi_async::export]` runs each async export on a tokio runtime
+# worker, off the foreign executor's small poll stack (`native-async-execution.md`
+# § The rule). UniFFI builds only, so the wasm and Go-bridge builds stay
+# tokio-free.
+fauna-uniffi-async = { workspace = true, optional = true }
+
+# Native concrete `LinkedNestsNest` seam (`build_linked_nests_machine`): the
+# shared glue `fauna-ffi` + linux both call. Native-gated — a single generic
+# `impl<R> LinkedNestsNest` is impossible (async_trait `+ Send` vs AFIT
+# `RpcRequester`), so the seam binds the concrete transport per target.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fauna-client = { path = "../fauna-client" }
+# The process-global TOFU identity pin the native login graduated for a host
+# (`trust::pinned_identity` over `authority_of`) — the source of the native
+# seam's `bound_nest_id`. Already in the graph under `fauna-client`.
+fauna-anon-client = { path = "../fauna-anon-client" }
+
+# Wasm concrete seam: the browser `WsRpcClient` (`RpcRequester` over gloo-net)
+# the web `linked-nests` page drives through `libs/fauna-wasm`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm" }
+# `rand::thread_rng()` (the trust `grant_id` CSPRNG) needs getrandom's wasm
+# backend; `fauna-wasm` enables it workspace-wide via the `wasm_js` cfg, so this
+# crate just needs the dep in its wasm graph (no per-crate feature). Mirrors
+# fauna-client-mail-settings.
+getrandom = { workspace = true }
+# Forward the `js` time backend on wasm for fauna-protocol + the trust-facet
+# deps (fauna-core's js-sys clock, fauna-mls's openmls/js). Mirrors
+# fauna-client-capabilities.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+# `blob-fetch-wasm` is the browser `WasmPublicChunkFetcher` the audit's
+# `wasm_backup_inclusion_source` fetches sampled backup records over (the wasm
+# twin of native's `ForeignPublicChunkFetcher` leg). `fauna-wasm` already turns
+# it on for the whole wasm graph, so this adds no weight — it declares the
+# dependency this crate actually has rather than relying on a consumer's
+# unification.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js", "blob-fetch-wasm"] }
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"] }
+fauna-client-core = { path = "../fauna-client-core", default-features = false, features = ["auth-ceremony", "js"] }
+
+[dev-dependencies]
+# The door-exact in-memory period-key store the trust-facet tests lend.
+fauna-client-subscriptions = { path = "../fauna-client-subscriptions", features = ["test-helpers"] }
+# Turn on the seams' shared in-memory doubles
+# (`fauna_client_config::test_helpers`) for the test
+# build only — a dev-dep feature, so it cannot reach a release artifact.
+fauna-client-config = { path = "../fauna-client-config", features = [
+    "test-helpers",
+] }
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+tokio = { workspace = true }
+# (ed25519-dalek is now a base dep — the real `GrantEventSigner` glue needs it,
+# and the tests' fake signer uses the same `SigningKey` type.)

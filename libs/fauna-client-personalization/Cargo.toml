@@ -1,0 +1,64 @@
+[package]
+name = "fauna-client-personalization"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Typed client for the fauna.personalization.model.* plane + the BackupKey seal of a trained topic model (nest-opaque from birth)."
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_bytes = "0.11"
+thiserror = { workspace = true }
+
+# The trained model this crate seals/unseals. uniffi-free + WASM-safe by
+# construction (serde/serde_json/unicode-* only), so it adds no native-only
+# surface to the wasm consumers of `fauna-feed`.
+fauna-text-model = { path = "../fauna-text-model" }
+
+# `default-features = false` on both keeps this crate wasm-clean — it is pulled
+# into `fauna-feed`, which the web SPA compiles to WASM (fauna-core's `network`
+# default drags in redb/tokio/hickory; fauna-protocol's `p2p` default drags in
+# wireguard → mio). Path form (not `workspace = true`) is required to override
+# defaults — the same shape `fauna-client-config` / `-bridges` already use.
+fauna-core = { path = "../fauna-core", default-features = false }
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+
+# `TrainedTopicsError::localized` — the one `error → user-facing sentence` map
+# for the two shells that consume this crate as Rust (linux, tui). Adds nothing
+# to any graph: `fauna-i18n` has no dependencies at all, and it is already an
+# unconditional dep of `fauna-protocol` directly above, so this is a direct
+# edge onto a crate that is already here — the wasm-clean posture the rest of
+# this file documents is untouched.
+fauna-i18n = { path = "../fauna-i18n" }
+
+# The `fauna.labelers.{list,publish}` seam `publish.rs` rides to deposit a
+# trained factor as a List labeler. Wasm-clean by construction — its only dep is
+# `fauna-protocol` with `default-features = false` (and the `js` forward on
+# wasm32), so it adds no native-only surface to `fauna-feed`'s wasm consumers.
+fauna-client-labelers = { path = "../fauna-client-labelers" }
+
+# The per-factor publishing keypair (`labeler_signing_seed`): BLAKE3 `derive_key`
+# in the `BackupKey::derive` convention, and Ed25519 to sign the labeler
+# metadata. `hex` decodes the review sheet's post ids. All three are already
+# unconditional, WASM-safe deps of `fauna-core`, so none widens this crate's
+# target surface.
+blake3 = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+
+# The trained-factor REGISTRY (the `fauna.state.personalization` plane kind,
+# edited via `fauna_client_config::preference_records`),
+# the second half of the trained-topic lifecycle `topics.rs` drives: a delete
+# pairs a registry removal here with a `model.delete` on the plane above. Also
+# `default-features = false` + wasm-clean, so it adds no native-only surface.
+fauna-client-config = { path = "../fauna-client-config" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Forward the `js` time/getrandom backend on wasm (mirrors the sibling clients).
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The shared single-poll `block_on` the publish tests drive (the recording
+# double itself stays local — it is stateful; see publish.rs).
+fauna-client-testkit = { path = "../fauna-client-testkit" }

@@ -1,0 +1,38 @@
+[package]
+name = "fauna-client-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# UniFFI Record/Enum derives on the view types for native (Apple/Android/Windows)
+# consumers via fauna-ffi. Off by default — linux (native Rust) + web (wasm)
+# consume the plain types directly. Forwards fauna-core/uniffi for the blanket
+# custom-type regs.
+uniffi = ["dep:uniffi", "fauna-core/uniffi"]
+
+[dependencies]
+# Shared addressing helpers (reserved labels, apex/subdomain URLs) live in
+# fauna_core::web. default-features = false keeps the crate wasm-clean (the web
+# SPA links it via fauna-wasm); native consumers re-add `network` by unification.
+fauna-core = { path = "../fauna-core", default-features = false }
+# `RpcRequester` + the typed `fauna.web.*` request/reply pairs (one source of
+# truth shared with the nest handlers). default-features = false drops the `p2p`
+# default so the crate stays wasm-safe; `js` forwarded on wasm below.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+serde = { workspace = true }
+serde_bytes = "0.11"
+uniffi = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+fauna-i18n = { path = "../fauna-i18n" }
+# The shared `FailingRequester`/`FailedRequest` test double — wasm-clean (see
+# that crate's own docs), so it keeps this crate's dev-deps wasm32-testable.
+fauna-client-testkit = { path = "../fauna-client-testkit" }

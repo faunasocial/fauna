@@ -1,0 +1,38 @@
+[package]
+name = "fauna-client-payments"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# fauna-protocol carries the typed `fauna.payments.*` wire types + the
+# `RpcRequester` seam this crate is generic over. `default-features = false`
+# drops the native-only `p2p` feature so this crate compiles to wasm32;
+# native workspace builds re-enable `p2p` via Cargo feature unification.
+# Same shape as fauna-client-subscriptions.
+# `features = ["payments"]` is correct HERE and nowhere else that ships both
+# flavors: this crate *is* the payments plane, so it is only ever in a graph
+# that already chose payments — rule (b)'s "never name it on a dep line" binds
+# consumers that must build both ways, which this crate cannot.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["payments"] }
+# `ActorId` / `Timestamp` appear in the `claims.redeem` reply.
+fauna-core = { path = "../fauna-core", default-features = false }
+# The provider-kind registry (`known_kinds`) — the provider form's kind
+# select enumerates the same list the nest's `providers.set` validates
+# against (one owner for the registry; the crate is wasm32-clean, pure
+# verification logic with no tokio/net).
+fauna-payments = { workspace = true }
+
+# wasm: forward the `js` features (js-sys time backend) so the transitive
+# wasm build resolves. Same shape as fauna-client-subscriptions.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js", "payments"] }
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# Names the serde bounds the `RpcRequester::request` method requires, for the
+# wire-contract tests' `RecordingRequester` mock impl. No `derive` needed.
+serde = { workspace = true }

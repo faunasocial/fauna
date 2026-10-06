@@ -1,0 +1,32 @@
+; Spec Y wire envelope (design tracked internally).
+
+Frame = Request / Reply / Push / Cancel
+
+Request = {
+  0: 0,                       ; type discriminant
+  1: uint .size 8,            ; correlation_id (per-connection ascending u64)
+  2: tstr .size (1..255),     ; kind ("fauna.<area>.<verb>")
+  3: bstr .size 16,           ; idempotency_key (16 random bytes)
+  4: any,                     ; payload (kind-specific)
+  ? 5: bool,                  ; replay_forbidden (default false)
+  ? 6: uint .size 4,          ; deadline_ms
+}
+
+Reply = {
+  0: 1,                       ; type discriminant
+  1: uint .size 8,            ; correlation_id (matches request)
+  4: any,                     ; payload (kind-specific result OR encoded RpcError)
+  7: bool,                    ; ok
+}
+
+Push = {
+  0: 2,                       ; type discriminant
+  2: tstr .size (1..255),     ; kind
+  4: any,                     ; payload
+  8: uint .size 8,            ; seq
+}
+
+Cancel = {
+  0: 3,                       ; type discriminant
+  1: uint .size 8,            ; correlation_id
+}

@@ -1,0 +1,24 @@
+[package]
+name = "fauna-bridge-supervisor"
+description = "Desktop MDA supervisor for the macOS (`social.fauna.bridge` LaunchDaemon) deployment: resolves the macOS data-dir layout and runs the shared fauna-mda-supervisor loop — spawn + monitor the Go fauna-mail-bridge MDA child (CalDAV + IMAP), gated on the nest's enable flags, KeepAlive'd by launchd."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fauna-bridge-supervisor"
+path = "src/main.rs"
+
+[dependencies]
+fauna-mda-supervisor.workspace = true
+# `parse_dir_override` for the FAUNA_DATA_DIR env convention shared with
+# fauna-nest / fauna-nest-daemon — zero-dependency, already transitive via
+# fauna-mda-supervisor, so this direct edge adds nothing to the build.
+fauna-deployment-flags.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# The shared logging stack (ring + size-capped file + stderr) — the
+# supervisor's only persistent log, holding the MDA child's captured output
+# too, since its LaunchDaemon plist redirects nothing (observability.md
+# § Persistence & privacy).
+fauna-log = { path = "../../libs/fauna-log" }

@@ -1,0 +1,393 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.AtprotoPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+      The dedicated AT Protocol settings page (docs/goal/ui/atproto.md, ratified
+      2026-07-22). windows was the LAST app without it — linux/apple 2026-07-23,
+      tui 07-24, web 07-29, android 07-30.
+
+      ONE PAGE, ONE QUESTION: how deep is this user's Bluesky integration? A single
+      ordered choice (Off -> Linked -> Hosted visible -> Hosted full PDS), with each
+      level's sub-settings revealed as its own panel. Independent toggles would let a
+      user hold both identity backings at once; the selector makes that impossible
+      structurally.
+
+      A dumb renderer of AtprotoViewModel over the shared AtprotoSettingsMachine. The
+      reveal rules, the gate verdict, the greying reason and the transition card's copy
+      are ALL machine-composed — this file decides nothing (priority #2).
+
+      Visibility is applied from code-behind rather than through x:Bind converters, both
+      because the codebase has no shared bool->Visibility converter (NostrPage does the
+      same) and because a nested x:Bind call is rejected by the merge gate.
+
+      600x600 DIP VIEWPORT: `is_visible` is `!IsOffscreen`, so anything below the
+      ScrollViewer fold reads invisible to the e2e. The selector and its four rungs must
+      therefore share one viewport — test_depth_selector_renders_at_off asserts all four
+      rungs' enabled-state together. The deeper panels may sit below the fold; the driver
+      scrolls them into view on `wait_for` before interacting.
+    -->
+    <ScrollViewer Padding="16" AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoPage}">
+        <StackPanel Spacing="12" MaxWidth="640" HorizontalAlignment="Left">
+
+            <controls:CopyableInfoBar x:Name="ErrorBar"
+                     Severity="Error" IsOpen="False" IsClosable="True" />
+
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=atproto_settings/title}" />
+
+            <!-- ── 0. The recovery-fork contest ceremony (user-approved 2026-08-02;
+                 mechanism: behavior/atproto-identity-custody.md § The 72 h
+                 recovery-fork contest). LEADS the page, above the selector below —
+                 an identity under active attack outranks every settings row here.
+                 Hidden until a standing custody violation names a box-authored op;
+                 rendered off CLIENT-SIDE evidence only. `state` carries
+                 contestable/window-closed/not-contestable so the honest states are
+                 assertable (linux/tui/android/web/apple reference shape). -->
+            <StackPanel x:Name="ContestCard" Spacing="8" Visibility="Collapsed"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoContestCard}"
+                        AutomationProperties.Name="contest card"
+                        BorderThickness="1" CornerRadius="4" Padding="12"
+                        BorderBrush="{ThemeResource SystemFillColorCriticalBrush}">
+                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                           Text="{loc:Localize Key=atproto_settings/contest_card_heading}" />
+                <!-- Rendered VERBATIM from the machine — it deliberately names what
+                     undoing does NOT restore (the nest keeps the publishing key). -->
+                <TextBlock x:Name="ContestDetailText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoContestDetail}"
+                           TextWrapping="Wrap" />
+                <TextBlock x:Name="ContestDeadlineText" Visibility="Collapsed"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoContestDeadline}"
+                           Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" />
+                <!-- Renders ONLY when the machine says show_contest — never inferred
+                     from `state`, since `not-contestable` covers two distinct
+                     un-buttonable reasons (decision 2). -->
+                <Button x:Name="ContestBtn" Visibility="Collapsed"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoContest}"
+                        Click="Contest_Click" Style="{StaticResource AccentButtonStyle}"
+                        Content="{loc:Localize Key=atproto_settings/contest_button}" />
+            </StackPanel>
+
+            <StackPanel x:Name="ContestConfirmCard" Spacing="8" Visibility="Collapsed"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoContestConfirmCard}"
+                        AutomationProperties.Name="contest confirm card"
+                        BorderThickness="1" CornerRadius="4" Padding="12"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
+                <StackPanel x:Name="ContestConfirmLines" Spacing="4" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="ContestConfirmBtn"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoContestConfirm}"
+                            Click="ContestConfirm_Click" Style="{StaticResource AccentButtonStyle}"
+                            Content="{loc:Localize Key=atproto_settings/contest_confirm_button}" />
+                    <Button x:Name="ContestCancelBtn"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoContestCancel}"
+                            Click="ContestCancel_Click"
+                            Content="{loc:Localize Key=atproto_settings/contest_cancel_button}" />
+                </StackPanel>
+            </StackPanel>
+
+            <!-- ── 1. The depth selector ──────────────────────────────────────
+                 The container carries the CURRENT LEVEL in its `state` attr
+                 (HelpText) — that is how the e2e reads the level. Each rung carries
+                 `gated`/`ok` in its own `reason` attr.
+
+                 The rungs stay RadioButtons whose IsChecked is set from the VM, never
+                 two-way bound: a two-way bind would re-enter SelectLevel while the
+                 machine is mid-transition. User intent arrives via Click, which fires
+                 only on real interaction. -->
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=atproto_settings/depth_heading}" />
+            <!-- ⚠ A bare layout panel carrying ONLY an AutomationId is PRUNED from the
+                 UIA tree FlaUI walks — `count` returns 0 and `is_visible` False, even
+                 though its child controls are found fine. An AutomationProperties.Name
+                 is what materializes the container peer. This is the page-level twin of
+                 the DataTemplate-row rule (memory reference_winui_flaui_datatemplate_name),
+                 and it is why every container on this page that the e2e reads by id
+                 (this selector, the transition card, the DID-method box) carries one.
+                 Safe for `card_text`'s get_text: ElementFinder.GetText scrapes child
+                 TextBlocks first and falls back to the element's own Name only as a last
+                 resort, so a container Name never shadows real content. -->
+            <StackPanel x:Name="DepthSelector" Spacing="4"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDepthSelector}"
+                        AutomationProperties.Name="depth selector">
+
+                <!-- The four rungs are built in code-behind from the shared catalog
+                     (fauna_atproto_settings_machine::depth::depth_level_options) —
+                     id, title, description and the hosted-gate fact all come from
+                     there, none re-spelled here (atproto.md § Where logic lives →
+                     *The rung catalog*). -->
+                <StackPanel x:Name="DepthRungsHost" Spacing="4" />
+
+                <!-- Greyed WITH a reason, never hidden (§ Reveal/greying rules). -->
+                <TextBlock x:Name="GateReasonText" Visibility="Collapsed" TextWrapping="Wrap"
+                           Style="{StaticResource CaptionTextBlockStyle}" />
+            </StackPanel>
+
+            <!-- ── 2. The transition card ─────────────────────────────────────
+                 States, concretely and completely, what THIS level change will do
+                 before anything happens. Its lines come from the machine's composed
+                 TransitionPlan and are rendered VERBATIM — never re-authored here. -->
+            <StackPanel x:Name="TransitionCard" Spacing="8" Visibility="Collapsed"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDepthConfirmCard}"
+                        AutomationProperties.Name="transition card"
+                        BorderThickness="1" CornerRadius="4" Padding="12"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
+                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                           Text="{loc:Localize Key=atproto_settings/depth_card_heading}" />
+                <StackPanel x:Name="CardLines" Spacing="4" />
+                <CheckBox x:Name="HistoryBackfill" Visibility="Collapsed"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoHistoryBackfill}"
+                          Click="HistoryBackfill_Click"
+                          Content="{loc:Localize Key=atproto_settings/history_backfill_label}" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="ConfirmBtn"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDepthConfirm}"
+                            Click="Confirm_Click" Style="{StaticResource AccentButtonStyle}"
+                            Content="{loc:Localize Key=atproto_settings/depth_confirm_button}" />
+                    <Button x:Name="CancelBtn"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDepthCancel}"
+                            Click="Cancel_Click"
+                            Content="{loc:Localize Key=atproto_settings/depth_cancel_button}" />
+                </StackPanel>
+            </StackPanel>
+
+            <!-- ── 3a. Linked-account panel (level = linked) ──────────────────
+                 The consume-side link surface, reused VERBATIM from the Bridges page:
+                 the same Controls/BridgeCard component, so this panel contributes zero
+                 new element ids (`bridge-card` / `bridge-action-button` and, when
+                 unlinked, the `bridge-link-field-*` dialog the button opens).
+
+                 It landed in ONE commit with the Bridges-page migration (deleting
+                 BridgesViewModel.NoDedicatedPageOnWindowsYet), because the moment that
+                 page honours the shared predicate this panel is the only home linked
+                 management has — ui/atproto.md § Migration step 2.
+
+                 The row comes from a SECOND BridgesViewModel scoped by SingleBridgeId
+                 (apple's BridgeManagerVM.singleBridgeId shape; android runs a second
+                 BridgesVM the same way), reading the same unfiltered fauna.bridges.list
+                 reply the Bridges page reads — so the two surfaces cannot disagree. -->
+            <StackPanel x:Name="LinkedPanel" Spacing="8" Visibility="Collapsed">
+                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                           Text="{loc:Localize Key=atproto_settings/depth_linked_title}" />
+                <controls:BridgeCard x:Name="LinkedBridgeCard"
+                                     ActionClick="LinkedBridgeAction_Click"
+                                     SettingChanged="LinkedBridgeSetting_Changed" />
+            </StackPanel>
+
+            <!-- ── 3b. Hosted panel (at, or staged toward, a hosted level) ────
+                 Pre-mint: the DID-method radio + the either-way handle line.
+                 Post-mint: the identity summary — the method is then a FACT, displayed
+                 not chosen (switching methods is a new identity, not a setting), and
+                 the raw DID string is deliberately never shown. -->
+            <StackPanel x:Name="HostedPanel" Spacing="8" Visibility="Collapsed">
+                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                           Text="{loc:Localize Key=atproto_settings/did_method_heading}" />
+
+                <StackPanel x:Name="DidMethodBox" Spacing="4" Visibility="Collapsed"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDidMethod}"
+                            AutomationProperties.Name="DID method">
+                    <RadioButton x:Name="DidPlc" GroupName="AtprotoDidMethod"
+                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDidMethodPlc}"
+                                 Click="DidMethod_Click" Tag="plc"
+                                 Content="{loc:Localize Key=atproto_settings/did_method_plc_title}" />
+                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Margin="28,-4,0,4"
+                               Text="{loc:Localize Key=atproto_settings/did_method_plc_desc}" TextWrapping="Wrap" />
+                    <RadioButton x:Name="DidWeb" GroupName="AtprotoDidMethod"
+                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDidMethodWeb}"
+                                 Click="DidMethod_Click" Tag="web"
+                                 Content="{loc:Localize Key=atproto_settings/did_method_web_title}" />
+                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Margin="28,-4,0,4"
+                               Text="{loc:Localize Key=atproto_settings/did_method_web_desc}" TextWrapping="Wrap" />
+                    <TextBlock x:Name="HandlePreviewText" Visibility="Collapsed" TextWrapping="Wrap"
+                               Style="{StaticResource CaptionTextBlockStyle}" />
+                </StackPanel>
+            </StackPanel>
+
+            <!-- Split OUT of HostedPanel (linux's identity_group/hosted_group split,
+                 the structural fix a nested-container UI needs): ui/atproto.md
+                 § Errors & edge cases requires the summary to render at level
+                 Off/Linked too, for a deactivated identity — states where HostedPanel
+                 itself is Collapsed. A WinUI Visibility.Collapsed on a PARENT hides
+                 every descendant regardless of the descendant's own Visibility, so
+                 this element's own ShowHostedHandle-bound visibility could never win
+                 while it lived inside HostedPanel. AutomationId ONLY, no static Name:
+                 a get_text label with both returns the wrong value (memory
+                 reference_windows_flaui_gettext_dynamic_label_no_name). -->
+            <TextBlock x:Name="HostedHandleText" Visibility="Collapsed" TextWrapping="Wrap"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoHostedHandle}" />
+
+            <!-- ── 3c. Full-PDS panel (level = hosted_full ONLY) ──────────────
+                 The F1 login-plane groups are the DEEPEST level's panel, not
+                 standalone settings — every other app gates them on hosted_full.
+
+                 The D10 authoring-delegation row is the LAST group in this panel
+                 (below), landed 2026-08-24 — windows was the 7th and final app. Its
+                 shared gestures ARE UniFFI-exported: they landed with apple's renderer
+                 and never ahead of one, so the dark-capability rule is satisfied by the
+                 pairing, and windows inherits them from the C# binding regen. -->
+            <StackPanel x:Name="FullPdsPanel" Spacing="8" Visibility="Collapsed">
+
+                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                           Text="{loc:Localize Key=atproto_settings/app_credentials_heading}" />
+                <ToggleSwitch x:Name="ExternalAppsToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoExternalAppsEnable}"
+                              Toggled="ExternalApps_Toggled"
+                              Header="{loc:Localize Key=atproto_settings/external_apps_toggle}" />
+                <Button x:Name="MintBtn"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoAppCredentialMint}"
+                        Click="Mint_Click"
+                        Content="{loc:Localize Key=atproto_settings/mint_button}" />
+
+                <!-- atproto-app-credentials-list. Each row carries an
+                     AutomationProperties.Name: without one FlaUI reports a
+                     DataTemplate row's count/is_visible as 0 (memory
+                     reference_winui_flaui_datatemplate_name). -->
+                <ItemsControl x:Name="CredentialsList"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoAppCredentialsList}"
+                              AutomationProperties.Name="{loc:Localize Key=atproto_settings/app_credentials_heading}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <!-- Literal for the same reason as the consent card above. -->
+                            <Grid ColumnSpacing="8" Margin="0,4"
+                                  AutomationProperties.AutomationId="atproto-app-credential-item"
+                                  AutomationProperties.Name="credential">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" VerticalAlignment="Center" TextWrapping="Wrap"
+                                           Text="{Binding Display}" />
+                                <Button Grid.Column="1" Tag="{Binding}" Click="Reveal_Click"
+                                        AutomationProperties.AutomationId="atproto-app-credential-reveal"
+                                        IsEnabled="{Binding CanReveal}"
+                                        Content="{Binding RevealText}" />
+                                <Button Grid.Column="2" Tag="{Binding}" Click="RevokeCredential_Click"
+                                        AutomationProperties.AutomationId="atproto-app-credential-revoke"
+                                        Content="{loc:Localize Key=atproto_settings/revoke_button}" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- ── The D10 authoring-delegation row (atproto-pds-full.md § App
+                     surface) — what authorizes an external ATProto app to *post* as
+                     this account, as opposed to merely signing in (everything above
+                     governs that). Six IDs user-approved 2026-07-29, `-last-used`
+                     2026-07-31; tui leads, linux/apple/web/android are the built
+                     references and windows is the 6th and last trickle-down leg.
+
+                     LEAF DECOMPOSITION, not the joined-text shape the credential rows
+                     above use. The deciding constraint is liveness: a joined blob can
+                     only assert that *some* text changed, never that the state itself
+                     moved expired -> active, so the guarantee would ship unpinned.
+
+                     TWO SHAPES, ONE ALWAYS-PRESENT CONTROL. With no delegation — or one
+                     whose stored cert failed the client-side verify under this account's
+                     own identity key — the row and its leaves are WITHHELD (never
+                     rendered as a grant the user cannot be shown to have made; the
+                     mismatch is already on error-message) and only `-authorize` renders.
+                     With one, the four leaves render and `-authorize` STAYS, because
+                     re-authorizing IS the renewal gesture. -->
+                <TextBlock Margin="0,12,0,0" FontWeight="SemiBold"
+                           Text="{loc:Localize Key=atproto_settings/delegation_heading}" />
+
+                <!-- The empty state. Not an error and not a warning: external apps can
+                     still sign in, they just cannot write as the account yet. -->
+                <TextBlock x:Name="DelegationEmptyText" TextWrapping="Wrap" Opacity="0.7"
+                           Text="{loc:Localize Key=atproto_settings/delegation_empty}" />
+
+                <!-- AutomationProperties.Name is load-bearing, not decoration: a Border
+                     carrying only an AutomationId is pruned from the UIA tree, so the
+                     row would be un-findable by the driver. -->
+                <Border x:Name="DelegationRow" BorderThickness="1" CornerRadius="4" Padding="12"
+                        Visibility="Collapsed"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDelegationRow}"
+                        AutomationProperties.Name="{loc:Localize Key=atproto_settings/delegation_heading}">
+                    <StackPanel Spacing="4">
+                        <TextBlock x:Name="DelegationScopeText" TextWrapping="Wrap"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDelegationScope}" />
+                        <TextBlock x:Name="DelegationLastsUntilText" TextWrapping="Wrap" Opacity="0.7"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDelegationLastsUntil}" />
+                        <!-- The liveness WIRE spelling rides HelpText, which is the slot
+                             the windows driver's get_attr(id, "state") reads — so the
+                             e2e asserts the STATE, never the prose (convention 14).
+                             Applied in ApplyVm, like every other HelpText on this page. -->
+                        <TextBlock x:Name="DelegationStatusText" TextWrapping="Wrap"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDelegationStatus}" />
+                        <!-- ADVISORY (D10 § Audit). Every leaf above derives from the
+                             SIGNED cert, re-verified client-side under this account's own
+                             identity key; this one does not — the nest simply asserts it,
+                             with nothing signing it. So the wording hedges and the hint
+                             line below points at the feed's delegated-origin-badge, which
+                             IS read from signed bytes. An absent stamp means nothing was
+                             REPORTED, never that nothing happened: a nest that
+                             under-reports is exactly what this value cannot detect. -->
+                        <TextBlock x:Name="DelegationLastUsedText" TextWrapping="Wrap" Opacity="0.7"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDelegationLastUsed}"
+                                   AutomationProperties.HelpText="advisory" />
+                        <TextBlock TextWrapping="Wrap" Opacity="0.7" FontSize="12"
+                                   Text="{loc:Localize Key=atproto_settings/delegation_last_used_hint}" />
+                    </StackPanel>
+                </Border>
+
+                <!-- `-authorize` renders in BOTH shapes: provisioning overwrites the
+                     stored cert with a freshly dated one, so a lapsed grant recovers in
+                     ONE gesture with no revoke first. Hiding it once authorized would
+                     force the revoke-then-re-mint flow the ruling forbids, and would
+                     destroy the signing sub-key K for what is only an expiry refresh.
+                     Only its LABEL follows the state. `-revoke` is the separate
+                     destructive action and renders only alongside a live row. -->
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="DelegationAuthorizeBtn" Click="AuthorizeDelegation_Click"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDelegationAuthorize}"
+                            Content="{loc:Localize Key=atproto_settings/delegation_authorize_button}" />
+                    <Button x:Name="DelegationRevokeBtn" Click="RevokeDelegation_Click"
+                            Visibility="Collapsed"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDelegationRevoke}"
+                            Content="{loc:Localize Key=atproto_settings/delegation_revoke_button}" />
+                </StackPanel>
+            </StackPanel>
+
+            <!-- ── 4. Delete my Bluesky presence ──────────────────────────────
+                 Renders whenever a hosted identity exists, ACTIVE OR DEACTIVATED, so
+                 the stronger destructive action stays reachable after a step-down. -->
+            <Button x:Name="DeletePresenceBtn" Visibility="Collapsed"
+                    Click="DeletePresence_Click" Style="{StaticResource AccentButtonStyle}"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDeletePresence}"
+                    Content="{loc:Localize Key=atproto_settings/delete_presence_button}" />
+
+            <!-- Its own confirm card — never the depth selector's (ui/atproto.md
+                 § User actions row 4). The copy is the machine's, rendered verbatim:
+                 the ceremony's promises about what survives are not this file's to
+                 word. Mirrors ContestConfirmCard above. -->
+            <StackPanel x:Name="DeleteConfirmCard" Spacing="8" Visibility="Collapsed"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDeleteConfirmCard}"
+                        AutomationProperties.Name="delete confirm card"
+                        BorderThickness="1" CornerRadius="4" Padding="12"
+                        BorderBrush="{ThemeResource SystemFillColorCriticalBrush}">
+                <StackPanel x:Name="DeleteConfirmLines" Spacing="4" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="DeleteConfirmBtn"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDeleteConfirm}"
+                            Click="DeleteConfirm_Click" Style="{StaticResource AccentButtonStyle}"
+                            Content="{loc:Localize Key=atproto_settings/delete_confirm_button}" />
+                    <Button x:Name="DeleteCancelBtn"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDeleteCancel}"
+                            Click="DeleteCancel_Click"
+                            Content="{loc:Localize Key=atproto_settings/delete_cancel_button}" />
+                </StackPanel>
+            </StackPanel>
+
+        </StackPanel>
+    </ScrollViewer>
+</Page>

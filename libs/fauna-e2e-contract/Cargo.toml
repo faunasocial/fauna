@@ -1,0 +1,9 @@
+[package]
+name = "fauna-e2e-contract"
+description = "The pure, wasm-safe half of the cross-app e2e observable contract (counters, payload parsers) shared by native and web legs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json = { workspace = true }

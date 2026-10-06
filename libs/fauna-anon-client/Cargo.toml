@@ -1,0 +1,100 @@
+[package]
+name = "fauna-anon-client"
+description = "Native client of the pre-identity (anonymous) WS-RPC connection to fauna-nest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# `trust::{pin_identity_for_test, pinned_identity_for_test}` — the native half of
+# the E2E bridge's nest-identity-pin seam. A *silent* global pin write is what the
+# TOFU model forbids in production, so it never exists in a shipped build; the
+# apps' debug/test builds turn it on through
+# `fauna-onboarding-machine/test-helpers`, which forwards to this.
+test-helpers = []
+
+# Native-only: tokio-tungstenite won't build on wasm32. The wasm twin of the
+# anonymous connector is `fauna-rpc-wasm::AnonymousWsRpcClient`. Consumers
+# target-gate this crate behind `cfg(not(target_arch = "wasm32"))`.
+#
+# Deliberately does NOT depend on `fauna-nest-http` (the legacy HTTP layer) —
+# that is the whole point of the extraction. Both pre-identity state machines
+# (`fauna-onboarding-machine`, `fauna-launch-machine`) reach the anonymous
+# connector through this crate without forming the
+# `fauna-client → fauna-nest-http → fauna-launch-machine → fauna-client`
+# dependency cycle that pulling it from `fauna-client` would create.
+
+[dependencies]
+fauna-i18n = { path = "../fauna-i18n" }
+# default-features = false: the anonymous connector only needs the core RPC
+# surface (KindRegistry, RpcDispatcher, RpcError, RpcErrorClass, the discovery
+# wire types) — not the native-only `p2p` default that drags in
+# fauna-wireguard/mio. `tls-spki` adds the shared SPKI-fingerprint helper the
+# capturing TLS verifier computes on the cert the client received.
+# `auth-ceremony` adds the raw challenge/verify ceremony
+# (`fauna_protocol::auth::challenge_verify`) the app-held bearer mint
+# (`bearer::mint_bearer_over_silent_challenge`) rides — code only, no new dep.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["tls-spki", "auth-ceremony"] }
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+# The capturing TLS verifier now lives in `fauna-ws-substrate` (shared by the
+# bearer client channel and the nest↔nest federation dialer, §5); this crate
+# re-exports it from `tls_verify.rs`. The bundled root store the verifier
+# classifies against is NOT here and no longer in `fauna-ws-substrate` either:
+# it moved on to `fauna-tls-bootstrap`, the shared rustls preamble, 2026-08-30.
+fauna-ws-substrate.workspace = true
+# rustls: the connector type (`ws.rs` builds `Connector::Rustls`) and the
+# channel-binding cert handling (`cert_binding.rs`). ring-only, matching the
+# workspace rustls.
+rustls.workspace = true
+serde.workspace = true
+futures-util = { workspace = true, features = ["sink"] }
+bytes.workspace = true
+getrandom.workspace = true
+thiserror.workspace = true
+# Disk-backed TOFU pin store (`cert_binding::DiskPinStore`) — host→actor_id
+# JSON: `hex` encodes the pinned ids, `serde_json` (de)serializes the file.
+# (The Ed25519 channel-binding *verification* now lives in the shared
+# `fauna-client-core::nest_trust` core — re-exported by `cert_binding.rs`; this
+# crate keeps only the native disk store + connect wiring.)
+hex.workspace = true
+# The handshake bearer mint (`bearer::mint_bearer_over_handshake`) signs the
+# `fauna.auth.handshake` ceremony with the caller's Ed25519 key. Lifted here from
+# `fauna-client` so the mint sits next to the anonymous connect + graduation it
+# composes (the leaf home; `fauna-onboarding-machine`'s native recovery reader
+# reaches it without the `fauna-client` Cargo cycle).
+ed25519-dalek = { workspace = true }
+serde_json.workspace = true
+# `cert_binding::ReadOnlyDiskPinStore` warns when a consumer process's dropped
+# `set`/`remove` is reached (a caller bug — the strict TOFU arm never mints).
+tracing.workspace = true
+# Axis-2 DNS `self=` identity root for self-signed *public* domains
+# (`trust::resolve_dns_self_root`, security.md § Transport trust): `fauna-core`
+# (network default) supplies `lookup_fauna_txt` + `extract_txt_value`;
+# `fauna-provisioning` (no native deps needed — pure classification) supplies
+# `probe::public_dns_host`, sharing `resolve_handle_domain`'s `.local`/IP
+# classification so "what counts as local" has one source of truth. Native-only,
+# like the rest of this crate.
+fauna-core = { path = "../fauna-core" }
+fauna-provisioning = { path = "../fauna-provisioning", default-features = false }
+# Shared transport-free nest-identity trust core (`nest_trust`: verify_cert_binding
+# / check_identity_root / NestIdentityPinStore / MemoryPinStore), re-exported by
+# `cert_binding.rs` so native call sites are unchanged. default-features = false:
+# this crate only needs the trust core.
+fauna-client-core = { path = "../fauna-client-core", default-features = false, features = ["auth-ceremony"] }
+
+[dev-dependencies]
+# `disk_pin_store_durability` integration test: forge a signed `CertBinding`
+# (ed25519-dalek — now a normal dependency, above — + the protocol wire type) to
+# drive `graduate_handshake` through an installed `DiskPinStore`, proving TOFU
+# pins survive a simulated restart.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["tls-spki"] }
+hex = { workspace = true }
+# The pin-store mirror tests (`cert_binding::tests`) need a throwaway
+# primary + replica dir pair.
+tempfile = { workspace = true }
+# `test-util` enables `tokio::time::pause`/`start_paused` for the
+# `connect_anonymous` connect-deadline regression test (not part of tokio's
+# `full` feature set) — same override as `fauna-ws-substrate`/`fauna-sync-engine`.
+tokio = { workspace = true, features = ["full", "test-util"] }

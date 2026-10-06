@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.network.client</key>
+  <true/>
+  <!-- Deliberately NO com.apple.security.application-groups claim (dropped
+       2026-08-25). The agent's data root, socket, logs and pin store all live in
+       the user domain (~/Library/Application Support/Fauna — sync-agent.md
+       § Packaging + lifecycle), never in the app-group container: macOS 15+ puts
+       ~/Library/Group Containers under kTCCServiceSystemPolicyAppData and a
+       launchd-spawned process is prompted there on EVERY instance with no user
+       decision ever binding the next one (installers/macos.md § Identifier
+       domain, record item 5), so the container is the sandboxed File Provider
+       extension's root only. A group claim here would be a dead claim — the
+       kind that invites the next "why does it prompt" hunt — and the pin test
+       (test_apple_identifier_pins.py) asserts its absence; the headless witness
+       that the agent creates nothing under the container is
+       agent_sigterm.rs::the_agent_binary_boots_in_the_user_domain_and_never_creates_the_container. -->
+</dict>
+</plist>

@@ -1,0 +1,24 @@
+# .gitleaks.toml — the public CI secret scanner's configuration.
+#
+# Extends gitleaks' default rule set (never replaces it). The precise
+# per-line `gitleaks:allow` marker is the end state for a file that can carry
+# one — that drain landed 2026-08-29 (49 findings across 44 files moved to
+# markers, verified locally against a fresh curated tree with this exact
+# scanner: 0 leaks). Every path below is a file where NO line can carry a
+# marker (a lockfile, a vendored multi-line raw string, an env file where an
+# inline `#` would be live config) and is reviewed with a reason in the
+# publisher's approved-exec list. The publish gate refuses any other
+# suppression shape (a regex, a subtree, an extra allowlist key, an
+# unreviewed file).
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Reviewed fixtures that cannot carry a per-line gitleaks:allow marker (lockfile, vendored multi-line raw string, env file, binary PEM)"
+paths = [
+  '^Cargo\.lock$',
+  '^bins/fauna-bridges/third_party/go-imap/imapclient/client_test\.go$',
+  '^tests/e2e-unified/helpers/stub_mx_tls_key\.pem$',
+  '^tests/e2e-unified/tests/platform/fediverse/mastodon/mastodon-test\.env$',
+]

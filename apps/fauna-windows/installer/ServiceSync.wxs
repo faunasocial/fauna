@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  Fauna Sync — file sync engine.
+
+  Ships fauna-sync-agent.exe (the sync agent) and registers a per-user HKLM \Run
+  logon launch for it.  The agent runs in each user's session under their
+  STANDARD (non-elevated) token — there is no NT SERVICE\FaunaSync machine
+  service.
+
+  The artifact was named fauna-sync.exe up to 0.1.1; milestone A5 renamed it to
+  fauna-sync-agent.exe (2026-07-22) to match every other platform's agent binary
+  and to stop colliding with bins/fauna-sync, the unrelated headless CLI daemon
+  (since removed, 2026-10-02).
+  The upgrade path is covered by MajorUpgrade's RemoveExistingProducts (Package.wxs,
+  scheduled afterInstallInitialize), which removes the old product — old exe AND old
+  Run-key value — before the new files land; a still-RUNNING agent is reaped by the
+  KillFaunaSync CA.
+
+  fauna-ctl.exe was dropped from the MSI (USER-ratified 2026-06-20): the
+  only user-configuration surface is the installer + the client, and the
+  network-reachable nest makes a headless box fully client-manageable at
+  `test@<ip>`, so the CLI (which duplicated client config UI) was redundant.
+  The crate itself was deleted 2026-10-02.  See
+  docs/goal/architecture/installers/windows.md § Feature Tree.
+-->
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Fragment>
+    <ComponentGroup Id="SyncService" Directory="INSTALLFOLDER">
+
+      <!-- fauna-sync-agent.exe.
+           NEW Component Id + GUID at the A5 rename (was FaunaSyncExe /
+           4a7b8c00-0001-…, key path fauna-sync.exe). MSI component rules forbid
+           changing an existing component's key-path file name under the same GUID,
+           so the renamed artifact gets its own component; the old one retires with
+           the old product at RemoveExistingProducts. -->
+      <Component Id="FaunaSyncAgentExe" Guid="4a7b8c00-0002-4d3a-b5c6-d7e8f9a0b1c2">
+        <File Id="FaunaSyncAgentExe"
+              Source="$(var.SyncBin)"
+              KeyPath="yes"
+              Name="fauna-sync-agent.exe" />
+
+        <!-- Per-user logon launch (replaces the old FaunaSync machine service):
+             HKLM \Run runs fauna-sync-agent.exe at every user's logon under that
+             user's STANDARD (non-elevated) token. Bare exe = per-user agent mode (the
+             SCM "service" arg was removed in Phase 3). Removed with the component on
+             uninstall (WiX removes component registry values automatically). -->
+        <RegistryValue
+          Root="HKLM"
+          Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+          Name="Fauna Sync"
+          Value="[INSTALLFOLDER]fauna-sync-agent.exe"
+          Type="string" />
+      </Component>
+
+    </ComponentGroup>
+  </Fragment>
+
+</Wix>

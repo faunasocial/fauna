@@ -1,0 +1,5 @@
+{
+  "tests/platform/docker/test_graceful_shutdown.py": 1,
+  "tests/platform/macos/test_onboarding.py": 1,
+  "tests/test_build_slot.py": 17
+}

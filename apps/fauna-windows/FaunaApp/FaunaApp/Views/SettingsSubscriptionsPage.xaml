@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.SettingsSubscriptionsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+      Settings → Subscriptions sub-page (subscription-settings; monetization.md § Pillar 1
+      consumer path; ui.yaml subscription-settings). The CONSUMER side: the tiers this user
+      subscribes to, across all creators — an observer-free dumb renderer of
+      SubscriptionsSettingsViewModel (FaunaApp.Core) over the INestRpcClient seam. Author-side
+      tier management lives on the Profile page (Tiers tab). Mirrors apple
+      SubscriptionsSettingsVM / linux src/settings/subscriptions.rs. Hosted by SettingsShellPage
+      (the settings sidebar-swap shell). No ConfigureAwait(false) in the handlers
+      (off-thread bound-state mutation throws a silent COMException —
+      reference_windows_vm_configureawait_comexception).
+    -->
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="24" MaxWidth="760" HorizontalAlignment="Left">
+
+            <!-- Error bar + hidden FlaUI mirror (same shape as ProfilePage / AdminCalendarPage).
+                 The CopyableInfoBar paints; the 1px TextBlock keeps the error-message AutomationId
+                 realized even when the bar is collapsed (state-protocol read path). -->
+            <controls:CopyableInfoBar x:Name="ErrorBar"
+                     Severity="Error" IsOpen="False" IsClosable="True" />
+            <TextBlock x:Name="ErrorTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+                       AutomationProperties.Name=" " Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=subscriptions/title}" />
+
+            <!-- ════ subscription-mine-section ════ -->
+            <StackPanel AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionMineSection}"
+                        AutomationProperties.Name="subscription-mine-section"
+                        Spacing="8">
+
+                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                           Text="{loc:Localize Key=subscriptions/my_subscriptions}" />
+
+                <!-- "No subscriptions" placeholder — shown when the list is empty;
+                     mirroring ProfilePage's NoTiersText pattern. -->
+                <TextBlock x:Name="NoSubscriptionsText" Opacity="0.6"
+                           Text="{loc:Localize Key=subscriptions/no_subscriptions}" />
+
+                <!-- subscription-mine-list: non-virtualizing ItemsControl (NOT ListView)
+                     so FlaUI count-all sees every row; bound to _vm.Subscriptions.
+                     Each DataTemplate row carries AutomationId + Name. -->
+                <ItemsControl x:Name="SubscriptionsList"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionMineList}"
+                              AutomationProperties.Name="{loc:Localize Key=subscriptions/my_subscriptions}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <!-- Literal ids below — this DataTemplate has no x:DataType, so
+                                 `{x:Bind ids:Ids.…}` silently drops here; see
+                                 Controls/RecipientPicker.xaml. -->
+                            <Grid AutomationProperties.AutomationId="subscription-mine-row"
+                                  AutomationProperties.Name="{Binding AuthorDisplay}"
+                                  Padding="0,4" ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis"
+                                           AutomationProperties.AutomationId="subscription-mine-author"
+                                           Text="{Binding AuthorDisplay}" />
+                                <TextBlock Grid.Column="1" VerticalAlignment="Center"
+                                           AutomationProperties.AutomationId="subscription-mine-tier"
+                                           Text="{Binding Tier}" />
+                                <!-- Status is the RAW wire string ("active"/"pending") —
+                                     a tier_3 e2e asserts the literal text; no converter. -->
+                                <TextBlock Grid.Column="2" VerticalAlignment="Center"
+                                           AutomationProperties.AutomationId="subscription-mine-status"
+                                           Text="{Binding Status}" />
+                                <Button Grid.Column="3"
+                                        AutomationProperties.AutomationId="subscription-mine-unsubscribe-button"
+                                        Tag="{Binding}" Click="Unsubscribe_Click"
+                                        Content="{loc:Localize Key=subscriptions/unsubscribe}" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+
+            <!-- ════ Claim redemption (monetization.md § Pillar 3 Q4 — the universal
+                 fallback binding). The markup lives in
+                 Views/Payments/ClaimRedeemPanel.xaml so it is one removable build item
+                 (dynamic-features.md § Platform-family surface excision), and is hosted
+                 rather than named: the store-safe csproj removes that type, so a XAML
+                 element naming it would not compile. Filled by the code-behind under
+                 `#if PAYMENTS`; empty and zero-height in an excised build. ════ -->
+            <ContentControl x:Name="ClaimRedeemHost"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Stretch" />
+
+        </StackPanel>
+    </ScrollViewer>
+</Page>

@@ -1,0 +1,13 @@
+[package]
+name = "fauna-deployment-flags"
+description = "The flag-file names the nest materializes in its data dir to tell a supervisor which roles to run and which ports to bind. A cross-process on-disk contract: the nest writes, the per-OS supervisor shells read. Zero dependencies by design — the whole point is that a desktop service shell can own the contract without depending on the nest."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Deliberately dependency-free, and it must stay that way. The two consumers on
+# the reading side (fauna-mda-supervisor, fauna-nest-supervisor) are std-only
+# service shells; a dependency added here is a dependency added to both. That
+# constraint is precisely why these names could not live in fauna-protocol,
+# where the tempting neighbour `DEFAULT_SERVING_PORT` sits.
+[dependencies]

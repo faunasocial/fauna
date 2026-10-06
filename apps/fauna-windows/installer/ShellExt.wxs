@@ -1,0 +1,257 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  Shell Extension — COM registration for overlay icons and context menu.
+
+  8 CLSIDs total:
+    4 overlay handlers (synced, syncing, cloud-only, error)
+    4 context menu handlers (root, share, info-devices, info-versions)
+-->
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <!--
+    Path 1 (USER-decision 2026-06-25): the shell DLL is installed under a
+    VERSION-STAMPED filename so a genuine change ships under a NEW filename and the
+    install NEVER touches the in-use old DLL (explorer.exe holds it via COM) — so
+    Explorer is never closed and the desktop can never strand. See
+    docs/goal/architecture/installers/windows.md § Shell Extension + § Feature Tree
+    for the full design + the forensic proof that the prior in-place
+    close-and-restart approach (B1) strands the desktop.
+
+    `ShellDllName` MUST stay in lockstep with the product version in Package.wxs
+    — bump BOTH together when the shell DLL genuinely changes; the product version
+    itself is fleet-wide, sourced from the root Cargo.toml (product-version.md;
+    the version-lockstep merge gate holds all three in step pre-build). The
+    coupling is asserted by test_installer_structure.py (the installed File @Name must
+    equal fauna_shell_<ProductVersion>.dll). Same version → same filename (NeverOverwrite
+    leaves the in-use file untouched); a bumped version → new filename → side-by-side.
+    The build-machine SOURCE stays the bare fauna_shell.dll ($(var.ShellDll)); only the
+    INSTALLED @Name is versioned, so staging + the -d ShellDll= path are unchanged.
+  -->
+  <?define ShellDllName = "fauna_shell_0.1.2.dll" ?>
+
+  <Fragment>
+    <ComponentGroup Id="ShellExtComponents" Directory="INSTALLFOLDER">
+
+      <!-- fauna_shell_<ver>.dll — Path 1 side-by-side shell DLL (USER-decision 2026-06-25).
+           explorer.exe loads this DLL via COM (overlay-icon + context-menu handlers), so
+           any MSI operation that removes or replaces it forces the in-use file's lock to be
+           freed — which on MSI 4.0+ auto-engages the Restart Manager and CLOSES Explorer,
+           stranding the desktop (proven broken under live RDP test 2026-06-23→25; the prior
+           close-and-restart machinery is GONE — see Package.wxs).
+           Path 1 makes the in-use file UNTOUCHABLE by the installer:
+
+             - Guid="*"  — the component GUID is auto-derived from the keypath (install dir +
+                           filename). A genuine change ships under a NEW filename
+                           ($(var.ShellDllName)), so it is a DISTINCT component installed
+                           side-by-side (the old file is merely orphaned, never removed); the
+                           same version reuses the same GUID. INSTALLFOLDER is rooted in the
+                           standard ProgramFiles64Folder, which Guid="*" requires.
+             - Permanent="yes" — MSI NEVER removes this file: not on uninstall, and not when
+                           RemoveExistingProducts uninstalls the old product during a major
+                           upgrade. So the OLD in-use DLL is never a file MSI must free a lock
+                           for → RM is never engaged → Explorer is never closed. (Required:
+                           without it, a genuine-version-change upgrade's RemoveExistingProducts
+                           would remove the in-use old DLL and strand the desktop. Removing the
+                           old util:RestartResource is NOT sufficient on its own — MSI 4.0+
+                           auto-engages RM for any in-use file it touches regardless of
+                           authoring.) Trade-off: orphaned fauna_shell_*.dll accumulate and an
+                           uninstall leaves the file — reclaimed out-of-band (MoveFileEx
+                           reboot-delete / the sync agent), NOT via RemoveFile (which routes
+                           through the RM-aware RemoveFiles action and would re-strand). See
+                           installers/windows.md § Shell Extension (orphan cleanup is follow-on).
+             - NeverOverwrite="yes" — on a SAME-version reinstall the keypath file already
+                           exists, so InstallFiles does not rewrite the in-use DLL. Dev caveat:
+                           a changed-but-same-version shell DLL is therefore NOT applied — bump
+                           the version (ShellDllName + Package Version together), or uninstall
+                           first. The shell ext changes rarely; documented in the goal doc.
+
+           util:RestartResource is intentionally absent: Path 1 never wants RM to close
+           Explorer, so registering the DLL with RM is counterproductive (it would force the
+           very shutdown we avoid). -->
+      <Component Id="FaunaShellDll" Guid="*" Permanent="yes" NeverOverwrite="yes">
+        <File Id="FaunaShellDll"
+              Source="$(var.ShellDll)"
+              KeyPath="yes"
+              Name="$(var.ShellDllName)" />
+      </Component>
+
+      <!-- Fauna-Sparse.msix — the sparse ("external location") package that grants the
+           shell extension PACKAGE IDENTITY, the ONLY way its context-menu handler reaches
+           the Windows 11 DEFAULT context menu (the HKCR verb below reaches only "Show more
+           options"). A manifest-only MSIX (~KB): the shell DLL + app exe it references stay
+           OUTSIDE the package at the -ExternalLocation install dir
+           (uap10:AllowExternalContent). The MSI merely SHIPS it here; the
+           RegisterSparsePackage / DeregisterSparsePackage CAs (Package.wxs) stage +
+           provision it per-machine on install and deprovision it on uninstall — there is no
+           MSI-native registration mechanism.
+
+           NOT Permanent (unlike the shell DLL): the COM surrogate holds a handle on the
+           shell DLL, not on the .msix itself, so a normal component (removed on uninstall,
+           after DeregisterSparsePackage) is correct. Built by the dedicated sparse-package
+           build script BEFORE `wix build` and supplied via -d SparsePackage. Rides the ShellExt feature
+           (this ComponentGroup), so it installs with — and only with — Explorer Integration.
+           See docs/goal/architecture/installers/windows.md § Menu placement. -->
+      <Component Id="FaunaSparsePackage" Guid="4a7b8c00-0013-4d3a-b5c6-d7e8f9a0b1c2">
+        <File Id="FaunaSparsePackage"
+              Source="$(var.SparsePackage)"
+              Name="Fauna-Sparse.msix"
+              KeyPath="yes" />
+      </Component>
+
+      <!-- Overlay icon files -->
+      <Component Id="OverlayIcons" Guid="4a7b8c00-0011-4d3a-b5c6-d7e8f9a0b1c2">
+        <File Id="IconSynced"  Source="$(var.IconDir)synced.ico"  Name="synced.ico" />
+        <File Id="IconSyncing" Source="$(var.IconDir)syncing.ico" Name="syncing.ico" />
+        <File Id="IconCloud"   Source="$(var.IconDir)cloud.ico"   Name="cloud.ico" />
+        <File Id="IconError"   Source="$(var.IconDir)error.ico"   Name="error.ico" />
+      </Component>
+
+      <!-- ── COM CLSID Registrations ── -->
+
+      <!-- Overlay: Synced -->
+      <Component Id="ComSynced" Guid="4a7b8c01-f1e2-4d3a-b5c6-d7e8f9a0b1c2">
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\CLSID\{4a7b8c01-f1e2-4d3a-b5c6-d7e8f9a0b1c2}">
+          <RegistryValue Type="string" Value="Fauna Synced Overlay" />
+          <RegistryKey Key="InprocServer32">
+            <RegistryValue Type="string" Value="[INSTALLFOLDER]$(var.ShellDllName)" />
+            <RegistryValue Name="ThreadingModel" Type="string" Value="Apartment" />
+          </RegistryKey>
+        </RegistryKey>
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\  FaunaSynced">
+          <RegistryValue Type="string" Value="{4a7b8c01-f1e2-4d3a-b5c6-d7e8f9a0b1c2}" />
+        </RegistryKey>
+      </Component>
+
+      <!-- Overlay: Syncing -->
+      <Component Id="ComSyncing" Guid="4a7b8c02-f1e2-4d3a-b5c6-d7e8f9a0b1c2">
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\CLSID\{4a7b8c02-f1e2-4d3a-b5c6-d7e8f9a0b1c2}">
+          <RegistryValue Type="string" Value="Fauna Syncing Overlay" />
+          <RegistryKey Key="InprocServer32">
+            <RegistryValue Type="string" Value="[INSTALLFOLDER]$(var.ShellDllName)" />
+            <RegistryValue Name="ThreadingModel" Type="string" Value="Apartment" />
+          </RegistryKey>
+        </RegistryKey>
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\  FaunaSyncing">
+          <RegistryValue Type="string" Value="{4a7b8c02-f1e2-4d3a-b5c6-d7e8f9a0b1c2}" />
+        </RegistryKey>
+      </Component>
+
+      <!-- Overlay: CloudOnly -->
+      <Component Id="ComCloudOnly" Guid="4a7b8c03-f1e2-4d3a-b5c6-d7e8f9a0b1c2">
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\CLSID\{4a7b8c03-f1e2-4d3a-b5c6-d7e8f9a0b1c2}">
+          <RegistryValue Type="string" Value="Fauna Cloud Only Overlay" />
+          <RegistryKey Key="InprocServer32">
+            <RegistryValue Type="string" Value="[INSTALLFOLDER]$(var.ShellDllName)" />
+            <RegistryValue Name="ThreadingModel" Type="string" Value="Apartment" />
+          </RegistryKey>
+        </RegistryKey>
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\  FaunaCloudOnly">
+          <RegistryValue Type="string" Value="{4a7b8c03-f1e2-4d3a-b5c6-d7e8f9a0b1c2}" />
+        </RegistryKey>
+      </Component>
+
+      <!-- Overlay: Error -->
+      <Component Id="ComError" Guid="4a7b8c04-f1e2-4d3a-b5c6-d7e8f9a0b1c2">
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\CLSID\{4a7b8c04-f1e2-4d3a-b5c6-d7e8f9a0b1c2}">
+          <RegistryValue Type="string" Value="Fauna Error Overlay" />
+          <RegistryKey Key="InprocServer32">
+            <RegistryValue Type="string" Value="[INSTALLFOLDER]$(var.ShellDllName)" />
+            <RegistryValue Name="ThreadingModel" Type="string" Value="Apartment" />
+          </RegistryKey>
+        </RegistryKey>
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\  FaunaError">
+          <RegistryValue Type="string" Value="{4a7b8c04-f1e2-4d3a-b5c6-d7e8f9a0b1c2}" />
+        </RegistryKey>
+      </Component>
+
+      <!-- Context Menu: Root -->
+      <Component Id="ComContextMenu" Guid="4a7b8c10-f1e2-4d3a-b5c6-d7e8f9a0b1c2">
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\CLSID\{4a7b8c10-f1e2-4d3a-b5c6-d7e8f9a0b1c2}">
+          <RegistryValue Type="string" Value="Fauna Context Menu" />
+          <RegistryKey Key="InprocServer32">
+            <RegistryValue Type="string" Value="[INSTALLFOLDER]$(var.ShellDllName)" />
+            <RegistryValue Name="ThreadingModel" Type="string" Value="Apartment" />
+          </RegistryKey>
+        </RegistryKey>
+        <!--
+          The IExplorerCommand verb key. `ExplorerCommandHandler` is the ONLY registry
+          surface Explorer honours for an IExplorerCommand handler.
+
+          Do NOT move this back to `*\shellex\ContextMenuHandlers\FaunaContextMenu`
+          (where it lived until 2026-07-14): that key's contract is the legacy
+          IShellExtInit + IContextMenu pair, which FaunaContextMenu does not implement.
+          Explorer CoCreateInstances the class, QueryInterfaces for IContextMenu, gets
+          E_NOINTERFACE, and silently drops the handler — no error, no log, and the Fauna
+          submenu never appears in ANY menu. That shipped, and a live-Explorer pass is what
+          finally caught it; `registration_contract_matches_implemented_interface` in
+          shell-ext/src/lib.rs now pins the key to the implemented interface.
+
+          Scope note: this surfaces the verb in the LEGACY ("Show more options") menu.
+          The Windows 11 default menu takes context-menu handlers only from an MSIX /
+          sparse-package `desktop4:FileExplorerContextMenus` registration — a separate track.
+        -->
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\*\shell\Fauna">
+          <RegistryValue Type="string" Value="Fauna" />
+          <RegistryValue Name="ExplorerCommandHandler" Type="string" Value="{4a7b8c10-f1e2-4d3a-b5c6-d7e8f9a0b1c2}" />
+        </RegistryKey>
+        <!--
+          The same verb for FOLDERS (USER-decided 2026-07-16): same CLSID, same
+          contract; the folder-appropriate leaf reduction (no per-file version
+          history / device info) lives in the handler, not the registration.
+          Twin of shell-ext/src/lib.rs `DIR_CONTEXT_VERB_PATH`.
+        -->
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\Directory\shell\Fauna">
+          <RegistryValue Type="string" Value="Fauna" />
+          <RegistryValue Name="ExplorerCommandHandler" Type="string" Value="{4a7b8c10-f1e2-4d3a-b5c6-d7e8f9a0b1c2}" />
+        </RegistryKey>
+      </Component>
+
+      <!-- Context Menu: Share Command -->
+      <Component Id="ComShareCommand" Guid="4a7b8c11-f1e2-4d3a-b5c6-d7e8f9a0b1c2">
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\CLSID\{4a7b8c11-f1e2-4d3a-b5c6-d7e8f9a0b1c2}">
+          <RegistryValue Type="string" Value="Fauna Share Command" />
+          <RegistryKey Key="InprocServer32">
+            <RegistryValue Type="string" Value="[INSTALLFOLDER]$(var.ShellDllName)" />
+            <RegistryValue Name="ThreadingModel" Type="string" Value="Apartment" />
+          </RegistryKey>
+        </RegistryKey>
+      </Component>
+
+      <!-- Context Menu: Info Devices -->
+      <Component Id="ComInfoDevices" Guid="4a7b8c12-f1e2-4d3a-b5c6-d7e8f9a0b1c2">
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\CLSID\{4a7b8c12-f1e2-4d3a-b5c6-d7e8f9a0b1c2}">
+          <RegistryValue Type="string" Value="Fauna Info Devices" />
+          <RegistryKey Key="InprocServer32">
+            <RegistryValue Type="string" Value="[INSTALLFOLDER]$(var.ShellDllName)" />
+            <RegistryValue Name="ThreadingModel" Type="string" Value="Apartment" />
+          </RegistryKey>
+        </RegistryKey>
+      </Component>
+
+      <!-- Context Menu: Info Versions -->
+      <Component Id="ComInfoVersions" Guid="4a7b8c13-f1e2-4d3a-b5c6-d7e8f9a0b1c2">
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\CLSID\{4a7b8c13-f1e2-4d3a-b5c6-d7e8f9a0b1c2}">
+          <RegistryValue Type="string" Value="Fauna Info Versions" />
+          <RegistryKey Key="InprocServer32">
+            <RegistryValue Type="string" Value="[INSTALLFOLDER]$(var.ShellDllName)" />
+            <RegistryValue Name="ThreadingModel" Type="string" Value="Apartment" />
+          </RegistryKey>
+        </RegistryKey>
+      </Component>
+
+      <!-- Notify Explorer to reload shell extensions after install -->
+      <Component Id="ShellNotify" Guid="4a7b8c00-0012-4d3a-b5c6-d7e8f9a0b1c2">
+        <RegistryValue Root="HKLM"
+                       Key="SOFTWARE\Fauna\Install"
+                       Name="ShellExtVersion"
+                       Type="string"
+                       Value="[ProductVersion]"
+                       KeyPath="yes" />
+      </Component>
+
+    </ComponentGroup>
+  </Fragment>
+
+</Wix>

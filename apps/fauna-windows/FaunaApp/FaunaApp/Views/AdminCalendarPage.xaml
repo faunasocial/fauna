@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.AdminCalendarPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+      The flat admin-calendar page (admin.md § 8 Calendar; caldav-server.md
+      § Independent enablement; ui.yaml admin-calendar). The CalDAV-enable sibling
+      of admin-mail's mail-enable toggle: email and calendar are two independently
+      enableable features of one MDA bridge, so each gets its own admin toggle. A
+      dumb renderer of the shared fauna_client_mail_settings::CaldavPolicyMachine
+      through the testable AdminCalendarViewModel (FaunaApp.Core), consumed over the
+      UniFFI ICaldavPolicyMachine seam (machine-as-seam). The VM owns the
+      get_mail_config hydrate (its caldav_enabled field) + the set_caldav_enabled
+      write + the re-read-after-write (priority #2); this page renders the toggle and
+      forwards the gesture. The deployment-wide CalDAV switch — flipping it (or the
+      admin-mail mail-enable toggle) brings the one MDA bridge up/down ("enabled if
+      either"). Static labels localize in XAML via {loc:Localize Key=...}. No
+      ConfigureAwait(false) in these handlers (off-thread bound-state mutation throws
+      a silent COMException). The admin-nav-back affordance lives in the shared
+      AdminShell header, NOT on this page. Lifts the flat linux reference
+      apps/fauna-linux/src/settings/admin_calendar.rs; mirrors AdminMailPage (machine
+      build over the shared INestRpcClient seam + the _syncing render guard).
+    -->
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="16" MaxWidth="640" HorizontalAlignment="Left">
+
+            <!-- App-wide error surface (also mirrored below for the state protocol) -->
+            <controls:CopyableInfoBar x:Name="ErrorBar"
+                     Severity="Error" IsOpen="False" IsClosable="True" />
+
+            <!-- Header (admin-calendar-heading per ui.yaml) -->
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminCalendarHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=admin/calendar_page/title}" />
+            <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=admin/calendar_page/description}" />
+
+            <ProgressRing x:Name="LoadProgress" IsActive="False"
+                          Visibility="Collapsed" HorizontalAlignment="Left" />
+
+            <!-- Hidden mirror keeps the app-wide error-message ID present for infra
+                 (state-protocol read; memory reference_windows_error_read_via_state). -->
+            <TextBlock x:Name="ErrorTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+                       AutomationProperties.Name=" " Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+
+            <!-- ════ CalDAV-enable master toggle (set_caldav_enabled) ════ -->
+            <StackPanel Spacing="2">
+                <ToggleSwitch x:Name="EnabledToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminCalendarEnabledToggle}"
+                              Toggled="EnabledToggle_Toggled"
+                              Header="{loc:Localize Key=admin/calendar_page/enabled_label}" />
+                <TextBlock Opacity="0.6" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/calendar_page/enabled_subtitle}" />
+            </StackPanel>
+
+            <!-- ════ Admin-set CalDAV port (set_caldav_port) — the admin-mail-*-input +
+                 save-button pattern over the same CaldavPolicyMachine. Governs only the
+                 router-less direct listener (default 8443); inert on a domain box where
+                 the SNI router + caldav_listen_https hatch win (admin.md § 8 Calendar /
+                 caldav-server.md § Network exposure). ════ -->
+            <StackPanel Spacing="2">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBox x:Name="CaldavPortBox"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminCalendarCaldavPortInput}"
+                             AutomationProperties.Name="admin-calendar-caldav-port-input"
+                             MinWidth="120"
+                             InputScope="Number"
+                             Header="{loc:Localize Key=admin/calendar_page/caldav_port_label}" />
+                    <Button x:Name="SaveCaldavPortButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminCalendarCaldavPortSaveButton}"
+                            AutomationProperties.Name="admin-calendar-caldav-port-save-button"
+                            VerticalAlignment="Bottom"
+                            Click="SaveCaldavPortButton_Click"
+                            Content="{loc:Localize Key=admin/calendar_page/caldav_port_save}" />
+                </StackPanel>
+                <TextBlock Opacity="0.6" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/calendar_page/caldav_port_desc}" />
+            </StackPanel>
+
+        </StackPanel>
+    </ScrollViewer>
+</Page>

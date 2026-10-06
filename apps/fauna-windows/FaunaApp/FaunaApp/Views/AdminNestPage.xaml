@@ -1,0 +1,501 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.AdminNestPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+      admin-nest (admin.md § N Nest) — the home for nest-wide settings that aren't
+      a feature page, introduced by the per-page-services redesign (2026-06-04,
+      admin.md § Admin IA redesign) that removed the standalone admin-services
+      page. A dumb renderer of the shared AdminNestViewModel (FaunaApp.Core, over
+      the INestRpcClient WS-RPC seam → FfiAdminClient / fauna.setup.status; no
+      /admin/api/* twins): the admin admin-service-pairing-toggle (moved off the
+      removed admin-services page). The pairing toggle is reflective — guarded by
+      _syncing so the programmatic IsOn doesn't re-dispatch. Factory Reset (Danger
+      zone, moved off admin-settings) stays a page-owned imperative action. Mirrors
+      linux build_nest_page. The read-only storage-mode indicator this page once
+      also carried was retired with the no-modes cutover (Phase-4 S8.7) — every
+      nest is sealed at rest, so there is nothing left to display.
+    -->
+
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="16" MaxWidth="640" HorizontalAlignment="Left">
+
+            <!-- Error bar -->
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="False"
+                IsClosable="True" />
+
+            <!-- Header -->
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=admin/nest_page/title}" />
+            <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=admin/nest_page/description}" />
+
+            <!-- Loading -->
+            <ProgressRing
+                x:Name="LoadProgress"
+                IsActive="False"
+                Visibility="Collapsed"
+                HorizontalAlignment="Left" />
+
+            <!-- ════ Admin-set client-facing serving port (fauna.admin.set_serving_port)
+                 — the admin-mail-*-input + save-button pattern over the INestRpcClient
+                 seam. Hydrated from fauna.setup.status (serving_port, default 443) — the
+                 read-back surface, no get-RPC. Governs only the router-less direct
+                 listener (desktop-native / bare-IP / domainless box); inert behind the
+                 :443 SNI router on a domain box. Applies on the next nest restart (the
+                 nest cannot hot-rebind its own listener; nest/common.md § Serving ports).
+                 The symmetric twin of admin-calendar-caldav-port-input. ════ -->
+            <StackPanel Spacing="2">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBox x:Name="ServingPortBox"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestServingPortInput}"
+                             AutomationProperties.Name="admin-nest-serving-port-input"
+                             MinWidth="120"
+                             InputScope="Number"
+                             Header="{loc:Localize Key=admin/nest_page/serving_port_label}" />
+                    <Button x:Name="SaveServingPortButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestServingPortSaveButton}"
+                            AutomationProperties.Name="admin-nest-serving-port-save-button"
+                            VerticalAlignment="Bottom"
+                            Click="SaveServingPortButton_Click"
+                            Content="{loc:Localize Key=admin/nest_page/serving_port_save}" />
+                </StackPanel>
+                <!-- Router-fronted read-only hint — revealed by Page_Loaded when
+                     fronted_by_router (a Docker/cloud :443 SNI-router box, where the
+                     serving port is the router's fixed 443 and the input+save are
+                     disabled). A plain untagged label — NO ui.yaml ID; the read-only
+                     contract is observable via the disabled admin-nest-serving-port-input.
+                     Matches web/linux/android. nest/common.md § Serving ports. -->
+                <TextBlock x:Name="ServingPortFrontedHint"
+                           Visibility="Collapsed"
+                           Opacity="0.6" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/nest_page/serving_port_fronted_hint}" />
+                <TextBlock Opacity="0.6" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/nest_page/serving_port_desc}" />
+            </StackPanel>
+
+            <!-- Pairing (fauna.admin.services.update name="pairing") — the admin
+                 master switch for user-initiated nest pairing (per-user
+                 multi-homing). Off ⇒ the nest rejects fauna.pair.add. The
+                 user-facing link/unlink surface is the linked-nests page
+                 (linked-nests.md); this is the admin's only pairing control. Moved
+                 off the removed Services page. -->
+            <StackPanel Spacing="2">
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <ToggleSwitch x:Name="PairingToggle" Grid.Column="0"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminServicePairingToggle}"
+                                  Toggled="PairingToggle_Toggled"
+                                  Header="{loc:Localize Key=admin/services_page/pairing}" />
+                    <TextBlock x:Name="PairingStatus" Grid.Column="1"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminServicePairingStatus}"
+                               VerticalAlignment="Center" Opacity="0.7" />
+                </Grid>
+                <TextBlock Opacity="0.6" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/services_page/pairing_desc}" />
+            </StackPanel>
+
+            <!-- Host-OS maintenance status (installers/vps.md § Host OS Maintenance
+                 § 4) — a passive patch/reboot indicator for the host Ubuntu box of an
+                 onboarded VPS, read off the os_* fields on fauna.setup.status (the SAME
+                 fetch that backs serving-port). The status line
+                 is ALWAYS present (defaults to "OS up to date" on a nest with no host
+                 channel — dev/desktop); the count badge shows only when
+                 security updates are pending; the "restart now" button shows only when a
+                 reboot is pending and expedites the nest-coordinated idle reboot
+                 (fauna.admin.request_host_restart). The status line + count carry NO
+                 AutomationProperties.Name so the e2e get_text reads their dynamic text
+                 (the FlaUI bridge falls back to the peer Name = the TextBlock Text);
+                 collapsed conditionals aren't counted. Mirrors web/linux/android/apple. -->
+            <StackPanel Spacing="8">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBlock x:Name="OsMaintenanceStatusText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.NestOsMaintenanceStatus}"
+                               Opacity="0.7" VerticalAlignment="Center" />
+                    <TextBlock x:Name="OsUpdatesCountText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.NestOsUpdatesCount}"
+                               Visibility="Collapsed"
+                               Opacity="0.7" VerticalAlignment="Center" />
+                </StackPanel>
+                <Button x:Name="OsRestartNowButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.NestOsRestartNowButton}"
+                        AutomationProperties.Name="nest-os-restart-now-button"
+                        Visibility="Collapsed"
+                        HorizontalAlignment="Left"
+                        Click="OsRestartNowButton_Click"
+                        Content="{loc:Localize Key=admin/nest_page/os_restart_now}" />
+            </StackPanel>
+
+            <!-- Declared region (fauna.admin.region.{get,set}; admin.md § N Nest →
+                 Declared region) — the deployment's legal situs, the region tier's
+                 one human choice (region-blocking.md § Region determination). Every
+                 rendering decision is the shared fauna_client_admin::admin_region_view
+                 fold (tui's admin/nest.rs, the reference leg) — this page paints
+                 exactly what it hands back and wires two buttons; it decides nothing
+                 about the plane. Read side folds onto the same nav-edge read as
+                 pairing/serving-port above. Mirrors linux build_nest_page's region
+                 block / apple AdminNestView.regionSection.
+                 ⚠ DECLARED, NEVER DETECTED (ratified 2026-08-11): no detect/prefill
+                 affordance may be added here — AdminParseRegionCode deliberately does
+                 not even case-fold. -->
+            <StackPanel x:Name="RegionSection"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestRegionSection}"
+                        AutomationProperties.Name="admin-nest-region-section"
+                        Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/nest_page/region_label}" />
+                <TextBlock Opacity="0.6" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/nest_page/region_desc}" />
+                <!-- A NORMAL state, never an error: a deployment that has never
+                     declared is conforming (seeded from the fold) — the
+                     unreadable-declaration arm routes here too, never to
+                     error-message. No AutomationProperties.Name, so get_text reads
+                     the dynamic Text (mirrors nest-os-maintenance-status). -->
+                <TextBlock x:Name="RegionStatusText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestRegionStatus}"
+                           Opacity="0.7" TextWrapping="Wrap" />
+                <!-- Present only while a region is declared: before that there is no
+                     authority channel to describe. -->
+                <TextBlock x:Name="RegionAuthorityText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestRegionAuthority}"
+                           Visibility="Collapsed"
+                           Opacity="0.6" TextWrapping="Wrap" />
+                <!-- The nest-reported "act when you can" warning, only when the
+                     authority channel is unreached — the rules already received stay
+                     in force, so this is a caveat, not an outage. -->
+                <TextBlock x:Name="RegionStalenessText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestRegionStaleness}"
+                           Visibility="Collapsed"
+                           Opacity="0.6" TextWrapping="Wrap" Foreground="Orange" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBox x:Name="RegionInputBox"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestRegionInput}"
+                             MinWidth="140"
+                             PlaceholderText="{loc:Localize Key=admin/nest_page/region_placeholder}" />
+                    <Button x:Name="RegionSaveButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestRegionSaveButton}"
+                            Click="RegionSaveButton_Click"
+                            Content="{loc:Localize Key=admin/nest_page/region_save}" />
+                    <!-- Shown only while a region is declared. Withdrawing also
+                         retires the previous region's feature-policy document
+                         nest-side. -->
+                    <Button x:Name="RegionWithdrawButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestRegionWithdrawButton}"
+                            Visibility="Collapsed"
+                            Click="RegionWithdrawButton_Click"
+                            Content="{loc:Localize Key=admin/nest_page/region_withdraw}" />
+                </StackPanel>
+            </StackPanel>
+
+            <!-- NAT mode (fauna.setup.nat_mode via the shared AdminNatModeMachine) —
+                 the post-onboarding change surface for the axis the wizard's
+                 nat_mode_choice page confirms once at claim (admin.md § Nest → NAT-mode
+                 control). Radio labels reuse the onboarding.nat_mode strings so both
+                 surfaces read identically; the status line renders the
+                 admin.nest_page.nat_mode_* group (idle/saved carry the
+                 live-vs-restart-applied caveat). No defer button — navigating away is
+                 the defer. Save stays enabled after success (mutable upsert; an
+                 immediate re-flip is allowed) and after errors (resubmit always
+                 allowed). Mirrors linux build_nest_page's NAT-mode section. -->
+            <StackPanel Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/nest_page/nat_mode_label}" />
+
+                <RadioButton x:Name="NatModePublicRadio"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestNatModePublicRadio}"
+                             GroupName="AdminNatMode"
+                             Checked="NatModePublicRadio_Checked">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="{loc:Localize Key=onboarding/nat_mode/public_label}" />
+                        <TextBlock Text="{loc:Localize Key=onboarding/nat_mode/public_desc}"
+                                   TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+                    </StackPanel>
+                </RadioButton>
+
+                <RadioButton x:Name="NatModePrivateRadio"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestNatModePrivateRadio}"
+                             GroupName="AdminNatMode"
+                             Checked="NatModePrivateRadio_Checked">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="{loc:Localize Key=onboarding/nat_mode/private_label}" />
+                        <TextBlock Text="{loc:Localize Key=onboarding/nat_mode/private_desc}"
+                                   TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+                    </StackPanel>
+                </RadioButton>
+
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock x:Name="NatModeStatusText" Grid.Column="0"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestNatModeStatus}"
+                               VerticalAlignment="Center" TextWrapping="Wrap" Opacity="0.7" />
+                    <Button x:Name="NatModeSaveButton" Grid.Column="1"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestNatModeSaveButton}"
+                            VerticalAlignment="Center"
+                            Click="NatModeSaveButton_Click"
+                            Content="{loc:Localize Key=admin/nest_page/nat_mode_save}" />
+                </Grid>
+            </StackPanel>
+
+            <!-- Deployment-identity rotation (box-recovery.md § Deployment-seed
+                 rotation). Arm → roster read → confirm/cancel, no dialog (the
+                 roster rows are the decision surface, not decoration — the
+                 ordering rule requires naming the set that inherits BEFORE the
+                 confirm is live). Every decision is pre-made in shared Rust
+                 (fauna_client_admin::seed_rotation_confirm_view /
+                 fauna_client_config::{rotate_deployment_seed,seed_rotation_verdict});
+                 this page only paints AdminNestViewModel's state. Mirrors linux
+                 build_nest_page's render_seed_rotate / android's SeedRotateSection. -->
+            <StackPanel x:Name="SeedRotateSection"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestSeedRotateSection}"
+                        AutomationProperties.Name="admin-nest-seed-rotate-section"
+                        Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/nest_page/rotate_seed_label}" />
+                <TextBlock TextWrapping="Wrap" Opacity="0.7"
+                           Text="{loc:Localize Key=admin/nest_page/rotate_seed_desc}" />
+                <Button x:Name="SeedRotateArmButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestSeedRotateButton}"
+                        Click="SeedRotateArmButton_Click"
+                        HorizontalAlignment="Left"
+                        Content="{loc:Localize Key=admin/nest_page/rotate_seed_button}" />
+                <!-- Present only while armed (Stage != None) — absent, not merely
+                     disabled, when un-armed. -->
+                <StackPanel x:Name="SeedRotateConfirmBox" Visibility="Collapsed" Spacing="8">
+                    <TextBlock TextWrapping="Wrap" Opacity="0.7"
+                               Text="{loc:Localize Key=admin/nest_page/rotate_seed_confirm_body}" />
+                    <!-- Roster rows built imperatively in code-behind (RenderSeedRotate) —
+                         indexed admin-nest-seed-rotate-roster-item-{n}, one per
+                         current admin who inherits, painted ONLY from a resolved
+                         roster. Never a bare layout root — each row needs
+                         AutomationProperties.Name or FlaUI prunes it
+                         (reference_winui_flaui_datatemplate_name). -->
+                    <StackPanel x:Name="SeedRotateRosterBox" Spacing="4" />
+                    <TextBlock x:Name="SeedRotateReasonText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestSeedRotateRosterReason}"
+                               Visibility="Collapsed"
+                               Opacity="0.6" TextWrapping="Wrap" Foreground="Orange" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="SeedRotateConfirmButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestSeedRotateConfirmButton}"
+                                Click="SeedRotateConfirmButton_Click"
+                                Content="{loc:Localize Key=admin/nest_page/rotate_seed_confirm_button}" />
+                        <Button x:Name="SeedRotateCancelButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestSeedRotateCancelButton}"
+                                Click="SeedRotateCancelButton_Click"
+                                Content="{loc:Localize Key=admin/nest_page/rotate_seed_cancel_button}" />
+                    </StackPanel>
+                </StackPanel>
+                <!-- Present only after a confirm dispatch (working, then the
+                     verdict) — not error-message, since the caveat outcome
+                     (predecessor_marked: false) is a success, not a failure. -->
+                <TextBlock x:Name="SeedRotateStatusText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestSeedRotateStatus}"
+                           Visibility="Collapsed"
+                           Opacity="0.7" TextWrapping="Wrap" />
+            </StackPanel>
+
+            <!-- Legal takedown console (moderation.md § Legal takedown →
+                 Invocation surface; admin.md § N Nest → Legal takedown
+                 console). Beside the seed-rotation ceremony, NOT on the
+                 moderation page — that page is the user's own training queue,
+                 never an admin console. Arm → named confirm → dispatch, no
+                 dialog: a compulsory act is never confirmed blind, so the
+                 summary names the verb, the content id and the citation.
+                 Every decision and every sentence is a shared fold
+                 (FaunaFfiMethods.TakedownFormView / TakedownVerdict); this
+                 page only paints AdminNestViewModel's state. Reference: tui's
+                 admin/nest.rs, linux's render_takedown. -->
+            <StackPanel x:Name="TakedownSection"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestTakedownSection}"
+                        AutomationProperties.Name="admin-nest-takedown-section"
+                        Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/nest_page/takedown_label}" />
+                <TextBlock TextWrapping="Wrap" Opacity="0.7"
+                           Text="{loc:Localize Key=admin/nest_page/takedown_desc}" />
+                <TextBox x:Name="TakedownContentIdInput"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestTakedownContentIdInput}"
+                         AutomationProperties.Name="admin-nest-takedown-content-id-input"
+                         Header="{loc:Localize Key=admin/nest_page/takedown_content_id_label}"
+                         TextChanged="TakedownContentIdInput_TextChanged" />
+                <!-- Two radios in one group: post is the default. -->
+                <StackPanel Orientation="Horizontal" Spacing="12">
+                    <RadioButton x:Name="TakedownTypePostRadio"
+                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestTakedownTypePostRadio}"
+                                 GroupName="AdminNestTakedownType"
+                                 IsChecked="True"
+                                 Checked="TakedownType_Changed"
+                                 Content="{loc:Localize Key=admin/nest_page/takedown_type_post}" />
+                    <RadioButton x:Name="TakedownTypeConversationRadio"
+                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestTakedownTypeConversationRadio}"
+                                 GroupName="AdminNestTakedownType"
+                                 Checked="TakedownType_Changed"
+                                 Content="{loc:Localize Key=admin/nest_page/takedown_type_conversation}" />
+                </StackPanel>
+                <TextBox x:Name="TakedownReferenceInput"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestTakedownReferenceInput}"
+                         AutomationProperties.Name="admin-nest-takedown-reference-input"
+                         Header="{loc:Localize Key=admin/nest_page/takedown_reference_label}"
+                         TextChanged="TakedownReferenceInput_TextChanged" />
+                <CheckBox x:Name="TakedownRestoreCheckbox"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestTakedownRestoreCheckbox}"
+                          AutomationProperties.Name="admin-nest-takedown-restore-checkbox"
+                          Checked="TakedownRestore_Changed"
+                          Unchecked="TakedownRestore_Changed"
+                          Content="{loc:Localize Key=admin/nest_page/takedown_restore_label}" />
+                <!-- The arm control's reason line: a disabled control owes its
+                     reason (no dedicated ui.yaml element — page chrome). -->
+                <TextBlock x:Name="TakedownReasonText"
+                           Visibility="Collapsed"
+                           Opacity="0.6" TextWrapping="Wrap" Foreground="Orange" />
+                <Button x:Name="TakedownArmButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestTakedownButton}"
+                        Click="TakedownArmButton_Click"
+                        HorizontalAlignment="Left"
+                        Style="{StaticResource AccentButtonStyle}" />
+                <!-- Present only while armed (absent, not merely disabled). -->
+                <StackPanel x:Name="TakedownConfirmBox" Visibility="Collapsed" Spacing="8">
+                    <TextBlock x:Name="TakedownConfirmSummaryText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestTakedownConfirmSummary}"
+                               TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="TakedownConfirmButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestTakedownConfirmButton}"
+                                Click="TakedownConfirmButton_Click" />
+                        <Button x:Name="TakedownCancelButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestTakedownCancelButton}"
+                                Click="TakedownCancelButton_Click"
+                                Content="{loc:Localize Key=common/cancel}" />
+                    </StackPanel>
+                </StackPanel>
+                <!-- Present only after a dispatch (working, then the verdict) —
+                     not error-message: a completed takedown is a success with
+                     consequences, not a failure. -->
+                <TextBlock x:Name="TakedownStatusText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestTakedownStatus}"
+                           Visibility="Collapsed"
+                           Opacity="0.7" TextWrapping="Wrap" />
+            </StackPanel>
+
+            <!-- Outside-app sign-in keys (authorization-server.md § The issuer →
+                 Two rotation arms). Every sentence here is a shared
+                 fauna_client_admin fold — this page only paints
+                 AdminNestViewModel's state, never words a verdict or picks a
+                 sentence itself. Reference: tui's admin/nest.rs::oauth_elements. -->
+            <StackPanel x:Name="OauthSection"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestOauthSection}"
+                        AutomationProperties.Name="admin-nest-oauth-section"
+                        Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/nest_page/oauth_label}" />
+                <TextBlock TextWrapping="Wrap" Opacity="0.7"
+                           Text="{loc:Localize Key=admin/nest_page/oauth_desc}" />
+                <!-- Key rows built imperatively in code-behind (RenderOauth) —
+                     indexed admin-nest-oauth-key-item-{n}, painted ONLY from an
+                     answered read. Never a bare layout root — each row needs
+                     AutomationProperties.Name or FlaUI prunes it
+                     (reference_winui_flaui_datatemplate_name). -->
+                <StackPanel x:Name="OauthKeyRowsBox" Spacing="4" />
+                <TextBlock x:Name="OauthKeyReasonText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestOauthKeyReason}"
+                           Visibility="Collapsed"
+                           Opacity="0.6" TextWrapping="Wrap" Foreground="Orange" />
+                <!-- The ordinary arm's cost — page chrome, no ui.yaml element
+                     (the button has no confirm, so its cost is stated beside
+                     it instead of a separate confirm surface). -->
+                <TextBlock x:Name="OauthRotateCostText"
+                           Visibility="Collapsed"
+                           Opacity="0.7" TextWrapping="Wrap" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="OauthRotateButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestOauthRotateButton}"
+                            Click="OauthRotateButton_Click"
+                            Content="{loc:Localize Key=admin/nest_page/oauth_rotate_button}" />
+                    <Button x:Name="OauthForceRotateButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestOauthForceRotateButton}"
+                            Click="OauthForceRotateButton_Click"
+                            Content="{loc:Localize Key=admin/nest_page/oauth_force_rotate_button}" />
+                    <Button x:Name="OauthSecretForceRotateButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestOauthSecretForceRotateButton}"
+                            Click="OauthSecretForceRotateButton_Click"
+                            Content="{loc:Localize Key=admin/nest_page/oauth_secret_force_rotate_button}" />
+                </StackPanel>
+                <!-- Present only while a forced arm is armed — one at a time.
+                     Not a ContentDialog: the shared e2e asserts synchronously
+                     after the click. -->
+                <StackPanel x:Name="OauthConfirmBox" Visibility="Collapsed" Spacing="8">
+                    <TextBlock x:Name="OauthConfirmSummaryText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestOauthConfirmSummary}"
+                               TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="OauthConfirmButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestOauthConfirmButton}"
+                                Click="OauthConfirmButton_Click"
+                                Style="{StaticResource AccentButtonStyle}" />
+                        <Button x:Name="OauthCancelButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestOauthCancelButton}"
+                                Click="OauthCancelButton_Click"
+                                Content="{loc:Localize Key=admin/nest_page/oauth_cancel_button}" />
+                    </StackPanel>
+                </StackPanel>
+                <!-- Present only after a control was used — not error-message:
+                     every success here has consequences worth words, and a
+                     failure must not claim nothing changed. -->
+                <TextBlock x:Name="OauthStatusText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestOauthStatus}"
+                           Visibility="Collapsed"
+                           Opacity="0.7" TextWrapping="Wrap" />
+            </StackPanel>
+
+            <!-- Factory reset (Danger zone) — moved off admin-settings (admin.md
+                 § Admin IA redesign: a nest-wide concern). admin-factory-reset-button
+                 behind a confirm ContentDialog (whose confirm is
+                 admin-factory-reset-confirm-button). Admin-gated by construction
+                 (the page is only reachable by an admin). Calls
+                 fauna.admin.factory_reset, then tears down the session (keeping
+                 local creds) and re-seeds onboarding at claim_code with the
+                 returned code pre-filled. Mirrors linux build_factory_reset_section.
+                 Per docs/goal/behavior/mail-bridge-lifecycle.md § Factory reset. -->
+            <StackPanel x:Name="FactoryResetSection"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminFactoryResetSection}"
+                        AutomationProperties.Name="admin-factory-reset-section"
+                        Spacing="12">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/settings_page/factory_reset_section}" />
+                <TextBlock TextWrapping="Wrap" Opacity="0.7"
+                           Text="{loc:Localize Key=admin/settings_page/factory_reset_desc}" />
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminFactoryResetButton}"
+                        Click="FactoryResetButton_Click"
+                        HorizontalAlignment="Left"
+                        Content="{loc:Localize Key=admin/settings_page/factory_reset_button}" />
+            </StackPanel>
+
+            <!-- TextBlock mirrors for E2E (see MainPage.UpdateTestMessages) -->
+            <TextBlock x:Name="ErrorTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+                       AutomationProperties.Name=" "
+                       Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+            <TextBlock x:Name="WarningTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.WarningMessage}"
+                       AutomationProperties.Name=" "
+                       Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

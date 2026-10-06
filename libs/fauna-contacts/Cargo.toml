@@ -1,0 +1,20 @@
+[package]
+name = "fauna-contacts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+nest-segments = ["dep:fauna-segment-store", "dep:fauna-cbor", "dep:fauna-core"]
+
+[dependencies]
+fauna-segment-store = { workspace = true, optional = true }
+fauna-cbor = { workspace = true, optional = true }
+fauna-core = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"] }
+serde_bytes = "0.11"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

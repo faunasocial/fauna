@@ -1,0 +1,7 @@
+[bindings.swift]
+module_name = "FaunaFFI"
+ffi_module_name = "FaunaFFIFFI"
+
+[bindings.kotlin]
+package_name = "com.fauna.ffi"
+cdylib_name = "fauna_ffi"

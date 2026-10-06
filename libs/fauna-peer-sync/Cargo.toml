@@ -1,0 +1,31 @@
+[package]
+name = "fauna-peer-sync"
+description = "The same-account peer sync leg (W2.6 (account-data-plane.md § Workstreams)): the admission seam's verdict core, the allowlisted pull/serve engine over the peer channel, and discovery from device-endpoint entries. Admission-agnostic by construction — the cross-account share twin and the custody leg reuse the core with their own witnesses."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fauna-account-store = { workspace = true }
+fauna-core = { workspace = true }
+fauna-protocol = { workspace = true }
+fauna-peer-channel = { workspace = true }
+fauna-transport = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+anyhow = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_bytes = "0.11"
+tracing = { workspace = true }
+# Interface enumeration for the `lan` module (RFC-1918 + shared-/24 arithmetic,
+# moved here from the deleted `fauna-wireguard` — it is its only consumer).
+if-addrs = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "io-util"] }
+async-trait = "0.1"
+ed25519-dalek = { workspace = true }
+futures-util = { workspace = true }
+# The serve-door tests build a real store (scoped records + blocks) to pin
+# the blocks.pull preflight against a Named-scope verdict.
+tempfile = { workspace = true }

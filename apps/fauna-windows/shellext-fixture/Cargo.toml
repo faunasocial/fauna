@@ -1,0 +1,23 @@
+[package]
+name = "fauna-shellext-fixture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Dev/test-only fixture for the shell-extension observation harness. NOT shipped:
+# never staged into the MSI (the installer copies only `fauna-sync-agent.exe`). It drives
+# the running `fauna-sync` service's own pipe to put a file into a tracked state,
+# so the live-Explorer overlay/context-menu render can be observed headlessly
+# (paired with a dev-fleet UIA menu-reading script). See
+# `docs/goal/architecture/apps/windows.md` § Shell Extension.
+
+[[bin]]
+name = "fauna-shellext-fixture"
+path = "src/main.rs"
+
+[dependencies]
+fauna-core.workspace = true
+fauna-ipc.workspace = true
+fauna-sync-engine.workspace = true
+anyhow.workspace = true

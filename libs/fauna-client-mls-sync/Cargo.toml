@@ -1,0 +1,83 @@
+[package]
+name = "fauna-client-mls-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# default-features = false keeps fauna-core's `network` default (redb, tokio,
+# hickory-resolver) out of wasm builds via Cargo feature unification — mirrors
+# fauna-client-config / fauna-client-drafts. Path form (not `workspace = true`)
+# is required to override defaults.
+fauna-core = { path = "../fauna-core", default-features = false }
+# The WS-RPC transport seam (`RpcRequester` / `RpcErrorClass`) + the
+# `fauna.mls.{get,put}` wire types + `MAX_MLS_REPLICA_BYTES`. `default-features =
+# false` drops fauna-protocol's native-only `p2p` default so this crate is
+# wasm-clean; the `js` time backend is forwarded on wasm below.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# `provider` path family: `ProviderReplica` + the three-way `merge_provider_replicas`
+# + the `ChannelId` cursor key. Per-target feature plumbing mirrors
+# fauna-conversations' own `fauna-mls` dep: featureless base table, `native`
+# (rusqlite) off-wasm, `js` (openmls/js + js-sys getrandom) on-wasm.
+fauna-mls = { path = "../fauna-mls", default-features = false }
+# `history/<channel_hex>` path family: `ChannelHistorySlice` + the commutative
+# `merge_history_slices`. The manager already compiles on both targets; the
+# `wasm` feature is forwarded on wasm below.
+fauna-conversations = { path = "../fauna-conversations", default-features = false }
+serde = { workspace = true }
+serde_bytes = "0.11"
+thiserror = { workspace = true }
+# The object-safe `MlsReplicaTransport` seam + the `CommitGate` impl
+# (`gate_impl::FaunaCommitGate`) are `#[async_trait]` traits/impls, dual-arm
+# (`?Send` on wasm) like `fauna-conversations`' seam traits.
+async-trait = "0.1"
+# The resync path warns on the stale-replica residual (observability, matching
+# the inbound driver's own warn discipline).
+tracing = { workspace = true }
+# The CAS base is `blake3` of the loaded sealed blob (the nest content-addresses
+# on those same bytes).
+blake3 = { workspace = true }
+# Zeroize the unsealed provider replica plaintext (openMLS group secrets) at
+# the seal boundary.
+zeroize = { workspace = true }
+fauna-sleep = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native builds get fauna-mls' rusqlite-backed storage (its `native` default).
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["native"] }
+# `rt` + `sync` for the shared tokio trigger (`launcher.rs`: the autosave
+# debounce task + its mpsc tick channel). Still no runtime of our own; the
+# legs spawn/await inside their own tokio contexts. The launch-retry backoff
+# sleep no longer needs `time` from here — `fauna-sleep` owns that split for
+# both targets — but the feature stays: `launcher.rs`'s debounce uses it too.
+tokio = { version = "1", default-features = false, features = ["time", "rt", "sync"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# `#[tokio::test]` for the launcher's hook-seam tests (`launcher.rs` spawns the
+# autosave task, so its tests need a real runtime, unlike the crate's other
+# executor-free `block_on` suites).
+tokio = { version = "1", default-features = false, features = ["time", "rt", "sync", "macros"] }
+# The provider CAS merge's two-writer warning is a user-visible line (it reaches
+# `fauna-log`'s ring, and thence every app's Settings -> Logs page), so its test
+# asserts it through a real subscriber filtered at `info` -- the filter the ring
+# itself runs. Native-only: the crate's wasm arm has no such suite.
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# `ProviderReplica::unexaminable_for_test` — the snapshot shape the seating
+# check must refuse (`succession-aftermath.md` rule (1)). Test build only.
+fauna-mls = { path = "../fauna-mls", default-features = false, features = [
+    "native",
+    "test-helpers",
+] }
+# The shared `block_on` single-poll executor the crate's other, executor-free
+# suites use — wasm-clean (see that crate's own docs), so it keeps this
+# crate's dev-deps wasm32-testable.
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# On wasm: forward fauna-protocol's `js` (fauna-core's js-sys time backend),
+# fauna-mls' `js` (openmls/js + getrandom), and fauna-conversations' `wasm`.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"] }
+fauna-conversations = { path = "../fauna-conversations", default-features = false, features = ["wasm"] }

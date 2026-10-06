@@ -1,0 +1,57 @@
+{
+  "_comment": [
+    "Control (c) of docs/goal/architecture/release-integrity.md \u00a7 Vendored forks: the",
+    "re-vendor drift check. Each fork here is a published crate copied into the tree and",
+    "consumed via a path dep or [patch.crates-io], so cargo-vet requires NOTHING for it",
+    "(audit-as-crates-io = false, deliberately). This manifest is the compensating control:",
+    "it pins the fork byte-for-byte against the pristine published source.",
+    "",
+    "pristine_sha256 is the crates.io-PUBLISHED checksum (the registry index `cksum`) of",
+    "pristine_crate, which is committed so the gate stays hermetic. Verify it against the",
+    "registry any time with `dep-vendor-drift --verify-upstream` (network).",
+    "",
+    "`divergence` is the complete, exhaustive set of paths allowed to differ from pristine,",
+    "with the exact expected content hash of each. Anything else is drift and fails closed.",
+    "Regenerate with `dep-vendor-drift --update` after a deliberate re-vendor, and REVIEW",
+    "the diff \u2014 that review is the point.",
+    "",
+    "NOT cargo-vet-managed. cargo-vet rewrites supply-chain/{config,audits,imports}.* and",
+    "strips their comments; it does not touch this subdirectory, so rationale can live here."
+  ],
+  "forks": [
+    {
+      "crate": "ksni",
+      "version": "0.2.2",
+      "tree": "libs/ksni",
+      "wired_by": "path dependency in apps/fauna-linux/Cargo.toml",
+      "rationale": "libs/ksni/PATCH.md",
+      "pristine_crate": "supply-chain/vendored-forks/ksni-0.2.2.crate",
+      "pristine_sha256": "4934310bdd016e55725482b8d35ac0c16fd058c1b955d8959aa2d953b918c85b",
+      "divergence": {
+        "modified": {
+          "Cargo.toml": "e00e31264f66eed6b86734453d4448375c27bf690e2261eb2ec77336dc9f0c75",
+          "dbus_interfaces/StatusNotifierItem.xml": "e7a750e3397fd754e24732197a1de7bb8d8c1eea4fced4f94d7dc3824b61a169",
+          "src/dbus_interface.rs": "b0a33e902fdb21ad761bf5b542ea411a10518a4a6601cbbafda34c131849a7dd",
+          "src/lib.rs": "c2f66091080931e65c46f01f8d36207e052d468f07469338f2cf9d95fd0388c9",
+          "src/menu.rs": "ec3a2ccc7eccb3cae45bf75b6be145e80412f32b3550b36efd63fa83a989d061",
+          "src/service.rs": "365a446a053ea175b120110edab5db6a8b1634c8348d9a6b752561764d47bdd1"
+        },
+        "added": {
+          "PATCH.md": "0e2f789beec081dccb267c85c98f4f3e8be405967eb7824c8bf05aeb081458df",
+          "src/dbus_interfaces.rs": "0b8b4a0ca3cfb78f0e3e572777d91688fa6a72a986a45e3bae6ae4faeddd9395"
+        },
+        "deleted": [
+          ".cargo_vcs_info.json",
+          ".github/dependabot.yml",
+          ".github/workflows/rust.yml",
+          ".gitignore",
+          "Cargo.lock",
+          "Cargo.toml.orig",
+          "build.rs",
+          "examples/example.rs",
+          "examples/screenshot_of_example_in_gnome.png"
+        ]
+      }
+    }
+  ]
+}

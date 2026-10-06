@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  fauna:// URL protocol handler registration.
+  Used for deep-link return from the onboarding web wizard.
+  Example: fauna://setup-complete?url=https://mynest.example.com
+-->
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Fragment>
+    <ComponentGroup Id="ProtocolComponents" Directory="AppFolder">
+
+      <Component Id="FaunaProtocol" Guid="4a7b8c00-0020-4d3a-b5c6-d7e8f9a0b1c2">
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\fauna">
+          <RegistryValue Type="string" Value="Fauna Protocol" />
+          <RegistryValue Name="URL Protocol" Type="string" Value="" />
+          <RegistryKey Key="shell\open\command">
+            <RegistryValue Type="string" Value="&quot;[AppFolder]FaunaApp.exe&quot; &quot;%1&quot;" />
+          </RegistryKey>
+        </RegistryKey>
+      </Component>
+
+    </ComponentGroup>
+  </Fragment>
+
+</Wix>

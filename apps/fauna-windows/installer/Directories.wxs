@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- Directory layout for Fauna installation -->
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Fragment>
+    <!-- Program Files\Fauna\ -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Fauna">
+        <Directory Id="AppFolder" Name="App" />
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Start Menu\Fauna\ -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="FaunaStartMenu" Name="Fauna" />
+    </StandardDirectory>
+
+    <!-- System32 — working directory for the taskkill custom action (Package.wxs).
+         Always exists, unlike INSTALLFOLDER on a first install. -->
+    <StandardDirectory Id="System64Folder" />
+
+    <!-- ProgramData\Fauna\ — per-service data directories -->
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="FaunaDataFolder" Name="Fauna">
+        <Directory Id="SyncDataFolder" Name="sync" />
+        <Directory Id="NestDataFolder" Name="nest" />
+        <Directory Id="BridgeDataFolder" Name="bridge" />
+      </Directory>
+    </StandardDirectory>
+  </Fragment>
+
+</Wix>

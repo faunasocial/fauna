@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.network.client</key>
+  <true/>
+  <key>com.apple.security.assets.pictures.read-write</key>
+  <true/>
+  <!-- Two app groups, two audiences (installers/macos.md § Identifier domain):
+       1. group.social.fauna.shared — shared with Fauna-FileProvider.appex: the
+          app provisions the app-dead capability (BackupKey + bearer, never the
+          seed) into this group's data-protection Keychain and the extension reads
+          it back (FileProviderCredentialStore); the appex's
+          NSExtensionFileProviderDocumentGroup names the same group, and its
+          container is the extension's state root, which the app stewards.
+       2. group.social.fauna.account — the APP ALONE (no appex names it): the
+          keychain access group KeychainStore's account credentials live in on the
+          data-protection plane. A second group, not the shared one, precisely so
+          the sandboxed extension can never read the identity seed. Keychain-only;
+          no container directory is ever resolved for it. -->
+  <key>com.apple.security.application-groups</key>
+  <array>
+    <string>7457N3M72H.group.social.fauna.shared</string>
+    <string>7457N3M72H.group.social.fauna.account</string>
+  </array>
+</dict>
+</plist>

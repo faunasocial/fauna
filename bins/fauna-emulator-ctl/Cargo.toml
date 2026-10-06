@@ -1,0 +1,12 @@
+[package]
+name = "fauna-emulator-ctl"
+description = "Minimal HTTP service to control the Android emulator on bare-metal macOS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Intentionally empty — std-only for auditability
+
+[dev-dependencies]
+tempfile = "3"

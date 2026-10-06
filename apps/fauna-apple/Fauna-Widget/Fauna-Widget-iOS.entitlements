@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- iOS twin of Fauna-Widget.entitlements: iOS extensions are sandboxed by
+       construction, so only the app group remains — the container the app
+       writes the unread-count snapshot into. -->
+  <key>com.apple.security.application-groups</key>
+  <array>
+    <string>group.social.fauna.shared</string>
+  </array>
+</dict>
+</plist>

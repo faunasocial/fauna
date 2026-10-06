@@ -1,0 +1,7 @@
+{
+  "event_responses_v2": {
+    "events_joined": [ { "name": "Fixture Picnic", "start_timestamp": 1630000000, "end_timestamp": 1630010000, "place": { "name": "Fixture Park" }, "description": "Bring food" } ],
+    "events_interested": [ { "name": "Board game night", "start_timestamp": 1631000000 } ],
+    "events_declined": [ { "name": "Marathon", "start_timestamp": 1632000000, "end_timestamp": 1632020000 } ]
+  }
+}

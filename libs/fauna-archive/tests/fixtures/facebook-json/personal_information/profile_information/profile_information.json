@@ -1,0 +1,11 @@
+{
+  "profile_v2": {
+    "name": { "full_name": "Test Owner", "first_name": "Test", "last_name": "Owner" },
+    "emails": { "emails": [] },
+    "registration_timestamp": 1262304000,
+    "profile_uri": "https://www.facebook.com/test.owner.fixture",
+    "username": "test.owner.fixture",
+    "intro_bio": { "text": "Fixture bio \u00e2\u009d\u00a4" },
+    "websites": [ { "address": "https://example.invalid/owner" } ]
+  }
+}

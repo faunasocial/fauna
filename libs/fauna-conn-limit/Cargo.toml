@@ -1,0 +1,17 @@
+[package]
+name = "fauna-conn-limit"
+description = "Accept-loop connection defence shared by fauna-nest and fauna-sni-router: a per-source-IP concurrent-connection cap, the TCP dead-peer detection that bounds each permit's lifetime, and rate-limited shed reporting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Deliberately tiny — the cap itself is still std-only. The two deps exist
+# solely because a permit with an unbounded lifetime IS the leak (crate docs
+# § "Why dead-peer detection lives in this crate"), and bounding it needs a
+# socket knob tokio does not expose.
+tokio = { workspace = true, features = ["net"] }
+socket2.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "net"] }

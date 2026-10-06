@@ -1,0 +1,36 @@
+#!/usr/bin/make -f
+
+# The pinned nightly toolchain (rust-toolchain.toml) comes from rustup, not
+# apt — Build-Depends deliberately omits cargo/rustc (an apt-installed system
+# Rust would be the wrong version and never actually get invoked: `cargo`
+# resolves via PATH to the rustup shim, which reads rust-toolchain.toml).
+# The build host needs rustup + the pinned toolchain already installed.
+CARGO_TARGET_DIR ?= target
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release -p fauna-linux -p fauna-sync-agent
+
+override_dh_auto_test:
+	# No-op — this workspace's tests run elsewhere; a packaging build only
+	# stages the already-verified release binary.
+
+override_dh_auto_install:
+	install -Dm755 $(CARGO_TARGET_DIR)/release/fauna-desktop debian/fauna-desktop/usr/bin/fauna-desktop
+	install -Dm755 $(CARGO_TARGET_DIR)/release/fauna-sync-agent debian/fauna-desktop/usr/bin/fauna-sync-agent
+	install -Dm644 apps/fauna-linux/packaging/social.fauna.fauna.desktop debian/fauna-desktop/usr/share/applications/social.fauna.fauna.desktop
+	install -Dm644 apps/fauna-linux/fauna.svg debian/fauna-desktop/usr/share/icons/hicolor/scalable/apps/fauna.svg
+
+override_dh_auto_clean:
+	# Deliberately NOT `cargo clean` — CARGO_TARGET_DIR may point at a large
+	# SHARED build-cache dataset covering the whole workspace, not just this
+	# crate; a blanket clean here would nuke every other crate's build cache.
+	# dh's own debian/ + .deb cleanup still runs via the default dh_clean.
+
+override_dh_clean:
+	# -Xvendor/: dh_clean's detritus sweep deletes *.orig files TREE-WIDE,
+	# which silently deletes cargo-vendor's TRACKED Cargo.toml.orig files
+	# under vendor/ (git-visible damage from a mere packaging build).
+	dh_clean -Xvendor/

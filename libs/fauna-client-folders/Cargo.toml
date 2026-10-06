@@ -1,0 +1,227 @@
+[package]
+name = "fauna-client-folders"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The real MLS-engine-backed `FolderGroupCrypto` adapter
+# (`impl FolderGroupCrypto for Arc<MlsEngine>`, src/mls_adapter.rs) — the
+# owner-side group-crypto seam `FoldersAuthor` drives, backed by the live MLS
+# engine that holds a folder's group. The `FolderGroupCrypto` trait is LOCAL to
+# this crate, so the orphan rule permits the impl HERE on the foreign
+# `Arc<MlsEngine>` — ONE shared, natively-tested adapter instead of a newtype
+# duplicated into fauna-ffi + fauna-wasm (priority #2/#4). Optional + default-off
+# keeps the base crate fauna-mls-free (wasm-light) for the thin-client / pure-custody
+# consumers; fauna-ffi + fauna-wasm (which already carry fauna-mls) flip it on to
+# expose `FoldersAuthor`. The native/js engine-storage split is target-scoped on
+# the optional dep below (native ⇒ rusqlite, wasm ⇒ openmls/js — never both).
+# Also pulls the thin shared conversations client (`ConversationsClient<R>`) so the
+# `mls`-gated `FoldersAuthor::share_set` (piece 5d(b-pre)) reuses its
+# `keypackage_fetch` + `welcome_deliver` MLS-channel-setup RPCs instead of
+# duplicating them (priority #2). `fauna-client-conversations` transitively pulls
+# `fauna-conversations` → `fauna-mls`, so it MUST ride this same `mls` feature to
+# keep the base (no-mls) thin-client/custody graph fauna-mls-free + wasm-light.
+mls = ["dep:fauna-mls", "dep:fauna-client-sync", "dep:fauna-client-conversations", "dep:fauna-conversations", "dep:fauna-client-capabilities", "dep:fauna-client-mls-sync", "dep:fauna-client", "dep:tokio", "dep:fauna-media-machine", "dep:fauna-rpc-wasm", "dep:fauna-provisioning"]
+# The cross-user share leg's roster adapter (`peer_share_adapter`) — answers
+# `fauna_peer_share::SetMembership` through `FolderGroupCrypto`. Part of the
+# gated `p2p-share` plane (dynamic-features.md § The cargo feature spine):
+# optional + default-off, and NEVER enabled in a wasm or store-safe graph
+# (fauna-peer-share's dep tree is native-only; the share leg is web's
+# declared structural absence).
+p2p-share = ["dep:fauna-peer-share"]
+# `CustodyServedSets` (`engine_binding`) — the custody answer to the mail-settings
+# machine's `WebdavServedSets` seam, which every host's mail-settings build hands
+# in (ruling (7)(b)(ii) rule (2): the MUA URL row reads custody, never the nest's
+# flag). The edge points THIS way — mail-settings sits below this crate (via
+# `fauna-client-conversations`), so it holds the trait and this crate the fold.
+mail-settings = ["dep:fauna-client-mail-settings"]
+
+[dependencies]
+# `mail-settings`: the `WebdavServedSets` seam (see [features] above). Base
+# build only — wasm-clean, as `fauna-client-conversations` already takes it.
+fauna-client-mail-settings = { path = "../fauna-client-mail-settings", default-features = false, optional = true }
+# The three-valued `FolderKeyResolver` contract is
+# anyhow-Result typed: `custody_ingest`'s production resolver and the test
+# stubs both name it.
+anyhow = { workspace = true }
+# The folder-key custody seam's crossing of web's account port (`port` — the
+# forwarder + `serve`, `fauna_devices_machine::port`'s shape). Wasm-clean.
+fauna-account-port = { workspace = true }
+# fauna-protocol carries the typed `fauna.folders.*` wire types
+# + the `RpcRequester` seam this crate is generic over. `default-features
+# = false` keeps the crate wasm32-clean (drops native-only features);
+# native workspace builds re-enable them via Cargo feature unification.
+# Same pattern as fauna-client-snapshots / fauna-client-bridges.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# The share leg's witness-verifier crate — optional, riding ONLY the
+# `p2p-share` feature (see [features] above).
+fauna-peer-share = { workspace = true, optional = true }
+# The M2 content-key custody types — `FoldersConfig` / `FolderKeyCustody` /
+# `FolderPendingRemoval` (`data`), `FolderContentKeys` / `ContentKeyGeneration`
+# (`folder_keys`), and `ActorId` — drive the pure `custody` transitions + the
+# `FoldersAuthor` orchestration (mirrors how `fauna-client-subscriptions` reaches
+# `data::{SubscriptionsConfig, ...}`). `default-features = false` keeps this crate
+# wasm32-clean; native builds re-enable via feature unification.
+fauna-core = { path = "../fauna-core", default-features = false }
+# The flipping client's served-set walk (`served_reseal`, `webdav-server.md`
+# § Key model (c)) — the Media seam's byte plane + signed record, which the
+# serve faces wire into `FoldersAuthor::serve_set` on BOTH targets. `rpc-glue`
+# is media-machine's standard feature set (the walk and its per-transport
+# builders live behind it); wasm-clean. Pulled by `mls`.
+fauna-media-machine = { path = "../fauna-media-machine", default-features = false, features = ["rpc-glue"], optional = true }
+# `follow_ops`'s wording half — the localized `devices::ERROR_FOLLOW_NOT_FOUND`
+# / `devices::error_follow_failed` strings the FOLD it owns resolves to. Zero
+# transitive deps (generated string tables only), so it costs this crate
+# nothing to stay wasm-clean; `fauna-client-backup`/`-family`/`-bridges`/
+# `-personalization`/`-features`/`-web` already take it unconditionally the
+# same way.
+fauna-i18n = { path = "../fauna-i18n" }
+# The shared account-store crate (`MailStore`, `StoreError`, …): the `FoldersAuthor`
+# orchestration OWNS persistence so the crash-recovery sentinel
+# (the `fauna.state.folder-keys` removal row) hits disk BEFORE the network publish — the
+# only crash-safe shape for the irrecoverable rotated content key (mirrors
+# `fauna-client-subscriptions`'s `SubscriptionsAuthor`). It is
+# wasm-clean (it backs the web SPA's account seams) + forwards `js` itself.
+fauna-client-config = { path = "../fauna-client-config" }
+# `mls`: the `RecordSigning` the nest-backed key resolver builds for a
+# seed-holding client's side recorders (writer-signed change records).
+# Wasm-clean, generic over `RpcRequester`.
+fauna-client-sync = { path = "../fauna-client-sync", optional = true }
+# The snapshot plane's typed client (`SnapshotsClient<R>`), for the S8 D3 half of
+# `seal_backfill`'s session-start sweep — the sweep drives folder D1 and
+# snapshot-tag D3 as ONE policy, so the crate that owns the roster owns the
+# sequencing. The edge points THIS way (folders → snapshots, never the reverse:
+# `fauna-client-snapshots` deliberately depends on nothing but `fauna-protocol` +
+# `fauna-core`, which is what keeps it wasm-clean and cheap to embed).
+fauna-client-snapshots = { path = "../fauna-client-snapshots" }
+# The durable-inbox client + the staged-share projection
+# (`InboxClient` / `FolderPendingShare` / `list_folder_pending_shares` /
+# `PENDING_SHARE_PEEK_LIMIT`) the recipient-side `recipient::decline_folder_share`
+# recipe reads: a decline resolves the pending row to learn the group id + home
+# nest URL it must address the roster leave to. The dependency points THIS way
+# (folders → inbox, never the reverse) because the decline's load-bearing half is
+# the `fauna.folders.leave` roster drop, a folders concern; the inbox ack is
+# bookkeeping. `fauna-client-inbox` is protocol+core only, so this keeps the base
+# crate wasm-clean and adds no cycle.
+fauna-client-inbox = { path = "../fauna-client-inbox" }
+# (No direct `rand`: `fresh_content_key` delegates the CSPRNG call to
+# `fauna_core::secret::fresh_secret_32`, and the `fauna-core/js` forward below
+# is what backs it on wasm.)
+# `Zeroizing` for the fresh content key before it lands in the sealed config.
+zeroize = { workspace = true }
+# Hex-encode the sealed envelope bytes + the removed member's ActorId for the
+# `content_key.put` / `members.evict` wire payloads (the nest decodes via `hex`).
+hex = { workspace = true }
+# Hash a byted sentinel's commit bytes to compare against the engine's durable
+# pending-commit identity before merging — the byted-resume foreign-pending
+# guard. wasm-clean (already
+# in the wasm graph via fauna-core / fauna-mls).
+blake3 = { workspace = true }
+# The live MLS engine behind the optional `mls` feature's `FolderGroupCrypto`
+# adapter. Optional + featureless HERE; the target blocks below add the engine's
+# storage backend (native ⇒ rusqlite, wasm ⇒ openmls/js) so the wrong one never
+# leaks across targets. Off by default — the base crate stays fauna-mls-free.
+fauna-mls = { path = "../fauna-mls", default-features = false, optional = true }
+# The thin shared conversations client behind the `mls` feature — `share_set` reuses
+# its `keypackage_fetch` + `welcome_deliver` (priority #2). It self-handles the
+# native/wasm split via its own target tables (no `js` feature to forward), so a plain
+# optional dep here suffices. Off by default (base crate stays fauna-mls-free).
+fauna-client-conversations = { path = "../fauna-client-conversations", optional = true }
+# The peer base URL a CROSS-NEST follow records (`follow_ops`) —
+# `probe::peer_nest_url`, the one domain→URL derivation every cross-nest caller
+# shares (the conversations picker's relay `nest_url`, the contacts knock send;
+# priority #4, one owner). Rides `mls` beside the conversations client whose
+# anon discovery hop the follow reuses; `default-features = false` is the
+# wasm-clean line fauna-client-conversations' own wasm block takes.
+fauna-provisioning = { path = "../fauna-provisioning", default-features = false, optional = true }
+# `FaunaMlsBackend` + `poll_inbound_folder` + the `CommitGate` seam, for the
+# `mls`-gated `FolderCommitGate` adapter (`impl … for Arc<FaunaMlsBackend>`,
+# mls_adapter.rs) — the Rule-1-conformant gated Remove-commit route
+# (`devices.md` § Cross-device MLS group-state sync). Already in the `mls` graph
+# transitively (fauna-client-conversations → fauna-conversations); named directly
+# so the adapter can use its types. Off by default (base crate stays wasm-light).
+fauna-conversations = { path = "../fauna-conversations", optional = true }
+# The owner-side capability mint behind the `mls` feature — `mint_folder_grant`
+# builds the `content.read{folder:set}` grant `paywall_set` sends to the
+# web-serve holder (`monetization.md` § Pillar 2, the folder half). Optional +
+# `mls`-gated because it pulls `fauna-mls` (the `wrapped_blob` crypto), which the
+# base crate stays free of. Self-forwards its own `js` on wasm, and is already in
+# the wasm graph via `fauna-client-pair`, so it adds no new wasm surface.
+fauna-client-capabilities = { path = "../fauna-client-capabilities", optional = true }
+# The `PostRestoreHook` seam the `mls`-gated launch-time removal resume
+# (`launch_resume::FolderRemovalResume`) implements — the ONE shared hook body
+# every leg drives (`launch_resume.rs` explains why the hook lives here and the
+# launcher there: this crate sits above fauna-client-conversations, which sits
+# above fauna-client-mls-sync). wasm-clean (web already carries it); the hook
+# module itself is additionally native-gated because the launcher trait is.
+fauna-client-mls-sync = { path = "../fauna-client-mls-sync", optional = true }
+# The resume's launch observability (a non-zero resumed count means a removal
+# the user asked for had been silently incomplete until now), and the engine-key
+# resolver's per-set omission log — a base-graph module since the desktop sync
+# agent resolves its own content keys without `mls`.
+tracing = { workspace = true }
+# Object-safe async for the `FolderCommitGate` seam (the trait is held as
+# `Arc<dyn …>` by `FoldersAuthor`, mirroring `fauna-conversations`' own
+# `CommitGate`). Unconditional — a small proc-macro; the trait itself is
+# featureless so `FoldersAuthor` carries no cfg-gated field.
+async-trait = "0.1"
+# Names the backend's per-channel serialization lock type
+# (`Arc<futures_util::lock::Mutex<()>>` — `FaunaMlsBackend::channel_lock`) in the
+# `FolderCommitGate::ungated_channel_lock` seam, so the ungated Remove-commit
+# stage→merge section can serialize against the background folder poll. Unconditional for the same reason as async-trait: the trait is
+# featureless. wasm-clean (futures-util is already in the wasm graph).
+futures-util = { workspace = true }
+
+# native: the `mls` adapter's engine uses SQLite storage (`native`). Scoped to
+# non-wasm so the wasm build (below) never pulls rusqlite.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["native"], optional = true }
+# The concrete native transport the `mls`-gated launch-time removal resume
+# (`launch_resume::FolderRemovalResume`) is built over — concrete, not
+# `R: RpcRequester`, because the `PostRestoreHook` future must be `Send` and the
+# seam's per-impl auto-trait inference only proves that for a concrete
+# transport (see launch_resume.rs). Native-scoped: the hook module is
+# native-only, and the wasm leg drives its resume through its own face. Already
+# in the `mls` graph transitively (fauna-client-conversations → fauna-client).
+fauna-client = { workspace = true, optional = true }
+# The launch folder pass's detached leg (`launch_resume::FolderRemovalResume`):
+# on a launch whose account runtime is still assembling, the pass is spawned to
+# run once custody is readable rather than awaited in the path of the receive
+# loop. Native-scoped like the hook module; every leg that runs the hook is
+# already inside a tokio runtime, and tokio is in the `mls` graph through
+# `fauna-client`.
+tokio = { workspace = true, optional = true }
+
+# wasm: forward fauna-protocol + fauna-core's `js` feature (fauna-core's js-sys
+# time backend) so the transitive wasm build resolves; `getrandom` gives
+# `rand::thread_rng()` its wasm backend (mirrors fauna-client-subscriptions). Off
+# on native.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+getrandom = { workspace = true }
+# wasm swaps the `mls` adapter's engine storage to the js backend (openmls/js) so
+# the wasm build never pulls rusqlite (the same optional dep as the native block).
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"], optional = true }
+# The concrete browser transport `custody_ingest`'s wasm `FolderCustodySink` /
+# `FolderKeyResolver` trait impls are pinned to (the wasm twin of `fauna-client`
+# above) — needed for the same reason: an AFIT-based `RpcRequester` impl's
+# future isn't provably `Send` for an abstract generic `R`, so the async-trait
+# impl must bind a concrete type. `dep:` in the `mls` feature is a no-op on native.
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm", optional = true }
+
+[dev-dependencies]
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# The port tests wire forwarder → `serve` through the loopback transport.
+fauna-account-port = { workspace = true, features = ["test-helpers"] }
+# `FakeMailStore` — the mail custody double `FoldersAuthor` is built over in
+# the unit tests (a served set's `WebdavKeysBlob` seals under its MSEK).
+fauna-client-config = { path = "../fauna-client-config", features = ["test-helpers"] }
+# Names the serde bounds the `RpcRequester::request` method requires, for the
+# wire-contract tests' `RecordingRequester` mock impl (and the construction
+# smoke test). No `derive` needed (trait paths only); mirrors
+# fauna-client-events / -snapshots / -sync.
+serde = { workspace = true }

@@ -1,0 +1,52 @@
+[package]
+name = "fauna-client-nostr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The `zaps` registry feature (`dynamic-features.md` § Charter members — a
+# subset member of `payments`): the `fauna.nostr.zap_signers.*` trust-root
+# client and `NostrContentClient::zap_total`.
+#
+# NOT in `default` — same depth rule as fauna-protocol's, whose manifest writes
+# out the measurement: at this depth a default-on feature is re-enabled by any
+# consumer taking the crate with defaults, so `--no-default-features` at the
+# flavor root would excise nothing. Default-on lives at fauna-ffi / fauna-wasm.
+# Forwards the wire plane so both halves ride ONE switch (rule (b)); the
+# `payments` edge is declared once, in fauna-protocol, and inherited here.
+zaps = ["fauna-protocol/zaps"]
+
+[dependencies]
+# fauna-protocol carries the typed `fauna.nostr.*` wire types + the
+# `RpcRequester` seam this crate is generic over. `default-features = false`
+# drops the native-only `p2p` (fauna-wireguard → tokio net → mio) feature so
+# this crate compiles to wasm32; native workspace builds re-enable `p2p` via
+# Cargo feature unification (fauna-client pulls it). The path form is required
+# to override `default-features` — Cargo refuses the override on a
+# `workspace = true` entry whose workspace definition doesn't disable defaults.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+
+# `zap_signer_row_text`'s formatting: fauna-core::format::short_id (the
+# pubkey display truncation) and fauna-i18n's generated strings (the
+# "Unnamed signer" fallback) — both zero/wasm-safe deps, same as
+# fauna-protocol above.
+fauna-core = { path = "../fauna-core", default-features = false }
+fauna-i18n = { path = "../fauna-i18n" }
+
+# wasm: forward fauna-protocol's `js` feature (fauna-core's js-sys time
+# backend, Timestamp::now()) so the transitive wasm build resolves. Off on
+# native — js-sys is wasm-only. Same path/default-features as above; Cargo
+# merges the two entries (features are additive).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# Names the serde bounds the `RpcRequester::request` method requires, for the
+# wire-contract tests' `RecordingRequester` mock impl. No `derive` needed
+# (trait paths only); mirrors fauna-client-email / -events / -snapshots / -sync.
+serde = { workspace = true }

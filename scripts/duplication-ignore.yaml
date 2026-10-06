@@ -1,0 +1,31 @@
+# Patterns that are intentionally repeated and should not be flagged as clones.
+# Each entry is a regex matched against the normalized text of a clone group.
+# If any line in the clone matches, the finding is suppressed.
+ignore:
+  # Rust trait impls are inherently per-type
+  - pattern: "impl Default for"
+    reason: "Rust trait impls are per-type boilerplate"
+
+  # Derive macros are structural, not logic duplication
+  - pattern: "#\\[derive\\("
+    reason: "Derive attribute blocks are not logic duplication"
+
+  # Test function signatures share setup patterns
+  - pattern: "^fn test_"
+    reason: "Test function definitions share boilerplate"
+
+  # Serde attributes are repeated per struct
+  - pattern: "#\\[serde\\("
+    reason: "Serde attributes are per-field boilerplate"
+
+  # C# property changed boilerplate
+  - pattern: "OnPropertyChanged"
+    reason: "WinUI property-changed notifications are per-property"
+
+  # Kotlin Compose modifier chains
+  - pattern: "Modifier\\.fillMaxWidth"
+    reason: "Compose modifier chains are layout boilerplate"
+
+  # Swift body/some View patterns
+  - pattern: "var body: some View"
+    reason: "SwiftUI view body declarations are per-view"

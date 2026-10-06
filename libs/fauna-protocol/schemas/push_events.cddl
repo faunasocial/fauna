@@ -1,0 +1,71 @@
+; Spec Y push event payloads. See § 2.5.
+
+ActorIdHex = tstr           ; 64-char hex of 32 bytes; not enforced at CBOR level
+ContentIdHex = tstr
+
+KnockPayload = {
+  sender_id: ActorIdHex,
+  summary: tstr,
+  ? body: LocalizedText,    ; the knock row's localized body; shape in error.cddl
+  * tstr => any,            ; preserve unknown keys (§ 2.3 rule 4)
+}
+
+AccountUpdatedPayload = {
+  changes: [* tstr],
+  timestamp: uint .size 8,
+  * tstr => any,
+}
+
+NotificationPayload = {
+  notification_id: int,
+  notif_type: tstr,
+  source: tstr,
+  ? sender_id: ActorIdHex,
+  ? content_id: ContentIdHex,
+  summary: tstr,
+  ? body: LocalizedText,    ; localized twin of summary; shape in error.cddl
+  timestamp: uint .size 8,
+  * tstr => any,
+}
+
+PeerWakePayload = {
+  requester_actor_id: ActorIdHex,
+  requester_endpoint: tstr,
+  nonce: tstr,
+  * tstr => any,
+}
+
+ChannelMessagePayload = {
+  channel_id: tstr,
+  data: bstr,
+  * tstr => any,
+}
+
+PeerSignalPayload = {
+  signal: any,              ; defined in fauna-wireguard; transparent here
+  * tstr => any,
+}
+
+InboxItemPayload = {
+  content_id: ContentIdHex,
+  ? kind_hint: tstr,
+  * tstr => any,
+}
+
+; fauna.segments.changed — segment-store-level events
+SegmentsChangedPayload = {
+  kind: tstr,
+  actor_id: tstr,
+  segment_id: uint .size 4,
+  change: SegmentChange,
+  * tstr => any,
+}
+
+SegmentChange = "Finalized" / "CompactedIn" / "CompactedOut" / "Tombstoned"
+
+; fauna.delegation.lease_changed — a task-delegation lease changed holder; the
+; actor's clients re-observe via fauna.delegation.observe. No state inline.
+LeaseChangedPayload = {
+  task_kind: tstr,
+  * tstr => any,
+}

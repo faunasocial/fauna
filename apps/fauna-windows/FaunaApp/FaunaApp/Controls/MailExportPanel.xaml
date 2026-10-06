@@ -1,0 +1,232 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FaunaApp.Controls.MailExportPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Controls"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Loaded="Panel_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- User-facing mail-export wizard (docs/goal/behavior/mail-export.md § UX shape):
+         a five-step wizard (Format → Scope → Confirm → Progress → Done) that pulls the
+         user's mailbox out in one of three MUA-portable formats, sealed-blob delivered.
+         Dumb renderer of the shared fauna_client_mail_settings::MailExportMachine
+         (exposed over UniFFI by build_mail_export_machine) — the wizard FSM lives in
+         shared Rust (priority #2). Lifts apps/fauna-linux/src/settings/mail_export.rs
+         and mirrors MailAliasesPanel: embedded in SettingsPage, sharing its page-heading
+         + error-message (routed up via ErrorChanged). All five steps' mail-export-*
+         elements live in one tree, shown conditionally by step (same pattern as
+         mail-add-credential), so every ui.yaml ID is statically present. The Next/Back
+         nav buttons carry the shared wizard-next-button / wizard-back-button ids
+         (reused across steps, mirroring the mail-import twin below); the durable commit
+         is the tagged mail-export-start-button.
+
+         The step gating is ALSO what keeps wizard-back-button / wizard-next-button
+         unique: Scope carries Back+Next and Confirm carries Back, so two of each id
+         exist in markup and exactly one of each is addressable at a time (a Collapsed
+         element is absent from the UIA tree entirely, not merely offscreen) — same
+         shape as MailImportPanel's own header comment, which this mirrors.
+
+         UI precedes backend, surfaced never faked (mail-export.md § Implementation status
+         today): the export backend is unbuilt, so the scope step lists no mailboxes +
+         Start surfaces an error-message; the client-side steps still navigate. -->
+    <StackPanel Spacing="12">
+
+        <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                   Text="{loc:Localize Key=mail_export/title}" />
+        <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                   Text="{loc:Localize Key=mail_export/description}" />
+
+        <ProgressRing x:Name="LoadingRing"
+                      IsActive="False" Visibility="Collapsed"
+                      HorizontalAlignment="Left" />
+
+        <!-- ════ Step 1 — Format ════ -->
+        <StackPanel x:Name="FormatGroup" Spacing="8">
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=mail_export/format_title}" />
+            <!-- mail-export-format-picker — 3-way picker (driver.select). Items declared in
+                 order (index 0=mbox, 1=maildir, 2=eml) to match MailExportViewModel.FormatIndex. -->
+            <ComboBox x:Name="FormatPicker"
+                      AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportFormatPicker}"
+                      AutomationProperties.Name="Export format"
+                      SelectionChanged="FormatPicker_SelectionChanged">
+                <ComboBoxItem Content="{loc:Localize Key=mail_export/format_mbox}" />
+                <ComboBoxItem Content="{loc:Localize Key=mail_export/format_maildir}" />
+                <ComboBoxItem Content="{loc:Localize Key=mail_export/format_eml}" />
+            </ComboBox>
+            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardNextButton}"
+                    Content="{loc:Localize Key=mail_export/next}"
+                    Click="Next_Click" />
+        </StackPanel>
+
+        <!-- ════ Step 2 — Scope ════ -->
+        <StackPanel x:Name="ScopeGroup" Spacing="8" Visibility="Collapsed">
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=mail_export/scope_title}" />
+
+            <TextBlock Opacity="0.7"
+                       Text="{loc:Localize Key=mail_export/scope_mailboxes_label}" />
+
+            <!-- mail-export-scope-mailboxes — multi-select container. Border-wrapped with
+                 a non-empty Name + non-virtualizing panel so FlaUI realizes it / its rows. -->
+            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportScopeMailboxes}"
+                    AutomationProperties.Name="Mailboxes"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="12">
+                <StackPanel Spacing="4">
+                    <TextBlock x:Name="MailboxesEmpty" Opacity="0.5" TextWrapping="Wrap"
+                               Visibility="Collapsed"
+                               Text="{loc:Localize Key=mail_export/scope_mailboxes_empty}" />
+                    <ItemsControl x:Name="MailboxesList">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Vertical" Spacing="4" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:MailExportMailboxRow">
+                                <!-- The indexed mail-export-scope-mailbox-item. A CheckBox,
+                                     not a Border: it is a real control, so it keeps its own
+                                     automation peer, its Content gives get_text the mailbox
+                                     name, and click drives it through TogglePattern rather
+                                     than a foreground-dependent physical mouse click. It
+                                     carries NO static AutomationProperties.Name — that would
+                                     win over the Content-derived one and freeze get_text.
+                                     HelpText is the `state` attribute the cross-app walk
+                                     reads; Click (not Checked/Unchecked) fires only on user
+                                     action, so the OneTime IsChecked bind never echoes a
+                                     dispatch back (mirrors mail-import's twin). -->
+                                <CheckBox AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportScopeMailboxItem}"
+                                          AutomationProperties.HelpText="{x:Bind State}"
+                                          Content="{x:Bind Name}"
+                                          IsChecked="{x:Bind Selected}"
+                                          Tag="{x:Bind Name}"
+                                          Click="Mailbox_Click" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+
+            <TextBox x:Name="DateFromInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportScopeDateFrom}"
+                     PlaceholderText="{loc:Localize Key=mail_export/scope_date_from_placeholder}"
+                     LostFocus="DateFrom_LostFocus" />
+            <TextBox x:Name="DateToInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportScopeDateTo}"
+                     PlaceholderText="{loc:Localize Key=mail_export/scope_date_to_placeholder}"
+                     LostFocus="DateTo_LostFocus" />
+
+            <ToggleSwitch x:Name="StripHeadersToggle"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportScopeStripHeadersToggle}"
+                          Header="{loc:Localize Key=mail_export/scope_strip_headers_label}"
+                          Toggled="StripHeaders_Toggled" />
+
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardBackButton}"
+                        Content="{loc:Localize Key=mail_export/back}" Click="Back_Click" />
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardNextButton}"
+                        Content="{loc:Localize Key=mail_export/next}" Click="Next_Click" />
+            </StackPanel>
+        </StackPanel>
+
+        <!-- ════ Step 3 — Confirm ════ -->
+        <StackPanel x:Name="ConfirmGroup" Spacing="8" Visibility="Collapsed">
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=mail_export/confirm_title}" />
+            <TextBlock x:Name="ConfirmSummary"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportConfirmSummary}"
+                       TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardBackButton}"
+                        Content="{loc:Localize Key=mail_export/back}" Click="Back_Click" />
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportStartButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Content="{loc:Localize Key=mail_export/start_button}"
+                        Click="Start_Click" />
+            </StackPanel>
+        </StackPanel>
+
+        <!-- ════ Step 4 — Progress ════ -->
+        <StackPanel x:Name="ProgressGroup" Spacing="8" Visibility="Collapsed">
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=mail_export/progress_title}" />
+            <TextBlock x:Name="ProgressSummary"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportProgressSummary}"
+                       TextWrapping="Wrap" />
+            <ProgressBar x:Name="ExportProgressBar"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportProgressBar}"
+                         Minimum="0" Maximum="1" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button x:Name="PauseButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportPauseButton}"
+                        Content="{loc:Localize Key=mail_export/pause_button}"
+                        Click="Pause_Click" />
+                <Button x:Name="ResumeButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportResumeButton}"
+                        Content="{loc:Localize Key=mail_export/resume_button}"
+                        Click="Resume_Click" />
+                <Button x:Name="CancelButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportCancelButton}"
+                        Content="{loc:Localize Key=mail_export/cancel_button}"
+                        Click="Cancel_Click" />
+            </StackPanel>
+            <TextBlock x:Name="ErrorLog"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportErrorLog}"
+                       Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
+
+            <!-- mail-export-mailbox-progress-list — per-mailbox progress rows. -->
+            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportMailboxProgressList}"
+                    AutomationProperties.Name="Mailbox progress"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="12">
+                <ItemsControl x:Name="MailboxProgressList">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Vertical" Spacing="4" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:MailExportMailboxProgressRow">
+                            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportMailboxProgressListItem}"
+                                    AutomationProperties.Name="{x:Bind Name}"
+                                    Padding="4">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportMailboxProgressListItemName}"
+                                               Text="{x:Bind Name}" />
+                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportMailboxProgressListItemProgress}"
+                                               Text="{x:Bind Progress}" Opacity="0.7" />
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Border>
+        </StackPanel>
+
+        <!-- ════ Step 5 — Done ════ -->
+        <StackPanel x:Name="DoneGroup" Spacing="8" Visibility="Collapsed">
+            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Text="{loc:Localize Key=mail_export/done_title}" />
+            <TextBlock x:Name="DoneSummary"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportDoneSummary}"
+                       TextWrapping="Wrap" />
+            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportDownloadButton}"
+                    Style="{StaticResource AccentButtonStyle}"
+                    Content="{loc:Localize Key=mail_export/download_button}"
+                    Click="Download_Click" />
+            <TextBlock x:Name="DownloadUrl"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportDownloadUrl}"
+                       IsTextSelectionEnabled="True" TextWrapping="Wrap" Opacity="0.7" />
+            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportDiscardButton}"
+                    Content="{loc:Localize Key=mail_export/discard_button}"
+                    Click="Discard_Click" />
+        </StackPanel>
+    </StackPanel>
+</UserControl>

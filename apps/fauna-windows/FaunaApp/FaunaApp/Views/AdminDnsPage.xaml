@@ -1,0 +1,748 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.AdminDnsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <Page.Resources>
+        <!-- The shared `admin-dns-record` card — reused by the per-domain record
+             matrix, the manual-paste `_acme-challenge` challenges, and the one-time
+             CNAME renewal-delegation row (one record type, one path, mirroring
+             linux's build_dns_record_card). A keyed resource so all three
+             ItemsControls render byte-identical cards. -->
+        <DataTemplate x:Key="DnsRecordCard" x:DataType="local:DnsRecordItem">
+            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsRecord}"
+                    AutomationProperties.Name="{x:Bind Name}"
+                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                    CornerRadius="4" Padding="8" Margin="0,3">
+                <StackPanel Spacing="4">
+
+                    <!-- Name -->
+                    <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="64" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="{x:Bind NameCaption}" Opacity="0.6" />
+                        <TextBlock Grid.Column="1"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsRecordName}"
+                                   Text="{x:Bind Name}" FontFamily="Consolas"
+                                   IsTextSelectionEnabled="True" TextWrapping="Wrap" />
+                    </Grid>
+
+                    <!-- Type -->
+                    <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="64" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="{x:Bind TypeCaption}" Opacity="0.6" />
+                        <TextBlock Grid.Column="1"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsRecordType}"
+                                   Text="{x:Bind RecordType}" TextWrapping="Wrap" />
+                    </Grid>
+
+                    <!-- Value -->
+                    <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="64" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="{x:Bind ValueCaption}" Opacity="0.6" />
+                        <TextBlock Grid.Column="1"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsRecordValue}"
+                                   Text="{x:Bind Value}" FontFamily="Consolas"
+                                   IsTextSelectionEnabled="True" TextWrapping="Wrap" />
+                    </Grid>
+
+                    <!-- Status + copy -->
+                    <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsRecordStatus}"
+                                   Text="{x:Bind StatusText}"
+                                   Foreground="{x:Bind StatusBrush}"
+                                   VerticalAlignment="Center" />
+                        <Button Grid.Column="1"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsRecordCopyButton}"
+                                Content="{x:Bind CopyLabel}"
+                                Click="CopyButton_Click" />
+                    </Grid>
+
+                    <!-- PTR rows only: reverse DNS is set at the admin's server/IP
+                         provider, never zone-published, so this row gets an advisory
+                         instead of the normal paste-and-verify treatment
+                         (dns-management.md § Records covered). Gated by a bound
+                         Visibility rather than an inline RecordType == "PTR" x:Bind
+                         expression — see ProviderNoteVisibility. -->
+                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsRecordProviderNote}"
+                               Text="{x:Bind ProviderNote}"
+                               Visibility="{x:Bind ProviderNoteVisibility}"
+                               Opacity="0.6" TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+        </DataTemplate>
+    </Page.Resources>
+
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="16" MaxWidth="640" HorizontalAlignment="Left">
+
+            <!-- Error bar -->
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="False"
+                IsClosable="True" />
+
+            <!-- Header -->
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=admin/dns/title}" />
+            <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=admin/dns/description}" />
+
+            <!-- Primary-domain rename in-flight banner (mail-primary-domain-rename.md
+                 § UX surface). A deployment-wide banner shown while a rename is
+                 running (LocalDomainsSnapshot.active_rename set): state + old→new +
+                 (post-flip) a client-rendered grace countdown + the Complete/Extend/
+                 Abort lifecycle actions. Populated imperatively by RenderRenameBanner
+                 (mirrors linux build_rename_banner's clear-then-rebuild + the web
+                 reveal-then-confirm) so the caution ThemeResource + the
+                 admin-dns-rename-banner AutomationId resolve in XAML while the dynamic,
+                 flag-gated children are built in code-behind. Collapsed (and thus
+                 uncounted) when no rename is active — the peer of MailSettingsPanel's
+                 PendingRotationBanner. -->
+            <Border x:Name="RenameBanner"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsRenameBanner}"
+                    AutomationProperties.Name="Primary-domain rename banner"
+                    Visibility="Collapsed"
+                    Background="{ThemeResource SystemFillColorCautionBackgroundBrush}"
+                    CornerRadius="4" Padding="12">
+                <StackPanel x:Name="RenameBannerHost" Spacing="8" />
+            </Border>
+
+            <!-- Start-a-rename wizard sheet (mail-primary-domain-rename.md § UX
+                 surface). An INLINE collapsed panel toggled visible from the primary
+                 row's admin-dns-domain-rename-button / a non-primary row's
+                 admin-dns-domain-promote-button — mirrors the web + linux inline
+                 toggled sheet (a modal ContentDialog does NOT surface
+                 admin-dns-rename-sheet to the FlaUI is_visible tree; the Border+
+                 Visibility idiom does, exactly like the RenameBanner above). The
+                 picker is populated in code-behind from the current active non-primary
+                 domains at open time (the wizard never adds a domain — two-step rule);
+                 submit dispatches StartPrimaryRename, cancel just collapses. Collapsed
+                 (and thus uncounted / not is_visible) when closed. -->
+            <Border x:Name="RenameSheet"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsRenameSheet}"
+                    AutomationProperties.Name="Rename primary domain"
+                    Visibility="Collapsed"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="12">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="{loc:Localize Key=admin/dns/rename/sheet_title}"
+                               Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock Text="{loc:Localize Key=admin/dns/rename/new_primary_label}" />
+                    <ComboBox x:Name="RenameNewPrimarySelect"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsRenameNewPrimarySelect}"
+                              HorizontalAlignment="Stretch" />
+                    <TextBlock Text="{loc:Localize Key=admin/dns/rename/grace_days_label}" />
+                    <TextBox x:Name="RenameGraceInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsRenameGraceDaysInput}"
+                             PlaceholderText="7" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsRenameSubmitButton}"
+                                Style="{StaticResource AccentButtonStyle}"
+                                Content="{loc:Localize Key=admin/dns/rename/submit}"
+                                Click="RenameSubmit_Click" />
+                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsRenameCancelButton}"
+                                Content="{loc:Localize Key=admin/dns/rename/cancel}"
+                                Click="RenameCancel_Click" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Add-domain form: a reveal button toggles an inline input + submit/
+                 cancel row. Submit dispatches the shared LocalDomainMachine's
+                 AddDomain (fauna.bridges.add_local_domain). Ports linux
+                 build_add_domain_form (apps/fauna-linux/src/views/admin.rs). Placed
+                 ABOVE the tall per-domain matrix so the queried IDs stay on-screen
+                 (the e2e reveals the form, types, submits). -->
+            <StackPanel Spacing="8">
+                <Button x:Name="AddDomainButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsAddDomainButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="AddDomain_Click"
+                        HorizontalAlignment="Left"
+                        Content="{loc:Localize Key=admin/dns/add_domain}" />
+                <!-- The first domain added to a domainless nest becomes the primary —
+                     the deployment identity — and can never be removed
+                     (mail-multidomain.md § Adding a new local domain step 7,
+                     § Removing a local domain). Untagged chrome (no ui.yaml id,
+                     mirroring tui's Element::chrome), shown only when
+                     LocalDomainsSnapshot.addingFirstDomain is true; a second-or-later
+                     add stays ordinary. tui's apps/fauna-tui/src/admin/dns.rs
+                     (ADD_DOMAIN_PRIMARY_WARNING) is the reference. -->
+                <TextBlock x:Name="AddDomainPrimaryWarning"
+                           Text="{loc:Localize Key=admin/dns/add_domain_primary_warning}"
+                           TextWrapping="Wrap" Opacity="0.85" MaxWidth="480"
+                           Visibility="Collapsed" HorizontalAlignment="Left" />
+                <StackPanel x:Name="AddDomainForm" Orientation="Horizontal" Spacing="8"
+                            Visibility="Collapsed">
+                    <!-- admin-dns-add-domain-input: a TextBox (the e2e type_text sets
+                         it via ValuePattern, no focus change needed). -->
+                    <TextBox x:Name="AddDomainInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsAddDomainInput}"
+                             MinWidth="240" VerticalAlignment="Center"
+                             PlaceholderText="{loc:Localize Key=admin/dns/add_domain_placeholder}" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsAddDomainSubmitButton}"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Click="AddDomainSubmit_Click"
+                            VerticalAlignment="Center"
+                            Content="{loc:Localize Key=admin/dns/add_domain_submit}" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsAddDomainCancelButton}"
+                            Click="AddDomainCancel_Click"
+                            VerticalAlignment="Center"
+                            Content="{loc:Localize Key=common/cancel}" />
+                </StackPanel>
+            </StackPanel>
+
+            <!-- Page controls: deployment "manage all domains" master switch +
+                 manual page refresh. The manage-all switch mirrors linux's
+                 dns_manage_all_toggle (admin-dns-manage-all-toggle on the
+                 admin-dns page — the sole "Fauna controls DNS" master switch since
+                 the admin-services page was removed, 2026-06-04, admin.md § Admin
+                 IA redesign): a ToggleSwitch (FlaUI drives it via TogglePattern →
+                 fires Toggled, unlike a bare ToggleButton's Click). The refresh
+                 button re-fetches the matrix + credential store
+                 (admin-dns-refresh-button). -->
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <ToggleSwitch x:Name="ManageAllToggle" Grid.Column="0"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsManageAllToggle}"
+                              Toggled="ManageAll_Toggled"
+                              VerticalAlignment="Center"
+                              Header="{loc:Localize Key=admin/dns/manage_all}" />
+                <Button Grid.Column="1"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsRefreshButton}"
+                        Click="Refresh_Click"
+                        VerticalAlignment="Center"
+                        Content="{loc:Localize Key=admin/dns/refresh}" />
+            </Grid>
+
+            <!-- Loading -->
+            <ProgressRing
+                x:Name="LoadProgress"
+                IsActive="False"
+                Visibility="Collapsed"
+                HorizontalAlignment="Left" />
+
+            <!-- Empty state -->
+            <TextBlock x:Name="EmptyText" Visibility="Collapsed" Opacity="0.5" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=admin/dns/empty}" />
+
+            <!-- ════ Managed-mode DNS-provider credentials ════
+                 The client-held "Fauna controls DNS" credential store
+                 (fauna.state.dns, tip-sealed, never readable by the nest). Rebuilt
+                 from DnsSnapshot.credentials on every snapshot. Ports linux
+                 build_dns_page's credential block + write-only add-credential
+                 form (apps/fauna-linux/src/views/admin.rs). Placed ABOVE the
+                 per-domain matrix (matching linux's order) so it stays on-screen
+                 and the e2e is_visible(admin-dns-credentials-list) check
+                 (!IsOffscreen) holds regardless of how tall the domain list is. -->
+            <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                       Margin="0,8,0,0"
+                       Text="{loc:Localize Key=admin/dns/credentials_title}" />
+
+            <!-- Held-credential list. A Border (not a bare ItemsControl) carries
+                 the test id: an empty ItemsControl collapses to zero size, which
+                 FlaUI reports as IsOffscreen → is_visible False. The Border is
+                 always rendered with the empty-state caption inside, so it has a
+                 non-zero on-screen rectangle even with no held credentials. -->
+            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsCredentialsList}"
+                    AutomationProperties.Name="{loc:Localize Key=admin/dns/credentials_title}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="12">
+                <StackPanel Spacing="4">
+                    <!-- Empty-state caption (mirrors linux credentials_empty);
+                         hidden once a credential is held. Not an
+                         admin-dns-credential-item, so it never counts toward the
+                         held-credential total. -->
+                    <TextBlock x:Name="CredentialsEmpty" Opacity="0.5" TextWrapping="Wrap"
+                               Visibility="Collapsed"
+                               Text="{loc:Localize Key=admin/dns/credentials_empty}" />
+                    <ItemsControl x:Name="CredentialsList">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="local:DnsCredentialItem">
+                                <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsCredentialItem}"
+                                        AutomationProperties.Name="{x:Bind ProviderText}"
+                                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                        BorderThickness="1" CornerRadius="6"
+                                        Padding="12" Margin="0,4">
+                                    <Grid ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" Spacing="2">
+                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsCredentialItemProvider}"
+                                                       Text="{x:Bind ProviderText}"
+                                                       Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsCredentialItemZones}"
+                                                       Text="{x:Bind ZonesText}"
+                                                       Opacity="0.7" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                        <Button Grid.Column="1"
+                                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsCredentialItemClearButton}"
+                                                Content="{x:Bind ClearLabel}"
+                                                Click="ClearCredential_Click"
+                                                VerticalAlignment="Center" />
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+
+            <!-- Write-only add-credential form: reveal button → per-provider
+                 buttons → dynamic field bag → verify+store (PutCredentials).
+                 Provider buttons + field entries are built in code-behind from
+                 the generated provider registry (Fauna.Generated.Providers),
+                 mirroring onboarding's DnsConfigView.BuildDnsProviderRow. -->
+            <StackPanel Spacing="8">
+                <Button x:Name="AddCredentialButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsAddCredentialButton}"
+                        Click="AddCredential_Click"
+                        HorizontalAlignment="Left"
+                        Content="{loc:Localize Key=admin/dns/add_credential}" />
+
+                <StackPanel x:Name="AddCredentialForm" Spacing="8" Visibility="Collapsed">
+                    <!-- Per-provider buttons, keyed admin-dns-add-credential-provider-row[<pid>] -->
+                    <StackPanel x:Name="AddCredentialProviderRow"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsAddCredentialProviderRow}"
+                                AutomationProperties.Name="admin-dns-add-credential-provider-row"
+                                Orientation="Horizontal" Spacing="8" />
+
+                    <!-- Dynamic field entries, rebuilt on provider-select -->
+                    <StackPanel x:Name="AddCredentialFields"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsAddCredentialForm}"
+                                AutomationProperties.Name="admin-dns-add-credential-form"
+                                Spacing="4" />
+
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsAddCredentialSubmitButton}"
+                                Style="{StaticResource AccentButtonStyle}"
+                                Click="AddCredentialSubmit_Click"
+                                Content="{loc:Localize Key=admin/dns/add_credential_submit}" />
+                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsAddCredentialCancelButton}"
+                                Click="AddCredentialCancel_Click"
+                                Content="{loc:Localize Key=common/cancel}" />
+                    </StackPanel>
+                </StackPanel>
+            </StackPanel>
+
+            <!-- Per-domain DNS record matrix -->
+            <ItemsControl x:Name="DomainsList">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="local:DnsDomainItem">
+                        <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomain}"
+                                AutomationProperties.Name="{x:Bind DomainName}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1" CornerRadius="6"
+                                Padding="12" Margin="0,4">
+                            <StackPanel Spacing="8">
+
+                                <!-- Domain header: name on its own row, mode +
+                                     primary-badge + remove etc. below — NOT one
+                                     Grid row sharing a `*`/`Auto` column pair.
+                                     At the app's minimum 600-DIP window the
+                                     per-domain container is ~276 px wide
+                                     (measured via the bridge's scroll-into-view
+                                     geometry trace, `fauna-bridge-diag-*.log`:
+                                     `container=(426,-1170 276x1861)`); the
+                                     button row's `Auto` column alone (mode
+                                     button + auto-renew checkbox + badge +
+                                     remove/rename/promote buttons) exceeds
+                                     that, so a shared-column Grid squeezed the
+                                     `*` name column to `el=(0,0 0x0)` —
+                                     invisible to a real user, not just the
+                                     e2e's `admin-dns-domain-name` wait. Same
+                                     class of bug as `ThreadHeader.xaml`'s
+                                     title/chips split: the
+                                     identity text goes on a row with no
+                                     Auto-sized sibling competing for its
+                                     width. -->
+                                <StackPanel Spacing="4">
+                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomainName}"
+                                               Text="{x:Bind DomainName}"
+                                               Style="{StaticResource SubtitleTextBlockStyle}"
+                                               TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                                    <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                        <!-- Per-domain Fauna-managed / manual control
+                                             (dns-management.md § The two modes). A labelled
+                                             Button whose content IS the effective mode text
+                                             ("Fauna-managed"/"Manual") — matches web's labelled
+                                             admin-dns-domain-mode button and the
+                                             get_text(admin-dns-domain-mode) → mode-label e2e
+                                             contract. A Button (Invoke), not a ToggleButton:
+                                             FlaUI drives toggle buttons via TogglePattern, which
+                                             fires Checked/Unchecked but not Click, so a Click
+                                             handler would never run. Clicking flips to the
+                                             opposite mode via DnsAction.SetMode. -->
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomainMode}"
+                                                Content="{x:Bind ModeLabel}"
+                                                Click="DomainMode_Click"
+                                                VerticalAlignment="Center" />
+                                        <!-- Per-domain auto-renew (admin-dns-domain-auto-renew,
+                                             tls-certificates.md § C.3). Shown ONLY for managed/
+                                             delegated rows (the only kind a synced client can
+                                             auto-issue); default-on. FlaUI drives a CheckBox via
+                                             the Toggle pattern (fires Checked/Unchecked, not Click),
+                                             so the handler is on Checked/Unchecked; AutoRenew_Toggled
+                                             ignores the render-time IsChecked echo. The e2e reads the
+                                             checked state from the `state` attr → HelpText
+                                             ("on"/"off"); the label is the constant "Auto-renew". -->
+                                        <CheckBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomainAutoRenew}"
+                                                  AutomationProperties.HelpText="{x:Bind AutoRenewState}"
+                                                  Visibility="{x:Bind AutoRenewVisibility}"
+                                                  IsChecked="{x:Bind AutoRenewOn}"
+                                                  Content="{x:Bind AutoRenewLabel}"
+                                                  Checked="AutoRenew_Toggled"
+                                                  Unchecked="AutoRenew_Toggled"
+                                                  VerticalAlignment="Center" />
+                                        <!-- Primary (onboarding) domain badge — read-only
+                                             marker; the primary cannot be removed (its
+                                             remove-button is disabled). Collapsed on
+                                             non-primary rows. -->
+                                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomainPrimaryBadge}"
+                                                   Text="{x:Bind PrimaryBadgeText}"
+                                                   Visibility="{x:Bind PrimaryBadgeVisibility}"
+                                                   Opacity="0.6" VerticalAlignment="Center" />
+                                        <!-- Soft-delete (mail-multidomain.md § Removing a
+                                             local domain). Present on every active row (so
+                                             its index aligns with admin-dns-domain-name);
+                                             disabled on the primary, which the nest also
+                                             refuses (cannot_remove_primary_domain). -->
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomainRemoveButton}"
+                                                Content="{x:Bind RemoveLabel}"
+                                                IsEnabled="{x:Bind RemoveEnabled}"
+                                                Click="RemoveDomain_Click"
+                                                VerticalAlignment="Center" />
+                                        <!-- Primary-domain rename affordances
+                                             (mail-primary-domain-rename.md § UX surface).
+                                             PRIMARY row: "Rename primary domain" opens the
+                                             start sheet, enabled iff a non-primary domain
+                                             exists to promote AND no rename is already in
+                                             flight (RenameEnabled = rename_available &&
+                                             active_rename == null); while a rename runs it
+                                             also shows the read-only state badge. NON-PRIMARY
+                                             row: a "Promote to primary" shortcut that opens
+                                             the same sheet pre-targeting this domain (hidden
+                                             while a rename runs). Buttons carry AutomationId
+                                             only (found by id, clicked by Invoke); the
+                                             dynamic-text state badge is AutomationId-only so
+                                             get_text returns its Text, not a Name. -->
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomainRenameButton}"
+                                                Content="{x:Bind RenameButtonLabel}"
+                                                Visibility="{x:Bind RenameButtonVisibility}"
+                                                IsEnabled="{x:Bind RenameEnabled}"
+                                                Click="RenamePrimary_Click"
+                                                VerticalAlignment="Center" />
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomainPromoteButton}"
+                                                Content="{x:Bind PromoteButtonLabel}"
+                                                Visibility="{x:Bind PromoteButtonVisibility}"
+                                                Click="PromoteDomain_Click"
+                                                VerticalAlignment="Center" />
+                                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomainRenameState}"
+                                                   Text="{x:Bind RenameStateText}"
+                                                   Visibility="{x:Bind RenameStateVisibility}"
+                                                   Opacity="0.7" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </StackPanel>
+
+                                <!-- Per-domain catch-all actor picker
+                                     (admin-dns-domain-catch-all-select; mail-aliases.md
+                                     § Kind 4, mail-multidomain.md § Per-domain catch-all).
+                                     A 1-per-domain admin-tier setting: index 0 = "None"
+                                     (clears), index i>0 = an actor. Item text = the actor
+                                     label / "None" so the FlaUI bridge selects by name (the
+                                     cert delegate-zone-select ComboBox is the prior art).
+                                     SelectedIndex is bound (x:Bind, OneTime) to the current
+                                     designation; that render-time set raises SelectionChanged,
+                                     which CatchAll_SelectionChanged ignores by comparing to
+                                     CatchAllSelectedIndex (mirrors linux's
+                                     "select-before-connect" + the auto-renew echo guard).
+                                     ItemsSource is declared BEFORE SelectedIndex so the index
+                                     is in range when applied. Shown only when the authoritative
+                                     local-domains row is in (CatchAllVisibility). -->
+                                <StackPanel Orientation="Horizontal" Spacing="8"
+                                            Visibility="{x:Bind CatchAllVisibility}"
+                                            VerticalAlignment="Center">
+                                    <TextBlock Text="{x:Bind CatchAllLabel}" Opacity="0.6"
+                                               VerticalAlignment="Center" />
+                                    <ComboBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomainCatchAllSelect}"
+                                              ItemsSource="{x:Bind CatchAllOptions}"
+                                              SelectedIndex="{x:Bind CatchAllSelectedIndex}"
+                                              SelectionChanged="CatchAll_SelectionChanged"
+                                              VerticalAlignment="Center" />
+                                </StackPanel>
+
+                                <!-- Succession-cleared catch-all explainer
+                                     (admin-dns-domain-catch-all-cleared-state;
+                                     succession-aftermath.md § Re-key scope, row 242).
+                                     Read-only, present only when a SUCCESSION (not an
+                                     admin) last cleared this domain's catch-all — tells
+                                     the admin why the picker above reads "None" and that
+                                     unmatched mail is now bouncing; re-designating via
+                                     that same picker is the fix. Same idiom as
+                                     admin-dns-domain-rename-state; AutomationId only, no
+                                     Name, so get_text returns the Text. -->
+                                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomainCatchAllClearedState}"
+                                           Text="{x:Bind CatchAllClearedText}"
+                                           Visibility="{x:Bind CatchAllClearedVisibility}"
+                                           Opacity="0.7" TextWrapping="Wrap"
+                                           Margin="12,0,12,4" />
+
+                                <!-- Per-domain role-address override pickers
+                                     (admin-dns-domain-role-address-<role>-select;
+                                     mail-multidomain.md § Per-domain role-address routing).
+                                     One actor dropdown per overridable RFC 2142 / RFC 5321
+                                     §4.5.1 role (postmaster/abuse/noc/security): index 0 =
+                                     "Admin (default)" clears the override (the role falls
+                                     back to the deployment admin); any actor designates. The
+                                     SAME per-row dropdown shape as catch-all, ×4 — static
+                                     AutomationIds (the proven FlaUI surface) since the four
+                                     roles are fixed. Each ComboBox carries its role's
+                                     RoleAddressPickerItem on Tag so the one shared handler has
+                                     the role + actor-id map + selected-index without a switch;
+                                     SelectedIndex (x:Bind) is the current designation, and the
+                                     render-time set raises SelectionChanged which the handler
+                                     ignores by comparing to the picker's SelectedIndex (same
+                                     echo guard as catch-all / auto-renew). ItemsSource is
+                                     declared BEFORE SelectedIndex so the index is in range
+                                     when applied. Shown only when the authoritative
+                                     local-domains row is in (RoleAddressVisibility), exactly
+                                     like catch-all. Mirrors linux build_domain_section's
+                                     `for role in RoleAddressKind::ALL` loop. -->
+                                <StackPanel Spacing="4" Visibility="{x:Bind RoleAddressVisibility}">
+                                    <TextBlock Text="{x:Bind RoleAddressLabel}" Opacity="0.6" />
+                                    <StackPanel Orientation="Horizontal" Spacing="8"
+                                                VerticalAlignment="Center">
+                                        <TextBlock Text="{x:Bind PostmasterPicker.RoleLabel}"
+                                                   Opacity="0.6" MinWidth="92"
+                                                   VerticalAlignment="Center" />
+                                        <ComboBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomainRoleAddressPostmasterSelect}"
+                                                  Tag="{x:Bind PostmasterPicker}"
+                                                  ItemsSource="{x:Bind PostmasterPicker.Options}"
+                                                  SelectedIndex="{x:Bind PostmasterPicker.SelectedIndex}"
+                                                  SelectionChanged="RoleAddress_SelectionChanged"
+                                                  VerticalAlignment="Center" />
+                                    </StackPanel>
+                                    <StackPanel Orientation="Horizontal" Spacing="8"
+                                                VerticalAlignment="Center">
+                                        <TextBlock Text="{x:Bind AbusePicker.RoleLabel}"
+                                                   Opacity="0.6" MinWidth="92"
+                                                   VerticalAlignment="Center" />
+                                        <ComboBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomainRoleAddressAbuseSelect}"
+                                                  Tag="{x:Bind AbusePicker}"
+                                                  ItemsSource="{x:Bind AbusePicker.Options}"
+                                                  SelectedIndex="{x:Bind AbusePicker.SelectedIndex}"
+                                                  SelectionChanged="RoleAddress_SelectionChanged"
+                                                  VerticalAlignment="Center" />
+                                    </StackPanel>
+                                    <StackPanel Orientation="Horizontal" Spacing="8"
+                                                VerticalAlignment="Center">
+                                        <TextBlock Text="{x:Bind NocPicker.RoleLabel}"
+                                                   Opacity="0.6" MinWidth="92"
+                                                   VerticalAlignment="Center" />
+                                        <ComboBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomainRoleAddressNocSelect}"
+                                                  Tag="{x:Bind NocPicker}"
+                                                  ItemsSource="{x:Bind NocPicker.Options}"
+                                                  SelectedIndex="{x:Bind NocPicker.SelectedIndex}"
+                                                  SelectionChanged="RoleAddress_SelectionChanged"
+                                                  VerticalAlignment="Center" />
+                                    </StackPanel>
+                                    <StackPanel Orientation="Horizontal" Spacing="8"
+                                                VerticalAlignment="Center">
+                                        <TextBlock Text="{x:Bind SecurityPicker.RoleLabel}"
+                                                   Opacity="0.6" MinWidth="92"
+                                                   VerticalAlignment="Center" />
+                                        <ComboBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomainRoleAddressSecuritySelect}"
+                                                  Tag="{x:Bind SecurityPicker}"
+                                                  ItemsSource="{x:Bind SecurityPicker.Options}"
+                                                  SelectedIndex="{x:Bind SecurityPicker.SelectedIndex}"
+                                                  SelectionChanged="RoleAddress_SelectionChanged"
+                                                  VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </StackPanel>
+
+                                <!-- Slice 1: served-cert health badge
+                                     (admin-dns-cert-status, tls-certificates.md § C.4).
+                                     The nest-computed state of the cert the listener
+                                     actually serves; "checking" until RefreshCertStatus
+                                     returns. A pure read — renders on every client. -->
+                                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsCertStatus}"
+                                           Text="{x:Bind CertStatusText}"
+                                           Foreground="{x:Bind CertStatusBrush}"
+                                           TextWrapping="Wrap" />
+
+                                <!-- Slice 3: cert issuance (get/renew) + manual-paste
+                                     surface (tls-certificates.md § B tier 2/3). The
+                                     button fires IssueCert (managed/delegated) or opens
+                                     the two-phase BeginManualIssueCert (manual); while a
+                                     manual order is pending for this domain the button is
+                                     inert and the `_acme-challenge` paste surface +
+                                     complete/cancel render. Native-only. -->
+                                <StackPanel Spacing="8">
+                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsCertIssueButton}"
+                                            Content="{x:Bind IssueLabel}"
+                                            IsEnabled="{x:Bind IssueEnabled}"
+                                            Click="CertIssue_Click"
+                                            HorizontalAlignment="Left" />
+                                    <StackPanel Spacing="8" Visibility="{x:Bind PendingVisibility}">
+                                        <TextBlock Text="{x:Bind PasteInstructions}"
+                                                   Opacity="0.7" TextWrapping="Wrap" />
+                                        <ItemsControl ItemsSource="{x:Bind PendingChallenges}"
+                                                      ItemTemplate="{StaticResource DnsRecordCard}" />
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsCertCompleteButton}"
+                                                    Style="{StaticResource AccentButtonStyle}"
+                                                    Content="{x:Bind CompleteLabel}"
+                                                    Click="CertComplete_Click" />
+                                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsCertCancelButton}"
+                                                    Content="{x:Bind CancelLabel}"
+                                                    Click="CertCancel_Click" />
+                                        </StackPanel>
+                                    </StackPanel>
+                                </StackPanel>
+
+                                <!-- Slice 2: one-time CNAME renewal-delegation
+                                     (tls-certificates.md § B tier 3, S6b). Delegated →
+                                     "renewals automated" + remove + the one-time CNAME
+                                     card; not delegated → a reveal-on-demand delegate
+                                     form (zone-select from the held credentials' zones).
+                                     Config-only — renders on web too. -->
+                                <StackPanel Spacing="8" Visibility="{x:Bind DelegatedVisibility}">
+                                    <Grid ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0"
+                                                   Text="{x:Bind RenewalsAutomatedLabel}"
+                                                   Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                                   VerticalAlignment="Center" TextWrapping="Wrap" />
+                                        <Button Grid.Column="1"
+                                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsCertRemoveDelegationButton}"
+                                                Content="{x:Bind RemoveDelegationLabel}"
+                                                Click="CertRemoveDelegation_Click"
+                                                VerticalAlignment="Center" />
+                                    </Grid>
+                                    <ItemsControl ItemsSource="{x:Bind DelegationCname}"
+                                                  ItemTemplate="{StaticResource DnsRecordCard}" />
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Spacing="8"
+                                            Visibility="{x:Bind UndelegatedVisibility}">
+                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsCertDelegateButton}"
+                                            Content="{x:Bind DelegateLabel}"
+                                            IsEnabled="{x:Bind DelegateEnabled}"
+                                            ToolTipService.ToolTip="{x:Bind DelegateNoZonesLabel}"
+                                            Click="CertDelegate_Click"
+                                            VerticalAlignment="Center" />
+                                    <!-- Reveal-on-demand form (Tag-marked so the
+                                         code-behind finds it within this row); hidden
+                                         until the delegate button is clicked. -->
+                                    <StackPanel Orientation="Horizontal" Spacing="8"
+                                                Tag="delegate-form" Visibility="Collapsed"
+                                                VerticalAlignment="Center">
+                                        <TextBlock Text="{x:Bind DelegateZoneLabel}"
+                                                   Opacity="0.7" VerticalAlignment="Center" />
+                                        <ComboBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsCertDelegateZoneSelect}"
+                                                  ItemsSource="{x:Bind DelegateZones}"
+                                                  SelectedIndex="0"
+                                                  VerticalAlignment="Center" />
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsCertDelegateSubmitButton}"
+                                                Style="{StaticResource AccentButtonStyle}"
+                                                Content="{x:Bind DelegateSubmitLabel}"
+                                                Click="CertDelegateSubmit_Click" />
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsCertDelegateCancelButton}"
+                                                Content="{x:Bind DelegateCancelLabel}"
+                                                Click="CertDelegateCancel_Click" />
+                                    </StackPanel>
+                                </StackPanel>
+
+                                <!-- Records -->
+                                <ItemsControl ItemsSource="{x:Bind Records}"
+                                              ItemTemplate="{StaticResource DnsRecordCard}" />
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <!-- ════ Recently removed (soft-deleted) domains ════
+                 Soft-deleted domains within the 30-day recovery window, each with a
+                 Restore affordance (mail-multidomain.md § Re-add within 30 days).
+                 Ports linux build_removed_domain_row. The whole section hides when
+                 none are removed (so admin-dns-removed-domain-name count is 0). -->
+            <StackPanel x:Name="RemovedSection" Spacing="8" Visibility="Collapsed">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Margin="0,8,0,0"
+                           Text="{loc:Localize Key=admin/dns/removed_title}" />
+                <TextBlock Opacity="0.6" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/dns/removed_desc}" />
+                <ItemsControl x:Name="RemovedDomainsList">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="local:DnsRemovedDomainItem">
+                            <!-- A non-empty AutomationProperties.Name keeps UIA from
+                                 pruning this layout-container DataTemplate root (else
+                                 FlaUI counts 0 rows — reference_winui_flaui_datatemplate_name). -->
+                            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsRemovedDomain}"
+                                    AutomationProperties.Name="{x:Bind DomainName}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1" CornerRadius="6"
+                                    Padding="12" Margin="0,4">
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsRemovedDomainName}"
+                                               Text="{x:Bind DomainName}"
+                                               Opacity="0.7" VerticalAlignment="Center" />
+                                    <Button Grid.Column="1"
+                                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsRemovedDomainRestoreButton}"
+                                            Content="{x:Bind RestoreLabel}"
+                                            Click="RestoreDomain_Click"
+                                            VerticalAlignment="Center" />
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+
+            <!-- TextBlock mirrors for E2E (see MainPage.UpdateTestMessages) -->
+            <TextBlock x:Name="ErrorTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+                       AutomationProperties.Name=" "
+                       Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+            <TextBlock x:Name="WarningTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.WarningMessage}"
+                       AutomationProperties.Name=" "
+                       Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

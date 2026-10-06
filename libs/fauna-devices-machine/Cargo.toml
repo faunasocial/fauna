@@ -1,0 +1,131 @@
+[package]
+name = "fauna-devices-machine"
+description = "Shared-Rust page-level Devices state machine: owns the device / folder / conflict reads + the embedded folder wizard. Mirrors fauna-folders-machine."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Turn on UniFFI scaffolding when consumed by fauna-ffi. Forwards the wizard
+# crate's `uniffi` so the embedded `FolderWizardSnapshot` / `FolderWizardMachine`
+# carry their UniFFI metadata into the same generated bindings.
+uniffi = ["dep:uniffi", "fauna-core/uniffi", "fauna-folders-machine/uniffi", "dep:fauna-uniffi-async"]
+# Test helpers — FakeDevicesNestApi + FakeWizardFactory (the latter builds the
+# wizard over the wizard crate's FakeFolderNestApi, so forward its test-helpers).
+test-helpers = ["fauna-folders-machine/test-helpers"]
+# Test observer — CountingObserver / NullObserver.
+test-observer = []
+# The fleet seam's crossing of web's account port (`port`): the forwarder the
+# folders chunk wires and the `serve` the core chunk answers with
+# (account-client-lifecycle.md § The account port, decision (c)). Pulls only
+# the thin transport crate — no plane, no store.
+account-port = ["dep:fauna-account-port", "dep:serde_bytes"]
+# Shared WS-RPC seam glue (`nest_api::ws_rpc` + `build_devices_machine`) — the
+# production `DevicesNestApi` impl over `fauna-client-{folders,sync}` and the
+# WS-RPC `WizardFactory`. Pulls the per-target transport (native `fauna-client`'s
+# `NestClient`, wasm `fauna-rpc-wasm`'s `WsRpcClient`) and forwards the wizard
+# crate's `rpc-glue` so `build_folder_wizard_machine` is available. Mirrors
+# `fauna-folders-machine`'s `rpc-glue`.
+rpc-glue = [
+    "dep:fauna-client-folders",
+    "dep:fauna-client-sync",
+    "dep:fauna-client-web",
+    "dep:fauna-client",
+    "dep:fauna-client-config",
+    "dep:fauna-rpc-wasm",
+    "dep:hex",
+    "fauna-folders-machine/rpc-glue",
+]
+
+[dependencies]
+# default-features = false: avoid fauna-core's `network` default (redb, tokio,
+# hickory-resolver) which breaks wasm. We only need `localized::LocalizedText`
+# (+ its uniffi derive) and `MaybeSendSync` (the seam supertrait).
+fauna-core = { path = "../fauna-core", default-features = false }
+# The embedded folder creation wizard (the `wizard:` field of DevicesSnapshot)
+# + its DeviceOption / observer / snapshot types.
+fauna-folders-machine = { path = "../fauna-folders-machine" }
+# NOT optional: `DevicesNestApi::list_conflicts` hands the machine the **wire**
+# `SyncConflict` rows so it can render each sealed path before transcribing (the
+# summary's `file_info` is precomputed from `path`). Same shape as
+# `fauna-media-machine`'s non-optional `fauna-client-media`, whose seam likewise
+# carries wire items to a machine that renders at ingest. `default-features =
+# false` drops fauna-protocol's `p2p` default (native-only wireguard) so the wasm
+# build works; `js` time backend forwarded on wasm below.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# The unreadable-path placeholder a skipped catch-up change's review row shows
+# in place of a name (`render_conflicts`): `file_info` is a display-ready
+# string, so the placeholder is resolved here (the `fauna-client-family`
+# row-text precedent), not by each app.
+fauna-i18n = { path = "../fauna-i18n" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = "0.1"
+# Producer-side error logging: the page's error transitions log the localized
+# banner message once (observability.md § Log on the *event*, not the *paint*).
+# wasm-safe — a no-op without a subscriber; web installs `RingLayer` at boot.
+tracing = { workspace = true }
+
+fauna-account-port = { workspace = true, optional = true }
+# `account-port`: the fixed-width ids cross as byte strings, never integer arrays.
+serde_bytes = { version = "0.11", optional = true }
+
+uniffi = { workspace = true, optional = true, features = ["tokio"] }
+# `#[fauna_uniffi_async::export]` runs each async export on a tokio runtime
+# worker, off the foreign executor's small poll stack
+# (`docs/goal/architecture/apps/native-async-execution.md` § The rule).
+fauna-uniffi-async = { workspace = true, optional = true }
+
+# `rpc-glue`: the transport-agnostic, wasm-clean typed call surfaces the WS-RPC
+# seam delegates to, plus `fauna-protocol` for the `RpcErrorClass`/`RpcError`
+# error mapping + the wire row types. Generic over `RpcRequester`, so all are
+# plain optional deps (not target-gated); the seam that uses them is gated.
+fauna-client-folders = { path = "../fauna-client-folders", optional = true }
+fauna-client-sync = { path = "../fauna-client-sync", optional = true }
+# `rpc-glue`: the actor's web-address opt-in flag (`fauna.web.get_subdomain_enabled`)
+# behind the website toggle's tri-state hint. Wasm-clean like its siblings above
+# (the web SPA's own Web-settings page renders off it).
+fauna-client-web = { path = "../fauna-client-web", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `rpc-glue`: the native `NestClient` (`Arc<NestClient>: RpcRequester`) the
+# WS-RPC seam + wizard factory bind. Native-gated; excluded from wasm.
+fauna-client = { path = "../fauna-client", optional = true }
+# `rpc-glue` (native): the `FollowsStore` seam (`fauna.state.follows`) behind the
+# `ws_rpc` follows binding + the shared `CustodyForeignSetsSource`
+# (cross-nest shared-set list rows), plus the
+# hex encode of the record's raw group id. Target-gated only because the
+# transport type it wraps (`Arc<NestClient>`) is native-only — the wasm twin
+# below wraps the browser `WsRpcClient` instead.
+fauna-client-config = { path = "../fauna-client-config", optional = true }
+hex = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `rpc-glue`: the browser `WsRpcClient` the web Devices page drives.
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm", optional = true }
+# Forward fauna-protocol's `js` (fauna-core's js-sys time backend) on wasm.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+# `rpc-glue` (wasm): the `FollowsStore` seam behind the `ws_rpc` follows binding
+# + the shared `CustodyForeignSetsSource` (cross-nest shared-set list rows), plus
+# the hex encode of the record's raw group id — the wasm twin of the native block
+# above; the browser `WsRpcClient` implements `RpcRequester` the same as
+# native's `Arc<NestClient>`.
+fauna-client-config = { path = "../fauna-client-config", optional = true }
+hex = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The `FolderKeyResolver` trait is anyhow-Result typed; the conflict-render
+# tests implement it.
+anyhow = { workspace = true }
+# The shared `RpcRequester` doubles + `ClassifiedError`, the one home for
+# "a rejection is exactly an answer carrying an RpcError" (priority #2).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+tokio = { workspace = true }
+# Self dev-dependency turns on the test-only features for the integration-test
+# build only (the `#[cfg(any(test, feature = "..."))]` items aren't visible to
+# `tests/*.rs` otherwise). `rpc-glue` so the native ws_rpc seam + its unit tests
+# compile under `cargo test`. Mirrors fauna-folders-machine.
+fauna-devices-machine = { path = ".", features = ["test-helpers", "test-observer", "rpc-glue", "account-port"] }
+# The loopback the `port` module's tests wire forwarder → `serve` through.
+fauna-account-port = { workspace = true, features = ["test-helpers"] }

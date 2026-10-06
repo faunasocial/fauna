@@ -1,0 +1,56 @@
+#!/command/with-contenv /bin/bash
+# fauna-iroh-relay sidecar — the nest's self-hosted P2P relay (no n0 third party).
+# Always up: the image runs the relay, and nothing — no person, no RPC, no flag
+# file — switches it on (p2p.md § The relay). Whether it SERVES is the nest's
+# answer, not this script's: the relay dials nest's /internal/relay/ws, runs the
+# fauna.sidecar.hello token handshake ATTESTING its X25519, and holds that channel
+# for its whole life. Until the nest has a public name of its own it is handed no
+# certificate and stands by, listening on loopback with nothing to present; from
+# then on it fetches its relay.<domain> TLS cert as an HPKE-sealed blob it opens
+# with that X25519 (NEVER /data/acme — security.md § UID isolation) and serves the
+# iroh relay protocol over HTTPS on a loopback port the sni-router fronts at :443
+# (SNI relay.<domain>). Every endpoint that connects is put to the nest over the
+# same channel (fauna.relay.admit): only a member's device is served.
+#
+# Runs as the non-root fauna-relay UID (s6-setuidgid): its only /data access is its
+# own 0700 /data/keys/relay (the X25519 keypair the entrypoint chowns to it). No
+# setcap — it binds only loopback ports >1024.
+#
+# FAUNA_SIDECAR_TOKEN: the boot-minted per-sidecar token (sidecar_tokens.rs writes
+# /data/sidecar-token-relay, mode 0600 fauna-owned). This run-script reads it as
+# ROOT and passes it via `env` BEFORE dropping to fauna-relay (the file→env
+# pattern); the relay UID itself never reads the token file.
+#
+# ⚠ That UID isolation is exactly why the value can only be a START-TIME snapshot:
+# the relay cannot re-read the file to refresh it, and nest re-mints every sidecar
+# token on EVERY boot. So the binary EXITS (78, EX_CONFIG) when nest refuses its
+# `fauna.sidecar.hello` — on any dial of its channel, which otherwise leaves the
+# relay admitting nobody and serving a cert it can never renew — and s6's
+# restart re-runs this `cat` against nest's current token. Nest merely being
+# unreachable is NOT a refusal (retried in-process), so the relay starting before
+# nest is up does not restart-loop. Owner: transport.md § Future directions → the
+# sidecar channel's credential lifetime.
+#
+# Ports: --https-bind 127.0.0.1:8445 is what the sni-router L4-splices SNI
+# relay.<domain> to (WITHOUT a --send-proxy-to: iroh-relay does not parse PROXY v2,
+# and the relay rate-limits per node-key not source IP, so losing the L4 client IP
+# is fine — D.1). --http-bind 127.0.0.1:8446 (the relay's plaintext captive-portal
+# probe) stays loopback-only — it is NOT SNI-routed, so it is not a public exposure.
+#
+# --nest-url: the loopback BASE; the dialer derives wss://…/internal/relay/ws and
+# dials it (accepting the served self-signed cert via the capturing verifier).
+# ALWAYS https:// — nest serves HTTPS on its bind port from boot via its always-live
+# self-signed floor cert, regardless of domain (main.rs `prepare_listener_tls`;
+# domainless-boot migration retired the `FAUNA_DOMAIN`-keyed http/https branch this
+# script used to carry). Only the test/diagnostic `FAUNA_INSECURE_DISABLE_TLS` escape
+# serves plain HTTP, and no deployment path ever sets it. (No s6
+# dependencies.d/fauna-nest: the relay's own fetch-with-retry loop tolerates nest not
+# yet being up.)
+TOKEN=$(cat /data/sidecar-token-relay 2>/dev/null || true)
+exec env FAUNA_SIDECAR_TOKEN="$TOKEN" \
+    s6-setuidgid fauna-relay \
+    fauna-iroh-relay \
+    --https-bind 127.0.0.1:8445 \
+    --http-bind 127.0.0.1:8446 \
+    --nest-url "https://127.0.0.1:${FAUNA_PORT:-3000}" \
+    --key-dir /data/keys/relay

@@ -1,0 +1,43 @@
+[package]
+name = "fauna-e2e-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Escape hatch to build this crate's automation surface — the HTTP server, the
+# op routing, the actuation gate, the stall capture — into a --release profile
+# (debug_assertions off). Never default-on. A host's own `e2e-agent` feature
+# forwards this one (testing.md convention 15, rule (b)); no dep line names it.
+#
+# WHY THE CRATE NEEDS ITS OWN GATE, when every caller is already gated. tui and
+# fauna-desktop depend on this crate UNCONDITIONALLY (they must: a plain debug
+# build hosts the agent through the `debug_assertions` arm, and Cargo cannot
+# condition a dependency on a profile). So a plain `--release` build links the
+# crate and, before this feature existed, relied on the linker's `--gc-sections`
+# to drop the uncalled fns and their strings — "a runtime env-var gate alone",
+# held up by an unverified assumption, which is the shape convention 15 forbids.
+# Measured 2026-09-22 before the gate landed: the assumption did hold on both
+# release binaries (zero markers), so this is defence in depth, not a leak fix —
+# and defence that no longer depends on what an optimizer chose to do.
+e2e-agent = []
+
+[dependencies]
+fauna-core = { path = "../fauna-core", default-features = false }
+# `connection_json` ships the offline-gate verdict beside the word, so the
+# harness never re-derives `OFFLINE_STATE_WORDS` (see `CONNECTION_KEY`).
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+serde_json = { workspace = true }
+fauna-e2e-contract = { path = "../fauna-e2e-contract" }
+tiny_http = "0.12"
+tracing = { workspace = true }
+
+# The UI-thread stall capture (`src/stall.rs`): `tgkill` to ask the stalled
+# thread for its own stack, `dladdr` to name the module, `/proc` for its state
+# and CPU time. Linux-only by construction, and the same `libc = "0.2"` line
+# both hosting apps already carry, so this adds no third-party code to the
+# workspace. The unwinder it calls (`_Unwind_Backtrace`) is libgcc, already
+# linked into every Rust binary, declared in an `extern` block rather than
+# pulled in as a crate.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

@@ -1,0 +1,351 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.FoldersPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- Settings → Folders sub-page (folders.md; ui.yaml § folders): the folder
+         CONTROL PLANE — the create wizard, the folder list + per-set config (selective
+         sync, conflict policy), the candidate-model conflict surface, and the desktop
+         local-folder binding nested under each set. Split out of the former top-level
+         SyncPage + the former Settings → Sync (SyncFoldersPage) by the 2026-06-28
+         sync/folder UI unification (spec §§ 1, 3, 4, 6): the roster moved to Settings →
+         Devices (DevicesPage), the folder surfaces moved here, and the standalone
+         "Sync conflicts" (conflicts-tab) is retired — conflicts render here. Reached via
+         {"view":"settings","id":"folders"}.
+
+         A thin renderer over two seams: the shared-Rust DevicesMachine
+         (libs/fauna-devices-machine, via libs/fauna-ffi) for the folder / conflict /
+         wizard slices, and the LocationsViewModel named-pipe seam (\\.\pipe\fauna-sync)
+         for the per-device local-folder binding. The set is contextual (you bind from
+         WITHIN a set's row), so there is no free-text set-name field (D3 / O-1 — the
+         removed folder-location-fileset-input + folder-location-fileset). -->
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Padding="16" Spacing="24" MaxWidth="900" HorizontalAlignment="Left">
+
+            <!-- Error bar — page error surfaces here AND via App.CurrentErrorMessage
+                 (the global error-message TextBox MainPage drills through to while a
+                 settings sub-page is shown; e2e reads it via the state protocol). -->
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="False"
+                IsClosable="True" />
+
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=folders/title}" />
+
+            <!-- ══════════════════════════════════════════════════════
+                 Folders
+                 ══════════════════════════════════════════════════════ -->
+            <StackPanel Spacing="8">
+                <StackPanel Orientation="Horizontal" Spacing="12">
+                    <TextBlock x:Name="FoldersHeader" Style="{StaticResource SubtitleTextBlockStyle}"
+                               VerticalAlignment="Center"
+                               Text="{loc:Localize Key=devices/folders}" />
+                    <Button x:Name="FolderAddButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.FolderAddButton}"
+                            Content="&#xE710;" FontFamily="Segoe MDL2 Assets"
+                            Padding="8" Click="FolderAdd_Click"
+                            ToolTipService.ToolTip="{loc:Localize Key=devices/wizard/new_folder}" />
+                </StackPanel>
+
+                <!-- Folder list: one Expander per FolderSummary, built in
+                     code-behind off DevicesMachine.Snapshot().folders. The
+                     expander body (selective-sync path editors + per-set
+                     conflict policy + save + delete + nested local-folder binding)
+                     is realized lazily on expand so the unindexed body IDs stay
+                     unique to the single open row (mirrors Linux's ExpanderRow). -->
+                <StackPanel x:Name="FolderContainer" Spacing="6" />
+
+                <TextBlock x:Name="EmptyText" Opacity="0.5" Visibility="Collapsed"
+                           HorizontalAlignment="Center"
+                           Text="{loc:Localize Key=folders/no_folders}" />
+
+                <ProgressRing x:Name="LoadProgress" IsActive="False" Visibility="Collapsed"
+                              HorizontalAlignment="Center" />
+            </StackPanel>
+
+            <!-- ══════════════════════════════════════════════════════
+                 Shared with you — pending share knocks (recipient side,
+                 folders.md § Sharing). A stranger's (non-contact) share stages
+                 the MLS Welcome UNPROCESSED until the user explicitly accepts or
+                 declines it — never auto-joined. Distinct from the Folders list
+                 above, which only shows ALREADY-joined shared sets (the
+                 role == "member" rows built by BuildSharedWithMeRow). No
+                 empty-state text: an empty container is the resting state
+                 (ui.yaml registers no "no pending shares" text for this section).
+                 ══════════════════════════════════════════════════════ -->
+            <StackPanel Spacing="8">
+                <TextBlock x:Name="PendingSharesHeader" Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=devices/shared_with_you}" />
+
+                <!-- One folder-pending-share row per FfiPendingShare, built in
+                     code-behind off a page-load fetch (a PEEK — folders_pending_shares
+                     never acks a row; re-fetched after accept/decline, never
+                     pushed/polled). -->
+                <StackPanel x:Name="PendingSharesContainer" Spacing="6" />
+            </StackPanel>
+
+            <!-- Offline co-present share (p2p.md § Offline share initiation).
+                 The section's markup is the `p2p-share` member's excision unit,
+                 so it lives in Views/P2pShare/OfflineShareSection.xaml and
+                 nowhere else (dynamic-features.md § Platform-family surface
+                 excision): XAML has no preprocessor, and an AutomationId literal
+                 here would ship in the store-safe flavor too. FoldersPage.xaml.cs
+                 fills this host under `#if P2P_SHARE`; the host stays empty in
+                 the excised flavor. ── -->
+            <ContentControl x:Name="OfflineShareSectionHost"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Stretch" />
+
+            <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+            <!-- ══════════════════════════════════════════════════════
+                 Following a public folder (folders.md § Following a public
+                 folder). PAGE-LEVEL, not per-row: a follow names somebody
+                 ELSE's folder, so it has no owner row to hang off.
+
+                 The section is ALWAYS offered, even with no follows — the
+                 button is how a user gets their first one, so gating it on a
+                 non-empty list would make it unreachable.
+
+                 A followed folder is a row in its OWN list, never a folder-row:
+                 it has no roster, no binding and no seat, so a folder-row would
+                 open an expander full of controls that cannot apply to it.
+
+                 The owner half of the flow REUSES the shared recipient-picker
+                 (no new picker IDs — priority #2, exactly as the share flow
+                 above does); it is built in code-behind beside the name input,
+                 since both are present only while the flow is open
+                 (ui.yaml optional_elements).
+                 ══════════════════════════════════════════════════════ -->
+            <StackPanel Spacing="8">
+                <TextBlock x:Name="FollowedHeader" Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=devices/followed_folders_section}" />
+
+                <TextBlock Opacity="0.6" TextWrapping="Wrap" FontSize="12"
+                           Text="{loc:Localize Key=devices/follow_public_folder_hint}" />
+
+                <!-- One folder-followed-item row per DevicesSnapshot.followed
+                     entry, built in code-behind. -->
+                <StackPanel x:Name="FollowedContainer" Spacing="6" />
+
+                <Button x:Name="FollowButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.FolderFollowButton}"
+                        Content="{loc:Localize Key=devices/follow_public_folder}"
+                        Click="FollowButton_Click"
+                        HorizontalAlignment="Left" />
+
+                <!-- The follow flow, revealed by the button above: the reused
+                     recipient-picker (injected here in code-behind) + the
+                     folder's plaintext name + the confirm. -->
+                <StackPanel x:Name="FollowFlowPanel" Spacing="8" Visibility="Collapsed">
+                    <TextBox x:Name="FollowNameBox"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.FolderFollowNameInput}"
+                             PlaceholderText="{loc:Localize Key=devices/follow_folder_name}" />
+                    <Button x:Name="FollowConfirmBtn"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.FolderFollowConfirm}"
+                            Content="{loc:Localize Key=devices/follow_confirm}"
+                            Click="FollowConfirm_Click"
+                            Style="{StaticResource AccentButtonStyle}"
+                            HorizontalAlignment="Left" />
+                </StackPanel>
+            </StackPanel>
+
+            <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+            <!-- ══════════════════════════════════════════════════════
+                 Conflicts (candidate model — relocated from the retired
+                 standalone "Sync conflicts" page; folders.md § Conflicts)
+                 ══════════════════════════════════════════════════════ -->
+            <StackPanel Spacing="8">
+                <TextBlock x:Name="ConflictsHeader" Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=conflicts/title}" />
+
+                <!-- Conflict REVIEW rows built in code-behind off snapshot.conflicts
+                     (fetched with include_resolved — auto-resolve, file-sync.md §
+                     Conflicts): per resolved conflict the resolution badge + the
+                     file → winner line + a one-tap "use the other version"
+                     (conflict-resolve-button → UseOtherVersion, the File-Versions
+                     restore re-point). Unresolved rows are informational. -->
+                <StackPanel x:Name="ConflictsContainer" Spacing="6" Visibility="Collapsed" />
+
+                <TextBlock x:Name="NoConflictsText" Opacity="0.5"
+                           Text="{loc:Localize Key=conflicts/no_conflicts}" />
+            </StackPanel>
+
+            <!-- ══════════════════════════════════════════════════════
+                 Sync defaults (page-level; the first non-per-set control here):
+                 the global default conflict policy stamped onto NEWLY created
+                 sets (fauna.state.sync-prefs; file-sync.md § Conflicts, policy).
+                 Items are built in code-behind (LoadSyncDefaultsAsync) with the
+                 wire value as each item's UIA Name — the same value/label split
+                 as folder-conflict-policy-select.
+                 ══════════════════════════════════════════════════════ -->
+            <StackPanel Spacing="8">
+                <TextBlock x:Name="SyncDefaultsHeader" Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=devices/sync_defaults}" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBlock VerticalAlignment="Center"
+                               Text="{loc:Localize Key=devices/default_conflict_policy}" />
+                    <ComboBox x:Name="DefaultConflictPolicyCombo" MinWidth="220"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.SyncDefaultConflictPolicySelect}"
+                              SelectionChanged="DefaultConflictPolicy_Changed" />
+                </StackPanel>
+            </StackPanel>
+
+            <!-- ══════════════════════════════════════════════════════
+                 Folder Creation Wizard (ContentDialog)
+
+                 A thin renderer over the shared-Rust FolderWizardMachine
+                 (libs/fauna-folders-machine, via libs/fauna-ffi). No wizard
+                 logic lives here (folders.md § Where logic lives): the three step
+                 panels are swapped + refreshed off the machine's per-step
+                 snapshots on every observer tick, and gestures forward to the
+                 machine. Steps: Name → Devices → Review → Done (the
+                 scan-frequency step, and the backup-type retention inputs it
+                 carried, retired with folders re-model phase 5 — file-sync.md
+                 § Config, the phase-5 block; the type step retired with phase 2
+                 slice e — a folder has no type, ui/folders.md § Layout & flow).
+                 The device rows (step 2) are built in code-behind off the
+                 snapshot.
+                 ══════════════════════════════════════════════════════ -->
+            <ContentDialog x:Name="WizardDialog">
+                <StackPanel Spacing="12" MinWidth="420">
+                    <!-- The steps scroll; the navigation row below never does. Step 2
+                         grows by four checkboxes and three explainers per device place,
+                         so with the nav inside one unbounded stack a single enrolled
+                         device pushed Back/Next below the dialog's fold, where the
+                         dialog's own scroller does not bring it back for automation
+                         (and makes a user hunt for it). Bounding the steps keeps the
+                         nav in view at every device count. -->
+                    <ScrollViewer MaxHeight="400" VerticalScrollBarVisibility="Auto">
+                    <StackPanel Spacing="12">
+                    <!-- Step 1 — Name: the name alone. The sync/backup/web
+                         mode buttons that sat here (wizard-mode-*) are RETIRED:
+                         a folder has no type (folders re-model phase 2 slice e);
+                         what a mode used to imply is now each seat's place flags
+                         (step 2) plus the row's nest-place policy after create. -->
+                    <StackPanel x:Name="WizardStep1" Spacing="8">
+                        <TextBox x:Name="WizardNameBox"
+                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardNameInput}"
+                                 TextChanged="WizardName_Changed" />
+                    </StackPanel>
+
+                    <!-- Step 2 — Devices, rendered as device PLACES: per-device
+                         enrollment (wizard-device-check) + the three place-flag
+                         checkboxes (wizard-device-originates / -accepts /
+                         -applies-deletes), each with its one-line explainer. The
+                         retired per-device role picker (wizard-device-role) is gone.
+                         Rows added to WizardDeviceContainer in code-behind. -->
+                    <StackPanel x:Name="WizardStep2" Spacing="8" Visibility="Collapsed">
+                        <TextBlock x:Name="WizardDevicesHeading" />
+                        <StackPanel x:Name="WizardDeviceContainer" Spacing="6" />
+                        <TextBlock x:Name="WizardNoDevicesText" Opacity="0.6"
+                                   Visibility="Collapsed" />
+                    </StackPanel>
+
+                    <!-- Step 3 — Review: read-only summary. -->
+                    <StackPanel x:Name="WizardStep3" Spacing="8" Visibility="Collapsed">
+                        <StackPanel x:Name="WizardReviewContainer" Spacing="6" />
+                        <!-- Wizard submit error. No AutomationId — the page's
+                             single canonical error-message lives on the page-level
+                             ErrorBar; the modal dialog covers it, so errors surface
+                             here in-dialog without duplicating the ID. -->
+                        <TextBlock x:Name="WizardErrorText" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                   Visibility="Collapsed" />
+                    </StackPanel>
+                    </StackPanel>
+                    </ScrollViewer>
+
+                    <!-- Navigation: Back (step 2+), Next (steps 1-3), Create (Review). -->
+                    <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                        <Button x:Name="WizardBackBtn"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardBackButton}"
+                                Click="WizardBack_Click" Visibility="Collapsed" />
+                        <Button x:Name="WizardNextBtn"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardNextButton}"
+                                Click="WizardNext_Click" />
+                        <Button x:Name="WizardCreateBtn"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardCreateButton}"
+                                Click="WizardCreate_Click"
+                                Style="{StaticResource AccentButtonStyle}" Visibility="Collapsed" />
+                    </StackPanel>
+                </StackPanel>
+            </ContentDialog>
+
+            <!-- Folder delete confirmation (destructive). The confirm response
+                 carries folder-delete-confirm; its Click commits via
+                 DevicesMachine.DeleteFolder. CloseButton cancels. -->
+            <ContentDialog x:Name="FolderDeleteDialog" CloseButtonText="{loc:Localize Key=common/cancel}">
+                <StackPanel Spacing="12" MinWidth="360">
+                    <TextBlock x:Name="FolderDeleteText" TextWrapping="Wrap" />
+                    <Button x:Name="FolderDeleteConfirmBtn"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.FolderDeleteConfirm}"
+                            Click="FolderDeleteConfirm_Click"
+                            Style="{StaticResource AccentButtonStyle}"
+                            HorizontalAlignment="Right" />
+                </StackPanel>
+            </ContentDialog>
+
+            <!-- Content-residency flip-to-metadata-only confirmation (destructive —
+                 deletes the nest's copy of the folder's content; file-sync.md §
+                 Content residency). The confirm response carries
+                 folder-residency-confirm; its Click commits via
+                 DevicesMachine.SetFolderResidency. CloseButton cancels — the select
+                 was already snapped back to the current value before this dialog
+                 opened, so cancel has nothing left to undo. -->
+            <ContentDialog x:Name="FolderResidencyDialog"
+                           Title="{loc:Localize Key=devices/residency_confirm_title}"
+                           CloseButtonText="{loc:Localize Key=common/cancel}">
+                <StackPanel Spacing="12" MinWidth="360">
+                    <TextBlock Text="{loc:Localize Key=devices/residency_confirm_body}" TextWrapping="Wrap" />
+                    <Button x:Name="FolderResidencyConfirmBtn"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.FolderResidencyConfirm}"
+                            Content="{loc:Localize Key=devices/residency_confirm}"
+                            Click="FolderResidencyConfirm_Click"
+                            Style="{StaticResource AccentButtonStyle}"
+                            HorizontalAlignment="Right" />
+                </StackPanel>
+            </ContentDialog>
+
+            <!-- Declassify confirmation for the public audience (folders.md §
+                 Audience and website serving). Picking Public on
+                 folder-audience-select ARMS this; it does not publish. A public
+                 folder rests UNSEALED — content AND names/paths, since the names
+                 become the address of each file (principles.md § The user always
+                 controls their data owns that single exception to
+                 sealed-at-rest), so the flip happens only on
+                 folder-audience-public-confirm. Two body lines, because each
+                 consequence surprised readers on its own: names and paths go
+                 public too, and flipping back re-seals only FUTURE content.
+                 CloseButton cancels — the select was already snapped back to the
+                 current audience before this opened, so cancel has nothing left
+                 to undo. -->
+            <ContentDialog x:Name="FolderAudienceDialog"
+                           Title="{loc:Localize Key=devices/declassify_title}"
+                           CloseButtonText="{loc:Localize Key=common/cancel}">
+                <StackPanel Spacing="12" MinWidth="360">
+                    <TextBlock Text="{loc:Localize Key=devices/declassify_body}" TextWrapping="Wrap" />
+                    <TextBlock Text="{loc:Localize Key=devices/declassify_irreversible}" TextWrapping="Wrap" />
+                    <Button x:Name="FolderAudienceConfirmBtn"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.FolderAudiencePublicConfirm}"
+                            Content="{loc:Localize Key=devices/declassify_confirm}"
+                            Click="FolderAudienceConfirm_Click"
+                            Style="{StaticResource AccentButtonStyle}"
+                            HorizontalAlignment="Right" />
+                </StackPanel>
+            </ContentDialog>
+
+        </StackPanel>
+    </ScrollViewer>
+</Page>

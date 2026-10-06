@@ -1,0 +1,650 @@
+[workspace]
+members = [
+    "libs/fauna-core",
+    "libs/fauna-labeler",
+    "libs/fauna-plugin-host",
+    "libs/fauna-log",
+    "libs/fauna-mls",
+    "libs/fauna-pq-kem",
+    "libs/fauna-wasm",
+    "libs/fauna-wasm-content-index",
+    "libs/fauna-wasm-onboarding",
+    "libs/fauna-wasm-panic-hook",
+    "libs/fauna-ffi",
+    "libs/fauna-index",
+    "libs/fauna-provisioning",
+    "libs/fauna-onboarding-machine",
+    "libs/fauna-folders-machine",
+    "libs/fauna-devices-machine",
+    "libs/fauna-backups-machine",
+    "libs/fauna-media-machine",
+    "libs/fauna-wasm-folders",
+    "libs/fauna-wasm-backups",
+    "libs/fauna-wasm-media",
+    "libs/fauna-wasm-labeler-catalog",
+    "libs/fauna-wasm-share",
+    "libs/fauna-wasm-atproto-settings",
+    "libs/fauna-wasm-connected-apps",
+    "libs/fauna-launch-machine",
+    "libs/fauna-feed",
+    "libs/fauna-client-account",
+    "libs/fauna-client-accounts",
+    "libs/fauna-client-account-runtime",
+    "libs/fauna-client-admin",
+    "libs/fauna-client-alerts",
+    "libs/fauna-client-alert-sweep",
+    "libs/fauna-client-family",
+    "libs/fauna-client-region",
+    "libs/fauna-client-backup",
+    "libs/fauna-client-atproto",
+    "libs/fauna-client-bluesky",
+    "libs/fauna-client-bridges",
+    "libs/fauna-atproto-settings-machine",
+    "libs/fauna-client-caldav",
+    "libs/fauna-client-carddav",
+    "libs/fauna-client-capabilities",
+    "libs/fauna-client-connected-apps",
+    "libs/fauna-capability-holder",
+    "libs/fauna-client-labelers",
+    "libs/fauna-labeler-catalog-machine",
+    "libs/fauna-client-config",
+    "libs/fauna-client-contacts",
+    "libs/fauna-client-features",
+    "libs/fauna-client-conversations",
+    "libs/fauna-client-custody",
+    "libs/fauna-client-delegation",
+    "libs/fauna-acme-core",
+    "libs/fauna-acme-http01",
+    "libs/fauna-client-dns",
+    "libs/fauna-pebble-testkit",
+    "libs/fauna-client-drafts",
+    "libs/fauna-client-email",
+    "libs/fauna-client-feed",
+    "libs/fauna-client-inbox",
+    "libs/fauna-client-index",
+    "libs/fauna-client-linkpreview",
+    "libs/fauna-client-mail-settings",
+    "libs/fauna-client-media",
+    "libs/fauna-client-mls-sync",
+    "libs/fauna-client-moderation",
+    "libs/fauna-client-notifications",
+    "libs/fauna-client-nostr",
+    "libs/fauna-client-folders",
+    "libs/fauna-client-pair",
+    "libs/fauna-uniffi-async",
+    "libs/fauna-uniffi-async-macros",
+    "libs/fauna-client-payments",
+    "libs/fauna-client-share",
+    "libs/fauna-client-push",
+    "libs/fauna-client-recovery",
+    "libs/fauna-client-personalization",
+    "libs/fauna-client-posts",
+    "libs/fauna-client-profile",
+    "libs/fauna-client-subscriptions",
+    "libs/fauna-client-search",
+    "libs/fauna-client-share-host",
+    "libs/fauna-client-snapshots",
+    "libs/fauna-client-spam",
+    "libs/fauna-client-stats",
+    "libs/fauna-client-status",
+    "libs/fauna-build-commit",
+    "libs/fauna-client-testkit",
+    "libs/fauna-client-sync",
+    "libs/fauna-client-web",
+    "libs/fauna-sleep",
+    "libs/fauna-sync-engine",
+    "libs/fauna-account-store",
+    "libs/fauna-account-plane",
+    "libs/fauna-account-seams",
+    "libs/fauna-account-port",
+    "libs/fauna-nest-http",
+    "libs/fauna-mail",
+    "libs/fauna-text-model",
+    "libs/fauna-calendar",
+    "libs/fauna-contacts",
+    "libs/fauna-media",
+    "libs/fauna-conversations",
+    "libs/fauna-wasm-launch",
+    "libs/fauna-bridge-atproto",
+    "libs/fauna-bridge-nostr",
+    "libs/fauna-transport",
+    "libs/fauna-iroh",
+    "libs/fauna-peer-channel",
+    "libs/fauna-peer-share",
+    "libs/fauna-peer-sync",
+    "libs/fauna-client-core",
+    "libs/fauna-client",
+    "libs/fauna-ws-substrate",
+    "libs/fauna-sidecar-client",
+    "libs/fauna-anon-client",
+    "libs/fauna-rpc-wasm",
+    "libs/fauna-peer",
+    "libs/fauna-segment-store",
+    "libs/fauna-update",
+    "libs/fauna-protocol",
+    "libs/fauna-payments",
+    "libs/fauna-cbor",
+    "libs/fauna-archive",
+    "libs/fauna-archive-import-machine",
+    "libs/fauna-carv2",
+    "libs/fauna-proxy-protocol",
+    "libs/fauna-conn-limit",
+    "libs/fauna-deployment-flags",
+    "libs/fauna-tls-bootstrap",
+    "libs/fauna-mda-supervisor",
+    "libs/fauna-nest-supervisor",
+    "libs/fauna-ui-ids",
+    "bins/fauna-bridge-supervisor",
+    "bins/fauna-nest-daemon",
+    "bins/fauna-nest",
+    "bins/fauna-sync-agent",
+    "bins/fauna-storage",
+    "bins/fauna-router",
+    "bins/fauna-sni-router",
+    "libs/fauna-bridge-activitypub",
+    "bins/fauna-push-relay",
+    "apps/fauna-tui",
+    "apps/fauna-linux",
+    "bins/fauna-iroh-relay",
+    "bins/fauna-sandbox",
+    "bins/fauna-sign",
+    "bins/fauna-emulator-ctl",
+    "apps/fauna-windows/fauna-bridge-service",
+    "apps/fauna-windows/fauna-nest-service",
+    "apps/fauna-windows/shell-ext",
+    "apps/fauna-windows/shellext-fixture",
+    "libs/fauna-cfapi",
+    "libs/fauna-ipc",
+    "libs/fauna-e2e-agent",
+    "libs/fauna-e2e-contract",
+    "libs/fauna-i18n",
+    "libs/fauna-credential-store",
+    "libs/uniffi-bindgen-cs",
+    "services/fauna-cors-proxy",
+    "services/fauna-front-door",
+    "tools/check-additive-evolution",
+]
+exclude = [
+    "libs/fauna-mls/fuzz",
+    "libs/fauna-peer-channel/fuzz",
+]
+resolver = "2"
+
+[workspace.package]
+# The product version — the fleet-wide source of truth every other surface
+# copies (docs/goal/architecture/product-version.md; version-lockstep gate).
+version = "0.1.2"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/faunasocial/fauna"
+
+[workspace.dependencies]
+# Fauna crates
+fauna-core = { path = "libs/fauna-core" }
+fauna-uniffi-async = { path = "libs/fauna-uniffi-async" }
+fauna-labeler = { path = "libs/fauna-labeler" }
+fauna-plugin-host = { path = "libs/fauna-plugin-host" }
+fauna-mls = { path = "libs/fauna-mls" }
+fauna-capability-holder = { path = "libs/fauna-capability-holder" }
+fauna-bridge-atproto = { path = "libs/fauna-bridge-atproto" }
+fauna-bridge-nostr = { path = "libs/fauna-bridge-nostr" }
+fauna-bridge-activitypub = { path = "libs/fauna-bridge-activitypub" }
+fauna-transport = { path = "libs/fauna-transport" }
+fauna-ui-ids = { path = "libs/fauna-ui-ids" }
+fauna-iroh = { path = "libs/fauna-iroh" }
+fauna-peer-channel = { path = "libs/fauna-peer-channel" }
+fauna-peer-share = { path = "libs/fauna-peer-share" }
+fauna-peer-sync = { path = "libs/fauna-peer-sync" }
+fauna-client = { path = "libs/fauna-client" }
+fauna-ws-substrate = { path = "libs/fauna-ws-substrate" }
+fauna-e2e-agent = { path = "libs/fauna-e2e-agent" }
+fauna-e2e-contract = { path = "libs/fauna-e2e-contract" }
+fauna-client-accounts = { path = "libs/fauna-client-accounts" }
+fauna-credential-store = { path = "libs/fauna-credential-store" }
+fauna-sidecar-client = { path = "libs/fauna-sidecar-client" }
+fauna-protocol = { path = "libs/fauna-protocol" }
+fauna-cbor = { path = "libs/fauna-cbor" }
+fauna-carv2 = { path = "libs/fauna-carv2" }
+fauna-proxy-protocol = { path = "libs/fauna-proxy-protocol" }
+fauna-conn-limit = { path = "libs/fauna-conn-limit" }
+fauna-deployment-flags = { path = "libs/fauna-deployment-flags" }
+fauna-tls-bootstrap = { path = "libs/fauna-tls-bootstrap" }
+fauna-mda-supervisor = { path = "libs/fauna-mda-supervisor" }
+fauna-nest-supervisor = { path = "libs/fauna-nest-supervisor" }
+fauna-peer = { path = "libs/fauna-peer" }
+fauna-update = { path = "libs/fauna-update" }
+fauna-calendar = { path = "libs/fauna-calendar" }
+fauna-contacts = { path = "libs/fauna-contacts" }
+fauna-cfapi = { path = "libs/fauna-cfapi" }
+fauna-index = { path = "libs/fauna-index" }
+fauna-client-index = { path = "libs/fauna-client-index" }
+fauna-conversations = { path = "libs/fauna-conversations" }
+fauna-feed = { path = "libs/fauna-feed" }
+fauna-mail = { path = "libs/fauna-mail" }
+fauna-payments = { path = "libs/fauna-payments" }
+fauna-text-model = { path = "libs/fauna-text-model" }
+fauna-media = { path = "libs/fauna-media", default-features = false }
+fauna-segment-store = { path = "libs/fauna-segment-store", default-features = false }
+fauna-sleep = { path = "libs/fauna-sleep" }
+fauna-sync-engine = { path = "libs/fauna-sync-engine" }
+fauna-account-store = { path = "libs/fauna-account-store" }
+fauna-account-plane = { path = "libs/fauna-account-plane" }
+fauna-account-seams = { path = "libs/fauna-account-seams" }
+fauna-account-port = { path = "libs/fauna-account-port" }
+fauna-ipc = { path = "libs/fauna-ipc" }
+fauna-nest = { path = "bins/fauna-nest" }
+
+# Windows
+windows = "0.61"
+windows-service = "0.8"
+
+# Terminal UI — the cli client (apps/fauna-tui, clients/tui.md § Architecture)
+ratatui = "0.30"
+crossterm = "0.29"
+
+semver = "1"
+
+# C2PA (content provenance)
+c2pa = { version = "0.90", default-features = false, features = ["rust_native_crypto"] }
+wasmi = "1"
+# The component-model runtime behind the nest-hosted WASM plugin form
+# (`third-party.md` § Execution forms → *WASM components*). User-approved
+# 2026-09-26: crate `wasmtime`, channel crates.io under cargo vet. Features are
+# the minimum the runner needs — the compiler, the component model, async host
+# imports — and nothing that widens the dependency tree for no runner purpose
+# (no GC, no profiling, no cache, no pooling allocator, no parallel compilation).
+wasmtime = { version = "49", default-features = false, features = ["runtime", "cranelift", "component-model", "async", "std", "anyhow"] }
+# The in-repo plugin fixtures (test-only): a core module in text, componentized
+# against the runner's own WIT — no third-party plugin code anywhere in the tree.
+wat = "1"
+wit-component = "0.258"
+wit-parser = "0.258"
+
+# Image metadata / processing
+img-parts = "0.3"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+
+# MLS (RFC 9420)
+openmls = "0.9"
+openmls_traits = "0.6"
+openmls_rust_crypto = "0.6"
+openmls_basic_credential = "0.6"
+
+# Crypto
+ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
+curve25519-dalek = "4"
+x25519-dalek = { version = "2", features = ["static_secrets", "getrandom"] }
+chacha20 = "0.9"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = "0.12"
+blake3 = { version = "1", features = ["pure"] }
+secp256k1 = { version = "0.30", features = ["rand", "global-context"] }
+bech32 = "0.11"
+aes-gcm = "0.10"
+argon2 = "0.5"
+hpke = { version = "0.13", default-features = false, features = ["x25519", "alloc"] }
+# iroh-QUIC P2P substrate — the optional, reversible *second* transport behind
+# the `fauna-transport` seam (only `libs/fauna-iroh` depends on it, behind its
+# non-default `quic` feature; OFF in the shipping nest image). `tls-ring` NOT
+# `tls-aws-lc-rs`: the tree is ring-based (aws-lc-rs is a cmake/C build absent
+# from the nest Docker toolchain — see the `mail-auth` note below). PQ
+# (`X25519MLKEM768`) is the separate §7.3 ring→aws-lc-rs provider migration,
+# proven SPKI-neutral by the 2026-06-28 iroh prototype.
+iroh = { version = "1", default-features = false, features = ["tls-ring"] }
+# iroh-relay's SERVER half (already in the lockfile as iroh's transitive client
+# dep). Used today only as a `libs/fauna-iroh` dev-dependency, to spin a
+# self-hosted relay on loopback in the relay-round-trip test (the durable form of
+# the 2026-06-28 relay-sovereignty proof). The future nest-side `iroh-relay`
+# sidecar binary will consume it as a real (feature-gated) dep. `tls-ring` (via
+# the `server` feature), never `tls-aws-lc-rs` — same ring-only discipline as iroh.
+iroh-relay = { version = "1", default-features = false }
+rand = "0.8"
+rand_core_09 = { package = "rand_core", version = "0.9", features = ["os_rng"] }
+rsa = { version = "0.9", features = ["sha2"] }
+
+# Compression
+flate2 = "1"
+
+# Diff / merge
+similar = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# BARE (RFC-draft Binary Application Record Encoding) — the pinned wire codec for
+# the community-labeler `label()` ABI (labeler-registry design §6 revision-history
+# 2026-07-07). Chosen over the house dag-cbor because dag-cbor forbids floats and
+# `Label.confidence` is an `f64`; BARE is a deterministic, schema-driven binary
+# format the holder and every WASM author agree on.
+serde_bare = "0.5"
+
+# Content-addressed storage — CARv2 framing reimplemented in libs/fauna-carv2
+# (sync v1 codec + v2 wrapper; iroh-car dropped per Layer 3 plan amendment).
+cid = "0.11"
+serde_ipld_dagcbor = "0.6"
+unsigned-varint = "0.8"
+
+# Bytes
+bytes = "1"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
+futures-util = "0.3"
+# Raw-socket knobs tokio's TcpStream doesn't expose — specifically TCP keepalive
+# (SO_KEEPALIVE + TCP_KEEPIDLE/INTVL/CNT), which `fauna-conn-limit` arms on every
+# accepted connection so a vanished peer can't hold a per-IP permit forever.
+socket2 = "0.6"
+
+# Concurrent data structures
+arc-swap = "1"
+dashmap = "6"
+lru = "0.18"
+
+# HTTP / WebSocket
+axum = { version = "0.8", features = ["ws"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service", "http1", "http2"] }
+tower-http = { version = "0.6", features = ["cors", "fs", "limit", "set-header"] }
+tower-layer = "0.3"
+tower-service = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# `rustls-tls-webpki-roots` so the native clients' WS adapter can dial `wss://`
+# (real HTTPS nests like example.com). Without a TLS feature, `connect_async`
+# can only do plaintext `ws://` — the native client silently failed every
+# `wss://` connection (local e2e is `ws://`, so it was invisible). webpki-roots
+# = bundled CA roots (no system OpenSSL), portable across linux/win/mac/android.
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+
+# Storage
+redb = "2"
+
+# Randomness
+getrandom = "0.3"
+
+# Zeroize
+zeroize = { version = "1", features = ["derive"] }
+
+# Hex / Base64
+hex = "0.4"
+base64 = "0.22"
+# base58btc for did:key/multibase encoding (ATProto identity — fauna-protocol::atproto).
+bs58 = "0.5"
+
+# UniFFI (iOS/native bindings)
+uniffi = "0.31"
+
+# WASM
+wasm-bindgen = "0.2"
+wasm-bindgen-test = "0.3"
+js-sys = "0.3"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Rate limiting
+governor = "0.8"
+
+# Email (optional, for node email gateway)
+mail-send = "0.5"
+mail-parser = "0.11"
+# Sans-io IMAP response parser (nom-based, zero I/O) backing the shared
+# source-side IMAP client (docs/goal/behavior/mailbox-migration.md § Client-
+# driven streaming model). Pure — nom + memchr + minimal-lexical — so it
+# compiles to wasm32-unknown-unknown alongside the rest of the import client.
+# A truncated literal parses as `Incomplete`, which is exactly the feed-more-
+# bytes contract the transport seam needs.
+imap-proto = "0.16"
+# imap-proto does not re-export nom, and the sans-io framing loop MUST tell
+# `Err::Incomplete` (feed more bytes) apart from `Err::Error` (the source
+# server violated the protocol). Same version imap-proto already locks, so this
+# adds no new supply-chain surface.
+nom = "7"
+# HTML→markdown for inbound HTML email (html5ever-based, WASM-safe). Used by
+# fauna-conversations' SMTP inbound to convert a received message's text/html
+# part to the markdown the clients already render (docs/goal/behavior/html-mail.md).
+htmd = "0.2"
+# mail-auth 0.9's `default` is `["aws-lc-rs", "report"]` — disable it and select the
+# `ring` backend so we don't drag in `aws-lc-rs`/`aws-lc-sys` (a cmake/C build, not
+# in the nest Docker image's toolchain, and inconsistent with the rest of the tree
+# which is ring-based). `ring` enables `hickory-resolver/{tls-ring,dnssec-ring,
+# rustls-platform-verifier}`; it's what fauna-mail's DKIM/ARC signing needs
+# (`mail_auth::common::crypto::{Ed25519Key, RsaKey, Sha256}`). `report` is unused.
+# 0.9 also moves the transitive `hickory-resolver` off the vulnerable
+# `0.26.0-alpha.1` (mail-auth 0.7.x/0.8.0 pinned `=0.26.0-alpha.1`) to stable
+# `^0.26`, clearing RUSTSEC-2026-0118 + -0119; 0.9.1 also fixes an
+# Authentication-Results header-injection bug.
+mail-auth = { version = "0.9", default-features = false, features = ["ring"] }
+hickory-resolver = "0.26"
+# X.509 parsing for outbound DANE/TLSA SPKI extraction (RFC 6698 selector 1).
+x509-parser = "0.16"
+
+# iCalendar (CalDAV server in fauna-mail-bridge MDA). Not WASM-safe;
+# pulled in only by libs/fauna-mail's icalendar feature, which the WASM
+# consumer of fauna-mail (fauna-wasm-content-index) does not enable.
+icalendar = "0.16"
+rrule = "0.12"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# ACME / TLS (optional)
+# 0.8 (from 0.7) for the two APIs the IP bridge cert needs: an RFC 8738 `Ip`
+# identifier and `NewOrder`'s ACME profile selector, which Let's Encrypt requires
+# (`shortlived`) for every IP certificate — `tls-certificates.md` § B-IP.
+# `default-features = false` + `ring` deliberately: 0.8 flipped its default crypto
+# provider to `aws-lc-rs`, which drags in `aws-lc-sys` + `cmake` (a C toolchain) on
+# every machine, and the workspace standardises on `ring` — the provider
+# `tokio-rustls` and the pebble testkit already match against. The `ring` feature
+# carries an unconditional `rcgen/ring` edge, so it also pulls a second `rcgen`
+# (0.14, beside the workspace's own 0.13). That duplicate is the accepted cost of
+# keeping a C toolchain off the build machines; collapsing it means bumping our own
+# rcgen, which is a separate decision.
+instant-acme = { version = "0.8", default-features = false, features = [
+    "hyper-rustls",
+    "ring",
+] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls-pki-types = "1"
+# PKIX path validation, used directly by `fauna_mail::outbound::dane` so a
+# DANE-TA (usage 2) TLSA record is checked as a real trust ANCHOR — the leaf
+# must chain to it — rather than as "some cert in the chain hashes right"
+# (RFC 7672 §3.1.1). Not a new crate in the graph: rustls 0.23 already pulls
+# this exact version. `ring` matches the workspace provider pin above.
+rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }
+# Mozilla CA roots for the client-side WebPKI verifier (the capturing TLS
+# verifier in fauna-anon-client). 0.26 matches the copy tokio-tungstenite's
+# `rustls-tls-webpki-roots` already pulls in.
+webpki-roots = "0.26"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+
+# Filesystem
+#
+# ⚠ `macos_fsevent`, NOT `macos_kqueue` — this feature choice is load-bearing and
+# was measured, not assumed. `macos_kqueue` takes macOS OFF FSEvents and onto
+# kqueue, which learns about a new directory entry only by RE-SCANNING the
+# directory it was told changed; under concurrent writes it simply drops entries.
+# Measured on macOS 2026-08-05 with the flag as it had stood since the very first
+# scaffold commit (2026-03-08, no rationale recorded): of ten files
+# written into a watch root, the watcher reported THREE. That is not a race at the
+# margin, it is the real-time sync plane not working on macOS at all.
+#
+# Cost of the flag before it was found — a file that appeared in no seat's log at all (three of four macOS
+# runs), diagnosed across four sessions as a wedged daemon, a full watcher
+# channel, and "FSEvents coalescing" — a backend this build was never using.
+# Pinned now by `fauna_sync_engine::watcher::tests::
+# every_file_created_in_the_watch_root_is_reported`, which fails 7/10 on kqueue
+# and passes on FSEvents; do not re-flip this without making that test green.
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+fastcdc = { version = "3", features = ["tokio"] }
+walkdir = "2"
+tempfile = "3"
+globset = "0.4"
+
+# Property-based testing (dev-dependency only). The fleet's ruled
+# property-testing library (selection ratified 2026-08-02; tracked internally):
+# adopt proptest first, stateright only if exhaustive checking is later needed.
+# std-only — no fork/timeout features — which keeps the lockfile's package set
+# unchanged (proptest is already vendored transitively via const-hex).
+proptest = { version = "1", default-features = false, features = ["std"] }
+
+# Compression
+zstd = "0.13"
+
+# QR code encoding (module matrix only). `default-features = false` drops the crate's
+# sole dependency (`image`) — clients render the matrix with their own toolkit, so we
+# never want a raster encoder. Pure Rust, wasm32-clean, MIT OR Apache-2.0.
+qrcode = { version = "0.14", default-features = false }
+
+# Search / indexing
+# default-features off: the only consumer (fauna-index) uses RamDirectory only,
+# never MmapDirectory, so it opts out of tantivy's `mmap` feature (fs4 → rustix
+# → errno, which won't build on wasm32). fauna-index re-adds the features it
+# wants. Drop default-features = false only if a future consumer needs mmap.
+tantivy = { version = "0.26", default-features = false }
+
+# Archive
+tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Config
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+
+# ATProto / Bluesky
+atrium-api = "0.25"
+atrium-common = "0.1"
+atrium-identity = { version = "0.1", default-features = false }
+atrium-oauth = { version = "0.1", default-features = false }
+atrium-xrpc = "0.12"
+atrium-xrpc-client = { version = "0.5", default-features = false, features = ["reqwest"] }
+jose-jwk = { version = "0.1", default-features = false, features = ["p256"] }
+p256 = { version = "0.13", features = ["jwk", "ecdsa", "pkcs8", "ecdh", "pem"] }
+# P-384 twin of p256, for the Apple App Attest chain (root + intermediate are
+# P-384; the leaf is P-256). Already resolved in the lock (the MLS crypto
+# provider pulls it) — this is a direct edge to an already-compiled crate,
+# not a new dependency.
+p384 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+# secp256k1 via the RustCrypto stack (API twin of p256) — ATProto identity keys
+# (repo signing + PLC rotation, fauna-provisioning `atproto-seal`).
+k256 = { version = "0.13", features = ["ecdsa"] }
+unicode-normalization = "0.1"
+unicode-segmentation = "1"
+url = "2"
+urlencoding = "2"
+
+# UUID
+uuid = { version = "1", features = ["v4"] }
+
+# AWS S3.
+#
+# `aws-sdk-s3`'s own TLS features are both wrong for us: `rustls` resolves to
+# `aws-smithy-http-client/legacy-rustls-ring` (rustls 0.21 + hyper 0.14 — a
+# whole second TLS stack, and the source of `rustls-webpki` 0.101.7's three
+# advisories), and `default-https-client` resolves to `rustls-aws-lc`, which
+# would turn on rustls' `aws_lc_rs` feature *alongside* the workspace's `ring`
+# — with both on, rustls' `from_crate_features()` yields no provider and every
+# `ClientConfig::builder()` that relies on the crate-feature default panics.
+# So the nest takes neither, and supplies the HTTP client itself from
+# `aws-smithy-http-client` with `rustls-ring` (rustls 0.23 + ring, matching
+# the workspace `rustls` pin). See `s3_blob_store.rs::https_client`.
+aws-sdk-s3 = { version = "1", default-features = false }
+aws-smithy-http-client = { version = "1", default-features = false, features = [
+    "rustls-ring",
+] }
+
+# Network interface enumeration
+if-addrs = "0.13"
+
+# Dev-profile debuginfo trim (2026-07-15). Full DWARF is the single largest
+# component of a debug cargo target dir, and with many parallel checkouts each
+# holding their own target dir on one shared disk it was the top disk consumer
+# (observed 10–36G per target dir). Workspace crates keep line tables —
+# backtraces still resolve file:line — and external deps drop debuginfo
+# entirely (we never step through dep internals in a debugger; a session that
+# truly needs full DWARF can `CARGO_PROFILE_DEV_DEBUG=2 cargo build` one-off).
+# `[profile.test]` inherits dev, so test builds shrink identically. Release and
+# dist profiles are untouched (wasm-pack + shipped artifacts build release).
+# Rationale + measurements: docs/goal/architecture/build-machine-resources.md
+# § Dev-profile debuginfo trim.
+#
+# Dev-profile incremental OFF (user ruling 2026-08-23). With the debuginfo
+# trimmed, the incremental cache became the largest single term in a warm
+# target dir (32–63% measured across live mac targets; 62% of a heavy dev
+# session's divergence) and the dominant per-checkout cost when many parallel
+# checkouts share one disk — while its speed win only lands on the SECOND+ rebuild of the same
+# crate, which short seeded-and-swept sessions rarely reach. Measured trade:
+# touch-rebuilds 2.5×(mid crate)–5×(fauna-nest) slower for ~1 GiB less written
+# per big-crate rebuild. A session that truly wants it back for a long TDD
+# loop can `CARGO_INCREMENTAL=1 cargo build` one-off (env overrides profile;
+# expect the fingerprint flip both ways). Windows's release-FFI lever
+# (CARGO_INCREMENTAL=1 inside `windows-ffi`, release profile) is unaffected.
+# Rationale + measurements: build-machine-resources.md § Dev-profile
+# incremental OFF.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.dev.package."*"]
+debug = false
+
+# ML-KEM-768 must not eat a foreign executor's stack in a dev build (measured
+# 2026-08-25). An unoptimized `libcrux-ml-kem` needs 227-290 KB of stack per
+# X-Wing operation; optimized it needs 32 KB, and in `release` under 16 KB. That
+# 9x gap is not a micro-optimization — it is the whole 2026-08-23 crash class.
+# `fauna-ffi`'s exports are polled on the FOREIGN executor's thread, and Swift's
+# concurrency cooperative pool gives that thread 544 KB, so an unoptimized leaf
+# plus a real call chain above it lands on the guard page: `EXC_BAD_ACCESS`, no
+# Rust panic, nothing on any sink. `just mac-debug` / `just swift-test` build
+# `fauna-ffi` unoptimized, which is why the crash reproduced in journey runs and
+# never in a shipped app.
+#
+# `opt-level = 2`, not 3, is deliberate and measured: at 3 the extra inlining
+# grows `derive_keypair`'s frame back to 48 KB, while 2 holds all five entry
+# points at 32 KB. Higher is not monotonically better for stack depth.
+#
+# Pinned by libs/fauna-pq-kem/tests/stack_budget.rs, which fails if these frames
+# grow again. Owner: docs/goal/architecture/apps/native-async-execution.md
+# § The rule.
+[profile.dev.package.libcrux-ml-kem]
+opt-level = 2
+debug = false
+
+# Shipped-profile overflow posture:
+# release artifacts keep integer-overflow checks ON, so debug and release agree
+# on overflow and a debug test's red-verify is evidence about the shipped
+# binary. A missed guard becomes a contained, loud panic (request task / engine
+# / UniFFI boundary — which is also why no profile may set `panic = "abort"`)
+# instead of the shape: a silent wrap corrupting cross-principal state
+# unrecoverably. Site-level `checked_*`/`saturating_*` on client-influenced
+# arithmetic stays first-line; an intentional wrap is spelled `wrapping_*` at
+# its site, never left to the profile. Ruling + escape hatches:
+# docs/goal/architecture/build-system.md § Shipped-profile overflow checks.
+# Pinned by tests/e2e-unified/tests/test_shipped_profile.py.
+[profile.release]
+overflow-checks = true
+
+# Size-optimized profile for SHIPPED artifacts (currently the Windows installer's
+# native binaries). Inherits release but trades a little speed + compile time for
+# size: strip symbols, thin-LTO dead-code elimination, opt-level "s", one codegen
+# unit. NOT used by dev/test/e2e builds (those stay on `release` for a fast inner
+# loop) — only the installer build recipes pass `--profile dist`. Do NOT add
+# `panic = "abort"`: UniFFI's FFI scaffolding relies on `catch_unwind`.
+# Rationale + measured impact: docs/goal/architecture/installers/windows.md.
+[profile.dist]
+inherits = "release"
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true
+

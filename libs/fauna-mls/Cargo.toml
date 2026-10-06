@@ -1,0 +1,75 @@
+[package]
+name = "fauna-mls"
+description = "MLS (RFC 9420) encryption layer for the Fauna protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["native"]
+# `fauna-core/sqlite-schema-meta` — the shared `schema_meta` single-row SQL
+# `storage.rs` delegates to for the two-number at-rest schema-version scheme.
+native = ["dep:rusqlite", "fauna-core/sqlite-schema-meta"]
+js = ["openmls/js"]
+# Attacker-simulation seams for the MLS-2 leaf-credential-binding tests
+# (`forge_key_package_bytes_for_test`, `add_member_from_bytes_unchecked_for_test`,
+# `new_in_memory_forged_for_test`). No honest path produces a credential≠signer
+# leaf; these exist only so cross-crate tests (fauna-conversations ingest) can
+# prove admission rejects one. Off in production builds.
+test-helpers = []
+
+# E2e test helper: mint a real MLS KeyPackage for a given Ed25519 identity so an
+# API-tier peer in tests/e2e-unified/tests/test_fauna_mls_real_roundtrip.py can be
+# added to a real group. Path-declared (not src/bin/, which the repo .gitignores
+# for dotnet's bin/). Requires `native` (default) for the engine's storage.
+[[bin]]
+name = "mls-keypackage-gen"
+path = "src/keypackage_gen_main.rs"
+
+[[bin]]
+name = "mls-group-gen"
+path = "src/group_gen_main.rs"
+
+[dependencies]
+fauna-core = { path = "../fauna-core", default-features = false }
+# Wire home of `ChannelEnvelope` (re-exported from `types`); default-features
+# off — the default `p2p` pulls native-only fauna-wireguard and this crate
+# builds for wasm32.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+fauna-cbor = { workspace = true }
+# X-Wing hybrid KEM (ML-KEM-768 ∥ X25519) — the post-quantum mail-at-rest seal
+# (surface A step 2). getrandom-free; builds for wasm32 (the open path runs in
+# the web app). See `wrapped_blob/xwing_envelope.rs`.
+fauna-pq-kem = { path = "../fauna-pq-kem" }
+openmls.workspace = true
+openmls_traits.workspace = true
+openmls_rust_crypto.workspace = true
+openmls_basic_credential.workspace = true
+rusqlite = { workspace = true, optional = true }
+serde.workspace = true
+# Not a wire or at-rest codec (those are dag-cbor via `fauna-cbor`): the one use
+# is `state_replica::group_id_needle`, which asks openMLS's own `GroupId` to
+# serialize itself through the same JSON codec its storage keys embed, so the
+# merge can tell which channel a provider KV key belongs to without a group load.
+serde_json.workspace = true
+serde_bytes = "0.11"
+blake3.workspace = true
+chacha20poly1305.workspace = true
+argon2.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+hpke.workspace = true
+x25519-dalek.workspace = true
+ed25519-dalek.workspace = true
+zeroize.workspace = true
+rand.workspace = true
+rand_core_09.workspace = true
+hex.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }

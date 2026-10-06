@@ -1,0 +1,36 @@
+<!--
+  The publisher of the MSI channel's package identity: the ONE build-time home
+  (docs/goal/architecture/installers/windows.md § Package identity for FaunaApp.exe).
+
+  MSIX binds a package to its signing certificate by requiring Identity/@Publisher to
+  equal the certificate's Subject DN exactly, and FaunaApp.exe's embedded `msix`
+  element must name that same DN or the exe silently runs WITHOUT identity (no error,
+  just no taskbar badge). So every consumer reads it from here, never a copy:
+
+    - FaunaApp.csproj imports this file and generates the embedded app manifest
+      from FaunaApp/app.manifest.in (the FaunaGenerateAppManifest target);
+    - the sparse- and store-package build scripts default their publisher to it
+      (scripts/_windows_package_identity.py parses this file);
+    - the e2e harness lends a build output identity under it
+      (tests/e2e-unified/helpers/taskbar_badge.py).
+
+  The value below is the DEV self-sign DN, which is what every local build and e2e
+  run uses. A release build signed with the production certificate overrides it —
+  one value handed to both halves of the build:
+
+    MSBuild … -p:FaunaPackagePublisher="<the cert's exact Subject DN>"
+    and the same DN as the sparse-package build script's publisher argument
+
+  (MSBuild splits `-p:` values on `;` and `,` — escape a DN's commas as %2C, or set
+  the FaunaPackagePublisher environment variable instead, which MSBuild reads as the
+  property.) The Store channel is NOT covered: its publisher is the Partner Center
+  identity (installers/windows.md § Identity & coexistence), passed to the store
+  build as its own publisher argument; only the store build's dev default comes from here.
+
+  Pinned by tests/e2e-unified/tests/platform/windows/test_package_identity_publisher.py.
+-->
+<Project>
+  <PropertyGroup>
+    <FaunaPackagePublisher Condition="'$(FaunaPackagePublisher)' == ''">CN=Fauna Social (Dev)</FaunaPackagePublisher>
+  </PropertyGroup>
+</Project>

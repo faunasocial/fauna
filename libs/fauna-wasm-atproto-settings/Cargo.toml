@@ -1,0 +1,68 @@
+[package]
+name = "fauna-wasm-atproto-settings"
+description = "WASM bindings for the Fauna ATProto login-plane settings page: the page-level AtprotoSettingsMachine (app credentials + connected-app sessions + the external-apps kill-switch)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# `e2e-agent` alongside `test-helpers` is LOAD-BEARING, not belt-and-braces:
+# the D10 delegation row's fake render clock (`delegation_clock`) is gated on
+# `any(debug_assertions, feature = "e2e-agent")`, and wasm-pack builds
+# `--release` — so without this forward `atprotoDelegationSetClockOffsetForTest`
+# would compile as an export that silently does nothing, and the lapse journey
+# would read as a product bug. `fauna-ffi` pays for the same forward, for the
+# same reason (apple's leg, 2026-07-31).
+test-helpers = [
+    "fauna-atproto-settings-machine/test-helpers",
+    "fauna-atproto-settings-machine/e2e-agent",
+]
+
+# wasm32-scoped on purpose: this crate builds only for wasm32, and a plain
+# [dependencies] table would leak its wasm-only feature activations (js,
+# wasm_js, …) into every HOST build's resolution under
+# resolver.feature-unification = "workspace". Add new deps here, never in a
+# plain [dependencies] table.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `js` so fauna-core's wasm build gets a getrandom backend (mirrors
+# fauna-wasm-labeler-catalog); the machine itself needs it for the actor
+# keypair + credential-secret generation.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+# `rpc-glue` for the wasm `build_atproto_settings_machine` (over `WsRpcClient`).
+fauna-atproto-settings-machine = { path = "../fauna-atproto-settings-machine", default-features = false, features = ["rpc-glue", "account-port"] }
+# The cross-page critical-alerts registry (docs/goal/behavior/critical-alerts.md)
+# feeder #1 (the ATProto custody check, inside fauna-atproto-settings-machine)
+# posts to. This chunk hosts the only registry instance reachable from web
+# today — see the module doc on the bindings below for why.
+fauna-client-alerts = { path = "../fauna-client-alerts" }
+# Direct dep (not just transitive via fauna-atproto-settings-machine) so the
+# `test-helpers`-gated binding below can call the wasm PLC-directory test
+# override directly, and so `setAccountPort` can wire the ATProto identity
+# seam's forwarder (`port::PortAtprotoIdentityStore`).
+fauna-client-atproto = { path = "../fauna-client-atproto" }
+# The SPA's `SharedAccountPort` as a transport (`setAccountPort`).
+fauna-account-port = { workspace = true }
+# The browser WS-RPC transport the machine's gestures ride; `connect()` opens
+# the connection from the JS-passed nest URL + actor id + token provider.
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm" }
+# Installed at module init (`#[wasm_bindgen(start)]` in src/lib.rs) — each wasm
+# chunk is its own runtime, so this must be installed per-chunk. See the crate
+# doc comment.
+fauna-wasm-panic-hook = { path = "../fauna-wasm-panic-hook" }
+wasm-bindgen.workspace = true
+wasm-bindgen-futures = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+getrandom = { workspace = true, features = ["wasm_js"] }
+# 0.2 alias: fauna-core's crypto stack transitively pulls getrandom 0.2, which
+# needs its `js` feature to compile for wasm. Same shape as
+# fauna-wasm-folders / fauna-wasm-media / fauna-wasm-labeler-catalog.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+js-sys.workspace = true
+
+[dev-dependencies]
+wasm-bindgen-test.workspace = true

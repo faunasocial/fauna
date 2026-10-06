@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.LaunchIdentityChangedPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ids="using:FaunaApp.UiIds">
+    <Grid Padding="48" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="500">
+        <StackPanel Spacing="16" HorizontalAlignment="Center">
+            <!-- (security.md § Transport trust): the nest's pinned
+                 identity changed, or it can no longer prove the identity this
+                 client previously trusted (SSH known_hosts model). Loud,
+                 non-retry warning: a retry cannot change the verdict and must
+                 never silently re-pin — so there is deliberately NO Retry
+                 button here, only the explicit trust + fallthrough. -->
+            <TextBlock x:Name="WarningText"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.NestIdentityChangedWarning}"
+                       Style="{StaticResource SubtitleTextBlockStyle}"
+                       TextWrapping="Wrap"
+                       TextAlignment="Center" />
+            <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center">
+                <Button x:Name="TrustButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.NestIdentityChangedTrustButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="OnTrustClick" />
+                <Button x:Name="FallthroughButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.LaunchFallthroughButton}"
+                        Click="OnFallthroughClick" />
+            </StackPanel>
+        </StackPanel>
+    </Grid>
+</Page>

@@ -1,0 +1,35 @@
+[package]
+name = "fauna-client-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The `RpcRequester` seam this crate doubles, plus the canonical codec the
+# double encodes/decodes with. `default-features = false` drops the native-only
+# `p2p` feature so the testkit compiles to wasm32 alongside the feature crates
+# that consume it (they are deliberately wasm-clean — see the crate docs);
+# native workspace builds re-enable `p2p` via Cargo feature unification.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+
+# Names the serde bounds `RpcRequester::request` requires. No `derive` needed
+# (trait paths only) — mirrors every consuming feature crate's dev-dep entry.
+serde = { workspace = true }
+
+# blake3 digests for doubles that model a content-addressed CAS precondition (a
+# base is a blake3 digest of the stored bytes). Workspace-pinned `features = ["pure"]`, so wasm-clean, and
+# `fauna-protocol` already pulls it in for `dav_identity` — this adds no new
+# code to any consumer.
+blake3 = { workspace = true }
+
+# `CapturingRequester`'s inspectable payload. Pure and runtime-free, so it
+# holds the crate docs' two lines (no async runtime, wasm-clean); every crate
+# adopting that double already depends on it anyway.
+serde_json = { workspace = true }
+
+# wasm: forward fauna-protocol's `js` feature (fauna-core's js-sys time
+# backend) so the transitive wasm build resolves. Off on native.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = [
+    "js",
+] }

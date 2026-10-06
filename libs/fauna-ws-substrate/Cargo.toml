@@ -1,0 +1,56 @@
+[package]
+name = "fauna-ws-substrate"
+description = "Substrate-neutral native WS-RPC transport: tungstenite Bytes adapter, keepalive, and the reconnect supervisor — shared by the fauna-client bearer channel and the nest↔nest federation channel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Exposes the in-memory `testing` harness (mpsc adapter + queue-backed mock
+# channel) so downstream crates (fauna-client, the nest federation channel) can
+# drive `run_supervisor` without a real WebSocket. Kept off the default set so
+# the harness never ships in a production build.
+test-util = []
+# The e2e test flavors' seam `dial_budget::clear_for_test` — the per-test
+# factory reset gives the app a fresh process's dial budget. Forwarded by
+# `fauna-ffi/test-helpers`; never in a production build.
+test-helpers = []
+
+[dependencies]
+# L3 dispatcher + frames: the supervisor spawns `RpcDispatcher::new`'s driver
+# and parks the dispatcher in a slot for originators to read. `tls-spki` adds
+# the SPKI-fingerprint helper the capturing TLS verifier (`tls_verify`) computes
+# on the cert the dialer received (lifted here from fauna-anon-client, §5).
+fauna-protocol = { workspace = true, features = ["tls-spki"] }
+# Single owner of the client-side connection-state vocabulary the supervisor
+# drives: the `Unreachable` threshold + the indicator's shared label mapping,
+# both shared with the wasm reconnect loop so the two cannot drift.
+fauna-core = { workspace = true }
+bytes.workspace = true
+futures-util = { workspace = true, features = ["sink"] }
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+# TLS connector setup (`tls_verify`'s capturing verifier) — the process-default
+# CryptoProvider install itself is `fauna-tls-bootstrap` (below), re-exported
+# from `adapter` so existing callers of this path are unaffected.
+rustls.workspace = true
+# The shared rustls preamble: `adapter::ensure_tls_provider` (the process-default
+# CryptoProvider install) and `webpki_root_store` (the bundled Mozilla roots the
+# capturing verifier classifies against — a self-signed nest cert is accepted
+# provisionally and authenticated by the in-band channel binding). Both were
+# duplicated with `fauna-mail`'s native IMAP dial before moving there; this crate
+# carries no `webpki-roots` of its own any more.
+fauna-tls-bootstrap = { workspace = true }
+async-trait = "0.1"
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# `test-util` enables `tokio::time::pause`/`start_paused` for the adapter
+# heartbeat tests (not part of tokio's `full` feature set).
+tokio = { workspace = true, features = ["full", "test-util"] }
+fauna-cbor.workspace = true
+serde.workspace = true
+# Synthesize a self-signed leaf cert to exercise the capturing TLS verifier
+# (`tls_verify`) without a live TLS server.
+rcgen = "0.13"

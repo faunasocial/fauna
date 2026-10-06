@@ -1,0 +1,164 @@
+[package]
+name = "fauna-client-capabilities"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# UniFFI scaffolding for `custody_view`'s boundary rows, consumed by fauna-ffi
+# (Apple/Android/Windows). OFF by default, exactly like `fauna-client-pair`'s
+# own `uniffi` feature — which is what keeps this crate wasm-clean: the web
+# SPA's wasm build never turns it on, so no UniFFI scaffolding is compiled
+# there and the same row types cross to JS through serde instead.
+#
+# ⚠ This gates the BOUNDARY layer only. `view_model`'s own fold types stay
+# derive-free and pure, which is the property `fauna-client-pair/src/trust.rs`
+# is protecting when it says the computation types stay pure.
+uniffi = ["dep:uniffi", "fauna-core/uniffi"]
+# Forwards `fauna-core`'s own `local-clock` feature, for the `*_text` doors in
+# `view_model` (`custody_receipt_status_text`, `custody_held_bytes_text`) that
+# need `fauna_core::format::format_unix_local` — native-only (the OS timezone
+# database is unreachable from wasm32 without a JS bridge), so this stays off
+# by default and the two native app crates (linux, tui) turn it on directly,
+# mirroring how they already enable `fauna-core/local-clock` themselves.
+local-clock = ["fauna-core/local-clock"]
+# The trust facet's e2e render-clock offset (`trust_clock`) in a release-profile
+# e2e build (testing.md convention 15). A debug build already has it via
+# `cfg(debug_assertions)`; a consumer's own `e2e-agent` forwards this one, and a
+# plain `--release` build never turns it on. Mirrors fauna-client-backup.
+e2e-agent = []
+# The offline share-initiation glue (`group_ceremony_peer`): the plane's own
+# feature name, forwarded per dynamic-features.md § The cargo feature spine.
+# Same wasm-cleanliness bargain as `uniffi` above — fauna-peer-share's dep tree
+# is native-only, so it stays off by default.
+p2p-share = [
+    "dep:fauna-peer-share",
+    # The bind door's own composition deps (`group_ceremony_node`): the node
+    # the ceremony serves on, the quota config its serve set takes, the
+    # transport seam the app's concrete substrate satisfies, and tokio for the
+    # consent gap's deadline poll. All native-only, all behind this feature —
+    # the wasm-clean default build sees none of them.
+    "dep:fauna-peer-channel",
+    "dep:fauna-peer-sync",
+    "dep:fauna-transport",
+    "dep:tokio",
+    "dep:anyhow",
+    "dep:tracing",
+]
+
+[dependencies]
+# `default-features = false` drops fauna-core's `network` default (redb,
+# tokio, hickory-resolver) so this crate stays wasm-clean; only the
+# `MailConfig` / `TierPeriod` / grant-mark data shapes are used here.
+# `js` (js-sys time backend) forwarded on wasm below. Mirrors
+# fauna-client-mail-settings / fauna-client-subscriptions.
+fauna-core = { path = "../fauna-core", default-features = false }
+# `view_model::receipt_text`'s wording — the three receipt-freshness
+# constants linux and tui each hand-carried identically (found by the
+# dev-fleet near-duplicate-function scanner's cross-crate pass, 0.696 similarity).
+# Zero transitive deps (generated string tables only), so it costs this
+# crate nothing to stay wasm-clean.
+fauna-i18n = { path = "../fauna-i18n" }
+# `derive_recipient_hpke_keypair` (MSEK -> recipient-mail HPKE secret) +
+# `build_grant_blob`/`ScopeTuple`/`GrantWindow`/`GrantBlob`/`WrapError` (the
+# client-side mint, design § Phase 2 Step 2 § 2.6). `default-features = false`
+# drops the `native` default (`dep:rusqlite`, not wasm-safe) — this crate only
+# touches the pure `wrapped_blob` crypto. `js` forwarded on wasm below.
+fauna-mls = { path = "../fauna-mls", default-features = false }
+# `current_period` — the author's already-recorded tier period_key
+# (`content.read{post:tier}`'s payload). Pure, wasm-clean (no transport).
+fauna-client-subscriptions = { path = "../fauna-client-subscriptions" }
+# `RpcRequester` + `ByteBuf` + the `wrapped_blob::{Mint,Renew,Revoke}Grant{Request,Reply}`
+# wire types for the owner-side `fauna.capabilities.*` RPC seam (`rpc.rs`).
+# `default-features = false` drops the native-only `p2p`/wireguard default so
+# this crate stays wasm-clean; `js` forwarded on wasm below. Mirrors
+# fauna-client-bridges / fauna-client-pair.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+thiserror = { workspace = true }
+# `SigningKey` for `grant_log::record_{mint,renew,revoke}` (signing a
+# `GrantEvent` with the minting client's identity key). Pure crypto, wasm-safe.
+ed25519-dalek = { workspace = true }
+# The account-store seams the succession grant re-mint and the custody ceremony
+# drive (`succession.rs` / `custody_ceremony.rs` — `SuccessionLedgerStore`,
+# `CustodyCeremonyStore`, `StoreError`); acyclic: config
+# depends only on core/protocol/backup. Wasm-clean by its own discipline.
+fauna-client-config = { path = "../fauna-client-config" }
+# `discover_holders` + `HolderInfo` + `MailAdminClient` — the live-roster
+# holder resolve the re-mint seals to (never the log-recorded pubkey alone:
+# no classical-blind PQ downgrade). Wasm-clean, two-dependency crate.
+fauna-client-bridges = { path = "../fauna-client-bridges" }
+# The `records` arm's one qualifier parser (`fauna_scope::records_qualifier`) —
+# what the consent-time `ext.*` mint reads a request's scopes with
+# (`ext_consent`). `default-features = false` keeps it wasm-clean; it depends
+# on fauna-core alone.
+fauna-bridge-atproto = { path = "../fauna-bridge-atproto", default-features = false }
+# The derived replacement grant-id (`remint_grant_id` — deterministic so
+# concurrent devices converge on one re-mint; the `folder_paywall_grant_id`
+# idiom). `pure` keeps it wasm-clean, mirroring fauna-client-config.
+blake3 = { workspace = true }
+# The ceremony carriage's `CeremonyState` seam (`group_ceremony_peer` — the
+# glue implementing it over this crate's state machine). Optional behind the
+# crate's own `p2p-share` feature: fauna-peer-share's dep tree is native-only,
+# and this crate stays wasm-clean by default (the fauna-client-folders
+# excision-spine pattern).
+fauna-peer-share = { workspace = true, optional = true }
+# The dual-arm async attribute of this crate's seam traits: the ceremony
+# carriage's `CeremonyState` and the base build's `OwnedSetNames`.
+async-trait = "0.1"
+# `group_ceremony_node`'s bind door (all optional behind `p2p-share`, so the
+# wasm-clean default build compiles none of them):
+#   - fauna-peer-channel: the `PeerNode` the ceremony serves on + the
+#     `PeerChannel` the initiator drives over.
+#   - fauna-peer-sync: `QuotaConfig` for the share serve set's rule-8 ledger.
+#   - fauna-transport: the substrate seam. The app supplies the concrete
+#     transport already bound to the ACTOR key (PT-1b) — this crate names no
+#     substrate, exactly as `fauna_sync_engine::peer_leg` names none.
+#   - tokio (`time`): the consent gap's deadline poll (convention 14).
+fauna-peer-channel = { workspace = true, optional = true }
+fauna-peer-sync = { workspace = true, optional = true }
+fauna-transport = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["time"] }
+anyhow = { workspace = true, optional = true }
+# The ceremony's serve-path and delivery-wait debug lines: a stalled
+# two-process ceremony names which seat's record took each frame only if the
+# recipient's log says so (`group_ceremony_peer::ingest_frame`).
+tracing = { workspace = true, optional = true }
+# `custody_view`'s boundary rows carry `Serialize`/`Deserialize` unconditionally
+# — that is the face the web SPA reads, and the reason there is ONE row type
+# rather than one per boundary.
+serde = { workspace = true }
+# The `uniffi::Record`/`uniffi::Enum` derives on those same rows, behind the
+# off-by-default `uniffi` feature above.
+uniffi = { workspace = true, optional = true, features = ["tokio"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Forward fauna-core's `js` (js-sys time backend), fauna-mls's `js`
+# (openmls/js), and fauna-protocol's `js` on wasm. Mirrors
+# fauna-client-mail-settings / fauna-client-bridges.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"] }
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# The shared in-memory succession-ledger double (`FakeSuccessionLedgerStore`)
+# the grant-log writers' tests record through.
+fauna-client-config = { path = "../fauna-client-config", features = ["test-helpers"] }
+# (The former `serde` dev-dep — which named the `rpc.rs` mock `RpcRequester`
+# bounds — is redundant now that `serde` is a regular dependency for
+# `custody_view`'s boundary rows, so it was dropped rather than duplicated.)
+#
+# `custody_view`'s round-trip test drives the serde face the web SPA reads.
+serde_json = { workspace = true }
+# The capstone-over-wire test (`tests/group_ceremony_over_wire.rs`, gated on
+# `--features p2p-share`): the real two-party ceremony over a real in-memory
+# peer channel. Dev-only and native-only by construction (tests never build
+# on wasm); required dev-deps because dev-dependencies cannot be optional.
+fauna-peer-channel = { workspace = true }
+fauna-peer-sync = { workspace = true }
+fauna-transport = { workspace = true, features = ["test-helpers"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+anyhow = { workspace = true }

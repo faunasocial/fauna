@@ -1,0 +1,64 @@
+#!/bin/bash
+# Postinstall for the Fauna Email Bridge component (machine-service LaunchDaemon).
+#
+# Installs the social.fauna.bridge LaunchDaemon that runs fauna-bridge-supervisor —
+# the macOS MDA supervisor — as the dedicated hidden `_fauna-bridge` service user.
+# KeepAlive'd by launchd, it spawns/monitors the Go fauna-mail-bridge MDA child
+# (CalDAV + IMAP), self-gating on the nest's enable flag files. Boot-started +
+# headless: it no longer depends on the per-user app to bootstrap it (a per-user
+# app cannot manage a system daemon, and a headless Mac-mini server runs no app) —
+# decision 2026-06-24, installers/macos.md § social.fauna.bridge.
+# Installed ENABLED + auto-started when the bridge component is SELECTED in the .pkg
+# installer (default-unselected, requires the nest component). The opt-in is the
+# component selection, not a post-install enable step; the boot-loaded supervisor
+# then self-gates the Go MDA child on the nest's caldav/imap flags. Decision
+# 2026-06-26, installers/macos.md § launchd jobs → Default state.
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/common.sh"
+
+# 1. The dedicated hidden service user that owns the bridge process + its bridge/ dir.
+ensure_service_user _fauna-bridge "Fauna Mail Bridge Service"
+
+# 2. The bridge's own data dir under the nest data dir, owned by _fauna-bridge. The
+#    supervisor reads the nest's flag files from FAUNA_DATA_DIR (755, owned _fauna)
+#    and writes its MDA keypair + operator-hatch into the bridge/ subdir it owns.
+#    (Install order is nest → sync → bridge, so the nest postinstall's
+#    `chown -R _fauna` over the parent has already run; this chown re-owns bridge/.)
+mkdir -p "$FAUNA_SYSTEM_DATA_DIR/bridge"
+chown -R _fauna-bridge:_fauna-bridge "$FAUNA_SYSTEM_DATA_DIR/bridge"
+chmod 755 "$FAUNA_SYSTEM_DATA_DIR/bridge"
+# The supervisor writes its own size-capped log (with the MDA child's captured
+# output) under bridge/logs/; the plist redirects nothing (observability.md
+# § Persistence & privacy).
+
+# 3. The social.fauna.bridge LaunchDaemon.
+PLIST_CONTENT=$(cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>social.fauna.bridge</string>
+    <key>UserName</key>
+    <string>_fauna-bridge</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/fauna-bridge-supervisor</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>FAUNA_DATA_DIR</key>
+        <string>${FAUNA_SYSTEM_DATA_DIR}</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+EOF
+)
+
+install_launchdaemon "social.fauna.bridge" "$PLIST_CONTENT"

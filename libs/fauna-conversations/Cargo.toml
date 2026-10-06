@@ -1,0 +1,209 @@
+[package]
+name = "fauna-conversations"
+description = "Multi-rail thread management for the unified conversations page"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+uniffi = ["dep:uniffi", "fauna-core/uniffi", "fauna-client-moderation/uniffi", "dep:fauna-uniffi-async"]
+wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen"]
+test-helpers = []
+# Gates the native-client display FFI export (`typed_address_display`). Enabled
+# by `fauna-ffi`'s default-on `conversations-session` feature, so the native
+# app FFI (windows/macos/ios/android) exports it, but the Go mail-bridge's
+# `--no-default-features` build drops it — the bridge has no address-display
+# surface, and the added export would otherwise force a Go-binding regen the
+# Windows dev machine can't run (no Go). Mirrors `fauna-ffi`'s `markdown-authoring`.
+client-display = []
+
+# `fauna-core` provides `identity::ActorId` and the shared
+# `render::RenderDocument` body model (embedded in `MessageSnapshot`,
+# render-model.md § D1) — keep it lean (`default-features = false` drops the
+# `network` feature, which would otherwise drag `tokio`'s full feature set +
+# `redb` + `hickory-resolver` into the wasm32 build via `fauna-wasm`). The
+# `uniffi` feature forwards `fauna-core/uniffi` so the embedded `RenderDocument`
+# gets its `uniffi::Record` registration cross-crate (the `fauna-feed` /
+# `fauna-onboarding-machine` pattern).
+[dependencies]
+# Direct path (not `workspace = true`) so `default-features = false` is
+# allowed — cargo forbids a workspace member overriding the workspace
+# dependency's `default-features`. Same form as fauna-protocol /
+# fauna-mls / fauna-client-core.
+fauna-core = { path = "../fauna-core", default-features = false }
+# The drafts blob's hand-written `SendState` decode reads the undecoded value
+# (`compose.rs`), and the test-only forgery pins seal bytes a HONEST sender
+# would never produce (a relabelled `SignedRoomMessage` under a generation key).
+fauna-cbor = { workspace = true }
+# A room-restricted post's base key crosses `fauna_core::room_post::RoomPostKeys`
+# wrapped so it is wiped on drop — key material, like every other base key.
+zeroize = { workspace = true }
+# The shared client-side moderation local-detection store + queue union
+# (`LocalDetectionStore` / `merge_queue`) — the post-decrypt classify hook in
+# `ConversationsManager::ingest_inbound_to_thread` `observe`s each just-decrypted
+# social message into a session-owned store, the encrypted-mode social-content
+# moderation signal the nest can't produce (`docs/goal/behavior/moderation.md`
+# § Layout & flow; `docs/goal/architecture/content-scoring.md` § two plaintext
+# positions → the client post-decrypt). Dep-free (only `fauna-protocol`) +
+# wasm-clean, so it rides the base table (the manager compiles on both targets;
+# the `uniffi` feature forwards `fauna-client-moderation/uniffi` so the session's
+# reader can return `QueueRow`/`LocalDetection` as `uniffi::Record`s cross-crate).
+fauna-client-moderation = { path = "../fauna-client-moderation" }
+# `fauna-mls` backs `FaunaMlsBackend` (encrypt/decrypt, group lifecycle,
+# keypackages, welcome). Per-target feature plumbing mirrors
+# `fauna-client-email`'s `fauna-protocol`: declared featureless in the base
+# table, then the **additive** per-target tables turn on `native` (rusqlite
+# storage) off-wasm and `js` (openmls/js + js-sys getrandom) on wasm — so the
+# wasm32 build never pulls `native`.
+fauna-mls = { path = "../fauna-mls", default-features = false }
+serde = { workspace = true, features = ["derive"] }
+serde_bytes = "0.11"
+thiserror = { workspace = true }
+async-trait = "0.1"
+# `futures_util::lock::Mutex` backs `FaunaMlsBackend`'s per-channel serialization
+# lock (device-owned-epoch cross-device sync, design §3 / slice 5): an async,
+# **target-agnostic** mutex — NOT `tokio::sync::Mutex` (this crate compiles on
+# wasm too, where there is no tokio). Held across `.await` by the background
+# inbound poll and the gated commit branches so the MLS engine never processes an
+# inbound commit while a gated send has a commit staged-but-unmerged on the same
+# group. `std` feature (default) provides `lock::Mutex`; it is wasm-safe (atomics
+# + a waiter queue, no OS threads).
+futures-util = { workspace = true }
+# Wire-op failures log through tracing (captured by the embedding client's
+# fauna-log subscriber), never eprintln! — a library has no console.
+# The facade is wasm-safe; events just drop where no subscriber is installed.
+tracing = { workspace = true }
+# Hex for the protocol-agnostic seam: actor-id / channel-id args cross the
+# `ConversationsRpc` boundary as lowercase-hex strings.
+hex = { workspace = true }
+# Inbound HTML email → markdown. `mail-parser` selects the best MIME part of a
+# received message; `htmd` (html5ever-based) converts a text/html part to the
+# markdown the apps already render. Outbound markdown→HTML reuses the existing
+# `fauna_core::markdown::markdown_to_html` (no new dep). Both WASM-safe — these
+# run client-side in the SMTP backend on every app incl. web (via WASM).
+# See docs/goal/behavior/html-mail.md.
+mail-parser = { workspace = true }
+htmd = { workspace = true }
+# Attachment content-addressing: BLAKE3 hex of the plaintext bytes is the
+# `blob_hash` load handle (`docs/goal/ui/conversations.md` § Attachments). The
+# `pure` feature keeps it wasm32-safe (no SIMD/asm), matching `fauna-mls`.
+blake3 = { workspace = true }
+# Outbound SMTP attachments are base64-encoded MIME parts (inbound base64 is
+# decoded by `mail-parser`). Pure Rust → wasm32-safe.
+base64 = { workspace = true }
+# 96 random bits per outbound `Message-ID` (`rfc5322::new_message_id`) — an id
+# that is both globally unique (the dedup key is derived from it) and unguessable
+# (the guardian mail gate's DSN correlation authorizes on it). wasm32-safe: the
+# `wasm_js` backend rides in via `fauna-mls`'s wasm32 target table, the same way
+# `fauna-core`'s identity/claim-code minting gets it.
+getrandom = { workspace = true }
+# The shared self-describing Message-ID mint (`fauna_mail::msgid::mint_local`)
+# behind `rfc5322::new_message_id` — one construction with the Go submission
+# stamp, so the guardian mail gate's provenance verify holds for both paths.
+# `msgid` only (sha2, pure, wasm-safe); the RNG stays in this crate (above).
+fauna-mail = { path = "../fauna-mail", default-features = false, features = ["msgid"] }
+# Localized error text for the SMTP backend's inline-ceiling pre-check
+# (`docs/goal/behavior/smtp-server.md` § Message size limits) — a pure,
+# dependency-free generated-constants crate (the `fauna-client`/`fauna-protocol`
+# pattern), never `fauna-protocol` itself (priority #2 boundary noted on
+# `ConvRpcError` above — this crate stays wire-type-free).
+fauna-i18n = { path = "../fauna-i18n" }
+# The `data.conversation_threads` e2e state-serialization contract
+# (`state_json` module) — the shared home for tui's/linux's identical
+# per-app copies. Pure Rust, no OS/DOM APIs, already proven wasm32-safe as
+# a real (non-dev) dependency elsewhere in this workspace
+# (`fauna-wasm-onboarding`'s `bill_of_materials()` binding). Promoted from a
+# dev-dependency (2026-07-20) — it also backs the address.rs tests' native
+# proxy for the wasm `serde_wasm_bindgen` round-trip (the externally-tagged
+# `TypedAddress` shares serde's data model with the snapshot's
+# `json_compatible()` serializer, so a serde_json round-trip there proves the
+# web `typedAddressDisplay` deserialize path).
+serde_json.workspace = true
+
+# `tokio` feature: drives the `#[uniffi::export(async_runtime = "tokio")]`
+# async manager surface (`send` / membership / `ensure_keypackages`) for the
+# native FFI clients (windows/macos/ios/android). Native-only — the `uniffi`
+# feature is never enabled on the wasm32 build (which uses `wasm`), so this
+# never drags tokio into wasm (see the `fauna-core` note above).
+uniffi = { workspace = true, optional = true, features = ["tokio"] }
+# `#[fauna_uniffi_async::export]` runs each async export on a tokio runtime
+# worker, off the foreign executor's small poll stack
+# (`docs/goal/architecture/apps/native-async-execution.md` § The rule).
+fauna-uniffi-async = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["native"] }
+# Privacy-metadata strip at the attachment staging seam (`stage_attachment`)
+# plus receive-time C2PA detection (`attachments_to_inbound`). Split per-target
+# exactly like `fauna-mls` above: native apps get the real `process_media`
+# stripper (`image` + `img-parts`) and `c2pa-detect`'s `c2pa::Reader`, the
+# wasm32 build below takes the crate's identity-passthrough stub (no
+# `c2pa-detect` — the heavy `c2pa` tree stays out of the web bundle) so
+# `AttachmentSnapshot.c2pa` stays a genuine stub there
+# (`docs/goal/ui/conversations.md` § Attachments "C2PA on-device").
+# `strip_metadata`/`detect_c2pa` therefore compile unconditionally at their
+# call sites — when web decides to carry the heavier deps, flipping the
+# feature below is the whole change, with no source edit.
+fauna-media = { workspace = true, features = ["process_media", "c2pa-detect"] }
+# Native-only: drives `ConversationsSession::start_receive_loop`'s detached push
+# loop (`tokio::spawn` + the `tokio::select!` over the push seam and a
+# `tokio::time::interval` backstop ticker). Never reaches the wasm32 build (which
+# uses its own `future_to_promise` poll loop), keeping the wasm tree tokio-free —
+# same per-target isolation as the `fauna-mls` native/js split above.
+# `sync` carries the receive loop's run-one-cycle-now poke (`tokio::sync::Notify`,
+# selected on beside the backstop ticker — `ConversationsSession::poke_receive_cycle`).
+tokio = { workspace = true, features = ["rt", "time", "macros", "sync"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"] }
+# Forward fauna-core's `js` time backend on wasm (Timestamp::now_secs /
+# now_millis) — the SMTP/FaunaMls/bridged backends' outbound-send timestamps
+# need the real wall clock, not the native-only SystemTime fallback. Mirrors
+# `fauna-client-caldav`/`fauna-client-dns`'s identical wasm-target forward.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+# Real `process_media` stripper, matching the native side. Pulls `image` + `img-parts`
+# into the web bundle; `fauna-wasm-media` already ships the same pair for the
+# media artifact, so this isn't new wasm-bundle risk, just a size cost accepted
+# in exchange for closing the EXIF/GPS leak on conversation attachments.
+fauna-media = { workspace = true, features = ["process_media"] }
+
+[dev-dependencies]
+# `test-util` provides `#[tokio::test(start_paused = true)]` — the virtual clock
+# the receive-loop tests run on instead of settle-sleeping against the wall clock
+# (e2e convention 14: latency-independent state). Dev-only; no shipped artifact
+# gains the feature.
+tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }
+# Crash-shaped reconcile tests (gate-less durable pending, devices.md Rule 1):
+# stage -> save_state -> reopen a second SQLite-backed engine over the same file.
+tempfile.workspace = true
+# `test-helpers` exposes the MLS-2 attacker-simulation seam
+# (`MlsEngine::new_in_memory_forged_for_test`) the forged-Welcome ingest
+# regression needs. As a dev-dependency it applies to every test build;
+# production (`cargo build`) excludes dev-deps and never compiles the seam.
+# ⚠ Coverage honesty (corrected 2026-08-19 — the old text claimed "the test
+# runs in CI", which was false twice over: there is NO automatic CI, and the
+# workspace-test-check gate runs `--lib --bins` only, never `tests/` targets):
+# the forged-Welcome ingest pin lives in tests/fauna_mls_backend_tests.rs and
+# is EXECUTED only by `just mls-integration-test-check` (async check tier).
+fauna-mls = { path = "../fauna-mls", features = ["test-helpers"] }
+# Test-only, and deliberately ONLY test-only: the share leg's endpoint binding
+# (`bind_share_advertisement`) is what a `ShareEndpointsSink` implementor runs,
+# so proving the carriage end to end — a real advertisement over a real MLS
+# channel, bound to the leaf-authenticated sender — needs it here. Production
+# (`cargo build`) excludes dev-deps, so this crate ships with no edge to the
+# gated `p2p-share` plane and the excision spine is untouched; the ingest seam
+# in `backend.rs` stays semantics-free (the `CustodyCeremonySink` pattern).
+fauna-peer-share = { path = "../fauna-peer-share" }
+
+[[test]]
+name = "manager_integration_tests"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "smtp_backend_tests"
+
+[[test]]
+name = "fauna_mls_backend_tests"

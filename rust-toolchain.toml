@@ -1,0 +1,28 @@
+# Pinned Rust toolchain — single source of truth for cargo/rustc/rustfmt/clippy
+# on every developer machine and in CI. rustup auto-installs this exact
+# toolchain (with the components/targets below) the first time cargo runs
+# anywhere in the repo, so no manual `rustup update` is needed — and `cargo fmt`
+# / `cargo clippy` then produce identical results everywhere.
+#
+# Why pinned: nightly rustfmt's default formatting and clippy's lint set drift
+# between nightly builds. Without a pin, `cargo fmt`/`cargo clippy` produce
+# different output depending on which nightly each machine happens to have, so
+# CI's `cargo fmt --all --check` becomes a moving target the codebase can never
+# stay clean against.
+#
+# Why an exact date (not "latest nightly"): a floating channel makes
+# `cargo fmt`/`cargo clippy` a moving target across machines and CI. The pin is
+# advanced deliberately, on a monthly toolchain-currency review — never
+# automatically, and never by a build.
+# nightly-2026-07-30 (rustc 1.99.0-nightly) is the most recent nightly the whole
+# workspace is known to build and test cleanly on; it was verified against
+# `openmls` FIRST, because that crate is why the pin once trailed
+# further back (a transient rustc name-resolution regression, E0365 in `openmls`
+# 0.8.1's source, broke nightlies around 2026-05-10; fixed upstream by
+# 2026-05-20). Bumping is one deliberate commit: a nightly the workspace builds
+# on, then `cargo fmt --all` + fixing any new `cargo clippy -- -D warnings`, all
+# together so reviewers see one event and in-flight branches rebase it once.
+[toolchain]
+channel = "nightly-2026-07-30"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

@@ -1,0 +1,44 @@
+# fauna.social front door — hardened unit (front-door.md § The box).
+# Installed at /etc/systemd/system/fauna-front-door.service; binary at
+# /usr/local/bin/fauna-front-door (arrives via the restricted deploy path).
+[Unit]
+Description=fauna.social front door (static vhosts + ACME + proxy pass)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/fauna-front-door
+DynamicUser=yes
+StateDirectory=fauna-front-door
+Restart=always
+RestartSec=2
+
+NoNewPrivileges=yes
+# 80/443 need CAP_NET_BIND_SERVICE in BOTH the bounding and ambient sets;
+# everything else is dropped.
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Content is read-only to the door; only StateDirectory is writable.
+ReadOnlyPaths=/srv/fauna
+
+# Co-tenancy caps so neither unit can starve the box.
+MemoryMax=512M
+CPUQuota=150%
+
+[Install]
+WantedBy=multi-user.target

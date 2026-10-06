@@ -1,0 +1,10 @@
+{
+  "tasks": {
+    "dev": "deno run --allow-read --allow-env --allow-run=deno,git,bwrap --allow-ffi ../../scripts/deno-sandbox.ts --serve --net=localhost,127.0.0.1,[::1] --sha-env=VITE_GIT_SHA -- npm:vite dev",
+    "build": "deno run --allow-read --allow-env --allow-run=deno,git,bwrap --allow-ffi ../../scripts/deno-sandbox.ts --net=localhost,127.0.0.1,[::1] --sha-env=VITE_GIT_SHA -- npm:vite build && deno run --allow-read --allow-env --allow-run=deno,git,bwrap --allow-ffi ../../scripts/deno-sandbox.ts --net=localhost,127.0.0.1,[::1] --sha-env=VITE_GIT_SHA -- npm:vite build --config vite.share-viewer.config.ts",
+    "preview": "deno run --allow-read --allow-env --allow-run=deno,git,bwrap --allow-ffi ../../scripts/deno-sandbox.ts --serve --net=localhost,127.0.0.1,[::1] --sha-env=VITE_GIT_SHA -- npm:vite preview",
+    "check": "deno run --allow-read --allow-env --allow-run=deno,git,bwrap --allow-ffi ../../scripts/deno-sandbox.ts --sha-env=VITE_GIT_SHA -- npm:@sveltejs/kit sync && deno run --allow-read --allow-env --allow-run=deno,git,bwrap --allow-ffi ../../scripts/deno-sandbox.ts --sha-env=VITE_GIT_SHA -- npm:svelte-check --tsconfig ./tsconfig.json"
+  },
+  "nodeModulesDir": "manual",
+  "minimumDependencyAge": "P7D"
+}

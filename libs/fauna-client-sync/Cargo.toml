@@ -1,0 +1,127 @@
+[package]
+name = "fauna-client-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Compile the FAUNA_E2E_* harness-pin reads into the build: the agent-binary
+# pin (`AGENT_BIN_ENV`) and the windows pipe/data-dir spawn forwards. Off, a
+# plain `--release` artifact consults none of them — a runtime env gate alone
+# ships a process-execution redirect inside every release binary (testing.md
+# convention 15; the 2026-08-02 seam-witness ruling names these reads).
+# Debug builds keep the pin through the `debug_assertions` arm; consumers
+# forward this from their own e2e feature (linux/tui `e2e-agent`, fauna-ffi
+# `test-helpers`), never on the dep line.
+#
+# Forwards `fauna-ipc/test-helpers`, the CONNECT side of the same windows pipe
+# override this crate's spawn side composes — the two must be enabled together
+# or a release-profile e2e build spawns its agent on the harness pipe and then
+# connects to the per-SID one (an isolation loss that reads as "no agent
+# running"). fauna-ipc is a target-specific dep, so the forward is inert on
+# wasm, where there is no local agent at all.
+#
+# Forwards `fauna-credential-store/e2e-agent`, the crate this one depends on
+# directly and whose `FAUNA_E2E_CREDENTIAL_DIR` read is gated the same
+# `debug_assertions OR e2e-agent` way. The forward has to live HERE rather than
+# in `fauna-ffi`'s `test-helpers` beside the three siblings it already names,
+# because a Cargo feature may only reference a DIRECT dependency and `fauna-ffi`
+# has no dep line of its own on the credential store — it reaches it through
+# this crate and `fauna-sync-engine`.
+#
+# ⚠ **Without it every UniFFI app's e2e resolved the developer's REAL OS
+# credential store**, and on iOS the account plane could not start at all. The
+# apple/windows/android FFI slices are built `--release`, so `cred_file_dir()`
+# compiled to its production twin (`None`) and `CredentialStore::new` fell
+# through to the platform keyring arm: `mac_keychain`/`win_credman` are real
+# stores, so macOS and windows silently wrote e2e writer keys into the box's own
+# keychain (an e2e-conventions point 10 isolation loss that no assertion could
+# see), while iOS has no keyring arm at all — `no_keyring` drops the write, the
+# W3 (account-data-plane.md § Workstreams) account runtime's mint read-back finds nothing, and the assembly refuses
+# with "the credential store did not retain the writer key". Measured on macOS
+# 2026-08-26: that refusal is why `--app ios` read `role: (False, False)` for
+# 240 s. linux and tui never hit it — they forward
+# `fauna-credential-store/e2e-agent` from their own `e2e-agent` feature, which
+# is precisely the drift this closes.
+test-helpers = ["fauna-ipc/test-helpers", "fauna-credential-store/e2e-agent"]
+
+[dependencies]
+# fauna-protocol carries the typed `fauna.sync.*` wire types + the
+# `RpcRequester` seam this crate is generic over. `default-features =
+# false` keeps the crate wasm32-clean (drops native-only features);
+# native workspace builds re-enable them via Cargo feature unification.
+# Same pattern as fauna-client-snapshots / fauna-client-bridges.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# `DeviceAuthorization` + `sign_envelope`/`EmbedAsBytes` + `ActorKeypair` for
+# the store principal's grant mint (`build_principal_grant` — sync-agent.md
+# § Credential model). Same wasm-clean default-features=false pattern as
+# fauna-protocol above.
+fauna-core = { path = "../fauna-core", default-features = false }
+
+# `tracing` (degrade-path diagnostics, e.g. `register_this_machine` in
+# `lib.rs`) + `zeroize` (the provisioner's in-memory key containment in
+# `src/agent.rs`). Both are wasm-safe (fauna-core already depends on them for
+# the wasm build).
+tracing = { workspace = true }
+zeroize = { workspace = true }
+# `ConflictLabels::seal` propagates the shared `fauna_core::label_custody`
+# funnel's error rather than degrading (path-sealing S6-a). Wasm-safe;
+# fauna-core already depends on it for the wasm build.
+anyhow = { workspace = true }
+# The grant-retirement proof of possession (`build_grant_revoke_request` —
+# `sync-agent.md` § Credential model, the RULED 2026-08-15 block's self arm)
+# signs with the retiring device key itself, which callers hold as a raw
+# `SigningKey`. Wasm-safe (pure Rust; fauna-core already builds on it), so it
+# sits in the shared block rather than the desktop-only one — the sign-out
+# consumer that will share this request builder is not desktop-only either.
+ed25519-dalek = { workspace = true }
+# Hex for that request's nonce + signature fields (the wire carries both as
+# hex, like every other identity reference — `fauna_protocol::auth`). Already
+# in the wasm graph via fauna-core.
+hex = { workspace = true }
+
+# The shared desktop sync-agent control client (`src/agent.rs`) runs on every
+# desktop: the agent's local IPC seam is a per-user unix socket on linux/macOS
+# and the per-SID named pipe on windows, resolved through the one
+# `fauna_ipc::endpoint` seam (`sync-agent.md` § Consumers). wasm has no agent at
+# all, so target-gating still keeps the crate wasm32-clean by construction.
+# (`tracing` + `zeroize` live in `[dependencies]` above — they are not
+# desktop-only.)
+[target.'cfg(any(unix, windows))'.dependencies]
+fauna-ipc = { path = "../fauna-ipc" }
+tokio = { workspace = true }
+# The sign-out marker `unprovision()` writes into the agent's own namespace
+# before the best-effort teardown push (`sync-agent.md` § Credential model →
+# *The signed-out reconcile*). Desktop-only for the same reason as fauna-ipc:
+# wasm has no agent, and this keeps the crate wasm32-clean by construction.
+fauna-credential-store = { path = "../fauna-credential-store" }
+# `SecretStore`, the trait that store's `set` lives on. Already in the desktop
+# graph via fauna-credential-store; named directly so the trait is in scope.
+fauna-client-accounts = { workspace = true }
+# The re-seed ceremony's outcome types: the agent runs the shared driver and
+# the app renders its result, so the IPC's wire form and its two conversions
+# live here, beside the provisioner verb that carries them (`reseed_wire`).
+fauna-client-backup = { path = "../fauna-client-backup" }
+
+# wasm: forward fauna-protocol's `js` feature (fauna-core's js-sys time
+# backend) so the transitive wasm build resolves. Off on native.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+# Test builds never reach the live OS keyring — see the `no-live-keyring`
+# feature in libs/fauna-credential-store/Cargo.toml (dev-dependencies ONLY).
+fauna-credential-store = { path = "../fauna-credential-store", features = ["no-live-keyring"] }
+# The shared `RecordingRequester` / `block_on` test double the wire-contract
+# tests below drive (one owner for the `RpcRequester` seam's fake).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+# Names the serde bounds `RpcRequester::request` requires, for the
+# construction smoke test's mock impl.
+serde = { workspace = true }
+# The row judge's binding-source test implements `FolderKeyResolver` (an
+# `async_trait` trait of fauna-core's).
+async-trait = "0.1"
+# The shared spawner's PATH-resolution test writes a fake agent binary into a
+# throwaway dir (`agent_spawner::path_lookup`).
+tempfile = { workspace = true }

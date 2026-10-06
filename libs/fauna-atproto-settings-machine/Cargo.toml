@@ -1,0 +1,147 @@
+[package]
+name = "fauna-atproto-settings-machine"
+description = "Shared-Rust page-level ATProto login-plane settings machine: app-credential mint/list/reveal/revoke, live sessions, and the per-account external-apps kill-switch. Mirrors fauna-labeler-catalog-machine."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Turn on UniFFI scaffolding when consumed by fauna-ffi.
+# Forwards `fauna-core/uniffi` for the blanket `SecretString` custom-type reg
+# (registered in `fauna_core::secret`) the one-time reveal returns through, and
+# `fauna-client-alerts/uniffi` because this crate's exported face hands back
+# that crate's `CriticalAlerts` — a re-export carries no derives of its own, so
+# without the forward the type has no `FfiConverterArc` and the crate does not
+# compile at all under `--features uniffi` alone. Invisible from `fauna-ffi`,
+# which happens to enable both.
+uniffi = ["dep:uniffi", "fauna-core/uniffi", "fauna-client-alerts/uniffi", "dep:fauna-uniffi-async"]
+# Test helpers — FakeAtprotoSettingsNestApi + FakeCredentialStore.
+test-helpers = []
+# Test observer — CountingObserver / NullObserver.
+test-observer = []
+# The D10 delegation row's fake render clock (`delegation_clock`), compiled
+# into a --release e2e build via a consumer's own e2e-agent feature — not
+# enabled in a plain `--release` build, and in a debug build the clock is
+# already live via `cfg(debug_assertions)` alone (mirrors fauna-client-backup).
+e2e-agent = ["fauna-client-atproto/e2e-agent"]
+# Shared WS-RPC seam glue (`nest_api::ws_rpc` + `build_atproto_settings_machine`)
+# — the production `AtprotoSettingsNestApi` impl over
+# `fauna_client_bridges::AtprotoSettingsClient`. Mirrors
+# `fauna-labeler-catalog-machine`'s `rpc-glue`.
+rpc-glue = [
+    "dep:fauna-client",
+    "dep:fauna-rpc-wasm",
+]
+# The ATProto credential seam's crossing of web's account port (`port`): the
+# forwarder the ATProto chunk wires and the `serve` the core chunk answers with
+# (account-client-lifecycle.md § The account port, decision (c)). Pulls only
+# the thin transport crate — no plane, no store.
+account-port = ["dep:fauna-account-port"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("e2e-agent"))'] }
+
+[dependencies]
+# default-features = false: avoid fauna-core's `network` default (redb, tokio,
+# hickory-resolver), which breaks wasm. Needed for `localized::LocalizedText`,
+# `MaybeSendSync`, `Timestamp`, `secret::SecretString`, and the
+# `data::{AtprotoAppCredential, AtprotoConfig}` at-rest shapes (the
+# `fauna.state.atproto` kind) the mint writes.
+fauna-core = { path = "../fauna-core", default-features = false }
+# The credential crypto primitives (`generate_app_credential`,
+# `compute_app_credential_verifier`), the shared kebab `derive_credential_id`,
+# and — under `rpc-glue` — the typed `AtprotoSettingsClient`. A **base**
+# (non-optional) dep: the always-compiled machine names the first three. Thin
+# and wasm-clean (protocol + core + rand + argon2), the same reason
+# fauna-client-mail-settings carries it non-optionally.
+fauna-client-bridges = { path = "../fauna-client-bridges" }
+# `StoreError` — the refusal the credential seam (`credentials`) answers with,
+# shared with every other client-side store seam. Wasm-clean, and already a
+# non-optional dep of fauna-ffi.
+fauna-client-config = { path = "../fauna-client-config" }
+# The user-custodied senior PLC rotation key (`ensure_user_rotation_key`) the
+# hosted-entry transition sends the pubkey of — that module is the sole
+# `fauna.state.atproto-identity` writer, so the machine calls it rather than growing a
+# second one. Lean and wasm-clean (protocol + core + p256).
+fauna-client-atproto = { path = "../fauna-client-atproto" }
+# The app-wide critical-alerts registry (`critical-alerts.md`) the S4-C
+# custody alarm posts to. Tiny and wasm-clean.
+fauna-client-alerts = { path = "../fauna-client-alerts" }
+# `authz::describe_scope` — the ONE owner of human-readable OAuth scope wording,
+# rendered by BOTH consent surfaces (the bridge's `/oauth/authorize` page and
+# this machine's approval card). A second wording is exactly the "is this the
+# same request?" doubt the binding code exists to remove, so the card reaches
+# the same function rather than restating it. `default-features = false` takes
+# only the pure host-direction core (`authz` + `outbound` + `types` + …), which
+# is wasm-clean and free of the `client` feature's async/atrium stack — the same
+# consumption shape fauna-ffi uses.
+fauna-bridge-atproto = { path = "../fauna-bridge-atproto", default-features = false }
+# The consent-time grant to a third-party app (`consent_grant`): the shared
+# entry point `ext_consent::prepare_ext_consent_grant`, the grant-log signer
+# and `build_revoke_event`. Wasm-clean (the labeler catalog machine's same dep).
+fauna-client-capabilities = { path = "../fauna-client-capabilities" }
+# The consent-time folder read twin's custody fold (`consent_grant::
+# consent_folder_from`): the owner's folder-key custody seam, its by-hash row
+# naming and the served/channel resolvers every folder consumer shares.
+# Base build — wasm-clean.
+fauna-client-folders = { path = "../fauna-client-folders" }
+# `rand::thread_rng()` — the consent grant's 16-byte `grant_id` (random, never
+# a counter: the nest keys on `(owner, grant_id)`).
+rand = { workspace = true }
+serde = { workspace = true }
+# The contest seam's `ForkPoint.op` is the fork-point PLC operation carried
+# forward as raw JSON (`fauna_client_atproto::recovery_fork`), so this crate
+# names `serde_json::Value` to model the plan. Already in the graph via
+# fauna-client-atproto — Cargo unifies, so it costs this build nothing.
+serde_json = { workspace = true }
+async-trait = "0.1"
+hex = { workspace = true }
+thiserror = { workspace = true }
+# Producer-side error logging (observability.md § Log on the *event*, not the
+# *paint*). wasm-safe — a no-op without a subscriber.
+tracing = { workspace = true }
+
+fauna-account-port = { workspace = true, optional = true }
+
+uniffi = { workspace = true, optional = true, features = ["tokio"] }
+# `#[fauna_uniffi_async::export]` runs each async export on a tokio runtime
+# worker, off the foreign executor's small poll stack
+# (`docs/goal/architecture/apps/native-async-execution.md` § The rule).
+fauna-uniffi-async = { workspace = true, optional = true }
+
+# A **base** (non-optional) dep, not an `rpc-glue` one: the always-compiled
+# machine names its wire types. `default-features = false`
+# drops the `p2p` default (native-only wireguard → tokio net → mio) so the crate
+# stays wasm-clean; `js` forwarded on wasm below. Also carries `RpcRequester` +
+# the `RpcErrorClass` mapping the `rpc-glue` seam uses.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fauna-client = { path = "../fauna-client", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm", optional = true }
+# `rand::thread_rng()` needs getrandom's wasm backend; `fauna-wasm` enables it
+# workspace-wide via the `wasm_js` cfg (the labeler catalog machine's shape).
+getrandom = { workspace = true }
+# Forward fauna-protocol's `js` (fauna-core's js-sys time backend) on wasm.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+# `identity_status_label`'s test pins every key to a real string.
+fauna-i18n = { path = "../fauna-i18n" }
+fauna-atproto-settings-machine = { path = ".", features = ["test-helpers", "test-observer", "account-port"] }
+# `identity_store::InMemoryAtprotoIdentityStore` — the plane door's in-memory
+# double the custody / retirement / contest tests seed the ring through.
+fauna-client-atproto = { path = "../fauna-client-atproto", features = ["test-fixtures"] }
+# The loopback the `port` module's tests wire forwarder → `serve` through.
+fauna-account-port = { workspace = true, features = ["test-helpers"] }
+# The consent-grant tests: the in-memory kind-manifest and ledger doubles, and
+# the publisher key a fixture manifest is signed under.
+fauna-client-config = { path = "../fauna-client-config", features = ["test-helpers"] }
+ed25519-dalek = { workspace = true }
+# The folder read twin's tests open the deposited `GrantBlob` and build the
+# holder key it is wrapped to.
+fauna-mls = { path = "../fauna-mls", default-features = false }

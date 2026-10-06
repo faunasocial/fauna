@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  WinUI 3 App — FaunaApp.exe and managed dependencies.
+
+  The AppDir variable points to the dotnet publish output directory.
+  The WiX v6 Files element auto-harvests all files from that directory.
+-->
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Fragment>
+    <ComponentGroup Id="AppComponents" Directory="AppFolder">
+
+      <!--
+        Harvest all files from the publish output directory.
+        This automatically creates File elements for FaunaApp.exe
+        and all .dll dependencies from the dotnet publish output.
+      -->
+      <Files Include="$(var.AppDir)**" />
+
+    </ComponentGroup>
+
+    <!-- Start Menu shortcut -->
+    <ComponentGroup Id="StartMenuComponents" Directory="FaunaStartMenu">
+      <Component Id="FaunaShortcut" Guid="4a7b8c00-0050-4d3a-b5c6-d7e8f9a0b1c2">
+        <Shortcut Id="FaunaAppShortcut"
+                  Name="Fauna"
+                  Target="[AppFolder]FaunaApp.exe"
+                  WorkingDirectory="AppFolder" />
+        <RemoveFolder Id="RemoveFaunaStartMenu" On="uninstall" />
+        <RegistryValue Root="HKCU"
+                       Key="SOFTWARE\Fauna\Install"
+                       Name="StartMenuShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+</Wix>

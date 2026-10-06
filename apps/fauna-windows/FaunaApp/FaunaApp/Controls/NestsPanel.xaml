@@ -1,0 +1,380 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FaunaApp.Controls.NestsPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Controls"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Loaded="Panel_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- Renders the shared fauna_client_pair::LinkedNestsMachine (over UniFFI):
+         list/link/unlink via fauna.pair.{list,add,revoke}, plus the v1 nest-trust
+         facet (per-row Now/History lens over the grant-event log; Renew/Revoke/
+         SetLens) and the scope-first Mint flow for authorizing a new use-case
+         (docs/goal/ui/nests.md § Mint). No pairing or trust logic in this shell
+         (priority #2). Embedded as a section in its
+         dedicated SettingsLinkedNestsPage sub-page (nav slug `nests`
+         fleet-wide) — the page-heading + error-message are that page's single
+         shared surfaces; this panel routes the machine error up via the
+         ErrorChanged event. -->
+    <StackPanel Spacing="12">
+
+        <!-- nests-add-button — reveals the inline add form -->
+        <Button x:Name="AddButton"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsAddButton}"
+                Style="{StaticResource AccentButtonStyle}"
+                Content="{loc:Localize Key=nests/add_button}"
+                Click="AddButton_Click" />
+
+        <!-- Add-a-nest form (inline reveal; collapsed until Add is clicked) -->
+        <StackPanel x:Name="AddForm" Spacing="8" Visibility="Collapsed">
+            <TextBox x:Name="AddInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsAddInput}"
+                     PlaceholderText="{loc:Localize Key=nests/add_input_placeholder}" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button x:Name="SubmitButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsAddSubmitButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Content="{loc:Localize Key=nests/add_submit}"
+                        Click="Submit_Click" />
+                <Button x:Name="CancelButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsAddCancelButton}"
+                        Content="{loc:Localize Key=nests/add_cancel}"
+                        Click="Cancel_Click" />
+            </StackPanel>
+        </StackPanel>
+
+        <ProgressRing x:Name="LoadingRing"
+                      IsActive="False"
+                      Visibility="Collapsed"
+                      HorizontalAlignment="Left" />
+
+        <!-- Empty-state placeholder (collapsed once the home row hydrates) -->
+        <TextBlock x:Name="EmptyText" Opacity="0.7"
+                   Text="{loc:Localize Key=nests/empty}" />
+
+        <!-- nests-item rows (indexed): the home nest first, then pairings. Non-
+             virtualizing panel so FlaUI realizes every row for count-all
+             (reference_winui_flaui_datatemplate_name). -->
+        <ItemsControl x:Name="NestsList">
+            <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate>
+                    <StackPanel Orientation="Vertical" Spacing="12" />
+                </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="local:NestRowItem">
+                    <!-- Row container needs AutomationProperties.Name or FlaUI counts 0
+                         (reference_winui_flaui_datatemplate_name). A Border (not a bare
+                         StackPanel) carries the id + border chrome. -->
+                    <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsItem}"
+                            AutomationProperties.Name="{x:Bind Label}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1" CornerRadius="6" Padding="8">
+                    <StackPanel Spacing="6">
+
+                        <!-- identity line -->
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Spacing="2">
+                                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsItemLabel}"
+                                           Text="{x:Bind Label}"
+                                           Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsItemNestId}"
+                                           Text="{x:Bind NestId}"
+                                           Opacity="0.7" FontFamily="Consolas" FontSize="12" />
+                                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsItemCapabilities}"
+                                           Text="{x:Bind Capabilities}"
+                                           Visibility="{x:Bind IdentityDetailVisibility}"
+                                           Opacity="0.7" FontSize="12" />
+                                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsItemExpiry}"
+                                           Text="{x:Bind Expiry}"
+                                           Visibility="{x:Bind IdentityDetailVisibility}"
+                                           Opacity="0.7" FontSize="12" />
+                            </StackPanel>
+                            <Button Grid.Column="1"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsItemUnlinkButton}"
+                                    Content="{x:Bind UnlinkLabel}"
+                                    Tag="{x:Bind NestIdFull}"
+                                    Visibility="{x:Bind IdentityDetailVisibility}"
+                                    VerticalAlignment="Center"
+                                    Click="Unlink_Click" />
+                        </Grid>
+
+                        <!-- trust facet: per-row Now/History lens (nests.md § Trust facet) -->
+                        <StackPanel Spacing="6" Margin="0,4,0,0">
+                            <StackPanel Orientation="Horizontal" Spacing="4">
+                                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustViewNow}"
+                                        Content="{x:Bind ViewNowLabel}"
+                                        Tag="{x:Bind NestIdFull}"
+                                        Click="ViewNow_Click" />
+                                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustViewHistory}"
+                                        Content="{x:Bind ViewHistoryLabel}"
+                                        Tag="{x:Bind NestIdFull}"
+                                        Click="ViewHistory_Click" />
+                            </StackPanel>
+
+                            <!-- nest-trust-empty: Now lens + no grants (a Control root
+                                 self-realizes; no Name needed). -->
+                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustEmpty}"
+                                       Text="{x:Bind TrustEmptyText}"
+                                       Visibility="{x:Bind EmptyVisibility}"
+                                       TextWrapping="Wrap" Opacity="0.7" />
+
+                            <!-- nest-trust-grant-list: Now lens + grants present. Border-
+                                 wrapped (not a bare ItemsControl) — an empty/zero-height
+                                 ItemsControl would be FlaUI IsOffscreen even when
+                                 GrantListVisibility flips it Visible momentarily. -->
+                            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGrantList}"
+                                    AutomationProperties.Name="{x:Bind Label}"
+                                    Visibility="{x:Bind GrantListVisibility}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1" CornerRadius="6" Padding="8">
+                                <ItemsControl ItemsSource="{x:Bind GrantItems}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Vertical" Spacing="6" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="local:TrustGrantItem">
+                                            <!-- nest-trust-grant-item: nested inside nests-item,
+                                                 queried scoped (nests.md § Element IDs). -->
+                                            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGrantItem}"
+                                                    AutomationProperties.Name="{x:Bind Scope}"
+                                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                    BorderThickness="1" CornerRadius="6"
+                                                    Padding="8" Margin="0,2">
+                                                <StackPanel Spacing="2">
+                                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGrantScope}"
+                                                               Text="{x:Bind Scope}"
+                                                               Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGrantLastsUntil}"
+                                                               Text="{x:Bind LastsUntil}"
+                                                               Opacity="0.7" FontSize="12" />
+                                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGrantStatus}"
+                                                               Text="{x:Bind Status}"
+                                                               Opacity="0.7" FontSize="12" />
+                                                    <!-- REQUIRED honest-bound copy (nests.md § Honest bound). -->
+                                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGrantBoundNote}"
+                                                               Text="{x:Bind BoundNote}"
+                                                               TextWrapping="Wrap" Opacity="0.6" FontSize="12" />
+                                                    <!-- The post-succession review mark (succession-aftermath.md
+                                                         § Adjudicating what the aftermath carries across; web and
+                                                         apple are the prior art). ABSENT (Collapsed, uncounted by
+                                                         UIA), not empty, on an ordinary grant; Revoke is NOT
+                                                         re-rendered — nest-trust-grant-revoke below already is it. -->
+                                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGrantUnattestedMark}"
+                                                               Text="{x:Bind UnattestedMark}"
+                                                               Visibility="{x:Bind UnattestedVisibility}"
+                                                               Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                                                               TextWrapping="Wrap" FontSize="12" />
+                                                    <StackPanel Orientation="Horizontal" Spacing="4" Margin="0,2,0,0">
+                                                        <!-- No confirm: Keep is non-destructive and re-decidable. -->
+                                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGrantKeepButton}"
+                                                                Content="{x:Bind KeepLabel}"
+                                                                Tag="{x:Bind GrantId}"
+                                                                Visibility="{x:Bind UnattestedVisibility}"
+                                                                Click="KeepGrant_Click" />
+                                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGrantRenew}"
+                                                                Content="{x:Bind RenewLabel}"
+                                                                Tag="{x:Bind GrantId}"
+                                                                Click="Renew_Click" />
+                                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGrantRevoke}"
+                                                                Content="{x:Bind RevokeLabel}"
+                                                                Tag="{x:Bind GrantId}"
+                                                                Click="Revoke_Click" />
+                                                    </StackPanel>
+                                                </StackPanel>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </Border>
+
+                            <!-- nest-trust-backup-list: Now lens + backup trust rows present
+                                 (home nest's row only — the shared machine populates
+                                 trustBackups nowhere else). AFTER the content-grant rows
+                                 (nests.md § Trust facet — backup rows); rendered independently
+                                 of GrantListVisibility above so an all-backups-no-grants home
+                                 row shows the backup list without an empty grant-list box.
+                                 Same Border-wrap rationale as the grant list. -->
+                            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustBackupList}"
+                                    AutomationProperties.Name="{x:Bind Label}"
+                                    Visibility="{x:Bind BackupListVisibility}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1" CornerRadius="6" Padding="8">
+                                <ItemsControl ItemsSource="{x:Bind BackupItems}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Vertical" Spacing="6" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="local:TrustBackupItem">
+                                            <!-- nest-trust-backup-item: nested inside nests-item,
+                                                 queried scoped (nests.md § Element IDs). -->
+                                            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustBackupItem}"
+                                                    AutomationProperties.Name="{x:Bind Scope}"
+                                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                    BorderThickness="1" CornerRadius="6"
+                                                    Padding="8" Margin="0,2">
+                                                <StackPanel Spacing="2">
+                                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustBackupScope}"
+                                                               Text="{x:Bind Scope}"
+                                                               Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                                    <!-- nest-trust-backup-since renders EMPTY on the
+                                                         seal row (no timestamp on the wire,
+                                                         nests.md:67) — the leaf still exists so a
+                                                         row's leaf set does not vary by kind. -->
+                                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustBackupSince}"
+                                                               Text="{x:Bind Since}"
+                                                               Opacity="0.7" FontSize="12" />
+                                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustBackupStatus}"
+                                                               Text="{x:Bind Status}"
+                                                               Opacity="0.7" FontSize="12" />
+                                                    <!-- REQUIRED honest-bound copy (nests.md § Honest bound). -->
+                                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustBackupBoundNote}"
+                                                               Text="{x:Bind BoundNote}"
+                                                               TextWrapping="Wrap" Opacity="0.6" FontSize="12" />
+                                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustBackupRevoke}"
+                                                            Content="{x:Bind RevokeLabel}"
+                                                            Tag="{x:Bind}"
+                                                            Margin="0,2,0,0"
+                                                            Click="RevokeBackup_Click" />
+                                                </StackPanel>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </Border>
+
+                            <!-- nest-trust-generation-list: Now lens + retained generations
+                                 present (home nest's row only). AFTER the backup trust rows
+                                 (nests.md § Trust facet — generation recovery) — same surface
+                                 deliberately, so "who may write here" and "what can I roll back"
+                                 read together. Same Border-wrap rationale as the lists above. -->
+                            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGenerationList}"
+                                    AutomationProperties.Name="{x:Bind Label}"
+                                    Visibility="{x:Bind GenerationListVisibility}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1" CornerRadius="6" Padding="8">
+                                <ItemsControl ItemsSource="{x:Bind GenerationItems}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Vertical" Spacing="6" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="local:TrustGenerationItem">
+                                            <!-- nest-trust-generation-item: nested inside
+                                                 nests-item, queried scoped (nests.md § Element IDs). -->
+                                            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGenerationItem}"
+                                                    AutomationProperties.Name="{x:Bind PathText}"
+                                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                    BorderThickness="1" CornerRadius="6"
+                                                    Padding="8" Margin="0,2">
+                                                <StackPanel Spacing="2">
+                                                    <!-- On an Unreachable row this names the
+                                                         DESTINATION that went dark (no generation
+                                                         to identify); on a Listed row with no
+                                                         plaintext path, renders the path_hash —
+                                                         NEVER hidden or skipped (nests.md:123). -->
+                                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGenerationPath}"
+                                                               Text="{x:Bind PathText}"
+                                                               Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                                    <!-- EMPTY on an Unreachable row — there is
+                                                         nothing superseded to date. -->
+                                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGenerationSuperseded}"
+                                                               Text="{x:Bind Superseded}"
+                                                               Opacity="0.7" FontSize="12" />
+                                                    <!-- REQUIRED quota-bound copy: EMPTY on an
+                                                         Unreachable row. -->
+                                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGenerationExpires}"
+                                                               Text="{x:Bind Expires}"
+                                                               TextWrapping="Wrap" Opacity="0.6" FontSize="12" />
+                                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGenerationSize}"
+                                                               Text="{x:Bind Size}"
+                                                               Opacity="0.7" FontSize="12" />
+                                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGenerationStatus}"
+                                                               Text="{x:Bind Status}"
+                                                               Opacity="0.7" FontSize="12" />
+                                                    <!-- Absent when status=unreachable — offering
+                                                         restore would imply an address we do not
+                                                         have (nests.md:122). -->
+                                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGenerationRestore}"
+                                                            Content="{x:Bind RestoreLabel}"
+                                                            Tag="{x:Bind}"
+                                                            Visibility="{x:Bind RestoreVisibility}"
+                                                            Margin="0,2,0,0"
+                                                            Click="RestoreGeneration_Click" />
+                                                </StackPanel>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </Border>
+
+                            <!-- nest-trust-generation-notice: the page's last restore outcome
+                                 (nests.md § Trust facet — generation recovery, ratified
+                                 2026-07-29). Home-row-scoped, NOT per-row — a restore's outcome
+                                 describes the page's last action, not any one generation row.
+                                 Registered whenever the Now lens renders on the HOME row, EMPTY
+                                 until a restore resolves — the leaf set does not vary. Distinct
+                                 from error-message: only a genuinely failed call reaches that;
+                                 PastRecoveryWindow is a product state, never an error. A Control
+                                 root (TextBlock) self-realizes — no Name needed. -->
+                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustGenerationNotice}"
+                                       Text="{x:Bind GenerationNoticeText}"
+                                       Visibility="{x:Bind GenerationNoticeVisibility}"
+                                       TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+
+                            <!-- nest-trust-history-list: History lens. Same Border-wrap
+                                 rationale as the grant list above. -->
+                            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustHistoryList}"
+                                    AutomationProperties.Name="{x:Bind Label}"
+                                    Visibility="{x:Bind HistoryLensVisibility}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1" CornerRadius="6" Padding="8">
+                                <ItemsControl ItemsSource="{x:Bind HistoryLines}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Vertical" Spacing="4" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="x:String">
+                                            <!-- nest-trust-history-item: a plain TextBlock (Control
+                                                 root) self-realizes — no Name needed. -->
+                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustHistoryItem}"
+                                                       Text="{x:Bind}"
+                                                       TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </Border>
+
+                            <!-- Mint flow (nests.md § Mint) — built in code-behind
+                                 (NestsPanel.BuildMintFlow); this host bridges the
+                                 DataTemplate into that builder via its auto-set
+                                 DataContext. Genuinely dynamic per-row state (scope-
+                                 driven holder visibility + confirm-enable) that OneTime
+                                 x:Bind can't express. -->
+                            <StackPanel x:Name="MintHost"
+                                        Visibility="{x:Bind MintFlowVisibility}"
+                                        Loaded="MintHost_Loaded" />
+                        </StackPanel>
+                    </StackPanel>
+                    </Border>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+    </StackPanel>
+</UserControl>

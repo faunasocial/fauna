@@ -1,0 +1,371 @@
+# Declarative source of truth for provisioning provider metadata.
+#
+# Regenerate clients with: just providers-generate
+#
+# Schema version. Bump MINOR for additive changes, MAJOR for breaking.
+schema_version: 1
+
+# ---------------------------------------------------------------------------
+# Providers
+# ---------------------------------------------------------------------------
+# Each entry describes one provider. Capabilities determine which UI flows
+# it participates in. Fields are the credentials the user enters.
+#
+# dispatch / dns_dispatch / registrar_dispatch: the name of the dispatch-enum
+#   variant serving each declared capability, in libs/fauna-provisioning's
+#   hand-written dispatch.rs. `dispatch` is the provider's DNS variant unless
+#   it also has vps capability, in which case `dispatch` is the VPS one and
+#   DNS moves to `dns_dispatch`; `registrar_dispatch` is always explicit.
+#   The generator normalizes these to one variant per capability and emits
+#   them as ProviderMeta::{dns,vps,registrar}_dispatch (Rust only — dispatch
+#   is shared-Rust for every app, so no per-language mirror carries them).
+#   tests/dispatch_registry_bijection.rs then asserts the declaration matches
+#   what dispatch.rs actually builds, which is what catches a `fields:` id
+#   renamed here without its `creds.get("…")` in dispatch.rs — otherwise a
+#   silent runtime None that reads as "this provider has no DNS".
+#   Declaring a capability without a resolvable variant is a generate error.
+#
+# cors_policy values:
+#   open      — browser fetch works directly (rare)
+#   proxy     — web app must route through proxy.fauna.social
+#   native    — native-only; web hides this provider entirely
+#
+# post_verify_select: if set, the provider's verify() returns a list that
+# populates a dropdown the user must pick from. `source` indicates which
+# field of the verify result to render (provider-specific).
+#
+# curated_offers: list of provider-native server_type/plan IDs that the UI
+#   shows as radio options on the VPS configuration page. Max 5 by convention.
+#   Empty/missing = the provider is not offered for VPS purchase in the
+#   handle-first flow (it stays usable via dispatch).
+#
+# tld_pricing_endpoint: optional public-pricing URL the registrar exposes
+#   without auth. If set, the wizard fetches it on the DNS-config page to
+#   show the price-of-buying-a-domain estimate before credentials are entered.
+#
+# signup_url: literal URL the wizard surfaces as the "open in browser" link
+#   on the per-provider section of dns_config / vps_config. Points the user
+#   at the provider's account dashboard / signup page where they can create
+#   an account and obtain API credentials. NOT translatable (URLs are
+#   provider-canonical and identical in every locale).
+#
+# Field-level `kinds` annotation (handle-first onboarding):
+#   Optional list — subset of [dns, vps, registrar]. Indicates which
+#   credential flows the field applies to. If absent, defaults to the
+#   provider's full `capabilities` list (the field is part of every flow
+#   that the provider participates in). Use `kinds` ONLY when a provider
+#   exposes separate API tokens for different surfaces — Hetzner is today's
+#   only example (cloud-API token vs dns-API token are distinct credentials).
+#
+#   Per-client UI rule (codegen always emits the resolved list):
+#     dns_config form, provider has only DNS cap                  → fields where "dns" in kinds
+#     dns_config form, same_provider_for_vps + provider has VPS   → fields where "dns" in kinds OR "vps" in kinds
+#     vps_config form                                              → fields where "vps" in kinds
+#     registrar verify (when buy_domain checked)                   → fields where "registrar" in kinds
+#   The credentials map carries the union of all entered fields; each
+#   verify call reads only the keys it needs.
+
+providers:
+
+  cloudflare:
+    display_name_key: provisioning.cloudflare.name
+    help_key:         provisioning.cloudflare.help
+    signup_url:       https://dash.cloudflare.com/sign-up
+    capabilities:     [dns, registrar]
+    cors_policy:      proxy
+    dispatch:         CloudflareDns
+    registrar_dispatch: CloudflareRegistrar
+    # Cloudflare's Registrar API uses the account's configured default
+    # registrant contact — not a per-registration ContactInfo, same
+    # account-level model as Porkbun. UI skips the contact form on this
+    # registrar and shows the account-contact reminder instead.
+    registrar_requires_contact: false
+    registrar_notes_key: provisioning.cloudflare.registrar_account_contact_note
+    fields:
+      - { id: api-token, type: secret, label_key: provisioning.cloudflare.api_token, required: true }
+      - { id: account-id, type: text, label_key: provisioning.cloudflare.account_id, required: true, kinds: [registrar] }
+    post_verify_select:
+      id:        zone-select
+      label_key: provisioning.cloudflare.zone
+      source:    zones
+      required:  true
+    pricing_source: null
+
+  porkbun:
+    display_name_key: provisioning.porkbun.name
+    help_key:         provisioning.porkbun.help
+    signup_url:       https://porkbun.com/account/signup
+    capabilities:     [dns, registrar]
+    cors_policy:      open
+    dispatch:         PorkbunDns        # for DNS calls
+    registrar_dispatch: PorkbunRegistrar # for domain-search + register
+    # Porkbun uses the contact info configured on the user's Porkbun account
+    # for domain registration. Their API does not accept per-registration
+    # contact fields. UI skips the contact form on this registrar and shows
+    # the account-contact reminder from `registrar_notes_key` instead.
+    registrar_requires_contact: false
+    registrar_notes_key: provisioning.porkbun.registrar_account_contact_note
+    fields:
+      - { id: api-key,       type: secret, label_key: provisioning.porkbun.key,    required: true }
+      - { id: secret-api-key,type: secret, label_key: provisioning.porkbun.secret, required: true }
+    post_verify_select:
+      id:        domain-select
+      label_key: provisioning.porkbun.domain
+      source:    zones
+      required:  true
+    pricing_source: null
+    tld_pricing_endpoint: https://api.porkbun.com/api/json/v3/pricing/get
+
+  hetzner:
+    display_name_key: provisioning.hetzner.name
+    help_key:         provisioning.hetzner.help
+    signup_url:       https://accounts.hetzner.com/signUp
+    capabilities:     [dns, vps]
+    cors_policy:      open
+    dispatch:         HetznerVps
+    dns_dispatch:     HetznerDns
+    # Hetzner uses ONE Cloud API token for both VPS and DNS. The standalone
+    # dns.hetzner.com DNS API went read-only 2026-05-20 and is being shut
+    # down; DNS zones are now Cloud-API resources (api.hetzner.cloud/v1,
+    # Bearer), so a single project Read&Write token covers both capabilities.
+    # The field is kinds:[vps,dns] — shown on both the dns_config and
+    # vps_config forms; same_provider_for_vps mirrors the single cred to the
+    # VPS flow.
+    fields:
+      - { id: api-token, type: secret, label_key: provisioning.hetzner.api_token, required: true, kinds: [vps, dns] }
+    post_verify_select:
+      id:        location-select
+      label_key: provisioning.hetzner.location
+      source:    regions
+      required:  true
+    pricing_source:
+      endpoint: /v1/server_types   # fetched from provider, not from fauna.social
+      price_path: prices[0].price_monthly.gross
+      currency: EUR
+    # Shared x86 (Intel) line: Hetzner retired the cx2x generation
+    # (cx22/cx32/cx42 — 422 "server type is deprecated" on create) in favor of
+    # cx2x+1 (cx23/cx33/cx43), identical specs. Dedicated ccx13/ccx23 remain
+    # current. Verify against GET /v1/server_types (deprecation == null) when
+    # bumping. cx23 = 2 vCPU / 4 GB (the entry tier the onboarding e2e uses).
+    curated_offers:
+      - cx23
+      - cx33
+      - cx43
+      - ccx13
+      - ccx23
+
+  namecheap:
+    display_name_key: provisioning.namecheap.name
+    help_key:         provisioning.namecheap.help
+    signup_url:       https://www.namecheap.com/myaccount/signup/
+    capabilities:     [dns, registrar]
+    cors_policy:      proxy
+    dispatch:         NamecheapDns
+    registrar_dispatch: NamecheapRegistrar
+    # Namecheap requires WHOIS contacts per registration (Registrant, Tech,
+    # Admin and AuxBilling — the wizard submits its single contact four
+    # times), unlike Porkbun's account-level model. UI renders the contact
+    # form; no `registrar_notes_key` needed.
+    registrar_requires_contact: true
+    fields:
+      - { id: api-user, type: text,   label_key: provisioning.namecheap.api_user, required: true }
+      - { id: api-key,  type: secret, label_key: provisioning.namecheap.api_key,  required: true }
+    post_verify_select:
+      id:        domain-select
+      label_key: provisioning.namecheap.domain
+      source:    zones
+      required:  true
+    pricing_source: null
+
+  gandi:
+    display_name_key: provisioning.gandi.name
+    help_key:         provisioning.gandi.help
+    signup_url:       https://id.gandi.net/sign-up
+    capabilities:     [dns, registrar]
+    cors_policy:      proxy
+    dispatch:         GandiDns
+    registrar_dispatch: GandiRegistrar
+    # Gandi accepts per-registration WHOIS contacts (unlike Porkbun's
+    # account-level model). UI renders the contact form on the registrar
+    # path; no `registrar_notes_key` needed.
+    registrar_requires_contact: true
+    fields:
+      - { id: personal-access-token, type: secret, label_key: provisioning.gandi.personal_access_token, required: true }
+    post_verify_select:
+      id:        domain-select
+      label_key: provisioning.gandi.domain
+      source:    zones
+      required:  true
+    pricing_source: null
+
+  digitalocean:
+    display_name_key: provisioning.digitalocean.name
+    help_key:         provisioning.digitalocean.help
+    signup_url:       https://cloud.digitalocean.com/registrations/new
+    capabilities:     [vps]
+    cors_policy:      open
+    dispatch:         DigitaloceanVps
+    fields:
+      - { id: api-token, type: secret, label_key: provisioning.digitalocean.api_token, required: true }
+    post_verify_select:
+      id:        location-select
+      label_key: provisioning.digitalocean.location
+      source:    regions
+      required:  true
+    pricing_source: null
+    curated_offers:
+      - s-1vcpu-1gb
+      - s-1vcpu-2gb
+      - s-2vcpu-2gb
+      - s-2vcpu-4gb
+      - s-4vcpu-8gb
+
+  vultr:
+    display_name_key: provisioning.vultr.name
+    help_key:         provisioning.vultr.help
+    signup_url:       https://www.vultr.com/register/
+    capabilities:     [vps]
+    cors_policy:      proxy
+    dispatch:         VultrVps
+    fields:
+      - { id: api-key, type: secret, label_key: provisioning.vultr.api_key, required: true }
+    post_verify_select:
+      id:        location-select
+      label_key: provisioning.vultr.location
+      source:    regions
+      required:  true
+    pricing_source: null
+    curated_offers:
+      - vc2-1c-1gb
+      - vc2-1c-2gb
+      - vc2-2c-4gb
+      - vhf-1c-2gb
+      - vhf-2c-4gb
+
+  ovh:
+    display_name_key: provisioning.ovh.name
+    help_key:         provisioning.ovh.help
+    signup_url:       https://www.ovhcloud.com/en/auth/signup/
+    capabilities:     [vps]
+    cors_policy:      open
+    dispatch:         OvhVps
+    fields:
+      - { id: app-key,      type: secret, label_key: provisioning.ovh.app_key,      required: true }
+      - { id: app-secret,   type: secret, label_key: provisioning.ovh.app_secret,   required: true }
+      - { id: consumer-key, type: secret, label_key: provisioning.ovh.consumer_key, required: true }
+    post_verify_select:
+      id:        project-select
+      label_key: provisioning.ovh.project
+      source:    projects
+      required:  true
+    pricing_source: null
+
+  linode:
+    display_name_key: provisioning.linode.name
+    help_key:         provisioning.linode.help
+    signup_url:       https://login.linode.com/signup
+    capabilities:     [vps]
+    cors_policy:      open
+    dispatch:         LinodeVps
+    fields:
+      - { id: api-token, type: secret, label_key: provisioning.linode.api_token, required: true }
+    post_verify_select:
+      id:        location-select
+      label_key: provisioning.linode.location
+      source:    regions
+      required:  true
+    pricing_source: null
+    curated_offers:
+      - g6-nanode-1
+      - g6-standard-1
+      - g6-standard-2
+      - g6-standard-4
+      - g6-dedicated-2
+
+  # The generic BUNDLED provider — one independent company as registrar + DNS
+  # + VPS, speaking the open Fauna Bundled Provider API v1
+  # (docs/goal/architecture/provisioning/bundled-provider-api.md; the
+  # registry-side shape is registry.md § Bundled provider). One entry, one
+  # adapter: any company implementing the spec plugs in with zero Rust
+  # changes — the user types the address it gave them into `base-url`. A
+  # curated intermediary, should one ever be admitted (spec § Neutrality),
+  # is a second entry on the same Bundled* dispatch with a fixed base URL.
+  bundled:
+    display_name_key: provisioning.bundled.name
+    help_key:         provisioning.bundled.help
+    # The entry's "website" IS the open spec (the hosted-auth button is the
+    # real "go there" affordance). signup_url stays a required key.
+    signup_url:       https://github.com/faunasocial/fauna/blob/main/docs/goal/architecture/provisioning/bundled-provider-api.md
+    capabilities:     [dns, vps, registrar]
+    # A spec REQUIREMENT (bundled-provider-api.md § CORS), not an audit
+    # observation: every conformant implementation serves permissive CORS,
+    # so web needs no proxy.fauna.social hop for it.
+    cors_policy:      open
+    dispatch:         BundledVps
+    dns_dispatch:     BundledDns
+    registrar_dispatch: BundledRegistrar
+    # The registrant is the USER, never the intermediary (spec § Exit) — the
+    # wizard collects the WHOIS contact.
+    registrar_requires_contact: true
+    fields:
+      - { id: base-url,  type: text,        label_key: provisioning.bundled.base_url, required: true }
+      # `hosted-auth`: the value is the Bearer token the spec's device-
+      # authorization flow yields (RFC 8628) against the sibling `base-url`;
+      # the app renders a button, never an input (onboarding.md § 4).
+      - { id: api-token, type: hosted-auth, label_key: provisioning.bundled.account,  required: true }
+    post_verify_select:
+      id:        location-select
+      label_key: provisioning.bundled.location
+      source:    regions
+      required:  true
+    pricing_source:
+      endpoint: /v1/server_types   # relative to the user's base-url
+      price_path: price_monthly_cents
+    # `*` = the provider curates SERVER-SIDE: its GET /v1/server_types is
+    # already the ordered offer list, so the adapter ignores curated_ids and
+    # shows the first five. Non-empty on purpose — the app-side "offered for
+    # VPS purchase iff curated_offers is non-empty" filter is unchanged.
+    curated_offers:
+      - "*"
+    # No static endpoint: the spec's unauthenticated GET /v1/pricing/tlds is
+    # served through the adapter once the base-url is known.
+    tld_pricing_endpoint: null
+
+# ---------------------------------------------------------------------------
+# Mode-to-capability mapping — drives which providers are offered per step.
+# ---------------------------------------------------------------------------
+modes:
+  own:
+    # User has a domain. Pick DNS + VPS.
+    steps:
+      - { step: dns_config,    require_capability: dns }
+      - { step: server_config, require_capability: vps }
+  managed:
+    # Placeholder for future managed-subdomain broker. Disabled today; the
+    # UI renders a "coming soon" state. Keep the mode so clients don't
+    # fork behavior.
+    disabled: true
+    disabled_reason_key: provisioning.managed.disabled
+  byo:
+    # User runs fauna-nest themselves via Docker. No provider pickers.
+    steps: []
+  purchase:
+    # User buys domain AND VPS. New mode enabled by this plan.
+    steps:
+      - { step: registrar,     require_capability: registrar }
+      - { step: server_config, require_capability: vps }
+
+# ---------------------------------------------------------------------------
+# Field type enum — minimal on purpose.
+# ---------------------------------------------------------------------------
+field_types:
+  text:   { description: "Plain single-line input" }
+  secret: { description: "Password-style input; never logged" }
+  select: { description: "Static dropdown (options inlined on the field)" }
+  # A button, not an input: the wizard runs the provider's hosted sign-in
+  # (RFC 8628 device-authorization flow against the sibling `base-url`
+  # field's address — bundled-provider-api.md § Authentication) and the
+  # resulting Bearer token becomes the field's value. An app that has not
+  # built the button renders the field as `secret` instead (a token pasted
+  # from the provider's dashboard is equally valid) — onboarding.md § 4.
+  hosted-auth: { description: "Hosted sign-in button; value = the token the device-authorization flow yields; never typed" }
