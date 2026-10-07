@@ -28,10 +28,13 @@ def _unique(prefix: str) -> str:
 
 
 def _require_built(app, element_id: str) -> None:
-    # tui leads (built 2026-09-26), macOS and iOS lifted through FaunaKit,
-    # windows and android off the same UniFFI helper; web and linux paint the
-    # copy as unlabelled chrome until their trickle-down lift.
-    if app_name(app.driver) not in ("tui", "macos", "ios", "windows", "android"):
+    # Built on all 7 apps: tui led (2026-09-26), macOS and iOS lifted through
+    # FaunaKit, windows and android off the UniFFI helper, linux off the Rust
+    # method and web off the wasm snapshot's derived `empty_state`. The gate
+    # stays for an app this checkout has not built.
+    if app_name(app.driver) not in (
+        "tui", "macos", "ios", "windows", "android", "linux", "web",
+    ):
         skip_unbuilt(
             app.driver,
             surface=element_id,

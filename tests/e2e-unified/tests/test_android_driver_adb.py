@@ -140,6 +140,8 @@ def bridge_posts(monkeypatch):
     monkeypatch.setattr(AndroidBridgeDriver, "_wait_for_health", lambda self, timeout=30: None)
     monkeypatch.setattr(AndroidBridgeDriver, "_post", record)
     monkeypatch.setattr(AndroidBridgeDriver, "_delete", lambda self, path: None)
+    # `launch()` takes the app-log byte floor over the bridge before `/session`.
+    monkeypatch.setattr(AndroidBridgeDriver, "_get", lambda self, path, params=None: {"files": []})
     return posts
 
 
@@ -475,3 +477,71 @@ def test_write_reauth_verdict_none_posts_null_to_remove_the_file(bridge_posts):
     # an explicit null — the remove instruction — not as a dropped key.
     _driver().write_reauth_verdict(None)
     assert [(p, b) for p, b, _ in bridge_posts] == [("/reauth-result", {"verdict": None})]
+
+
+# ── The app-log reader: the shared `fauna_log` files over the bridge, from a floor ──
+def _log_bridge(monkeypatch, files):
+    """A bridge answering `/app-log` (listing) and `/app-log-file` (bytes from `from`)."""
+
+    def fake_get(self, path, params=None):
+        assert path == "/app-log"
+        return {"files": [{"name": n, "size": len(b)} for n, b in files.items()]}
+
+    def fake_bytes(self, path, params=None):
+        assert path == "/app-log-file"
+        return files[params["name"]][params["from"]:]
+
+    monkeypatch.setattr(AndroidBridgeDriver, "_get", fake_get)
+    monkeypatch.setattr(AndroidBridgeDriver, "_get_bytes", fake_bytes)
+
+
+def test_app_log_text_returns_only_bytes_past_the_launch_floor(monkeypatch):
+    # filesDir survives relaunch and `adb install -r`, so the file already holds a
+    # PREVIOUS launch's lines; the control must not be satisfiable by that ghost.
+    files = {"fauna.log.2026-10-06": b"old mls-sync: ghost\n"}
+    _log_bridge(monkeypatch, files)
+    driver = AndroidBridgeDriver()
+    driver._mark_log_baseline()
+    files["fauna.log.2026-10-06"] += b"new line\n"
+    assert driver.app_log_text() == "new line\n"
+    assert driver.app_stderr_text() == "new line\n"
+
+
+def test_app_log_text_reads_a_file_born_after_the_floor_whole(monkeypatch):
+    files = {}
+    _log_bridge(monkeypatch, files)
+    driver = AndroidBridgeDriver()
+    driver._mark_log_baseline()
+    files["fauna.log.2026-10-07"] = b"rolled over\n"
+    assert driver.app_log_text() == "rolled over\n"
+
+
+def test_app_log_text_is_none_when_there_is_nothing_since_launch(monkeypatch):
+    # `None` is the deliberate "<empty>" answer `app_log_section` renders.
+    _log_bridge(monkeypatch, {"fauna.log.2026-10-06": b"before\n"})
+    driver = AndroidBridgeDriver()
+    driver._mark_log_baseline()
+    assert driver.app_log_text() is None
+    assert driver.app_stderr_text() == ""
+
+
+def test_app_log_text_is_none_when_the_bridge_is_gone(monkeypatch):
+    def dead(self, path, params=None):
+        raise ConnectionError("bridge down")
+
+    monkeypatch.setattr(AndroidBridgeDriver, "_get", dead)
+    assert AndroidBridgeDriver().app_log_text() is None
+
+
+def test_launch_takes_the_log_floor_before_the_session_post(monkeypatch, bridge_posts, fake_adb):
+    # The floor is only sound taken BEFORE `/session` starts the app: every byte
+    # counted belongs to a previous launch, with no race against the live app.
+    gets = []
+
+    def listing(self, path, params=None):
+        gets.append((path, len(bridge_posts)))
+        return {"files": []}
+
+    monkeypatch.setattr(AndroidBridgeDriver, "_get", listing)
+    _driver().launch(_config())
+    assert ("/app-log", 0) in gets, "the floor must be read while no /session POST has landed"

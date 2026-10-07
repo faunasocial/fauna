@@ -13,7 +13,7 @@ use fauna_client_carddav::{
     bridge_routing::{ListAddressbooksRequest, QueryCardsRequest},
     vcard_row,
 };
-use fauna_client_config::dav_store_context;
+use fauna_client_config::{DavStoreContext, dav_store_context};
 use fauna_client_conversations::{ConversationsClient, NestImipDispatch};
 use fauna_client_recovery::linked_fanout::native::NativeLinkedNestDial;
 use fauna_core::identity::{ActorId, ActorKeypair};
@@ -1098,7 +1098,7 @@ impl FaunaClient {
         let tx = self.tx.clone();
         let secret_hex = self.secret_hex.clone();
         self.spawn_bg(async move {
-            let Some((actor_id, msek)) = caldav_context(&nest, &secret_hex).await else {
+            let Some(DavStoreContext { actor_id, msek, prior_mseks }) = caldav_context(&nest, &secret_hex).await else {
                 tx.send(UiMessage::Data(DataMessage::CalendarsLoaded {
                     calendars: vec![],
                 }));
@@ -1163,7 +1163,7 @@ impl FaunaClient {
             // an msek mismatch — would otherwise just vanish from the list.
             // Derived once for the whole list — every row's metadata reuses it
             // instead of paying its own X-Wing keygen .
-            let dav_keys = DavRecipientKeys::derive(&msek);
+            let dav_keys = DavRecipientKeys::from_mseks(&msek, &prior_mseks);
             let calendars: Vec<_> = entries
                 .iter()
                 .filter_map(
@@ -1196,7 +1196,9 @@ impl FaunaClient {
         let secret_hex = self.secret_hex.clone();
         let name = name.to_string();
         self.spawn_bg(async move {
-            let Some((actor_id, msek)) = caldav_context(&nest, &secret_hex).await else {
+            let Some(DavStoreContext { actor_id, msek, .. }) =
+                caldav_context(&nest, &secret_hex).await
+            else {
                 tx.send(UiMessage::Action(ActionResult::Failed {
                     context: "calendar_created".into(),
                     error: crate::i18n::strings::errors::CALENDAR_REQUIRES_MAIL.into(),
@@ -1264,7 +1266,12 @@ impl FaunaClient {
             let Some(cal_id) = hex32(&cal_hex) else {
                 return;
             };
-            let Some((actor_id, msek)) = caldav_context(&nest, &secret_hex).await else {
+            let Some(DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            }) = caldav_context(&nest, &secret_hex).await
+            else {
                 tx.send(UiMessage::Data(DataMessage::EventsLoaded {
                     calendar_id: cal_hex.clone(),
                     events: vec![],
@@ -1317,6 +1324,7 @@ impl FaunaClient {
                 &actor_id,
                 &cal_id,
                 &msek,
+                &prior_mseks,
                 &sync_tokens,
             )
             .await
@@ -1354,7 +1362,12 @@ impl FaunaClient {
         let tx = self.tx.clone();
         let secret_hex = self.secret_hex.clone();
         self.spawn_bg(async move {
-            let Some((actor_id, msek)) = caldav_context(&nest, &secret_hex).await else {
+            let Some(DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            }) = caldav_context(&nest, &secret_hex).await
+            else {
                 tx.send(UiMessage::Data(DataMessage::AddressbooksLoaded {
                     addressbooks: vec![],
                 }));
@@ -1366,7 +1379,7 @@ impl FaunaClient {
                     ListAddressbooksRequest {
                         actor_id: actor_id.to_vec(),
                     },
-                    &DavRecipientKeys::derive(&msek),
+                    &DavRecipientKeys::from_mseks(&msek, &prior_mseks),
                 )
                 .await
             {
@@ -1400,7 +1413,12 @@ impl FaunaClient {
             let Some(book_id) = hex32(&book_hex) else {
                 return;
             };
-            let Some((actor_id, msek)) = caldav_context(&nest, &secret_hex).await else {
+            let Some(DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            }) = caldav_context(&nest, &secret_hex).await
+            else {
                 tx.send(UiMessage::Data(DataMessage::CardsLoaded {
                     addressbook_id: book_hex.clone(),
                     cards: vec![],
@@ -1417,7 +1435,7 @@ impl FaunaClient {
                         after_card_id: None,
                         limit: 0,
                     },
-                    &DavRecipientKeys::derive(&msek),
+                    &DavRecipientKeys::from_mseks(&msek, &prior_mseks),
                 )
                 .await
             {
@@ -1469,7 +1487,12 @@ impl FaunaClient {
                 }));
                 return;
             };
-            let Some((actor_id, msek)) = caldav_context(&nest, &secret_hex).await else {
+            let Some(DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            }) = caldav_context(&nest, &secret_hex).await
+            else {
                 tx.send(UiMessage::Data(DataMessage::CardLocated {
                     addressbooks: vec![],
                     open: None,
@@ -1478,7 +1501,7 @@ impl FaunaClient {
             };
             let client = CardDavClient::new(nest);
             let located = match client
-                .locate_card_by_uid_hash(actor_id.to_vec(), &msek, &uid_hash)
+                .locate_card_by_uid_hash(actor_id.to_vec(), &msek, &prior_mseks, &uid_hash)
                 .await
             {
                 Ok(l) => l,
@@ -1532,7 +1555,9 @@ impl FaunaClient {
                 }));
                 return;
             };
-            let Some((actor_id, msek)) = caldav_context(&nest, &secret_hex).await else {
+            let Some(DavStoreContext { actor_id, msek, .. }) =
+                caldav_context(&nest, &secret_hex).await
+            else {
                 tx.send(UiMessage::Action(ActionResult::Failed {
                     context: "event_created".into(),
                     error: crate::i18n::strings::errors::CALENDAR_REQUIRES_MAIL.into(),
@@ -1581,7 +1606,8 @@ impl FaunaClient {
             let (Some(cal_id), Some(uh)) = (hex32(&cal_hex), hex32(&uid_hex)) else {
                 return;
             };
-            let Some((actor_id, _msek)) = caldav_context(&nest, &secret_hex).await else {
+            let Some(DavStoreContext { actor_id, .. }) = caldav_context(&nest, &secret_hex).await
+            else {
                 return;
             };
             let client = CalDavClient::new(nest);
@@ -1630,20 +1656,26 @@ impl FaunaClient {
             let (Some(cal_id), Some(_uh)) = (hex32(&cal_hex), hex32(&uid_hex)) else {
                 return;
             };
-            let Some((actor_id, msek)) = caldav_context(&nest, &secret_hex).await else {
+            let Some(DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            }) = caldav_context(&nest, &secret_hex).await
+            else {
                 return;
             };
             let client = CalDavClient::new(Arc::clone(&nest));
-            let decoded = match query_events_in(&client, &actor_id, &cal_id, &msek).await {
-                Ok(events) => events,
-                Err(e) => {
-                    tx.send(UiMessage::Action(ActionResult::Failed {
-                        context: "fauna.bridges.query_events".into(),
-                        error: e,
-                    }));
-                    return;
-                }
-            };
+            let decoded =
+                match query_events_in(&client, &actor_id, &cal_id, &msek, &prior_mseks).await {
+                    Ok(events) => events,
+                    Err(e) => {
+                        tx.send(UiMessage::Action(ActionResult::Failed {
+                            context: "fauna.bridges.query_events".into(),
+                            error: e,
+                        }));
+                        return;
+                    }
+                };
             let Some(target) = decoded
                 .iter()
                 .find(|d| fauna_core::format::hex_full(&d.uid_hash) == uid_hex)
@@ -1745,7 +1777,12 @@ impl FaunaClient {
             let Some(cal_id) = hex32(&cal_hex) else {
                 return;
             };
-            let Some((actor_id, msek)) = caldav_context(&nest, &secret_hex).await else {
+            let Some(DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            }) = caldav_context(&nest, &secret_hex).await
+            else {
                 tx.send(UiMessage::Action(ActionResult::Failed {
                     context: "event_invited".into(),
                     error: crate::i18n::strings::errors::CALENDAR_REQUIRES_MAIL.into(),
@@ -1753,7 +1790,9 @@ impl FaunaClient {
                 return;
             };
             let client = CalDavClient::new(Arc::clone(&nest));
-            let Ok(events) = query_events_in(&client, &actor_id, &cal_id, &msek).await else {
+            let Ok(events) =
+                query_events_in(&client, &actor_id, &cal_id, &msek, &prior_mseks).await
+            else {
                 tx.send(UiMessage::Action(ActionResult::Failed {
                     context: "event_invited".into(),
                     error: crate::i18n::strings::errors::EVENT_LOAD_FOR_INVITE_FAILED.into(),
@@ -1922,11 +1961,18 @@ impl FaunaClient {
             let Some(cal_id) = hex32(&cal_hex) else {
                 return;
             };
-            let Some((actor_id, msek)) = caldav_context(&nest, &secret_hex).await else {
+            let Some(DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            }) = caldav_context(&nest, &secret_hex).await
+            else {
                 return;
             };
             let client = CalDavClient::new(nest);
-            let Ok(decoded) = query_events_in(&client, &actor_id, &cal_id, &msek).await else {
+            let Ok(decoded) =
+                query_events_in(&client, &actor_id, &cal_id, &msek, &prior_mseks).await
+            else {
                 return;
             };
             let attendees = decoded
@@ -1958,7 +2004,12 @@ impl FaunaClient {
             let Some(cal_id) = hex32(&cal_hex) else {
                 return;
             };
-            let Some((actor_id, msek)) = caldav_context(&nest, &secret_hex).await else {
+            let Some(DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            }) = caldav_context(&nest, &secret_hex).await
+            else {
                 tx.send(UiMessage::Action(ActionResult::Failed {
                     context: "ics_export".into(),
                     error: crate::i18n::strings::errors::CALENDAR_REQUIRES_MAIL.into(),
@@ -1967,7 +2018,11 @@ impl FaunaClient {
             };
             let client = CalDavClient::new(nest);
             let ics = match client
-                .export_calendar_ics(&actor_id, &cal_id, &DavRecipientKeys::derive(&msek))
+                .export_calendar_ics(
+                    &actor_id,
+                    &cal_id,
+                    &DavRecipientKeys::from_mseks(&msek, &prior_mseks),
+                )
                 .await
             {
                 Ok(ics) => ics,
@@ -2006,7 +2061,9 @@ impl FaunaClient {
             let Some(cal_id) = hex32(&cal_hex) else {
                 return;
             };
-            let Some((actor_id, msek)) = caldav_context(&nest, &secret_hex).await else {
+            let Some(DavStoreContext { actor_id, msek, .. }) =
+                caldav_context(&nest, &secret_hex).await
+            else {
                 tx.send(UiMessage::Action(ActionResult::Failed {
                     context: "ics_import".into(),
                     error: crate::i18n::strings::errors::CALENDAR_REQUIRES_MAIL.into(),
@@ -6752,11 +6809,18 @@ impl FaunaClient {
             let Some(cal_id) = hex32(&cal_hex) else {
                 return;
             };
-            let Some((actor_id, msek)) = caldav_context(&nest, &secret_hex).await else {
+            let Some(DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            }) = caldav_context(&nest, &secret_hex).await
+            else {
                 return;
             };
             let client = CalDavClient::new(nest);
-            let Ok(decoded) = query_events_in(&client, &actor_id, &cal_id, &msek).await else {
+            let Ok(decoded) =
+                query_events_in(&client, &actor_id, &cal_id, &msek, &prior_mseks).await
+            else {
                 return;
             };
             let offset = decoded
@@ -6807,11 +6871,18 @@ impl FaunaClient {
             let Some(cal_id) = hex32(&cal_hex) else {
                 return;
             };
-            let Some((actor_id, msek)) = caldav_context(&nest, &secret_hex).await else {
+            let Some(DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            }) = caldav_context(&nest, &secret_hex).await
+            else {
                 return;
             };
             let client = CalDavClient::new(nest);
-            let Ok(decoded) = query_events_in(&client, &actor_id, &cal_id, &msek).await else {
+            let Ok(decoded) =
+                query_events_in(&client, &actor_id, &cal_id, &msek, &prior_mseks).await
+            else {
                 return;
             };
             let Some(target) = decoded
@@ -8748,7 +8819,7 @@ fn attendee_rows(attendees: &[AttendeeInfo]) -> Vec<caldav_backend::CalDavAttend
 /// [`fauna_client_config::dav_store_context`] (also tui's `caldav_context` and
 /// the FFI face's `dav_store_context`) — this seam supplies only what the linux
 /// shell knows: the actor keypair rebuilt from the connection secret.
-async fn caldav_context(nest: &Arc<NestClient>, secret_hex: &str) -> Option<([u8; 32], [u8; 32])> {
+async fn caldav_context(nest: &Arc<NestClient>, secret_hex: &str) -> Option<DavStoreContext> {
     let _ = nest;
     let actor_id = secret_to_keypair(secret_hex).ok()?.actor_id().0;
     dav_store_context(crate::account_runtime::mail_store().as_ref(), actor_id).await
@@ -8762,6 +8833,7 @@ async fn query_events_in(
     actor_id: &[u8; 32],
     calendar_id: &[u8; 32],
     msek: &[u8; 32],
+    prior_mseks: &[[u8; 32]],
 ) -> Result<Vec<fauna_client_caldav::DecodedEvent>, String> {
     let page = client
         .query_events_decoded(
@@ -8772,7 +8844,7 @@ async fn query_events_in(
                 after_event_id: None,
                 limit: 0,
             },
-            &DavRecipientKeys::derive(msek),
+            &DavRecipientKeys::from_mseks(msek, prior_mseks),
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -8797,6 +8869,7 @@ async fn query_events_in_seeded(
     actor_id: &[u8; 32],
     calendar_id: &[u8; 32],
     msek: &[u8; 32],
+    prior_mseks: &[[u8; 32]],
     sync_tokens: &Arc<std::sync::Mutex<CalendarSyncTokens>>,
 ) -> Result<Vec<fauna_client_caldav::DecodedEvent>, String> {
     let page = client
@@ -8808,7 +8881,7 @@ async fn query_events_in_seeded(
                 after_event_id: None,
                 limit: 0,
             },
-            &DavRecipientKeys::derive(msek),
+            &DavRecipientKeys::from_mseks(msek, prior_mseks),
         )
         .await
         .map_err(|e| e.to_string())?;

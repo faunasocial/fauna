@@ -56,6 +56,7 @@ pub use backup_enroll::{
     deregister_backup_destination, detach_folder_from_destination, enroll_backup_destination,
     enroll_client_custodian, keep_backup_destination_at_rest, list_folder_destinations,
     read_backup_status, reconcile_backup_enrollment, reenroll_custodian_after_reseed,
+    reenroll_nest_destination_after_reseed,
 };
 pub use backup_store::{
     BackupWriteError, load_backup_state, load_backup_state_refiled, mutate_backup,
@@ -67,7 +68,7 @@ pub use custody_leg::{
     rotate_deployment_seed_on_plane, run_deployment_seed_custody_leg,
     run_deployment_seed_custody_leg_over, run_linked_deployment_seed_custody_leg,
 };
-pub use dav_context::dav_store_context;
+pub use dav_context::{DavStoreContext, dav_store_context};
 /// One muted keyword — term and weight — re-exported beside the page record
 /// that carries it.
 pub use fauna_core::data::MutedKeyword;
@@ -81,9 +82,9 @@ pub use member_reviews::{
     MemberReviewRaise, decide_member_review, load_member_reviews, raise_succession_member_reviews,
 };
 pub use mutate::{
-    add_backup_destination, attach_backup_destination_folder, detach_backup_destination_folder,
-    edit_backup_destination, keep_backup_destination, normalize_muted_keywords,
-    remove_backup_destination,
+    FolderCoverageLabel, add_backup_destination, attach_backup_destination_folder,
+    detach_backup_destination_folder, edit_backup_destination, keep_backup_destination,
+    normalize_muted_keywords, remove_backup_destination,
 };
 pub use muted_words::MutedWordsSnapshot;
 pub use nostr_npub_confirm::{npub_confirmation_owed, npub_confirmation_owed_for};

@@ -1,4 +1,4 @@
-//! The **DAV-store context chokepoint** — `(actor_id, msek)`, the two inputs
+//! The **DAV-store context chokepoint** — `(actor_id, msek, prior_mseks)`, the inputs
 //! every encrypted CalDAV/CardDAV op needs (both surfaces read/write the SAME
 //! MSEK-keyed store, priority #2 — one msek gate, not two copies).
 //!
@@ -16,9 +16,33 @@
 //! The MSEK is read from the account's mail custody (`fauna.state.mail`,
 //! through [`MailStore`]).
 
+use zeroize::Zeroizing;
+
 use crate::store_seam::MailStore;
 
-/// `(actor_id, msek)` for an encrypted CalDAV/CardDAV op, or `None` when
+/// The inputs every encrypted CalDAV/CardDAV op needs: the actor, the current
+/// MSEK generation (what a write seals to) and the custody's prior generations,
+/// newest first (with `msek`, what a read opens through —
+/// `DavRecipientKeys::from_mseks(&msek, &prior_mseks)`; `mail-credentials.md`
+/// § Rotation and recovery → *DAV bodies across a rotation*, ruling 1: reads
+/// walk the ring, writes seal to the current generation alone).
+#[derive(PartialEq, Eq)]
+pub struct DavStoreContext {
+    pub actor_id: [u8; 32],
+    pub msek: [u8; 32],
+    pub prior_mseks: Zeroizing<Vec<[u8; 32]>>,
+}
+
+impl core::fmt::Debug for DavStoreContext {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DavStoreContext")
+            .field("actor_id", &self.actor_id)
+            .field("prior_generations", &self.prior_mseks.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// The [`DavStoreContext`] for an encrypted CalDAV/CardDAV op, or `None` when
 /// mail/CalDAV-CardDAV is not enabled yet (no MSEK minted —
 /// `MailSettingsMachine::enable_mail`) or the custody read failed. A read
 /// failure logs and degrades the same way as the legitimate disabled state
@@ -27,7 +51,7 @@ use crate::store_seam::MailStore;
 pub async fn dav_store_context(
     mail: &dyn MailStore,
     actor_id: [u8; 32],
-) -> Option<([u8; 32], [u8; 32])> {
+) -> Option<DavStoreContext> {
     let mail = match mail.load().await {
         Ok(mail) => mail,
         Err(e) => {
@@ -35,7 +59,11 @@ pub async fn dav_store_context(
             return None;
         }
     };
-    Some((actor_id, mail.msek?.to_array()))
+    Some(DavStoreContext {
+        actor_id,
+        msek: mail.msek?.to_array(),
+        prior_mseks: Zeroizing::new(mail.prior_mseks.iter().map(|m| m.to_array()).collect()),
+    })
 }
 
 #[cfg(test)]
@@ -62,9 +90,33 @@ mod tests {
             msek: Some([0x99; 32].into()),
             ..MailConfig::default()
         });
-        let (actor_id, msek) = block_on(dav_store_context(&mail, [8; 32])).expect("context");
+        let DavStoreContext {
+            actor_id,
+            msek,
+            prior_mseks,
+        } = block_on(dav_store_context(&mail, [8; 32])).expect("context");
         assert_eq!(actor_id, [8; 32]);
         assert_eq!(msek, [0x99; 32]);
+        assert!(
+            prior_mseks.is_empty(),
+            "a never-rotated custody has no grace generations"
+        );
+    }
+
+    /// After a rotation the context carries the custody's prior generations,
+    /// newest first — the ring's inputs, without which every DAV body written
+    /// before the rotation fails to open (`mail-credentials.md` § Rotation and
+    /// recovery → *DAV bodies across a rotation*, ruling 1).
+    #[test]
+    fn a_rotated_custody_carries_its_prior_generations() {
+        let mail = FakeMailStore::with(&MailConfig {
+            msek: Some([0x99; 32].into()),
+            prior_mseks: vec![[0x88; 32].into(), [0x77; 32].into()],
+            ..MailConfig::default()
+        });
+        let ctx = block_on(dav_store_context(&mail, [8; 32])).expect("context");
+        assert_eq!(ctx.msek, [0x99; 32]);
+        assert_eq!(*ctx.prior_mseks, vec![[0x88; 32], [0x77; 32]]);
     }
 
     /// A custody the runtime cannot read degrades to `None`, like the

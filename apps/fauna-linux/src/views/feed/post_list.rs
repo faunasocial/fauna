@@ -25,8 +25,8 @@ use fauna_core::render::{AuthoringOriginStatus, VerificationStatus};
 #[cfg(feature = "payments")]
 use fauna_feed::TipView;
 use fauna_feed::{
-    AttachedFile, FeedSnapshot, FeedStatus, PostSummary, SellComposeState, TrainVerb,
-    classify_sources,
+    AttachedFile, FeedEmptyState, FeedSnapshot, FeedStatus, PostSummary, SellComposeState,
+    TrainVerb, classify_sources,
 };
 
 /// The open detail's last-painted embed signature — see
@@ -277,6 +277,11 @@ pub struct PostListHandles {
     compose_file_remove: gtk::Button,
     /// Page-level error (`error-message`) ← `snapshot.error`.
     pub error_message_label: gtk::Label,
+    /// `feed-empty-state` / `feed-no-results` — the post list's placeholder,
+    /// at most one shown, ← `snapshot.empty_state()` (`feed.md` § Errors &
+    /// edge cases).
+    empty_state: adw::StatusPage,
+    no_results: adw::StatusPage,
     /// Previous render's `FeedStatus`, so `render_posts` can tell a
     /// `Loading → non-Loading` transition (a *fresh page*) from an
     /// embed-resolution re-emit (`resolve_media` / `resolve_quoted_post`, which
@@ -410,9 +415,23 @@ pub fn build_post_list_wired(
     post_list_box.add_css_class("boxed-list");
     crate::testid::set_test_id(&post_list_box, ids::FEED_VIEW);
 
-    let placeholder = adw::StatusPage::builder()
+    // The empty list's placeholder holds the feed's two empty states
+    // (`feed.md` § Errors & edge cases): `render_posts` shows at most one,
+    // off the shared `FeedSnapshot::empty_state`, and neither while a read is
+    // in flight — so an empty ListBox mid-load paints nothing.
+    let empty_state = adw::StatusPage::builder()
         .title(feed::list::NO_POSTS)
+        .visible(false)
         .build();
+    crate::testid::set_test_id(&empty_state, ids::FEED_EMPTY_STATE);
+    let no_results = adw::StatusPage::builder()
+        .title(feed::list::NO_MATCHING_POSTS)
+        .visible(false)
+        .build();
+    crate::testid::set_test_id(&no_results, ids::FEED_NO_RESULTS);
+    let placeholder = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    placeholder.append(&empty_state);
+    placeholder.append(&no_results);
     post_list_box.set_placeholder(Some(&placeholder));
 
     let scrolled = gtk::ScrolledWindow::builder()
@@ -552,6 +571,8 @@ pub fn build_post_list_wired(
         compose_file_ready,
         compose_file_remove,
         error_message_label,
+        empty_state,
+        no_results,
         prev_status: Cell::new(FeedStatus::default()),
         settled_selection: RefCell::new(None),
         open_detail_id,
@@ -604,6 +625,16 @@ pub fn render_posts(
         }
         None => handles.error_message_label.set_visible(false),
     }
+
+    // Empty state (`feed-empty-state` / `feed-no-results`) ← the shared
+    // decision, never `posts.is_empty()` or the search entry's own text.
+    let empty = snap.empty_state();
+    handles
+        .empty_state
+        .set_visible(empty == Some(FeedEmptyState::NoPosts));
+    handles
+        .no_results
+        .set_visible(empty == Some(FeedEmptyState::NoMatches));
 
     // Compose text/tags/audience ← snapshot (draft restore + cross-notify
     // sync; `ui/feed.md` § Persistence). Diff-guarded to avoid a spurious
@@ -679,10 +710,9 @@ pub fn render_posts(
     let fresh_page = prev_status == FeedStatus::Loading && snap.status != FeedStatus::Loading;
 
     // Rebuild rows from the snapshot's ordered, deduplicated list.
+    // Rows only: the placeholder holding the empty states must survive.
     let list = &handles.post_list_box;
-    while let Some(child) = list.first_child() {
-        list.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(list);
     for post in &snap.posts {
         list.append(&build_post_card(
             post,

@@ -113,6 +113,47 @@ impl From<FfiReportTarget> for ReportTarget {
     }
 }
 
+impl From<ReportTarget> for FfiReportTarget {
+    fn from(t: ReportTarget) -> Self {
+        FfiReportTarget {
+            subject: t.subject.into(),
+            sealed: t.sealed,
+            author: t.author,
+            plaintext: t.plaintext,
+        }
+    }
+}
+
+/// `ReportTarget::post` — a feed post; `gated` is the sealed rule's post arm
+/// (the post was opened through a key).
+#[uniffi::export]
+pub fn report_post_target(
+    cid: String,
+    author: String,
+    plaintext: String,
+    gated: bool,
+) -> FfiReportTarget {
+    ReportTarget::post(&cid, &author, &plaintext, gated).into()
+}
+
+/// `ReportTarget::actor` — the OTHER profile.
+#[uniffi::export]
+pub fn report_actor_target(actor_id: String) -> FfiReportTarget {
+    ReportTarget::actor(&actor_id).into()
+}
+
+/// `ReportTarget::message` — a conversation message off its plane ref; `None`
+/// for a mail or bridged message, which paints no report verb.
+#[uniffi::export]
+pub fn report_message_target(
+    plane_scope: String,
+    record_digest: String,
+    sender_actor: Option<String>,
+    plaintext: String,
+) -> Option<FfiReportTarget> {
+    ReportTarget::message(&plane_scope, &record_digest, sender_actor, &plaintext).map(Into::into)
+}
+
 /// The sheet's draft (`report::ReportForm`); `reason` is a wire token or
 /// `None` until one is picked.
 #[derive(uniffi::Record, Clone, Debug, Default, PartialEq, Eq)]
@@ -237,20 +278,53 @@ pub struct FfiReportQueueRow {
     pub origin: LocalizedText,
     /// Microsecond epoch.
     pub created_at: i64,
+    /// Whether `admin-nest-report-open-takedown-button` renders — posts and
+    /// messages only (`report::takedown_prefill`).
+    pub can_open_takedown: bool,
 }
 
 fn queue_row(entry: AbuseReportQueueEntry) -> FfiReportQueueRow {
-    let origin = report::queue_origin(&entry);
+    let view = report::queue_row_view(&entry);
     FfiReportQueueRow {
         report_id: entry.report_id,
         subject: entry.subject.into(),
         subject_actor: entry.subject_actor,
-        reason: report::reason_label(entry.reason),
-        note: entry.note,
-        excerpt: entry.excerpt,
-        origin,
+        reason: view.reason,
+        note: view.note,
+        excerpt: view.excerpt,
+        origin: view.origin,
         created_at: entry.created_at,
+        can_open_takedown: view.can_open_takedown,
     }
+}
+
+/// What *open takedown* pre-fills the legal-takedown console with.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiTakedownPrefill {
+    pub content_id: String,
+    /// `true` selects the conversation kind, else a post.
+    pub conversation: bool,
+}
+
+/// `report::takedown_prefill` — `None` for an account or an unknown subject.
+#[uniffi::export]
+pub fn report_takedown_prefill(subject: FfiReportSubject) -> Option<FfiTakedownPrefill> {
+    use fauna_client_moderation::takedown::TakedownContentType;
+    report::takedown_prefill(&subject.into()).map(|form| FfiTakedownPrefill {
+        content_id: form.content_id,
+        conversation: form.content_type == TakedownContentType::Conversation,
+    })
+}
+
+/// `report::message_subject` — the report subject for a conversation message
+/// from its plane ref (`plane_scope`, `record_digest`); `None` for a mail or
+/// bridged message, which paints no report verb.
+#[uniffi::export]
+pub fn report_message_subject(
+    plane_scope: String,
+    record_digest: String,
+) -> Option<FfiReportSubject> {
+    report::message_subject(&plane_scope, &record_digest).map(Into::into)
 }
 
 /// The sheet's per-keystroke fold.

@@ -27,8 +27,9 @@ actor's own act through the nest API — the seed, not the journey. Waits are
 named budgets over deadline polls (convention 14); every feed-exclusion assert
 rides a re-selected feed, the one reload a user can drive.
 
-App arm: **tui** (the lead app — ``testing.md`` § Default app and nest mode).
-The other six join their trickle-down by extending ``_BUILT_APPS``.
+App arm: **tui** (the lead app — ``testing.md`` § Default app and nest mode),
+then **web**. The other five join their trickle-down by extending
+``_BUILT_APPS`` and carrying their marker.
 """
 
 import time
@@ -42,9 +43,9 @@ from helpers.app_surface import app_name, skip_unbuilt
 from helpers.e2e_session import E2E_LOGIN_DEVICE_ID, login_as
 from helpers.mail_dedicated_nest import login_as_nest_admin
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui]
+pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.web]
 
-_BUILT_APPS = ("tui",)
+_BUILT_APPS = ("tui", "web")
 
 # The shared words every app renders (i18n `moderation.report.*`,
 # `notifications.row_abuse_report_*`, en.yaml).

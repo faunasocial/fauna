@@ -65,6 +65,25 @@ class PostAuthGlueVM @Inject constructor(
     }
 
     /**
+     * Register the RecoveryKey root the user confirmed on the sign-up
+     * `recovery_kit` page (`identity-succession.md` § The RecoveryKey →
+     * *Creation UX*) — THAT root, the one just written down, never a fresh one,
+     * over the shared `register_deferred_kit` ceremony tui, linux and web run
+     * at the same edge. No-op when the kit was skipped or never offered.
+     * Best-effort and log-only: the ceremony never errors on its own failure,
+     * and Settings' `recovery-kit-status` tells the truth (never-created, or
+     * registered-no-escrow).
+     */
+    suspend fun registerDeferredRecoveryKit() {
+        val kit = host.consumePendingRecoveryKit() ?: return
+        try {
+            api.registerDeferredRecoveryKit(kit)
+        } catch (e: Exception) {
+            ShellLog.w("RecoveryKitGlue", "registering the sign-up recovery kit failed: ${e.message}")
+        }
+    }
+
+    /**
      * Host-address acquisition glue (domains-and-tls-bootstrap.md § Host-address
      * acquisition). Fired at the universal post-auth hook, admin-gated — a
      * non-admin call is refused nest-side, so gating avoids a pointless failing

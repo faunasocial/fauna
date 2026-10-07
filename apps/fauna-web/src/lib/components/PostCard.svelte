@@ -111,6 +111,13 @@
      *  `block` always, a `collapse` until the viewer reveals it (the reveal runs
      *  `onrevealcontent`, the same session-local set as the family collapse). */
     regionPlaceholder?: RegionPlaceholderValue | null;
+    /** The viewer reported this post (or its author): the block notice names
+     *  that act — "You reported this", `source="reported"` — and no body paints
+     *  (`moderation.md` § Corollary). Only meaningful with `contentBlocked`. */
+    contentReported?: boolean;
+    /** `feed-post-report-button` in the ⋯ menu — gated `!isOwn`; the parent
+     *  opens the shared report sheet on this post. */
+    onreport?: (post_id: string) => void;
 
     // ── Own-post web-publishing verbs (web-content-hosting.md
     // § Published-post management; presence rules `ui/feed.md` § User
@@ -162,7 +169,18 @@
     contentCollapsed = false,
     onrevealcontent,
     regionPlaceholder = null,
+    contentReported = false,
+    onreport,
   }: Props = $props();
+
+  // The report verb: another's post only (`!is_own`).
+  const showReport = $derived(!!onreport && !isOwn);
+
+  function report(e: MouseEvent): void {
+    e.stopPropagation();
+    actionsOpen = false;
+    onreport?.(post.post_id);
+  }
 
   // The ⋯ overflow's open state is per-card (each card owns its own menu), and
   // the items live inside an `{#if}` — so a CLOSED menu has no items in the DOM
@@ -320,7 +338,11 @@
        never be revealed past the floor. `content-policy-blocked-notice` is the
        one ui.yaml ID this pillar renders (indexed, per post-card). -->
   <div class="content-policy-collapse">
-    <span class="muted" data-testid={IDS.CONTENT_POLICY_BLOCKED_NOTICE}>{t.family.content_blocked_notice}</span>
+    <span
+      class="muted"
+      data-testid={IDS.CONTENT_POLICY_BLOCKED_NOTICE}
+      data-source={contentReported ? 'reported' : undefined}
+    >{contentReported ? t.moderation.report.hidden_placeholder : t.family.content_blocked_notice}</span>
   </div>
 {:else if muted}
   <!-- Muted-keyword collapse. The body, media and author are NOT rendered — the
@@ -414,7 +436,7 @@
         onclick={(e) => { e.stopPropagation(); onbuyunlockoffer?.(post.post_id); }}
       >{t.feed.post.buy_button}</button>
     {/if}
-    {#if ontrain || showDelete || showWebPublish}
+    {#if ontrain || showDelete || showWebPublish || showReport}
       <!-- Per-card ⋯ overflow (the dm-message-actions-button precedent applied to
            posts). Hosts the trained-topic training verbs, own-post delete, and
            the own-post web-publishing verbs. -->
@@ -504,6 +526,13 @@
             </p>
           {/if}
         {/if}
+      {/if}
+      {#if showReport}
+        <button
+          class="menu-item"
+          data-testid={IDS.FEED_POST_REPORT_BUTTON}
+          onclick={report}
+        >{t.feed.report_post}</button>
       {/if}
       {#if showDelete}
         <!-- Destructive two-step, mirroring dm-message-delete-button /

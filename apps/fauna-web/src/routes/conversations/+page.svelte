@@ -22,6 +22,9 @@
   import { contentRender, hydrateContentPolicy } from '$lib/contentPolicy.svelte';
   import { registerRegionBlockCounter } from '$lib/region.svelte';
   import RegionPlaceholder from '$lib/components/RegionPlaceholder.svelte';
+  import ReportHost from '$lib/components/ReportHost.svelte';
+  import { reportMessageTarget, type ReportTarget } from '$lib/wasm';
+  import { actorHex } from '$lib/hex';
   import type { ContentRender, RegionPlaceholder as RegionPlaceholderValue } from '$lib/wasm';
   import { notifyBuffer } from '$lib/familyNotify';
   import {
@@ -384,13 +387,17 @@
       ? t.conversations.errors.mail_unopenable({ count: String($unopenableMailCount) })
       : null,
   );
+  // The shared report sheet (`report-sheet`), opened by `dm-message-report-button`;
+  // its failure line paints on the page's `error-message` through `displayError`.
+  let reportTarget = $state<ReportTarget | null>(null);
+  let reportError = $state('');
   let displayError = $derived(
     conversationsDisplayError({
       roleRefusal,
       receiveStopped,
       membershipError,
       sendFailure,
-      pageError,
+      pageError: pageError || reportError,
       unopenableMail,
     }),
   );
@@ -542,10 +549,41 @@
     return contentRender(msg.labels, {
       contentIdHex: msg.message_id,
       authorHex: null,
+      // The viewer's own reports key a message by its plane record digest and
+      // its sender's actor id (`moderation.md` § App surface), not `message_id`.
+      reportIdHex: msg.plane_ref?.record_digest ?? null,
+      reportAuthorHex: senderActorHex(msg.sender),
       text: msg.body ?? '',
       hashtags: [],
       hasMedia: false,
     });
+  }
+  // The sender's hex actor id for a Fauna-rail address (`{ Fauna: { actor_id } }`,
+  // the id as raw bytes), else null — mail and bridged senders have none.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function senderActorHex(sender: any): string | null {
+    const id = sender?.Fauna?.actor_id;
+    return id ? actorHex(id) : null;
+  }
+  // The report target for a message, or null when it has no plane identity
+  // (mail and bridged rails — nothing to report it against; no verb paints).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function msgReportTarget(msg: any): ReportTarget | null {
+    if (!msg.plane_ref) return null;
+    return reportMessageTarget(
+      msg.plane_ref.scope,
+      msg.plane_ref.record_digest,
+      senderActorHex(msg.sender),
+      msg.body ?? '',
+    );
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function openReport(msg: any): void {
+    const target = msgReportTarget(msg);
+    if (!target) return;
+    reportError = '';
+    closeMessageMenus();
+    reportTarget = target;
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function regionPlaceholderMsg(msg: any): RegionPlaceholderValue | null {
@@ -1109,6 +1147,7 @@
   <!-- ── detail pane ────────────────────────────────────────────── -->
   <section class="detail-pane">
     {#if displayError}<p data-testid={IDS.ERROR_MESSAGE} class="error">{displayError}</p>{/if}
+    <ReportHost bind:target={reportTarget} onerror={(m) => (reportError = m)} />
 
     {#if mode === 'empty'}
       <p class="muted hint">{t.conversations.list.select_conversation}</p>
@@ -1285,7 +1324,8 @@
           {@const showReactions = !!caps?.supports_reactions}
           {@const showDelete = !!caps?.supports_message_delete && !!msg.is_own}
           {@const showFlagSpam = !msg.is_own}
-          {@const showActions = showReactions || showDelete || showFlagSpam}
+          {@const showReport = !msg.is_own && msgReportTarget(msg) !== null}
+          {@const showActions = showReactions || showDelete || showFlagSpam || showReport}
           {#if msg.subject_line}
             <div data-testid={IDS.SUBJECT_DIVIDER} class="subject-divider">{msg.subject_line}</div>
           {/if}
@@ -1320,7 +1360,11 @@
                    § Content policy). Checked AHEAD of the muted arm (absolute) — the
                    twin of linux `message_bubble.rs`'s early-return; renders the one
                    ui.yaml ID this pillar surfaces on the bubble. -->
-              <div data-testid={IDS.CONTENT_POLICY_BLOCKED_NOTICE} class="message-deleted message-content-blocked">{t.family.content_blocked_notice}</div>
+              <div
+                data-testid={IDS.CONTENT_POLICY_BLOCKED_NOTICE}
+                data-source={msgRender(msg).reported ? 'reported' : undefined}
+                class="message-deleted message-content-blocked"
+              >{msgRender(msg).reported ? t.moderation.report.hidden_placeholder : t.family.content_blocked_notice}</div>
             {:else if isMuted(msg) && !revealedMuted.has(msg.message_id)}
               <!-- Muted-keyword collapse (moderation.md § Muted keywords;
                    content-moderation-and-ranking.md § Q3 — Option A, per-app,
@@ -1392,6 +1436,9 @@
                 {/if}
                 {#if showDelete}
                   <button data-testid={IDS.DM_MESSAGE_DELETE_BUTTON} class="delete-option" onclick={() => openDeleteConfirm(msg.message_id)}>{t.conversations.detail.delete_message}</button>
+                {/if}
+                {#if showReport}
+                  <button data-testid={IDS.DM_MESSAGE_REPORT_BUTTON} class="delete-option" onclick={() => openReport(msg)}>{t.conversations.detail.report_message}</button>
                 {/if}
                 {#if showFlagSpam}
                   <button data-testid={IDS.DM_MESSAGE_MARK_AS_SPAM_BUTTON} class="delete-option" onclick={() => markAsSpam(msg.message_id, msg.body, msg.subject_line)}>{t.conversations.detail.mark_as_spam}</button>

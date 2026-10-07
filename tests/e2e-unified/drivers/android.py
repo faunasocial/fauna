@@ -48,13 +48,70 @@ class AndroidBridgeDriver(HttpBridgeDriver):
     """Connects to the Kotlin bridge on an Android device via ADB port-forward."""
 
     def log_scope_across_relaunch(self) -> str:
-        """``"none"`` — this driver answers neither `app_log_text` nor `app_stderr_text` .
+        """``"per-launch"`` — the reader slices from a byte floor taken at launch.
 
-        See the base declaration for what each answer means and why it is
-        declared rather than inferred; pinned per driver by
-        `tests/test_module_relaunch.py`.
+        The app's `fauna_log` rolling files live in its `filesDir`, which survives
+        every relaunch and `adb install -r`, so the files are cumulative across
+        runs; `_mark_log_baseline()` records each file's size over the bridge
+        before `/session` starts the app, and `app_log_text` reads only past it
+        (the iOS shape). See the base declaration for what each answer means;
+        pinned per driver by `tests/test_module_relaunch.py`.
         """
-        return "none"
+        return "per-launch"
+
+    def _mark_log_baseline(self) -> None:
+        """Record how much log each file already holds, before the app starts.
+
+        Called after the bridge is healthy and before `/session` launches the
+        app — every byte counted here belongs to a PREVIOUS launch, with no race
+        against the live app.
+        """
+        self._log_baseline = {}
+        for entry in self._app_log_listing():
+            self._log_baseline[entry["name"]] = int(entry["size"])
+
+    def _app_log_listing(self) -> list[dict]:
+        """The bridge's flat listing of the app's log files (`GET /app-log`)."""
+        reply = self._get("/app-log")
+        files = reply.get("files") if isinstance(reply, dict) else None
+        if not isinstance(files, list):
+            raise RuntimeError(f"bridge GET /app-log answered without a files list: {reply!r}")
+        return files
+
+    def app_log_text(self) -> str | None:
+        """This launch's on-disk app log — the client's own account of itself,
+        attached to every failing test's report by `helpers/app_log_section.py`.
+
+        The android twin of `IosBridgeDriver.app_log_text`: the shared
+        `fauna_log` rolling files (`<filesDir>/logs/fauna.log.<date>`,
+        `FaunaApp.kt` → `installLogging`), fetched over the bridge because no
+        host path reaches the app's `filesDir`. **Not `adb logcat`:** the Rust
+        tracing output never reaches logcat (no logcat layer is installed), so a
+        logcat reader would return Kotlin `Log.*` noise and miss every
+        `mls-sync:` / `account runtime:` line the tests ask about.
+
+        `None` (no files, or bridge unreachable) is a deliberate answer: it makes
+        `app_log_section` emit its explicit `<empty>` section.
+        """
+        baseline = getattr(self, "_log_baseline", None) or {}
+        chunks = []
+        try:
+            listing = self._app_log_listing()
+            for entry in listing:
+                name = entry["name"]
+                data = self._get_bytes(
+                    "/app-log-file", {"name": name, "from": baseline.get(name, 0)}
+                )
+                text = data.decode("utf-8", errors="replace")
+                if text:
+                    chunks.append(text)
+        except Exception:  # noqa: BLE001 — a dead bridge at report time is "no log", not a second failure
+            return None
+        return "\n".join(chunks) if chunks else None
+
+    def app_stderr_text(self) -> str:
+        """This launch's on-disk app log, `""` if it has none yet (the cross-app contract)."""
+        return self.app_log_text() or ""
 
     def __init__(self):
         super().__init__()
@@ -262,6 +319,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         # Kept for `preserve_state_across_relaunch()`, which pins into it, and
         # for the relaunch a real `recover()` will run from it.
         self._launch_config = config
+        self._mark_log_baseline()
         self._post("/session", self._session_body(config))
 
     #: The `_launch_config` key `preserve_state_across_relaunch()` pins. android

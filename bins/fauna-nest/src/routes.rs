@@ -2678,6 +2678,23 @@ pub(crate) async fn run_connection(
                         Ok(fauna_protocol::Frame::Request(_))
                             if dispatch_conn.spared_until().is_some() => {}
                         Ok(fauna_protocol::Frame::Request(req)) => {
+                            // Admission: reserve this request's Reply slot
+                            // before anything else runs (`RpcConnection::
+                            // reply_slots`). A full queue parks the reader here
+                            // — the per-connection backpressure — but only for
+                            // as long as the connection itself lives.
+                            let Some(slot) = admit_reply_slot(
+                                &dispatch_conn,
+                                &mut dispatch_revoked,
+                                &mut dispatch_fatal,
+                                &mut dispatch_shutdown,
+                                liveness_deadline,
+                            )
+                            .await
+                            else {
+                                break;
+                            };
+                            dispatch_conn.hold_reply_slot(req.correlation_id, slot);
                             dispatch_request(
                                 Arc::clone(&dispatch_state),
                                 Arc::clone(&dispatch_conn),
@@ -2765,6 +2782,54 @@ fn frame_is_reply_for(payload: &bytes::Bytes, correlation_id: u64) -> bool {
         fauna_protocol::decode_frame(payload),
         Ok(fauna_protocol::Frame::Reply(r)) if r.correlation_id == correlation_id
     )
+}
+
+/// Reserve the outbound slot an admitted Request's Reply will go out through
+/// (`RpcConnection::reply_slots`), parking the reader while the queue is full.
+///
+/// Raced against everything that ends the connection, so a parked admission
+/// ends with it: a revocation, a committed fatal close, the shutdown signal,
+/// the writer going away, and the liveness deadline — the reader reads no
+/// frame while parked, so no Pong can re-arm it, and a queue that stays full
+/// for a whole liveness window is a peer that has stopped draining, which
+/// `transport.md` § Backpressure already rules dead. `None` = stop reading.
+async fn admit_reply_slot(
+    conn: &crate::ws::RpcConnection,
+    revoked: &mut tokio::sync::watch::Receiver<bool>,
+    fatal: &mut tokio::sync::watch::Receiver<Option<FatalCloseReason>>,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    liveness_deadline: tokio::time::Instant,
+) -> Option<tokio::sync::mpsc::OwnedPermit<bytes::Bytes>> {
+    let reserve = conn.reserve_reply_slot();
+    tokio::pin!(reserve);
+    loop {
+        tokio::select! {
+            biased;
+            changed = revoked.changed() => {
+                if changed.is_err() || *revoked.borrow() {
+                    return None;
+                }
+            }
+            changed = fatal.changed() => {
+                if changed.is_err() || fatal.borrow().is_some() {
+                    return None;
+                }
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return None;
+                }
+            }
+            slot = &mut reserve => return slot,
+            _ = tokio::time::sleep_until(liveness_deadline) => {
+                tracing::warn!(
+                    actor = %hex::encode(conn.actor_id),
+                    "outbound queue stayed full for the whole liveness window; closing dead link",
+                );
+                return None;
+            }
+        }
+    }
 }
 
 /// How long `run_connection` waits for the outbound task to emit its 4401 close
@@ -3282,18 +3347,12 @@ async fn send_error_reply(
     correlation_id: u64,
     err: fauna_protocol::RpcError,
 ) {
-    use fauna_protocol::{Frame, Reply, Value, encode_canonical, encode_frame};
-    let err_bytes = encode_canonical(&err).unwrap_or_default();
-    let payload: Value = fauna_cbor::decode_strict(&err_bytes).unwrap_or(Value::Null);
-    let frame = Frame::Reply(Reply {
-        ty: Reply::TYPE,
-        correlation_id,
-        payload,
-        ok: false,
-    });
-    if let Ok(bytes) = encode_frame(&frame) {
-        let _ = conn.ws_tx.try_send(bytes);
-    }
+    // The sink's own error emitter: the Reply goes out through the slot the
+    // reader reserved at admission, under the same fatal rule as every other
+    // Reply. (Until 2026-10-06 this site `try_send`ed and ignored a failure,
+    // so a gate refusal on a saturated queue simply vanished.)
+    use crate::dispatch_core::DispatchSink;
+    Arc::clone(conn).send_error(correlation_id, err).await;
 }
 
 async fn dispatch_cancel(conn: &Arc<crate::ws::RpcConnection>, cancel: fauna_protocol::Cancel) {

@@ -27,6 +27,10 @@ import {
   type BackupAuditAlertReason,
   type StaleSurfaces,
   type RegionPlaneHandle,
+  type ReportTarget,
+  type ReportForm,
+  type ReportLedgerRow,
+  type ReportQueueRow,
 } from './wasm';
 import { guardSingletonBuild } from './singleton-build';
 import { resetActorScopedState } from './actorScope';
@@ -2056,6 +2060,63 @@ export function moderationLegalTakedown(
         restore,
       ) as Promise<ModerationLegalTakedownReply>,
   );
+}
+
+// ── User-initiated reporting (`moderation.md` § User-initiated reporting) —
+// the five client calls and the reporter-side hide. The sheet's decisions are
+// `$lib/wasm`'s `reportSheetView` & co.; these only dispatch.
+
+/** `fauna.moderation.abuse_report.submit`, built from the sheet by the shared
+ *  `report_request` (a sheet the view would not let send rejects before
+ *  anything leaves). `block_author` is recorded only — the caller chains
+ *  `knocksBlock` and `hideReported` itself. */
+export function moderationAbuseReportSubmit(
+  secretHex: string,
+  target: ReportTarget,
+  form: ReportForm,
+): Promise<{
+  report_id: string;
+  routed_to: string[];
+  acknowledgement: import('$lib/i18n/localized').LocalizedText;
+}> {
+  return call(secretHex, (c) => c.moderationAbuseReportSubmit(target, form) as Promise<never>);
+}
+
+/** `fauna.moderation.abuse_report.mine` — the ledger, newest first, worded. */
+export function moderationAbuseReportMine(secretHex: string): Promise<ReportLedgerRow[]> {
+  return call(secretHex, (c) => c.moderationAbuseReportMine() as Promise<ReportLedgerRow[]>);
+}
+
+/** `fauna.moderation.abuse_report.withdraw` — errors reject for
+ *  `reportWithdrawVerdict` to word. */
+export function moderationAbuseReportWithdraw(secretHex: string, reportId: string): Promise<void> {
+  return call(secretHex, (c) => c.moderationAbuseReportWithdraw(reportId) as Promise<void>);
+}
+
+/** `fauna.moderation.abuse_report.queue` — the open reports, oldest first
+ *  (Admin-class). */
+export function adminAbuseReportQueue(secretHex: string): Promise<ReportQueueRow[]> {
+  return call(secretHex, (c) => c.adminAbuseReportQueue() as Promise<ReportQueueRow[]>);
+}
+
+/** `fauna.moderation.abuse_report.resolve` — a record, not an action; `acted`
+ *  false dismisses (Admin-class). */
+export function adminAbuseReportResolve(
+  secretHex: string,
+  reportId: string,
+  acted: boolean,
+): Promise<void> {
+  return call(secretHex, (c) => c.adminAbuseReportResolve(reportId, acted) as Promise<void>);
+}
+
+/** The ids the owner hid by reporting them (`moderation.md` § Corollary). */
+export function loadHiddenContent(secretHex: string): Promise<string[]> {
+  return call(secretHex, (c) => c.loadHiddenContent() as Promise<string[]>);
+}
+
+/** Hide a reported subject for the owner; resolves to the stored list. */
+export function hideReported(secretHex: string, id: string): Promise<string[]> {
+  return call(secretHex, (c) => c.hideReported(id) as Promise<string[]>);
 }
 
 // Tiers (definitions — shared with admin-settings; the tier pickers' options).

@@ -78,6 +78,8 @@ Stamped 2026-09-23 at 039e9619ca.
    - `tests/e2e-unified/tests/test_mail_settings_controls.py::test_a_refused_change_says_why_and_can_be_tried_again`
 25. [app] A mail app keeps sending month after month without you re-entering anything — `docs/goal/behavior/mail-credentials.md` § Architectural rules
    - (none)
+26. [app] After you rotate your mail keys, the calendars and events you made before still open — `docs/goal/behavior/mail-credentials.md` § Rotation and recovery
+   - `tests/e2e-unified/tests/test_mail_credentials.py::test_calendar_written_before_a_key_rotation_still_opens`
 
 ## Status
 
@@ -128,4 +130,5 @@ Stamped 2026-09-23 at 039e9619ca.
 | 23 | app | (none) | — |
 | 24 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_a_refused_change_says_why_and_can_be_tried_again` | tui (linux): passed |
 | 25 | app | (none) | — |
+| 26 | app | `tests/e2e-unified/tests/test_mail_credentials.py::test_calendar_written_before_a_key_rotation_still_opens` | linux (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

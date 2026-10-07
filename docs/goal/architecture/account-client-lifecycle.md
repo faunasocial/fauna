@@ -257,10 +257,16 @@ bridge yet"). Six rulings:
   owns the nudge contract). No app hand-wires the arm, and the nest stays
   kind-blind (§ The `__config` dissolution schedule, P6) → walk that scope;
   **(2)** the backstop ticker (rescan cadence, minutes —
-  correctness never depends on the nudge) → `reconcile` + `publish_pending`;
+  correctness never depends on the nudge) → `reconcile` + `publish_pending` (a full pass
+  also carries the capability reconcile sweep behind its fleet walk — owner
+  [`../ui/nests.md`](../ui/nests.md) § Trust facet — grants → *Reconcile*, ruled
+  2026-10-06, built 2026-10-06);
   **(3)** the reconnect watch
-  (`NestClient::subscribe_reconnects`) → `publish_pending` + walk, because
-  push `seq` resets on reconnect; **(4)** the local-write wake: a write
+  (`NestClient::subscribe_reconnects`) of the app session's client and,
+  when the data path rides the store principal's own client, of that client
+  too (`resolve_and_start` merges the two, so a data-client drop the session
+  never saw still re-walks within seconds, not at the backstop) →
+  `publish_pending` + walk, because push `seq` resets on reconnect; **(4)** the local-write wake: a write
   through the handle (`put_preference`, a read-marker raise, an
   observation, the devices page's removal legs, the custody, group and
   share door puts) is the **local write only** — the row is durable and
@@ -398,9 +404,10 @@ bridge yet"). Six rulings:
 - **Consumption: assembly is per-app glue of a few lines at the app's one
   post-auth hook; everything else is the shared runtime.** tui first (the
   lead app): `session::establish` assembles the runtime and attaches the
-  session's wake streams (`with_session_wakes` — the reconnect watch and
-  the push stream the runtime's own nudge arm reads; no app-side push arm
-  since 2026-09-25); linux mirrors it in `account_runtime.rs`;
+  session's wake streams (`with_session_wakes` — the session client's
+  reconnect watch and the push stream the runtime's own nudge arm reads; no
+  app-side push arm since 2026-09-25; the data client's reconnect watch is
+  the runtime's own, merged in `resolve_and_start`); linux mirrors it in `account_runtime.rs`;
   apple/windows/android reach the same runtime through a `fauna-ffi` factory
   in the batched trickle-down (the conversations-session factory shape); web
   as above. Teardown at sign-out **and** at plain quit — at W3 the pump is

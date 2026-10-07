@@ -69,6 +69,8 @@
   import { resolveLocalized } from '$lib/i18n/localized';
   import { onMount } from 'svelte';
   import MessageBanner from '$lib/components/MessageBanner.svelte';
+  import ReportHost from '$lib/components/ReportHost.svelte';
+  import { reportActorTarget, type ReportTarget } from '$lib/wasm';
   import ProviderSection from '$lib/components/payments/ProviderSection.svelte';
   import ClaimSection from '$lib/components/payments/ClaimSection.svelte';
   import AskingPriceInput from '$lib/components/payments/AskingPriceInput.svelte';
@@ -747,6 +749,17 @@
     }
   }
 
+  // `profile-report-button` — report this account to the nest admins
+  // (moderation.md § User-initiated reporting → App surface), beside block on
+  // an OTHER profile. Opens the shared report sheet; a report that also blocked
+  // the account flips the block label here too.
+  let reportTarget = $state<ReportTarget | null>(null);
+  function openReport(): void {
+    if (!viewedActorId || isSelf) return;
+    error = '';
+    reportTarget = reportActorTarget(viewedActorId);
+  }
+
   // `profile-request-contact-button` — the knock, over the contacts page's own
   // `sendKnock` (the profile is a caller of the contact-edge lifecycle, not a
   // second implementation), routed to the viewed profile's home nest. The reply
@@ -861,6 +874,10 @@
         class="btn danger" data-testid={IDS.PROFILE_BLOCK_BUTTON}
         onclick={toggleBlock} disabled={blockBusy}
       >{blockLabel}</button>
+      <button
+        class="btn danger" data-testid={IDS.PROFILE_REPORT_BUTTON}
+        onclick={openReport}
+      >{t.profile.report}</button>
       <button
         class="btn" data-testid={IDS.PROFILE_REQUEST_CONTACT_BUTTON}
         onclick={requestContact} disabled={knockBusy || knockAsk.knockSent}
@@ -995,6 +1012,11 @@
   </nav>
 
   <MessageBanner bind:error />
+  <ReportHost
+    bind:target={reportTarget}
+    onerror={(m) => (error = m)}
+    onblocked={(actor) => { if (actor === viewedActorId) isBlocked = true; }}
+  />
 
   <!-- ── Posts tab (content TBD — landmark only) ── -->
   <section hidden={activeTab !== 'posts'}>

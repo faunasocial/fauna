@@ -382,6 +382,8 @@ private fun OnboardingWizardNavHost(
         }
         composable("onboarding/identity-created") { IdentityCreatedScreen(navController) }
         composable("onboarding/identity-import") { IdentityImportScreen(navController) }
+        composable(RECOVERY_KIT_ROUTE) { RecoveryKitScreen(navController) }
+        composable(RECOVERY_ENTRY_ROUTE) { RecoveryEntryScreen(navController) }
         composable("onboarding/handle-entry") {
             HandleEntryScreen(navController, onWizardExit)
         }
@@ -657,6 +659,9 @@ fun FaunaNavHost(
         // onboarding.md § 3b-ter: mint the one-tap trust answer latched on
         // the trust_prompt page. No-op unless the user granted it.
         LaunchedEffect(Unit) { postAuthGlue.mintDefaultTrustSet() }
+        // identity-succession.md § The RecoveryKey → Creation UX: register the
+        // kit confirmed on the sign-up recovery_kit page. No-op if skipped.
+        LaunchedEffect(Unit) { postAuthGlue.registerDeferredRecoveryKit() }
         // box-recovery.md § The plane-era recovery floor, (c) The writes: the
         // deployment-seed custody leg at the post-auth edge, on every connect —
         // the only capture, so the nest's `nest_actor_id` survives total box

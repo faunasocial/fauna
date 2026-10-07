@@ -34,7 +34,7 @@ Stamped 2026-09-26 at dc54d3d61e.
 | App | Status | Stamp |
 |---|---|---|
 | web |  no run recorded | |
-| linux | ✅ full | 0.1.2-dev+d4125106 standalone |
+| linux | ✅ full | 0.1.2-dev+78e73031 standalone |
 | windows |  no run recorded | |
 | macos |  no run recorded | |
 | ios |  no run recorded | |

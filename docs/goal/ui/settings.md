@@ -1,7 +1,7 @@
 # Settings — target state
 
 Owns: settings, identity-export
-Status: partially-specified — § Navigation model + the rail set are ratified (2026-06-03 / 2026-06-28) and built on all seven apps; § Recovery kit is ratified (2026-08-01); the section is built on tui (2026-08-01/02), linux and web (2026-08-17), macOS and iOS (2026-08-21) and windows (2026-08-24), android to follow; § State & data shape / § Persistence remain TBD — resolved by the settings-snapshot design
+Status: partially-specified — § Navigation model + the rail set are ratified (2026-06-03 / 2026-06-28) and built on all seven apps; § Recovery kit is ratified (2026-08-01); the section is built on tui (2026-08-01/02), linux and web (2026-08-17), macOS and iOS (2026-08-21), windows (2026-08-24) and android (2026-10-06, its stolen-identity leg still to follow); § State & data shape / § Persistence remain TBD — resolved by the settings-snapshot design
 Authority: ui.yaml (`settings` page) owns element IDs + per-page element scope; this doc owns the Settings shell (rail set, sidebar-swap model, `settings-nav-back`, the two-element sub-page nav), the root-page behavior (account / quota / handle / sign-out / delete / data export / identity export / recovery kit / push), and the Rust/app split; the recovery kit's *surface placement and view state* only — the RecoveryKey itself, every ceremony behind these buttons, and the pending-replacement condition → [`../behavior/identity-succession.md`](../behavior/identity-succession.md); each rail sub-page's content → its own owner doc ([status.md](status.md), [devices.md](devices.md), [folders.md](folders.md), [mail-settings.md](mail-settings.md), [nests.md](nests.md), [nostr.md](nostr.md); settings-logs → [observability.md](../architecture/apps/observability.md); muted-words → [content-moderation-and-ranking.md](../architecture/content-moderation-and-ranking.md); task-delegation → [participants.md](../behavior/participants.md); subscriptions → [monetization.md](../behavior/monetization.md); web → [web-content-hosting.md](../behavior/web-content-hosting.md)); multi-account switcher behavior → [long-term-store.md](../architecture/long-term-store.md) § Multi-account evolution.
 
 ## Goal
@@ -886,8 +886,8 @@ press itself (swept → replaces the view + the handoff, no error; the other fou
 surface, view untouched) — no e2e coverage of the press/render half exists on any app today
 (measured against the fleet's own e2e coordination notes), so this pin is the only witness. The `*_no_retry` copy
 and the `SweepRetryAffordance` flag retire only when the **seventh** app renders the button, and
-today one of the seven still owes it — **android**, which renders no recovery-kit ceremony at
-all — so that retirement is gated behind android's own leg alone.
+today one of the seven still owes it — **android**, whose section (2026-10-06) does not yet run
+the stolen-identity ceremony the sweep follows — so that retirement is gated behind android's own leg alone.
 
 **Credential store — IDs approved 2026-08-06; tui is the first (and today only structurally
 eligible) implementer.** The section + change-passphrase modal are built on tui behind the

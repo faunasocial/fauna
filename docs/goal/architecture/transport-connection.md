@@ -79,7 +79,10 @@ Close codes (custom in WebSocket private range 4000–4999):
 `RpcConnection` carries a `fatal_tx` watch holding a `FatalCloseReason`
 (`ProtocolViolation` → 4400, `ReplyOverflow` → 1011); the inbound dispatch loop
 sets it on a Reply/Push-from-client, a text frame, or an undecodable frame, the
-three Reply-carriage sites set it when the bounded outbound channel is full, and
+shared Reply carriage (`RpcConnection::emit_reply`) sets it when a Reply with no
+reserved slot meets a full outbound channel (a Reply holds its slot from
+admission, so a draining connection never does — `transport.md`
+§ Backpressure), and
 `routes::close_fatal` turns it into the frame. It rides beside — never merged
 into — the existing `revoked_tx`, which outranks it in the send task's `biased;`
 order: revocation is an authority control, a fault is not.

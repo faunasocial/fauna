@@ -257,6 +257,22 @@ impl MailcalKeyRing {
         Ok(ring)
     }
 
+    /// The current generation, then one grace generation per prior MSEK — the
+    /// ring a client builds from its own mail custody (`MailConfig.prior_mseks`,
+    /// newest first), with no snapshot in hand.
+    ///
+    /// It opens exactly what [`from_msek_and_snapshot`](Self::from_msek_and_snapshot)
+    /// opens: each snapshot grace entry is this same derivation of a prior
+    /// MSEK. The caller caps `prior_mseks` to the grace window, as it does for
+    /// the standing keys and epoch roots it derives beside this ring.
+    pub fn from_msek_and_priors(msek: &[u8; 32], prior_mseks: &[[u8; 32]]) -> Self {
+        let mut ring = Self::from_msek(msek);
+        ring.keys.extend(prior_mseks.iter().map(|prior| {
+            IndexSegmentKey::from_bytes(*fauna_mls::wrapped_blob::derive_index_segment_key(prior))
+        }));
+        ring
+    }
+
     /// The key every writer seals under (see the type docs).
     pub fn current(&self) -> &IndexSegmentKey {
         self.keys
@@ -1306,6 +1322,43 @@ mod tests {
         let ring =
             MailcalKeyRing::from_msek_and_snapshot(&NOW, &snapshot_with_grace(&[])).expect("ring");
         assert_eq!(ring.len(), 1);
+    }
+
+    /// The client leg's ring, built from its own mail custody's MSEK history
+    /// rather than a snapshot, opens exactly what the snapshot ring opens: the
+    /// grace key a snapshot carries is the derivation of the prior MSEK the
+    /// custody holds. Without it, a user who rotates their mail keys loses
+    /// their own local mail/calendar search — the manifest sealed before the
+    /// rotation no longer opens and the builder never resumes.
+    #[test]
+    fn the_custody_ring_opens_a_prior_generations_manifest_like_the_snapshot_ring() {
+        let manifest = IndexManifest::empty(
+            fauna_index::KindClass::MailCal,
+            fauna_index::TOKENIZER_PIPELINE_VERSION,
+        );
+        let prior_key = IndexSegmentKey::from_bytes(*derive_index_segment_key(&PRIOR));
+        let sealed = manifest.to_sealed_bytes_mailcal(&prior_key).expect("seal");
+
+        let ring = MailcalKeyRing::from_msek_and_priors(&NOW, &[PRIOR]);
+        assert_eq!(ring.len(), 2, "current + one grace generation");
+        ring.open_manifest(&sealed)
+            .expect("the prior MSEK's key opens the pre-rotation manifest");
+        assert_eq!(
+            ring.open_segment(&seal_under(&PRIOR, b"one back"))
+                .expect("and its segments"),
+            b"one back"
+        );
+        // Writes stay on the current generation, as for every ring.
+        assert_eq!(
+            MailcalKeyRing::from_msek(&NOW)
+                .open_segment(
+                    &fauna_index::seal_segment_bytes_mailcal(b"fresh", ring.current())
+                        .expect("seal")
+                )
+                .expect("current-only ring opens it"),
+            b"fresh"
+        );
+        assert_eq!(MailcalKeyRing::from_msek_and_priors(&NOW, &[]).len(), 1);
     }
 
     /// The manifest twin walks the same ring — proven separately because it

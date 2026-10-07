@@ -135,7 +135,9 @@ fun IdentityCreatedScreen(
             Button(
                 onClick = {
                     vm.confirm()
-                    navController.navigate("onboarding/handle-entry")
+                    // The machine decides: the recovery-kit offer (android
+                    // declares setRendersRecoveryKit), else handle entry.
+                    navController.navigate(routeForStep(vm.host.machine.step()))
                 },
                 modifier = Modifier.testTag(Ids.IDENTITY_CONTINUE_BUTTON),
             ) { Text(stringResource(R.string.onboarding_identity_created_continue)) }

@@ -2847,6 +2847,64 @@ mod tests {
             );
         }
 
+        /// A covered-folder mirror's custody path survives the boot scrub
+        /// beside its sealed name, while an ordinary set's custody row still
+        /// scrubs. On a reserved (`__`) backup set the path is the source row's
+        /// `path_hash`, hex-spelled — a routing key the nest-held pull-back
+        /// addresses the row by, and nothing can re-derive it from the row's
+        /// own one-way `path_hash` (`segment-backup-protocol.md` § *The
+        /// nest-held pull-back*).
+        #[tokio::test]
+        async fn scrub_keeps_a_reserved_backup_sets_custody_path_beside_its_seal() {
+            let db = CacheDb::open_in_memory().unwrap();
+            let actor = [9u8; 32];
+            let mirror = db.create_folder("mirror", &actor).await.unwrap();
+            let ordinary = db.create_folder("vault", &actor).await.unwrap();
+            let leaf = "ab".repeat(32);
+            {
+                let conn = db.conn().await;
+                conn.execute(
+                    "UPDATE folders SET name = '__folder/aa/7', custody_copy = 1 WHERE id = ?1",
+                    rusqlite::params![mirror],
+                )
+                .unwrap();
+                for (folder, path) in [(mirror, leaf.as_str()), (ordinary, "vault/deed.tiff")] {
+                    conn.execute(
+                        "INSERT INTO backup_custody (uploader_actor, folder_id, path_hash,
+                                size_bytes, updated_at, path, path_sealed)
+                         VALUES (?1, ?2, ?3, 1, 1, ?4, x'5E')",
+                        rusqlite::params![
+                            &actor[..],
+                            folder,
+                            &fauna_core::sync::path_hash(path)[..],
+                            path
+                        ],
+                    )
+                    .unwrap();
+                }
+            }
+
+            db.scrub_plaintext_where_sealed().await.unwrap();
+
+            let conn = db.conn().await;
+            assert_eq!(
+                text_at(
+                    &conn,
+                    &format!("SELECT path FROM backup_custody WHERE folder_id = {mirror}")
+                ),
+                Some(leaf),
+                "a reserved backup set keeps the leaf the pull-back addresses by"
+            );
+            assert_eq!(
+                text_at(
+                    &conn,
+                    &format!("SELECT path FROM backup_custody WHERE folder_id = {ordinary}")
+                ),
+                None,
+                "an ordinary set's custody path still scrubs beside its seal"
+            );
+        }
+
         /// A folder whose paths rest plaintext BY DESIGN (a `public` audience)
         /// keeps its plaintext `path` on
         /// both path planes even where an over-sealing writer rested a seal

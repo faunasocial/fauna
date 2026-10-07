@@ -29,7 +29,7 @@ use fauna_client_carddav::{
     CardDavClient, DavRecipientKeys, DecodedCardsPage,
     bridge_routing::{ListAddressbooksRequest, QueryCardsRequest},
 };
-use fauna_client_config::dav_store_context;
+use fauna_client_config::{DavStoreContext, dav_store_context};
 use fauna_core::identity::ActorKeypair;
 use fauna_i18n::strings::contacts as t;
 
@@ -71,7 +71,7 @@ fn book_label(b: &AddressbookRow) -> String {
 async fn carddav_context(
     mail: &dyn fauna_client_config::MailStore,
     secret: [u8; 32],
-) -> Option<([u8; 32], [u8; 32])> {
+) -> Option<DavStoreContext> {
     dav_store_context(mail, ActorKeypair::from_secret(secret).actor_id().0).await
 }
 
@@ -85,10 +85,15 @@ pub async fn load_addressbooks(
     secret: [u8; 32],
     mail: Arc<dyn fauna_client_config::MailStore>,
 ) -> Result<Vec<AddressbookRow>, String> {
-    let Some((actor_id, msek)) = carddav_context(mail.as_ref(), secret).await else {
+    let Some(DavStoreContext {
+        actor_id,
+        msek,
+        prior_mseks,
+    }) = carddav_context(mail.as_ref(), secret).await
+    else {
         return Ok(Vec::new());
     };
-    let keys = DavRecipientKeys::derive(&msek);
+    let keys = DavRecipientKeys::from_mseks(&msek, &prior_mseks);
     let books = CardDavClient::new(nest)
         .list_addressbooks_decoded(
             ListAddressbooksRequest {
@@ -119,10 +124,15 @@ pub async fn load_cards(
     // `fauna.bridges.query_cards`.
     let addressbook_id =
         fauna_core::hex32::decode(&book_id).map_err(|e| format!("address book id: {e}"))?;
-    let Some((actor_id, msek)) = carddav_context(mail.as_ref(), secret).await else {
+    let Some(DavStoreContext {
+        actor_id,
+        msek,
+        prior_mseks,
+    }) = carddav_context(mail.as_ref(), secret).await
+    else {
         return Ok(Vec::new());
     };
-    let keys = DavRecipientKeys::derive(&msek);
+    let keys = DavRecipientKeys::from_mseks(&msek, &prior_mseks);
     let page = CardDavClient::new(nest)
         .query_cards_decoded(
             QueryCardsRequest {
@@ -182,11 +192,16 @@ pub async fn locate_card(
     // hex) `uid_hash` must never reach `locate_card_by_uid_hash`.
     let uid_hash =
         fauna_core::hex32::decode(uid_hash_hex).map_err(|e| format!("contact id: {e}"))?;
-    let Some((actor_id, msek)) = carddav_context(mail.as_ref(), secret).await else {
+    let Some(DavStoreContext {
+        actor_id,
+        msek,
+        prior_mseks,
+    }) = carddav_context(mail.as_ref(), secret).await
+    else {
         return Ok(LocatedCard::default());
     };
     let located = CardDavClient::new(nest)
-        .locate_card_by_uid_hash(actor_id.to_vec(), &msek, &uid_hash)
+        .locate_card_by_uid_hash(actor_id.to_vec(), &msek, &prior_mseks, &uid_hash)
         .await
         .map_err(|e| e.to_string())?;
     Ok(LocatedCard {

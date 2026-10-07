@@ -52,7 +52,7 @@ use fauna_client_caldav::{
     project_attendee_rsvp, seal_calendar_metadata, set_reminder, uid_hash,
     unseal_calendar_metadata,
 };
-use fauna_client_config::dav_store_context;
+use fauna_client_config::{DavStoreContext, dav_store_context};
 use fauna_client_conversations::NestImipDispatch;
 use fauna_client_email::EmailClient;
 use fauna_conversations::ConversationsSession;
@@ -1261,7 +1261,11 @@ impl Op {
                 mail,
                 name,
             } => {
-                let Some((actor_id, msek)) = caldav_context(mail.as_ref(), &secret_hex).await
+                let Some(DavStoreContext {
+                    actor_id,
+                    msek,
+                    prior_mseks,
+                }) = caldav_context(mail.as_ref(), &secret_hex).await
                 else {
                     return Outcome::Failed(errors::CALENDAR_REQUIRES_MAIL.to_string());
                 };
@@ -1290,7 +1294,7 @@ impl Op {
                 {
                     return Outcome::Failed(format!("provision_calendar: {e}"));
                 }
-                match list_calendars_rows(&nest, &actor_id, &msek).await {
+                match list_calendars_rows(&nest, &actor_id, &msek, &prior_mseks).await {
                     Ok(rows) => Outcome::CalendarCreated(rows),
                     Err(e) => Outcome::Failed(e),
                 }
@@ -1312,7 +1316,11 @@ impl Op {
                     account_store.as_ref(),
                 )
                 .await;
-                let Some((actor_id, msek)) = caldav_context(mail.as_ref(), &secret_hex).await
+                let Some(DavStoreContext {
+                    actor_id,
+                    msek,
+                    prior_mseks,
+                }) = caldav_context(mail.as_ref(), &secret_hex).await
                 else {
                     return Outcome::CalendarsAndEventsLoaded {
                         calendars: vec![],
@@ -1321,14 +1329,22 @@ impl Op {
                         query_gen,
                     };
                 };
-                let calendars = match list_calendars_rows(&nest, &actor_id, &msek).await {
-                    Ok(rows) => rows,
-                    Err(e) => return Outcome::Failed(e),
-                };
+                let calendars =
+                    match list_calendars_rows(&nest, &actor_id, &msek, &prior_mseks).await {
+                        Ok(rows) => rows,
+                        Err(e) => return Outcome::Failed(e),
+                    };
                 let mut events = Vec::new();
                 for cal in calendars_in_scope(&calendars, &selected_calendar) {
-                    match fetch_events_rows(&nest, &actor_id, &cal.id, &msek, &organizer_email)
-                        .await
+                    match fetch_events_rows(
+                        &nest,
+                        &actor_id,
+                        &cal.id,
+                        &msek,
+                        &prior_mseks,
+                        &organizer_email,
+                    )
+                    .await
                     {
                         Ok(rows) => events.extend(rows),
                         Err(e) => return Outcome::Failed(e),
@@ -1356,7 +1372,11 @@ impl Op {
                     Ok(text) => text,
                     Err(e) => return Outcome::Failed(format!("{path}: {e}")),
                 };
-                let Some((actor_id, msek)) = caldav_context(mail.as_ref(), &secret_hex).await
+                let Some(DavStoreContext {
+                    actor_id,
+                    msek,
+                    prior_mseks,
+                }) = caldav_context(mail.as_ref(), &secret_hex).await
                 else {
                     return Outcome::Failed(errors::CALENDAR_REQUIRES_MAIL.to_string());
                 };
@@ -1371,8 +1391,15 @@ impl Op {
                         |_| format!("{}@fauna-tui", uuid::Uuid::new_v4()),
                     )
                     .await;
-                match fetch_events_rows(&nest, &actor_id, &calendar_id, &msek, &organizer_email)
-                    .await
+                match fetch_events_rows(
+                    &nest,
+                    &actor_id,
+                    &calendar_id,
+                    &msek,
+                    &prior_mseks,
+                    &organizer_email,
+                )
+                .await
                 {
                     Ok(events) => Outcome::IcsImported {
                         calendar_id,
@@ -1392,12 +1419,20 @@ impl Op {
                 let Some(cal_id) = hex32(&calendar_id) else {
                     return Outcome::Failed(et::SELECT_CALENDAR.to_string());
                 };
-                let Some((actor_id, msek)) = caldav_context(mail.as_ref(), &secret_hex).await
+                let Some(DavStoreContext {
+                    actor_id,
+                    msek,
+                    prior_mseks,
+                }) = caldav_context(mail.as_ref(), &secret_hex).await
                 else {
                     return Outcome::Failed(errors::CALENDAR_REQUIRES_MAIL.to_string());
                 };
                 let ics = match CalDavClient::new(Arc::clone(&nest))
-                    .export_calendar_ics(&actor_id, &cal_id, &DavRecipientKeys::derive(&msek))
+                    .export_calendar_ics(
+                        &actor_id,
+                        &cal_id,
+                        &DavRecipientKeys::from_mseks(&msek, &prior_mseks),
+                    )
                     .await
                 {
                     Ok(ics) => ics,
@@ -1436,7 +1471,11 @@ impl Op {
                 organizer_email,
                 query_gen,
             } => {
-                let Some((actor_id, msek)) = caldav_context(mail.as_ref(), &secret_hex).await
+                let Some(DavStoreContext {
+                    actor_id,
+                    msek,
+                    prior_mseks,
+                }) = caldav_context(mail.as_ref(), &secret_hex).await
                 else {
                     return Outcome::EventsLoaded {
                         calendar_id,
@@ -1444,8 +1483,15 @@ impl Op {
                         query_gen,
                     };
                 };
-                match fetch_events_rows(&nest, &actor_id, &calendar_id, &msek, &organizer_email)
-                    .await
+                match fetch_events_rows(
+                    &nest,
+                    &actor_id,
+                    &calendar_id,
+                    &msek,
+                    &prior_mseks,
+                    &organizer_email,
+                )
+                .await
                 {
                     Ok(events) => Outcome::EventsLoaded {
                         calendar_id,
@@ -1470,7 +1516,11 @@ impl Op {
                 let Some(cal_id) = hex32(&calendar_id) else {
                     return Outcome::Failed(et::SELECT_CALENDAR.to_string());
                 };
-                let Some((actor_id, msek)) = caldav_context(mail.as_ref(), &secret_hex).await
+                let Some(DavStoreContext {
+                    actor_id,
+                    msek,
+                    prior_mseks,
+                }) = caldav_context(mail.as_ref(), &secret_hex).await
                 else {
                     return Outcome::Failed(errors::CALENDAR_REQUIRES_MAIL.to_string());
                 };
@@ -1507,8 +1557,15 @@ impl Op {
                 {
                     return Outcome::Failed(format!("put_event_ciphertext: {e}"));
                 }
-                match fetch_events_rows(&nest, &actor_id, &calendar_id, &msek, &organizer_email)
-                    .await
+                match fetch_events_rows(
+                    &nest,
+                    &actor_id,
+                    &calendar_id,
+                    &msek,
+                    &prior_mseks,
+                    &organizer_email,
+                )
+                .await
                 {
                     Ok(events) => Outcome::EventCreated {
                         calendar_id,
@@ -1528,7 +1585,11 @@ impl Op {
                 let (Some(cal_id), Some(uh)) = (hex32(&calendar_id), hex32(&uid_hash_hex)) else {
                     return Outcome::Failed(et::SELECT_CALENDAR.to_string());
                 };
-                let Some((actor_id, msek)) = caldav_context(mail.as_ref(), &secret_hex).await
+                let Some(DavStoreContext {
+                    actor_id,
+                    msek,
+                    prior_mseks,
+                }) = caldav_context(mail.as_ref(), &secret_hex).await
                 else {
                     return Outcome::Failed(errors::CALENDAR_REQUIRES_MAIL.to_string());
                 };
@@ -1544,8 +1605,15 @@ impl Op {
                 {
                     return Outcome::Failed(format!("delete_event: {e}"));
                 }
-                match fetch_events_rows(&nest, &actor_id, &calendar_id, &msek, &organizer_email)
-                    .await
+                match fetch_events_rows(
+                    &nest,
+                    &actor_id,
+                    &calendar_id,
+                    &msek,
+                    &prior_mseks,
+                    &organizer_email,
+                )
+                .await
                 {
                     Ok(events) => Outcome::EventDeleted {
                         calendar_id,
@@ -1563,17 +1631,27 @@ impl Op {
                 organizer_email,
                 response,
             } => {
-                let Some((actor_id, msek)) = caldav_context(mail.as_ref(), &secret_hex).await
+                let Some(DavStoreContext {
+                    actor_id,
+                    msek,
+                    prior_mseks,
+                }) = caldav_context(mail.as_ref(), &secret_hex).await
                 else {
                     return Outcome::Failed(errors::CALENDAR_REQUIRES_MAIL.to_string());
                 };
-                let target =
-                    match fetch_decoded_event(&nest, &actor_id, &calendar_id, &msek, &uid_hash_hex)
-                        .await
-                    {
-                        Ok(d) => d,
-                        Err(e) => return Outcome::Failed(e),
-                    };
+                let target = match fetch_decoded_event(
+                    &nest,
+                    &actor_id,
+                    &calendar_id,
+                    &msek,
+                    &prior_mseks,
+                    &uid_hash_hex,
+                )
+                .await
+                {
+                    Ok(d) => d,
+                    Err(e) => return Outcome::Failed(e),
+                };
                 let rw = match apply_rsvp(
                     &target.ics,
                     target.fauna_ext.as_ref(),
@@ -1594,8 +1672,15 @@ impl Op {
                         .send(reply.recipients, reply.raw_rfc5322)
                         .await;
                 }
-                match fetch_events_rows(&nest, &actor_id, &calendar_id, &msek, &organizer_email)
-                    .await
+                match fetch_events_rows(
+                    &nest,
+                    &actor_id,
+                    &calendar_id,
+                    &msek,
+                    &prior_mseks,
+                    &organizer_email,
+                )
+                .await
                 {
                     Ok(events) => Outcome::EventMutated {
                         calendar_id,
@@ -1614,17 +1699,27 @@ impl Op {
                 organizer_email,
                 offset,
             } => {
-                let Some((actor_id, msek)) = caldav_context(mail.as_ref(), &secret_hex).await
+                let Some(DavStoreContext {
+                    actor_id,
+                    msek,
+                    prior_mseks,
+                }) = caldav_context(mail.as_ref(), &secret_hex).await
                 else {
                     return Outcome::Failed(errors::CALENDAR_REQUIRES_MAIL.to_string());
                 };
-                let target =
-                    match fetch_decoded_event(&nest, &actor_id, &calendar_id, &msek, &uid_hash_hex)
-                        .await
-                    {
-                        Ok(d) => d,
-                        Err(e) => return Outcome::Failed(e),
-                    };
+                let target = match fetch_decoded_event(
+                    &nest,
+                    &actor_id,
+                    &calendar_id,
+                    &msek,
+                    &prior_mseks,
+                    &uid_hash_hex,
+                )
+                .await
+                {
+                    Ok(d) => d,
+                    Err(e) => return Outcome::Failed(e),
+                };
                 let rw = match set_reminder(&target.ics, target.fauna_ext.as_ref(), &offset) {
                     Ok(rw) => rw,
                     Err(e) => return Outcome::Failed(e),
@@ -1632,8 +1727,15 @@ impl Op {
                 if let Err(e) = put_rewrite(&nest, &actor_id, &calendar_id, &msek, &rw).await {
                     return Outcome::Failed(e);
                 }
-                match fetch_events_rows(&nest, &actor_id, &calendar_id, &msek, &organizer_email)
-                    .await
+                match fetch_events_rows(
+                    &nest,
+                    &actor_id,
+                    &calendar_id,
+                    &msek,
+                    &prior_mseks,
+                    &organizer_email,
+                )
+                .await
                 {
                     Ok(events) => Outcome::EventMutated {
                         calendar_id,
@@ -1653,17 +1755,27 @@ impl Op {
                 attendee_email,
                 real_session,
             } => {
-                let Some((actor_id, msek)) = caldav_context(mail.as_ref(), &secret_hex).await
+                let Some(DavStoreContext {
+                    actor_id,
+                    msek,
+                    prior_mseks,
+                }) = caldav_context(mail.as_ref(), &secret_hex).await
                 else {
                     return Outcome::Failed(errors::CALENDAR_REQUIRES_MAIL.to_string());
                 };
-                let target =
-                    match fetch_decoded_event(&nest, &actor_id, &calendar_id, &msek, &uid_hash_hex)
-                        .await
-                    {
-                        Ok(d) => d,
-                        Err(e) => return Outcome::Failed(e),
-                    };
+                let target = match fetch_decoded_event(
+                    &nest,
+                    &actor_id,
+                    &calendar_id,
+                    &msek,
+                    &prior_mseks,
+                    &uid_hash_hex,
+                )
+                .await
+                {
+                    Ok(d) => d,
+                    Err(e) => return Outcome::Failed(e),
+                };
                 let attendee_email = attendee_email.trim().to_string();
                 // Add to the roster + re-PUT FIRST (events.md § Errors — the
                 // roster persists even if the best-effort dispatch below
@@ -1723,8 +1835,15 @@ impl Op {
                             .map(|e| e.to_string()),
                     },
                 };
-                match fetch_events_rows(&nest, &actor_id, &calendar_id, &msek, &organizer_email)
-                    .await
+                match fetch_events_rows(
+                    &nest,
+                    &actor_id,
+                    &calendar_id,
+                    &msek,
+                    &prior_mseks,
+                    &organizer_email,
+                )
+                .await
                 {
                     Ok(events) => Outcome::EventMutated {
                         calendar_id,
@@ -1978,7 +2097,7 @@ fn calendars_in_scope<'a>(
 async fn caldav_context(
     mail: &dyn fauna_client_config::MailStore,
     secret_hex: &str,
-) -> Option<([u8; 32], [u8; 32])> {
+) -> Option<DavStoreContext> {
     let actor_id = ActorKeypair::from_secret_hex(secret_hex).ok()?.actor_id().0;
     dav_store_context(mail, actor_id).await
 }
@@ -1987,6 +2106,7 @@ async fn list_calendars_rows(
     nest: &Arc<NestClient>,
     actor_id: &[u8; 32],
     msek: &[u8; 32],
+    prior_mseks: &[[u8; 32]],
 ) -> Result<Vec<CalendarRow>, String> {
     let client = CalDavClient::new(Arc::clone(nest));
     let reply = client
@@ -1997,7 +2117,7 @@ async fn list_calendars_rows(
         .map_err(|e| format!("list_calendars: {e}"))?;
     // Derived once for the whole list — every row's metadata reuses it instead
     // of paying its own X-Wing keygen .
-    let keys = DavRecipientKeys::derive(msek);
+    let keys = DavRecipientKeys::from_mseks(msek, prior_mseks);
     Ok(reply
         .calendars
         .iter()
@@ -2029,6 +2149,7 @@ async fn fetch_events_rows(
     actor_id: &[u8; 32],
     calendar_id_hex: &str,
     msek: &[u8; 32],
+    prior_mseks: &[[u8; 32]],
     self_email: &str,
 ) -> Result<Vec<EventRow>, String> {
     let Some(cal_id) = hex32(calendar_id_hex) else {
@@ -2044,7 +2165,7 @@ async fn fetch_events_rows(
                 after_event_id: None,
                 limit: 0,
             },
-            &DavRecipientKeys::derive(msek),
+            &DavRecipientKeys::from_mseks(msek, prior_mseks),
         )
         .await
         .map_err(|e| format!("query_events: {e}"))?;
@@ -2066,6 +2187,7 @@ async fn fetch_decoded_event(
     actor_id: &[u8; 32],
     calendar_id_hex: &str,
     msek: &[u8; 32],
+    prior_mseks: &[[u8; 32]],
     uid_hash_hex: &str,
 ) -> Result<DecodedEvent, String> {
     let cal_id = hex32(calendar_id_hex).ok_or_else(|| et::SELECT_CALENDAR.to_string())?;
@@ -2079,7 +2201,7 @@ async fn fetch_decoded_event(
                 after_event_id: None,
                 limit: 0,
             },
-            &DavRecipientKeys::derive(msek),
+            &DavRecipientKeys::from_mseks(msek, prior_mseks),
         )
         .await
         .map_err(|e| format!("query_events: {e}"))?;

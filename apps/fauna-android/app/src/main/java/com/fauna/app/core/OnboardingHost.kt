@@ -13,6 +13,7 @@ import com.fauna.ffi.onboarding.AgeNoncePlain
 import com.fauna.ffi.onboarding.OnboardingMachine
 import com.fauna.ffi.onboarding.OnboardingObserver
 import com.fauna.ffi.onboarding.OnboardingStep
+import com.fauna.ffi.onboarding.RestoredPredecessorSeed
 import com.fauna.ffi.onboarding.WizardOutcome
 import com.fauna.app.widget.WidgetDataWorker
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -77,6 +78,11 @@ class OnboardingHost @Inject constructor(
         // capability flag is the ONLY thing that makes the step reachable —
         // leaving it undeclared exits straight to `Done`, unchanged.
         it.setRendersTrustPrompt(true)
+        // …and the identity-recovery pages (`onboarding.md` § 1 Identity):
+        // `RecoveryKitScreen` / `RecoveryEntryScreen`. Declaring this routes
+        // `confirmGeneratedIdentity` through the sign-up kit offer; the
+        // declaration and the screens land together.
+        it.setRendersRecoveryKit(true)
         // box-recovery.md § The plane-era recovery floor, *(b) The reads*: the
         // re-provision drive's local custody read opens THIS device's account
         // store, which on android lives in the app container — the platform
@@ -169,6 +175,25 @@ class OnboardingHost @Inject constructor(
     fun consumePendingTrustGranted(): Boolean {
         val v = pendingTrustGranted
         pendingTrustGranted = false
+        return v
+    }
+
+    /**
+     * The RecoveryKey root the user confirmed on the sign-up `recovery_kit`
+     * page, latched at `WizardOutcome::LoggedIn` for the authed launch glue to
+     * register ([com.fauna.app.ui.viewmodel.PostAuthGlueVM.registerDeferredRecoveryKit]):
+     * minted on the page but deliberately unregistered until a signed-in
+     * connection exists (`identity-succession.md` § The RecoveryKey →
+     * *Creation UX*). Never persisted — process-lifetime, like the trust latch;
+     * `null` when skipped, never offered, or already taken.
+     */
+    @Volatile
+    private var pendingRecoveryKit: String? = null
+
+    /** One-shot read of the confirmed-kit latch: returns (and clears) it. */
+    fun consumePendingRecoveryKit(): String? {
+        val v = pendingRecoveryKit
+        pendingRecoveryKit = null
         return v
     }
 
@@ -384,6 +409,15 @@ class OnboardingHost @Inject constructor(
                                 val entry = registry.list().firstOrNull { it.actorId == actorId }
                                 registry.updateCache(actorId, outcome.handle, entry?.domain, entry?.tier)
                             }
+                            // The predecessor seeds a phrase-only restore
+                            // recovered — empty on every ordinary onboarding —
+                            // linked to the identity just activated, HERE,
+                            // before the authed shell builds its session
+                            // (`identity-succession.md` § Seed escrow →
+                            // *Restore path*: a session resolves predecessor
+                            // keys once, so a later persist leaves
+                            // predecessor-sealed data dark until a relaunch).
+                            persistRestoredPredecessors(registry, actorId, machine.restoredPredecessors())
                         }.onFailure { ShellLog.w(TAG, "persistLoggedIn failed: ${it.message}") }
                     }
                     // Claim terminal #3 (gap CR-1, nest/common.md § Client-state
@@ -434,6 +468,18 @@ class OnboardingHost @Inject constructor(
                 // runs twice mints once; `false` when the user skipped or was
                 // never asked.
                 pendingTrustGranted = machine.takeTrustPromptGranted()
+                // The kit confirmed on the `recovery_kit` page. Consume-once;
+                // `null` if skipped. An append run drops it, as tui and linux
+                // do: the kit registers only on the first-sign-in launch, and
+                // Settings says never-created (where the user can create one).
+                val kit = machine.takePendingRecoverySecret()
+                if (isAppend) {
+                    if (kit != null) {
+                        ShellLog.w(TAG, "add-account: the confirmed recovery kit is not registered on this path")
+                    }
+                } else {
+                    pendingRecoveryKit = kit
+                }
             }
             // ⚠ There is deliberately no `InviteSubmitted` arm (retired
             // 2026-08-12). That exit dropped the user into a SESSIONLESS
@@ -501,4 +547,22 @@ class OnboardingHost @Inject constructor(
         }
         return outcome
     }
+}
+
+/**
+ * Persist the predecessor seeds a phrase-only restore recovered (the wizard's
+ * `restoredPredecessors()`), linked to [restoredActor] — the identity they are
+ * predecessors *of*, named explicitly because an add-account restore persists
+ * before the switch that activates it. The shared
+ * `AccountRegistry::persist_restored_predecessors`, best-effort per row; an
+ * ordinary onboarding recovered nothing and writes nothing.
+ */
+internal fun persistRestoredPredecessors(
+    registry: FfiAccountRegistry,
+    restoredActor: String?,
+    predecessors: List<RestoredPredecessorSeed>,
+) {
+    if (predecessors.isEmpty()) return
+    runCatching { registry.persistRestoredPredecessors(restoredActor, predecessors) }
+        .onFailure { ShellLog.w(TAG, "persistRestoredPredecessors failed: ${it.message}") }
 }

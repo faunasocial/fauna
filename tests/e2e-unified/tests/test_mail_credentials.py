@@ -299,6 +299,80 @@ def test_mail_settings_rotate_keys_completes(logged_in_app):
     )
 
 
+@pytest.mark.tui
+@pytest.mark.feature("turn-on-mail")
+def test_calendar_written_before_a_key_rotation_still_opens(app, request, nest_instance):
+    """A rotation must not hide the user's own calendar (mail-credentials.md
+    § Rotation and recovery → *DAV bodies across a rotation*, ruling 1).
+
+    Every calendar's metadata and every event body rests sealed to ONE MSEK
+    generation and is never re-sealed, so after "Rotate mail keys" the app opens
+    them through the whole ring (current + prior generations). Before the ring,
+    every app opened with the current generation alone and the whole calendar
+    failed ``unseal DAV body: HPKE open failed`` — the 2026-10-06 linux witness
+    this test was missing. The calendar and event are made through the Events
+    page BEFORE the rotation; after it (and, on a native app, a cold relaunch
+    that re-reads the custody from the account plane) both must still render.
+
+    A dedicated actor, so the rotation cannot shift the shared ``test_user``'s
+    keys under any later test.
+    """
+    from datetime import datetime, timedelta
+    import uuid
+
+    from conftest import _login_app_as, _make_user
+
+    user = _make_user(nest_instance)
+    _login_app_as(app, request, nest_instance, user, verify_live_actor=True)
+    app.mail_settings.navigate()
+    app.mail_settings.ensure_mail_enabled()
+
+    tag = uuid.uuid4().hex[:8]
+    cal_name = f"prerot-cal-{tag}"
+    summary = f"prerot-event-{tag}"
+    start = (datetime.now() + timedelta(days=3)).replace(
+        hour=10, minute=0, second=0, microsecond=0
+    )
+    ev = app.events
+    ev.navigate()
+    ev.create_calendar(cal_name)
+    ev.select_calendar(cal_name)
+    ev.create_event(
+        summary=summary,
+        start=start.strftime("%Y-%m-%dT%H:%M"),
+        end=(start + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M"),
+    )
+    assert summary in ev.event_summaries(), (
+        f"sanity: the event must render before the rotation; error: {app.error_text()!r}"
+    )
+
+    app.mail_settings.navigate()
+    app.mail_settings.rotate_keys()
+    err = app.mail_settings.page_error_text(timeout=10.0)
+    assert not err, f"rotate-keys should complete without error; got {err!r}"
+
+    if not app.driver.is_web():
+        # A cold relaunch: nothing cached in the process survives, so the ring
+        # can only come from the custody the rotation wrote.
+        assert app.driver.recover(), "client process relaunch (driver.recover()) failed"
+        _login_app_as(app, request, nest_instance, user, verify_live_actor=True)
+
+    ev.navigate()
+    # Stripped: a row's label can carry trailing padding (tui renders one).
+    names = [n.strip() for n in ev.calendar_names()]
+    assert cal_name in names, (
+        f"the calendar created before the rotation must still be listed by name "
+        f"(its metadata opens through a prior generation); listed={names!r}, "
+        f"error: {app.error_text()!r}"
+    )
+    ev.select_calendar(cal_name)
+    summaries = ev.event_summaries()
+    assert summary in summaries, (
+        f"the event created before the rotation must still render; "
+        f"events={summaries!r}, error: {app.error_text()!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # M8 slice 4 (tui): the PLAIN add-credential family + the OAUTHBEARER one-time
 # token. These add credentials to an ALREADY-enabled actor (the session-scoped

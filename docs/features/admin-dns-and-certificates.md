@@ -180,7 +180,7 @@ Stamped 2026-10-01 at 308c995169.
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_lists_domain_records` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_lists_domain_records` | web (linux): passed, linux (linux): failed, windows (windows): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_ptr_row_shows_provider_note` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_add_remove_restore_domain` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_credentials_list_and_refresh` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |

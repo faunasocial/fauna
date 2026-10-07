@@ -49,6 +49,7 @@ use fauna_client_caldav::{
     parse_ical_attendees, parse_ical_organizer, personal_calendar_id, project_attendee_rsvp,
     seal_calendar_metadata, set_reminder, uid_hash, unseal_calendar_metadata,
 };
+use fauna_client_config::DavStoreContext;
 #[cfg(feature = "account-runtime")]
 use fauna_client_config::dav_store_context as shared_dav_store_context;
 use fauna_client_conversations::NestImipDispatch;
@@ -282,7 +283,7 @@ impl FfiCaldavClient {
     /// not enabled (no `msek` minted) or the config load failed. Thin wrapper over
     /// the shared [`dav_store_context`] (CalDAV + CardDAV read the SAME
     /// `cfg.mail.msek`).
-    async fn caldav_context(&self) -> Option<([u8; 32], [u8; 32])> {
+    async fn caldav_context(&self) -> Option<DavStoreContext> {
         dav_store_context(&self.nest).await
     }
 
@@ -358,6 +359,7 @@ impl FfiCaldavClient {
         &self,
         actor_id: &[u8; 32],
         msek: &[u8; 32],
+        prior_mseks: &[[u8; 32]],
         uid_hash_hex: &str,
     ) -> Result<Option<([u8; 32], DecodedEvent)>, FfiError> {
         let listing = self
@@ -369,7 +371,7 @@ impl FfiCaldavClient {
             .map_err(|e| e.to_string())?;
         // Derived once for every calendar this searches, instead of once per
         // calendar .
-        let keys = DavRecipientKeys::derive(msek);
+        let keys = DavRecipientKeys::from_mseks(msek, prior_mseks);
         for cal in &listing.calendars {
             let Some(calendar_id) = hex32(&hex::encode(&cal.calendar_id)) else {
                 continue;
@@ -393,7 +395,12 @@ impl FfiCaldavClient {
     /// lazily provisioned (`personal_calendar_id`, byte-identical to the MDA's) so
     /// the page always has a selectable calendar. Empty when mail/CalDAV is off.
     pub async fn list_calendars(&self) -> Result<Vec<FfiCalendarRow>, FfiError> {
-        let Some((actor_id, msek)) = self.caldav_context().await else {
+        let Some(DavStoreContext {
+            actor_id,
+            msek,
+            prior_mseks,
+        }) = self.caldav_context().await
+        else {
             return Ok(vec![]);
         };
         let client = self.client();
@@ -437,7 +444,7 @@ impl FfiCaldavClient {
         }
         // Derived once for the whole list — every row's metadata reuses it
         // instead of paying its own X-Wing keygen .
-        let keys = DavRecipientKeys::derive(&msek);
+        let keys = DavRecipientKeys::from_mseks(&msek, &prior_mseks);
         Ok(entries
             .iter()
             .filter_map(|e| {
@@ -455,7 +462,7 @@ impl FfiCaldavClient {
     /// 32-byte id (only `Personal` is deterministic). `visibility` is a local
     /// display toggle, so only name + colour are sealed into the metadata.
     pub async fn create_calendar(&self, name: String) -> Result<(), FfiError> {
-        let Some((actor_id, msek)) = self.caldav_context().await else {
+        let Some(DavStoreContext { actor_id, msek, .. }) = self.caldav_context().await else {
             return Err(FfiError::General {
                 msg: MAIL_DISABLED.to_string(),
             });
@@ -494,11 +501,16 @@ impl FfiCaldavClient {
                 msg: "calendar id must be 64 hex chars".to_string(),
             });
         };
-        let Some((actor_id, msek)) = self.caldav_context().await else {
+        let Some(DavStoreContext {
+            actor_id,
+            msek,
+            prior_mseks,
+        }) = self.caldav_context().await
+        else {
             return Ok(vec![]);
         };
         let self_email = self.self_email().await;
-        let keys = DavRecipientKeys::derive(&msek);
+        let keys = DavRecipientKeys::from_mseks(&msek, &prior_mseks);
         let decoded = self.query_decoded(&actor_id, &calendar_id, &keys).await?;
         Ok(decoded
             .iter()
@@ -536,7 +548,12 @@ impl FfiCaldavClient {
                 msg: "calendar id must be 64 hex chars".to_string(),
             });
         };
-        let Some((actor_id, msek)) = self.caldav_context().await else {
+        let Some(DavStoreContext {
+            actor_id,
+            msek,
+            prior_mseks,
+        }) = self.caldav_context().await
+        else {
             return Ok(Some(vec![]));
         };
         let client = self.client();
@@ -559,7 +576,7 @@ impl FfiCaldavClient {
             BackstopVerdict::ReadRequired => {}
         }
         let self_email = self.self_email().await;
-        let keys = DavRecipientKeys::derive(&msek);
+        let keys = DavRecipientKeys::from_mseks(&msek, &prior_mseks);
         let page = client
             .query_events_decoded(
                 QueryEventsRequest {
@@ -605,7 +622,12 @@ impl FfiCaldavClient {
     /// qualifies when the actor is on the roster with a not-yet-final status
     /// (`NEEDS-ACTION`) and is not the organizer. Empty when mail/CalDAV is off.
     pub async fn query_invited_events(&self) -> Result<Vec<FfiCalEvent>, FfiError> {
-        let Some((actor_id, msek)) = self.caldav_context().await else {
+        let Some(DavStoreContext {
+            actor_id,
+            msek,
+            prior_mseks,
+        }) = self.caldav_context().await
+        else {
             return Ok(vec![]);
         };
         let self_email = self.self_email().await;
@@ -621,7 +643,7 @@ impl FfiCaldavClient {
             .map_err(|e| e.to_string())?;
         // Derived once for every calendar this gathers across, instead of once
         // per calendar .
-        let keys = DavRecipientKeys::derive(&msek);
+        let keys = DavRecipientKeys::from_mseks(&msek, &prior_mseks);
         let mut out = Vec::new();
         for cal in &listing.calendars {
             let cal_hex = hex::encode(&cal.calendar_id);
@@ -665,7 +687,7 @@ impl FfiCaldavClient {
                 msg: "calendar id must be 64 hex chars".to_string(),
             });
         };
-        let Some((actor_id, msek)) = self.caldav_context().await else {
+        let Some(DavStoreContext { actor_id, msek, .. }) = self.caldav_context().await else {
             return Err(FfiError::General {
                 msg: MAIL_DISABLED.to_string(),
             });
@@ -704,11 +726,18 @@ impl FfiCaldavClient {
     /// `None` when no such event / mail is off. Carries the full detail (roster,
     /// organizer, reminder) so the detail panel renders without further calls.
     pub async fn get_event(&self, uid_hash_hex: String) -> Result<Option<FfiCalEvent>, FfiError> {
-        let Some((actor_id, msek)) = self.caldav_context().await else {
+        let Some(DavStoreContext {
+            actor_id,
+            msek,
+            prior_mseks,
+        }) = self.caldav_context().await
+        else {
             return Ok(None);
         };
         let self_email = self.self_email().await;
-        let Some((calendar_id, decoded)) = self.find_event(&actor_id, &msek, &uid_hash_hex).await?
+        let Some((calendar_id, decoded)) = self
+            .find_event(&actor_id, &msek, &prior_mseks, &uid_hash_hex)
+            .await?
         else {
             return Ok(None);
         };
@@ -718,7 +747,12 @@ impl FfiCaldavClient {
     /// Delete an event by hex `uid_hash` (`fauna.bridges.delete_event`), resolving
     /// its calendar across the actor's collections.
     pub async fn delete_event(&self, uid_hash_hex: String) -> Result<(), FfiError> {
-        let Some((actor_id, msek)) = self.caldav_context().await else {
+        let Some(DavStoreContext {
+            actor_id,
+            msek,
+            prior_mseks,
+        }) = self.caldav_context().await
+        else {
             return Err(FfiError::General {
                 msg: MAIL_DISABLED.to_string(),
             });
@@ -728,7 +762,10 @@ impl FfiCaldavClient {
                 msg: "event id must be 64 hex chars".to_string(),
             });
         };
-        let Some((calendar_id, _)) = self.find_event(&actor_id, &msek, &uid_hash_hex).await? else {
+        let Some((calendar_id, _)) = self
+            .find_event(&actor_id, &msek, &prior_mseks, &uid_hash_hex)
+            .await?
+        else {
             return Ok(()); // already gone
         };
         self.client()
@@ -758,13 +795,20 @@ impl FfiCaldavClient {
         uid_hash_hex: String,
         response: fauna_core::rsvp::RsvpResponse,
     ) -> Result<(), FfiError> {
-        let Some((actor_id, msek)) = self.caldav_context().await else {
+        let Some(DavStoreContext {
+            actor_id,
+            msek,
+            prior_mseks,
+        }) = self.caldav_context().await
+        else {
             return Err(FfiError::General {
                 msg: MAIL_DISABLED.to_string(),
             });
         };
         let self_email = self.self_email().await;
-        let Some((calendar_id, decoded)) = self.find_event(&actor_id, &msek, &uid_hash_hex).await?
+        let Some((calendar_id, decoded)) = self
+            .find_event(&actor_id, &msek, &prior_mseks, &uid_hash_hex)
+            .await?
         else {
             return Err(FfiError::General {
                 msg: "event not found".to_string(),
@@ -808,12 +852,19 @@ impl FfiCaldavClient {
     /// VEVENT reminder on an event (read-mutate-rewrite, re-PUT). Resolves the
     /// event by `uid_hash` across the actor's calendars.
     pub async fn set_reminder(&self, uid_hash_hex: String, offset: String) -> Result<(), FfiError> {
-        let Some((actor_id, msek)) = self.caldav_context().await else {
+        let Some(DavStoreContext {
+            actor_id,
+            msek,
+            prior_mseks,
+        }) = self.caldav_context().await
+        else {
             return Err(FfiError::General {
                 msg: MAIL_DISABLED.to_string(),
             });
         };
-        let Some((calendar_id, decoded)) = self.find_event(&actor_id, &msek, &uid_hash_hex).await?
+        let Some((calendar_id, decoded)) = self
+            .find_event(&actor_id, &msek, &prior_mseks, &uid_hash_hex)
+            .await?
         else {
             return Err(FfiError::General {
                 msg: "event not found".to_string(),
@@ -858,13 +909,20 @@ impl FfiCaldavClient {
         uid_hash_hex: String,
         email: String,
     ) -> Result<(), FfiError> {
-        let Some((actor_id, msek)) = self.caldav_context().await else {
+        let Some(DavStoreContext {
+            actor_id,
+            msek,
+            prior_mseks,
+        }) = self.caldav_context().await
+        else {
             return Err(FfiError::General {
                 msg: MAIL_DISABLED.to_string(),
             });
         };
         let self_email = self.self_email().await;
-        let Some((calendar_id, decoded)) = self.find_event(&actor_id, &msek, &uid_hash_hex).await?
+        let Some((calendar_id, decoded)) = self
+            .find_event(&actor_id, &msek, &prior_mseks, &uid_hash_hex)
+            .await?
         else {
             return Err(FfiError::General {
                 msg: "event not found".to_string(),
@@ -945,14 +1003,23 @@ impl FfiCaldavClient {
                 msg: "calendar id must be 64 hex chars".to_string(),
             });
         };
-        let Some((actor_id, msek)) = self.caldav_context().await else {
+        let Some(DavStoreContext {
+            actor_id,
+            msek,
+            prior_mseks,
+        }) = self.caldav_context().await
+        else {
             return Err(FfiError::General {
                 msg: MAIL_DISABLED.to_string(),
             });
         };
         Ok(self
             .client()
-            .export_calendar_ics(&actor_id, &calendar_id, &DavRecipientKeys::derive(&msek))
+            .export_calendar_ics(
+                &actor_id,
+                &calendar_id,
+                &DavRecipientKeys::from_mseks(&msek, &prior_mseks),
+            )
             .await
             .map_err(|e| e.to_string())?)
     }
@@ -971,7 +1038,7 @@ impl FfiCaldavClient {
                 msg: "calendar id must be 64 hex chars".to_string(),
             });
         };
-        let Some((actor_id, msek)) = self.caldav_context().await else {
+        let Some(DavStoreContext { actor_id, msek, .. }) = self.caldav_context().await else {
             return Err(FfiError::General {
                 msg: MAIL_DISABLED.to_string(),
             });
@@ -1017,7 +1084,7 @@ impl FfiCaldavClient {
 /// `--no-default-features` Go mail-bridge and watchOS builds) holds no custody,
 /// so it reads as the mail-disabled state.
 #[cfg(feature = "account-runtime")]
-pub(crate) async fn dav_store_context(nest: &Arc<NestClient>) -> Option<([u8; 32], [u8; 32])> {
+pub(crate) async fn dav_store_context(nest: &Arc<NestClient>) -> Option<DavStoreContext> {
     let actor_id = nest
         .auth()
         .keypair()
@@ -1029,7 +1096,7 @@ pub(crate) async fn dav_store_context(nest: &Arc<NestClient>) -> Option<([u8; 32
 
 /// The runtime-less build's twin — see the doc above.
 #[cfg(not(feature = "account-runtime"))]
-pub(crate) async fn dav_store_context(_nest: &Arc<NestClient>) -> Option<([u8; 32], [u8; 32])> {
+pub(crate) async fn dav_store_context(_nest: &Arc<NestClient>) -> Option<DavStoreContext> {
     None
 }
 

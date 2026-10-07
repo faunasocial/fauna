@@ -12,6 +12,8 @@
     adminRegionStatus,
     adminSetRegion,
     moderationLegalTakedown,
+    adminAbuseReportQueue,
+    adminAbuseReportResolve,
     adminIssuerKeyStatus,
     adminRotateIssuerKey,
     adminForceRotateIssuer,
@@ -55,6 +57,9 @@
     issuerKeyRowLabel,
     issuerKeyRotateCost,
     issuerForcedConfirmView,
+    reportResolveVerdict,
+    reportTakedownPrefill,
+    type ReportQueueRow,
   } from '$lib/wasm';
   import { makeOfflineGate } from '$lib/offline-gate';
   import { resolveLocalized } from '$lib/i18n/localized';
@@ -498,6 +503,62 @@
     }
   }
 
+  // ── User-initiated reports queue (`admin-nest-reports-*`; moderation.md
+  // § User-initiated reporting → Where it lands — the takedown console's
+  // inbox). Rows and every word come from the shared fold
+  // (`adminAbuseReportQueue` → `queue_row_view`); *open takedown* pre-fills the
+  // console above with the subject and NO citation, so the console's own guard
+  // still stands. Read in this page's load; the empty line paints only off
+  // `reportsLoaded`, never while the read is in flight.
+  let reports = $state<ReportQueueRow[]>([]);
+  let reportsLoaded = $state(false);
+  let reportsStatus = $state('');
+
+  async function loadReports() {
+    const id = $identity;
+    if (!id) return;
+    try {
+      reports = await adminAbuseReportQueue(id.secretHex);
+      reportsLoaded = true;
+    } catch { /* queue not available — the empty line stays off */ }
+  }
+
+  async function resolveReport(row: ReportQueueRow, acted: boolean) {
+    const id = $identity;
+    if (!id) return;
+    let failure: string | null = null;
+    try {
+      await adminAbuseReportResolve(id.secretHex, row.report_id, acted);
+    } catch (e) {
+      failure = e instanceof Error ? e.message : String(e);
+    }
+    reportsStatus = resolveLocalized(reportResolveVerdict(acted, failure));
+    await loadReports();
+  }
+
+  function openReportTakedown(row: ReportQueueRow) {
+    const prefill = reportTakedownPrefill(row.subject);
+    if (!prefill) return;
+    takedownContentId = prefill.content_id;
+    takedownConversation = prefill.conversation;
+    takedownReference = '';
+    takedownRestore = false;
+    takedownArmed = null;
+    takedownStatus = '';
+  }
+
+  // One queue row's line: reason · kind id · origin · when — note — “excerpt”.
+  function reportLine(row: ReportQueueRow): string {
+    const subjectId =
+      row.subject.kind === 'post' ? row.subject.cid
+      : row.subject.kind === 'message' ? row.subject.record_cid
+      : row.subject.actor_id;
+    let text = `${resolveLocalized(row.reason)} · ${row.subject.kind} ${subjectId} · ${resolveLocalized(row.origin)} · ${new Date(row.created_at / 1000).toLocaleString()}`;
+    if (row.note) text += ` — ${row.note}`;
+    if (row.excerpt) text += ` — “${row.excerpt}”`;
+    return text;
+  }
+
   // ── Factory-reset (danger zone) ──
   let showFactoryResetConfirm = $state(false);
   let factoryResetting = $state(false);
@@ -510,6 +571,7 @@
     loadOsMaintenance();
     loadNatMode();
     loadOauthKeys();
+    loadReports();
     // Re-count the retired keys' minutes while the page stays open; the rows
     // re-read the clock on each tick (`oauthRows`).
     const oauthTicker = setInterval(() => (oauthTick += 1), 15_000);
@@ -1161,6 +1223,43 @@
   {#if takedownStatus}
     <p data-testid={IDS.ADMIN_NEST_TAKEDOWN_STATUS}>{takedownStatus}</p>
   {/if}
+</section>
+
+<!-- User-initiated reports queue — after the takedown console (moderation.md
+     § User-initiated reporting → Where it lands). -->
+<section class="section" data-testid={IDS.ADMIN_NEST_REPORTS_SECTION}>
+  <h2>{t.admin.nest_page.reports_label}</h2>
+  <p class="muted">{t.admin.nest_page.reports_desc}</p>
+  {#if !reportsLoaded}
+    <p class="muted">{t.admin.nest_page.reports_loading}</p>
+  {:else if reports.length === 0}
+    <p class="muted">{t.admin.nest_page.reports_empty}</p>
+  {/if}
+  {#each reports as row (row.report_id)}
+    <div class="report-row">
+      <span data-testid={IDS.ADMIN_NEST_REPORT_ITEM} data-subject={row.subject.kind === 'post' ? row.subject.cid : row.subject.kind === 'message' ? row.subject.record_cid : row.subject.actor_id} data-kind={row.subject.kind}>{reportLine(row)}</span>
+      {#if row.can_open_takedown}
+        <button
+          class="btn small"
+          data-testid={IDS.ADMIN_NEST_REPORT_OPEN_TAKEDOWN_BUTTON}
+          onclick={() => openReportTakedown(row)}
+        >{t.admin.nest_page.reports_open_takedown}</button>
+      {/if}
+      <button
+        class="btn small"
+        data-testid={IDS.ADMIN_NEST_REPORT_ACTED_BUTTON}
+        use:offlineGate={{ kind: 'fauna.moderation.abuse_report.resolve', disabled: false }}
+        onclick={() => resolveReport(row, true)}
+      >{t.admin.nest_page.reports_acted}</button>
+      <button
+        class="btn small"
+        data-testid={IDS.ADMIN_NEST_REPORT_DISMISS_BUTTON}
+        use:offlineGate={{ kind: 'fauna.moderation.abuse_report.resolve', disabled: false }}
+        onclick={() => resolveReport(row, false)}
+      >{t.admin.nest_page.reports_dismiss}</button>
+    </div>
+  {/each}
+  {#if reportsStatus}<p class="muted">{reportsStatus}</p>{/if}
 </section>
 
 <!-- Factory Reset Danger Zone (moved off Settings) -->

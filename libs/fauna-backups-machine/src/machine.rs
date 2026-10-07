@@ -59,6 +59,10 @@ struct State {
     /// A folder was picked while an op held the slot; that op loads it before
     /// releasing the slot ([`BackupsMachine::finish_op`]).
     reselect_pending: bool,
+    /// A refresh was asked for while an op held the slot; that op re-reads the
+    /// page before releasing the slot ([`BackupsMachine::finish_op`]). A plain
+    /// re-read, unlike a pick: it keeps the op's own verdicts.
+    reload_pending: bool,
 }
 
 impl State {
@@ -73,6 +77,7 @@ impl State {
             detail: None,
             error: None,
             reselect_pending: false,
+            reload_pending: false,
         }
     }
 
@@ -210,8 +215,14 @@ impl BackupsMachine {
     /// name-ordered list once loaded, and a selected set that has disappeared
     /// falls back to that default rather than sticking to a name the nest no
     /// longer serves.
+    ///
+    /// A refresh asked for while another op holds the slot is **not dropped**:
+    /// it is recorded and that op re-reads before releasing the slot. The op in
+    /// flight may have read the folder list before the change this refresh was
+    /// asked to pick up, so dropping it can leave the page stale until the next
+    /// visit (§ Snapshot-list shape, *Selection* ruling).
     pub async fn refresh(&self) {
-        if !self.begin_op(BackupOp::Refresh) {
+        if !self.begin_op_or_queue_reload() {
             return;
         }
         let outcome = self.load().await;
@@ -471,8 +482,23 @@ impl BackupsMachine {
     /// caller must return without touching state — the one rule that retires
     /// the six apps' ad-hoc partial busy flags.
     fn begin_op(&self, op: BackupOp) -> bool {
+        self.try_begin_op(op, false)
+    }
+
+    /// [`Self::begin_op`] for a refresh: when the slot is held, record the
+    /// re-read for the holder to run instead of dropping it. Checked and
+    /// recorded under one lock, so the holder cannot release the slot between
+    /// the two and leave the refresh neither run nor pending.
+    fn begin_op_or_queue_reload(&self) -> bool {
+        self.try_begin_op(BackupOp::Refresh, true)
+    }
+
+    fn try_begin_op(&self, op: BackupOp, queue_reload: bool) -> bool {
         let mut state = self.state.lock().unwrap();
         if state.in_progress_op.is_some() {
+            if queue_reload {
+                state.reload_pending = true;
+            }
             return false;
         }
         state.in_progress_op = Some(op);
@@ -489,41 +515,47 @@ impl BackupsMachine {
     /// `snapshot().error` reactively on every tick, so logging there would
     /// re-fire on every repaint (observability.md § Log on the *event*, not the
     /// *paint*).
-    fn end_op(&self, error: Option<LocalizedText>) {
-        {
-            let mut state = self.state.lock().unwrap();
-            state.in_progress_op = None;
-            if let Some(err) = error {
-                tracing::warn!(target: "fauna_backups", "{}", err.log_line());
-                state.error = Some(err);
-            }
+    fn end_op(state: &mut State, error: Option<LocalizedText>) {
+        state.in_progress_op = None;
+        if let Some(err) = error {
+            tracing::warn!(target: "fauna_backups", "{}", err.log_line());
+            state.error = Some(err);
         }
-        self.observer.on_changed();
     }
 
     /// End an op, first loading any folder picked while it held the slot. A pick
     /// is never dropped (§ Snapshot-list shape, *Selection* ruling), and every
     /// op ends here, so a pick made during a check, a detail read or a create is
-    /// loaded just as one made during a refresh is.
+    /// loaded just as one made during a refresh is. A refresh asked for while
+    /// it held the slot is re-read here the same way, without the pick's
+    /// clearing of the op's own verdicts.
     async fn finish_op(&self, mut error: Option<LocalizedText>) {
         loop {
             {
                 let mut state = self.state.lock().unwrap();
-                if !std::mem::take(&mut state.reselect_pending) {
+                let reload = std::mem::take(&mut state.reload_pending);
+                let reselect = std::mem::take(&mut state.reselect_pending);
+                if !reload && !reselect {
+                    // Released under the same lock that found nothing pending,
+                    // so a pick or refresh recorded after this check finds the
+                    // slot free and runs itself.
+                    Self::end_op(&mut state, error);
                     break;
                 }
-                // What the op produced described the set it began on; the
-                // pick already cleared these once, and the op may have
-                // written them again since.
-                state.check_result = None;
-                state.prune_preview = None;
-                state.detail = None;
+                if reselect {
+                    // What the op produced described the set it began on; the
+                    // pick already cleared these once, and the op may have
+                    // written them again since.
+                    state.check_result = None;
+                    state.prune_preview = None;
+                    state.detail = None;
+                }
             }
             if let Err(e) = self.load().await {
                 error = error.or(Some(e));
             }
         }
-        self.end_op(error);
+        self.observer.on_changed();
     }
 
     /// The shared read both `refresh` and every successful mutation end with:

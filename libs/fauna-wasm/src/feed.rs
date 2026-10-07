@@ -301,9 +301,24 @@ mod manager {
         /// page error entirely from it. `json_compatible` so numbers stay numbers
         /// and unit enums (`status`) serialize to strings (matches `snapshot()`
         /// on the conversations manager).
+        ///
+        /// It also carries one DERIVED key the struct's serde shape has no field
+        /// for: `empty_state` — [`fauna_feed::FeedSnapshot::empty_state`]'s
+        /// answer (`"NoPosts"` / `"NoMatches"` / `null`), computed off this same
+        /// snapshot so the page paints `feed-empty-state` / `feed-no-results`
+        /// from the one shared decision instead of re-deriving it from
+        /// `status`, `posts` and its own search field (`ui/feed.md` § Errors &
+        /// edge cases) — the web twin of the native apps' `feed_empty_state`.
         #[wasm_bindgen(js_name = "snapshot")]
         pub fn snapshot(&self) -> Result<JsValue, JsValue> {
-            crate::rpc::to_js(&self.manager.snapshot())
+            let snapshot = self.manager.snapshot();
+            let obj = crate::rpc::to_js(&snapshot)?;
+            js_sys::Reflect::set(
+                &obj,
+                &"empty_state".into(),
+                &crate::rpc::to_js(&snapshot.empty_state())?,
+            )?;
+            Ok(obj)
         }
 
         /// Update the composer (`compose-text-field` / `compose-tags-field` /

@@ -338,12 +338,18 @@ capped `self` row was weighed and refused: the cap would be a new user-visible
 limit — a count, a name length and a secret length, each with an add-refused
 error path on all seven apps — bought for a bound the plane gives for free, and
 the sibling credential list already rides per-entity rows (one shape for both).
-The rest — the MSEK, its cap-2 grace window with retirements, the succession
-burns, the rotation sentinel, the three flags — stays **one row** (`self`, the
-`MailStateRow` born for the plane with its own `updated_at`, P3): every field
-is fixed by shape except the burns, which grow by one per succession
-*ceremony* — the ledger chain's growth class — and the size pin seals a
-512-burn row under half the cap. **This split changes P1, and the change is
+The rest — the MSEK, the succession burns, the rotation sentinel, the three
+flags — stays **one row** (`self`, the `MailStateRow` born for the plane with
+its own `updated_at`, P3): every field is fixed by shape except the burns,
+which grow by one per succession *ceremony* — the ledger chain's growth class
+— and the size pin seals a 512-burn row under half the cap. The retired MSEK
+generations (ruled 2026-10-06, uncapped — `owner-key-material.md` § Path
+B-sibling-2 → *Pre-rotation mail at rest*) are a third family, one row per
+generation (`generation/<MsekFingerprint>`, immutable, present-wins — the
+credential rows' shape, for the credential rows' reason: bounded by use, never
+by a cap), folded into `MailConfig.prior_mseks` by the READ fold; until the
+lift lands they ride the `self` row as its cap-2
+window with retirements. **This split changes P1, and the change is
 ruled here.** The shipped rule moves the recreatable five — `credentials`,
 `pending_rotation` and the three flags — as ONE latest-wins decision, for a
 stated reason: a credential list and the rotation it belongs to must not come

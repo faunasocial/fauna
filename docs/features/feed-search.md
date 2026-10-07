@@ -30,8 +30,8 @@ Stamped 2026-09-19 at 23b3189e2b.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+9bf9020c standalone |
-| linux | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| web | ✅ full | 0.1.2-dev+9bf9020c standalone |
+| linux | ✅ full | 0.1.2-dev+a1f84cc6 standalone |
 | windows | ✅ full | 0.1.2-dev+6d8dc256.dirty standalone |
 | macos | ✅ full | 0.1.2-dev+a1f84cc6 standalone |
 | ios | ✅ full | 0.1.2-dev+a1f84cc6 standalone |
@@ -45,5 +45,5 @@ Stamped 2026-09-19 at 23b3189e2b.
 | 1 | app | `tests/e2e-unified/tests/test_feed_search.py::test_feed_search_clear_restores_feed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/api/test_feed_search_api.py::test_local_feed_search_narrows_by_body` | nest (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/api/test_feed_search_api.py::test_custom_any_feed_search_narrows_by_body` | nest (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_feed_empty_state.py::test_a_search_with_no_matches_says_so` | linux (linux): skipped, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_feed_empty_state.py::test_a_search_with_no_matches_says_so` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

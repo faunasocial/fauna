@@ -529,7 +529,11 @@ impl RpcArchiveNest {
     /// key-material-lifetime decision rather than a performance tweak.
     async fn dav_context(&self) -> Result<Option<([u8; 32], [u8; 32])>, ArchiveNestError> {
         let actor_id = self.keypair()?.actor_id().0;
-        Ok(dav_store_context(self.mail.as_ref(), actor_id).await)
+        // Write-only: an import seals to the current generation alone, so the
+        // custody's prior generations (the read ring's) are not carried.
+        Ok(dav_store_context(self.mail.as_ref(), actor_id)
+            .await
+            .map(|ctx| (ctx.actor_id, ctx.msek)))
     }
 
     /// The actor's first calendar, in `created_at` order — the one an import

@@ -27,6 +27,7 @@ class IdentityChoiceVM @Inject constructor(
     fun beginCreate() = host.machine.beginCreateIdentity()
     fun beginImport() = host.machine.beginImportIdentity()
     fun beginRecoverLostBox() = host.machine.beginRecoverLostBox()
+    fun beginRecoveryEntry() = host.machine.beginRecoveryEntry()
 }
 
 /**
@@ -82,6 +83,18 @@ fun IdentityChoiceScreen(
             },
             modifier = Modifier.fillMaxWidth().testTag(Ids.IMPORT_IDENTITY_BUTTON),
         ) { Text(stringResource(R.string.onboarding_identity_choice_import_existing)) }
+
+        Spacer(Modifier.height(12.dp))
+
+        // The phrase-only IDENTITY restore (onboarding.md § 1 Identity) — a
+        // lost identity, distinct from the lost-box NEST recovery below it.
+        OutlinedButton(
+            onClick = {
+                vm.beginRecoveryEntry()
+                navController.navigate(RECOVERY_ENTRY_ROUTE)
+            },
+            modifier = Modifier.fillMaxWidth().testTag(Ids.RESTORE_FROM_RECOVERY_KIT_BUTTON),
+        ) { Text(stringResource(R.string.onboarding_identity_choice_restore_from_recovery_kit)) }
 
         Spacer(Modifier.height(12.dp))
 

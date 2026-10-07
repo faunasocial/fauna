@@ -59,6 +59,25 @@ pub fn clear_preferences_group_rows(group: &adw::PreferencesGroup) {
     }
 }
 
+/// Remove every row from a `gtk::ListBox`, keeping its placeholder.
+///
+/// The placeholder is a child of the list like the rows are, so the
+/// `while let Some(c) = list.first_child() { list.remove(&c) }` clear also
+/// removes it — GTK treats removing the placeholder as `set_placeholder(None)`
+/// — and an empty list then paints nothing at all. That is how the feed's empty
+/// state never showed after the first render (`ui/feed.md` § Errors & edge
+/// cases). Every child `append` adds is wrapped in a `gtk::ListBoxRow`; the
+/// placeholder never is, so the row test is exact.
+pub fn clear_list_box_rows(list: &gtk::ListBox) {
+    let mut next = list.first_child();
+    while let Some(child) = next {
+        next = child.next_sibling();
+        if child.is::<gtk::ListBoxRow>() {
+            list.remove(&child);
+        }
+    }
+}
+
 /// Page-content scaffolding for a settings sub-page built outside
 /// `adw::PreferencesPage` (which already centers/clamps its own content): a
 /// centered, fixed-width column matching the rest of Settings. `spacing`
@@ -77,4 +96,39 @@ pub fn page_box(spacing: i32) -> gtk::Box {
         .halign(gtk::Align::Center)
         .width_request(600)
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The clear keeps the placeholder: after rows come and go, an empty list
+    /// still carries it, and the automation walk finds it.
+    #[test]
+    fn clearing_rows_keeps_the_placeholder() {
+        crate::testid::run_on_gtk_thread(|| {
+            let list = gtk::ListBox::new();
+            let empty = gtk::Label::new(Some("No posts yet."));
+            crate::testid::set_test_id(&empty, fauna_ui_ids::FEED_EMPTY_STATE);
+            list.set_placeholder(Some(&empty));
+            list.append(&gtk::Label::new(Some("a row")));
+            list.append(&gtk::Label::new(Some("another")));
+
+            clear_list_box_rows(&list);
+
+            let root: gtk::Widget = list.upcast();
+            assert_eq!(
+                crate::automation::find::count_in(&root, fauna_ui_ids::FEED_EMPTY_STATE),
+                1
+            );
+            let mut children = 0;
+            let mut c = root.first_child();
+            while let Some(w) = c {
+                assert!(!w.is::<gtk::ListBoxRow>(), "a row survived the clear");
+                children += 1;
+                c = w.next_sibling();
+            }
+            assert_eq!(children, 1, "only the placeholder is left");
+        });
+    }
 }

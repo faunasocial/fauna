@@ -71,14 +71,26 @@ def _witness(app, log, **kw):
     )
 
 
-# ── The android branch: no reader at all is a DECLARED skip, never an assert ──
+# ── No reader at all is a DECLARED skip, never an assert ──
 def test_a_driver_with_no_log_reader_declares_rather_than_asserting():
-    """android answers neither log attribute, so an absent marker is no
-    evidence — convention 7's `skip_unbuilt`, not a red."""
+    """A driver answering neither log attribute cannot show an absent marker is
+    evidence — convention 7's `skip_unbuilt`, not a red. (Every shipped family
+    now has a reader; the branch guards the next driver that does not.)"""
     with pytest.raises(pytest.skip.Exception) as exc:
         _witness("android", None)
     assert "app-log reader" in str(exc.value)
-    assert "row 806" in str(exc.value), "the skip must name where the work is tracked"
+    assert "e2e-self-diagnosing-failures.md" in str(exc.value), (
+        "the skip must name where the work is tracked"
+    )
+
+
+def test_the_android_driver_has_an_app_log_reader():
+    """The seam `has_reader` reads: android answers `app_log_text` over the
+    bridge's `GET /app-log`, so the control no longer skips it as unbuilt."""
+    from drivers.android import AndroidBridgeDriver
+    from helpers import app_log_section
+
+    assert app_log_section.has_reader(AndroidBridgeDriver())
 
 
 def test_web_declares_rather_than_reading_its_evicting_ring():
@@ -87,6 +99,7 @@ def test_web_declares_rather_than_reading_its_evicting_ring():
     with pytest.raises(pytest.skip.Exception) as exc:
         _witness("web", "")
     assert "non-evicting" in str(exc.value)
+    assert "declared absence" in str(exc.value), "a permanent absence, not unbuilt debt"
 
 
 # ── The branch this whole module exists for ──────────────────────────────────

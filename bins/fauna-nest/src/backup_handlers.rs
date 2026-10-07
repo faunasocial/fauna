@@ -844,7 +844,11 @@ fn custody_list_handler() -> RpcHandler {
                             manifest_hash: hex::encode(&c.manifest_hash),
                             size_bytes: c.size_bytes,
                             updated_at: c.updated_at,
-                            extra: Default::default(),
+                            // A covered-folder mirror row's sealed name, for
+                            // the nest-held pull-back to re-record; `None` on
+                            // every segment-plane row.
+                            path_sealed: c.path_sealed.map(fauna_protocol::ByteBuf::from),
+                            ..Default::default()
                         },
                         c.rowid,
                     )

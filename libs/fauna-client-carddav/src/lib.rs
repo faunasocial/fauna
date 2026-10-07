@@ -823,12 +823,14 @@ impl<R: RpcRequester> CardDavClient<R> {
         &self,
         actor_id: Vec<u8>,
         msek: &[u8; 32],
+        prior_mseks: &[[u8; 32]],
         uid_hash: &[u8],
     ) -> Result<LocatedCard, LocateCardError<R::Error>> {
         // Derived once for the whole walk — the book listing AND every book's
         // card page below reuse it instead of each paying its own keygen
-        // .
-        let keys = DavRecipientKeys::derive(msek);
+        //  — and as the whole ring, so a card written before a
+        // mail-key rotation is still found.
+        let keys = DavRecipientKeys::from_mseks(msek, prior_mseks);
         let books = self
             .list_addressbooks_decoded(
                 ListAddressbooksRequest {
@@ -1715,6 +1717,7 @@ END:VCARD\r\n";
         let located = block_on(client.locate_card_by_uid_hash(
             id(0xAA),
             &MSEK,
+            &[],
             &uid_hash("urn:uuid:1234-5678"),
         ))
         .expect("locate");
@@ -1758,6 +1761,7 @@ END:VCARD\r\n";
         let located = block_on(client.locate_card_by_uid_hash(
             id(0xAA),
             &MSEK,
+            &[],
             &uid_hash("urn:uuid:1234-5678"),
         ))
         .expect("locate");
@@ -1787,9 +1791,13 @@ END:VCARD\r\n";
                 cards_reply(vec![sealed_card_at(0xC1, "urn:uuid:someone-else")]),
             ),
         ]));
-        let located =
-            block_on(client.locate_card_by_uid_hash(id(0xAA), &MSEK, &uid_hash("urn:uuid:gone")))
-                .expect("a missing card is not a failure");
+        let located = block_on(client.locate_card_by_uid_hash(
+            id(0xAA),
+            &MSEK,
+            &[],
+            &uid_hash("urn:uuid:gone"),
+        ))
+        .expect("a missing card is not a failure");
         assert!(located.card.is_none());
         assert_eq!(
             located.books.len(),
@@ -1819,6 +1827,7 @@ END:VCARD\r\n";
         let located = block_on(client.locate_card_by_uid_hash(
             id(0xAA),
             &MSEK,
+            &[],
             &uid_hash("urn:uuid:1234-5678"),
         ))
         .expect("locate");
@@ -1844,6 +1853,7 @@ END:VCARD\r\n";
         let err = block_on(client.locate_card_by_uid_hash(
             id(0xAA),
             &wrong,
+            &[],
             &uid_hash("urn:uuid:1234-5678"),
         ))
         .expect_err("a book we cannot open is an error");

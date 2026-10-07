@@ -3443,10 +3443,44 @@ pub struct MailKeys {
     /// with `standing`. The receive path passes them (as `&[&[u8; 32]]`) to the
     /// epoch opener. Only the current root is the common case (no rotation yet).
     epoch_roots: Vec<[u8; 32]>,
+    /// The prior grace MSEK generations (`MailConfig.prior_mseks`, newest first,
+    /// capped beside `standing`) — held so [`Self::index_ring`] can open a
+    /// mail/calendar index blob sealed before a rotation. Empty until the
+    /// account first rotates.
+    prior_mseks: Vec<[u8; 32]>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl MailKeys {
+    /// The key set from the account's mail custody: the live MSEK, then its
+    /// prior grace generations (already capped by the caller), every derived
+    /// key aligned with that one history.
+    fn from_custody(actor_id: [u8; 32], msek: &[u8; 32], prior_mseks: &[[u8; 32]]) -> Self {
+        let mseks: Vec<[u8; 32]> = std::iter::once(*msek)
+            .chain(prior_mseks.iter().copied())
+            .collect();
+        // Deref out of the `Zeroizing` derivation wrapper: the wrapper drops
+        // (zeroizing) at the end of each statement, and the destination is
+        // `MailKeys`, which is itself zeroize-on-drop.
+        let epoch_roots = mseks.iter().map(|m| *derive_mail_epoch_root(m)).collect();
+        Self {
+            standing: derive_standing_mail_keypairs(&mseks),
+            msek: *msek,
+            actor_id,
+            epoch_roots,
+            prior_mseks: prior_mseks.to_vec(),
+        }
+    }
+
+    /// The mail/calendar index key ring: the current generation plus one grace
+    /// key per prior MSEK. Both client readers of the `__index` mail/calendar
+    /// slice — the builder's resume and the local search arm — take it from
+    /// here, so a rotation does not cut the user off from the index sealed
+    /// before it (`owner-key-material.md` § Path B-sibling-4).
+    fn index_ring(&self) -> fauna_client_index::MailcalKeyRing {
+        fauna_client_index::MailcalKeyRing::from_msek_and_priors(&self.msek, &self.prior_mseks)
+    }
+
     /// Open one `inbox.fetch` / `sent.fetch` record (both decrypt layers,
     /// either suite) under this key set: the epoch chain over the roots, then
     /// the standing arm over the complete standing set — the one shared
@@ -3669,11 +3703,14 @@ impl NestMailInboundSource {
         let nest = Arc::clone(&self.nest);
         let actor_id = keys.actor_id;
         let msek = keys.msek;
+        // The whole MSEK history, so a REPLY to an event created before a
+        // mail-key rotation still finds it; zeroized when the task ends.
+        let prior_mseks = zeroize::Zeroizing::new(keys.prior_mseks.clone());
         let raw = rfc5322.to_vec();
         let refused = Arc::clone(&self.refused);
         tokio::spawn(async move {
             match CalDavClient::new(Arc::clone(&nest))
-                .apply_inbound_reply_from_mail(&actor_id, &msek, &raw, now_secs())
+                .apply_inbound_reply_from_mail(&actor_id, &msek, &prior_mseks, &raw, now_secs())
                 .await
             {
                 Ok(outcome) => {
@@ -4086,28 +4123,20 @@ async fn load_mail_keys(
     let actor_id = nest.auth().keypair()?.actor_id().0;
     let mail = mail.load().await.ok()?;
     let msek = mail.msek?;
-    // The MSEK history, current first then each prior grace generation
-    // (`prior_mseks`, capped so current + grace == SNAPSHOT_GRACE_KEYPAIRS) —
-    // the same list the snapshot builder takes, so the standing key set and
-    // the epoch roots below are exactly what the MDA opens with.
-    let mseks: Vec<[u8; 32]> = std::iter::once(*msek)
-        .chain(
-            mail.prior_mseks
-                .iter()
-                .take(SNAPSHOT_GRACE_KEYPAIRS - 1)
-                .map(|prior| **prior),
-        )
+    // The prior grace generations, capped so current + grace ==
+    // SNAPSHOT_GRACE_KEYPAIRS — the same history the snapshot builder takes, so
+    // the standing key set, the epoch roots and the index ring are exactly what
+    // the MDA opens with.
+    let mut prior_mseks: Vec<[u8; 32]> = mail
+        .prior_mseks
+        .iter()
+        .take(SNAPSHOT_GRACE_KEYPAIRS - 1)
+        .map(|prior| **prior)
         .collect();
-    // Deref out of the `Zeroizing` derivation wrapper: the wrapper drops
-    // (zeroizing) at the end of each statement, and the destination is
-    // `MailKeys`, which is itself zeroize-on-drop.
-    let epoch_roots = mseks.iter().map(|m| *derive_mail_epoch_root(m)).collect();
-    Some(MailKeys {
-        standing: derive_standing_mail_keypairs(&mseks),
-        msek: *msek,
-        actor_id,
-        epoch_roots,
-    })
+    let keys = MailKeys::from_custody(actor_id, &msek, &prior_mseks);
+    // The local copy is not zeroize-on-drop; `keys` now carries its own.
+    prior_mseks.zeroize();
+    Some(keys)
 }
 
 /// The nest-backed calendar-apply sink for the **mailbox-less CalDAV iMIP rail**
@@ -4239,6 +4268,7 @@ impl SchedulingSink for NestSchedulingSink {
             .apply_inbound_scheduling_from_message(
                 &keys.actor_id,
                 &keys.msek,
+                &keys.prior_mseks,
                 &raw_rfc5322,
                 now_secs(),
                 // Pass-through only: who may create / change / cancel is decided
@@ -4541,7 +4571,7 @@ impl NestMailIndexLauncher {
             // § Carrier shape; the same posture `NestContactCorpus` took for the
             // contacts arm).
             members.push(Arc::new(fauna_client_index::MailLocalSearch::new(
-                fauna_client_index::MailcalKeyRing::from_msek(&keys.msek),
+                keys.index_ring(),
                 Arc::clone(&self.publisher),
                 Arc::clone(&lookup),
             )));
@@ -4815,7 +4845,8 @@ impl fauna_client_index::ContactCorpusRead for NestContactCorpus {
         // Derived once for the whole corpus read — the book listing AND every
         // book's card page below reuse it instead of each paying its own
         // X-Wing keygen .
-        let dav_keys = fauna_client_carddav::DavRecipientKeys::derive(&keys.msek);
+        let dav_keys =
+            fauna_client_carddav::DavRecipientKeys::from_mseks(&keys.msek, &keys.prior_mseks);
         let books = carddav
             .list_addressbooks_decoded(
                 fauna_protocol::bridge_routing::ListAddressbooksRequest {
@@ -5849,11 +5880,13 @@ impl NestMailIndexLauncher {
         // to start does not republish an index the actor already has.
         match fauna_client_index::resume_mail_builder(
             &keys.msek,
-            // Current generation only: this leg has no MLS snapshot in hand at
-            // this point. Rotation grace arrives when the client's own snapshot
-            // reaches here — the MDA leg builds the same ring from the session
-            // snapshot today (`key-material-hierarchy.md` § Path B-sibling-4).
-            &fauna_client_index::MailcalKeyRing::from_msek(&keys.msek),
+            // Current generation plus a grace key per prior MSEK the custody
+            // still holds — the ring the MDA leg builds from the session
+            // snapshot, here from the custody itself, so a manifest sealed
+            // before a rotation still resumes (and is re-sealed under the
+            // current key on the next publish) (`owner-key-material.md`
+            // § Path B-sibling-4).
+            &keys.index_ring(),
             Arc::clone(&self.publisher) as Arc<dyn fauna_client_index::SegmentRail>,
         )
         .await
@@ -6021,7 +6054,8 @@ impl NestMailIndexLauncher {
         let Some(keys) = self.keys.get().await else {
             return;
         };
-        let dav_keys = fauna_client_carddav::DavRecipientKeys::derive(&keys.msek);
+        let dav_keys =
+            fauna_client_carddav::DavRecipientKeys::from_mseks(&keys.msek, &keys.prior_mseks);
         let enumeration = NestContactsEnumeration {
             nest: Arc::clone(&self.nest),
             keys,
@@ -7289,6 +7323,40 @@ mod tests {
         let kp = ActorKeypair::generate();
         let nest = NestClient::new("ws://127.0.0.1:0/ws".into(), kp);
         let _c = ConversationsClient::new(nest);
+    }
+
+    /// A mail-key rotation must not cut the client off from its own local
+    /// mail/calendar search: the manifest the builder sealed under the
+    /// pre-rotation MSEK still opens through the ring the client derives from
+    /// its custody, which now names the old MSEK as a grace generation.
+    /// Before this, the client leg built a current-only ring and the builder
+    /// never resumed after a rotation ("no key in the ring opens it (1 tried:
+    /// current + 0 grace)").
+    #[test]
+    fn the_index_ring_opens_a_manifest_sealed_before_a_mail_key_rotation() {
+        const OLD: [u8; 32] = [21u8; 32];
+        const NEW: [u8; 32] = [42u8; 32];
+        let old_key = fauna_index::IndexSegmentKey::from_bytes(
+            *fauna_mls::wrapped_blob::derive_index_segment_key(&OLD),
+        );
+        let sealed = fauna_index::IndexManifest::empty(
+            fauna_index::KindClass::MailCal,
+            fauna_index::TOKENIZER_PIPELINE_VERSION,
+        )
+        .to_sealed_bytes_mailcal(&old_key)
+        .expect("seal under the pre-rotation key");
+
+        let after_rotation = MailKeys::from_custody([7; 32], &NEW, &[OLD]);
+        after_rotation
+            .index_ring()
+            .open_manifest(&sealed)
+            .expect("the rotated client opens its pre-rotation manifest");
+
+        let never_rotated = MailKeys::from_custody([7; 32], &NEW, &[]);
+        assert!(
+            never_rotated.index_ring().open_manifest(&sealed).is_err(),
+            "a key the custody does not hold stays shut"
+        );
     }
 
     // ── Wire-contract tests ─────────────────────────────────────────────────

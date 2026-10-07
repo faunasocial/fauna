@@ -125,10 +125,10 @@ Stamped 2026-10-01 at e129e78aa0.
 | 8 | nest | `tests/e2e-unified/tests/api/test_nest_rotation_chain.py::test_the_chain_carries_the_hop_a_real_rotation_wrote` | nest (linux): passed |
 | 8 | nest | `tests/e2e-unified/tests/api/test_nest_rotation_chain.py::test_a_rotation_evicts_every_bearer_minted_before_it` | nest (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_admin_oauth_issuer_keys.py::test_the_admin_walks_the_three_sign_in_key_controls_through_the_app` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, tui (linux): passed |
 | 11 | app | (none) | — |
-| 12 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, tui (linux): passed |
 | 14 | nest | (none) | — |
 | 15 | nest | (none) | — |
 | 16 | app | (none) | — |

@@ -15,6 +15,7 @@
 
 import {
   contentRenderVerdict,
+  contentRenderForItem,
   probabilityToPerMille,
   type ContentLabelEntry,
   type ContentPolicyValue,
@@ -22,7 +23,7 @@ import {
   type ContentRender,
   type RegionItem,
 } from '$lib/wasm';
-import { familyStatus, spamGetPreferences } from '$lib/rpc';
+import { familyStatus, spamGetPreferences, loadHiddenContent } from '$lib/rpc';
 import { regionRender } from '$lib/region.svelte';
 import { registerActorScopedReset } from '$lib/actorScope';
 
@@ -40,6 +41,17 @@ let ownPhishingPermille = $state<number | undefined>(undefined);
 // (`family-safety.md` § Guardian Notify). When on, the ward's client counts its
 // guardian-floor enforcement events and reports coarse per-category aggregates.
 let contentNotifyEnabled = $state<boolean>(false);
+
+// The ids the viewer hid by reporting (`fauna.state.moderation`'s
+// `hidden_content`, read through `loadHiddenContent`). Empty until the read
+// lands — then no reporter-side hide composes.
+let hiddenContent = $state<string[]>([]);
+
+/** Cache the viewer's hidden-content list (the stored list a report's hide, or
+ *  the load, resolved to). */
+export function setHiddenContent(ids: string[]): void {
+  hiddenContent = ids;
+}
 
 /** Move the guardian half — the floor + the Guardian Notify knob — to what a
  *  SUCCESSFUL `fauna.family.status` read, or the launch restore, established.
@@ -90,6 +102,13 @@ export async function hydrateContentPolicy(secretHex: string): Promise<void> {
   } catch {
     // No preferences read — no own-threshold rule composes.
   }
+  // The reporter-side hide's list rides the sealed account-plane record, whose
+  // runtime may not be up yet (a fresh sign-in); it must NEVER hold the surface's
+  // first paint, so it is not awaited — the list lands when it lands, and the
+  // surface re-renders off the `$state`. A failed read leaves the hide as it was.
+  void loadHiddenContent(secretHex)
+    .then(setHiddenContent)
+    .catch(() => {});
 }
 
 /** The content-policy render verdict for a piece of content, keyed on its
@@ -108,6 +127,22 @@ export function contentVerdict(labels: ContentLabelEntry[] | undefined): Content
  *  ahead of the family arm. Before the plane is open this is the family/own
  *  verdict alone (nothing held yet, so nothing regional to apply). */
 export function contentRender(labels: ContentLabelEntry[] | undefined, item: RegionItem): ContentRender {
+  // The viewer's own reports come first: an item they reported — or whose
+  // author they reported or blocked-by-report — is `block` with
+  // `reported: true` (`moderation.md` § Corollary), decided in shared Rust.
+  const reportId = item.reportIdHex ?? item.contentIdHex;
+  if (hiddenContent.length > 0 && reportId) {
+    const own = contentRenderForItem(
+      hiddenContent,
+      reportId,
+      item.reportAuthorHex ?? item.authorHex ?? null,
+      labels ?? [],
+      wardContentPolicy,
+      ownSpamPermille,
+      ownPhishingPermille,
+    );
+    if (own.reported) return { verdict: 'block', placeholder: null, reported: true };
+  }
   const composed = regionRender(labels ?? [], wardContentPolicy, ownSpamPermille, ownPhishingPermille, item);
   return composed ?? { verdict: contentVerdict(labels), placeholder: null };
 }
@@ -142,6 +177,7 @@ export function contentNotifyOn(): boolean {
  *  failure into "no floor composes for anyone", the state the fail-open was
  *  actually designed around. */
 function resetContentPolicy(): void {
+  hiddenContent = [];
   wardContentPolicy = null;
   ownSpamPermille = undefined;
   ownPhishingPermille = undefined;

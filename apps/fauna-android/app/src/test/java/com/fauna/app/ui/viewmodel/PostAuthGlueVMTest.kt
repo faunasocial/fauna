@@ -7,6 +7,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.mockito.Mockito.mock
+import org.mockito.Mockito.never
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when` as whenever
 
@@ -90,5 +91,32 @@ class PostAuthGlueVMTest {
             PostAuthGlueVM.RecoveryCustodyOutcome.NOT_PROTECTED_FAILED,
             vm.runDeploymentSeedCustodyLeg(),
         )
+    }
+
+    // ── identity-succession.md § The RecoveryKey → *Creation UX*: the kit the
+    // sign-up `recovery_kit` screen minted registers at the signed-in edge —
+    // THAT root (the one the user wrote down), never a fresh one. ──
+
+    @Test
+    fun registerDeferredRecoveryKit_registersTheConfirmedKit() = runTest {
+        val api = mock(ApiClient::class.java)
+        val host = mock(OnboardingHost::class.java)
+        whenever(host.consumePendingRecoveryKit()).thenReturn(KIT)
+        PostAuthGlueVM(api, host).registerDeferredRecoveryKit()
+        verify(api).registerDeferredRecoveryKit(KIT)
+    }
+
+    @Test
+    fun registerDeferredRecoveryKit_aSkippedKitRegistersNothing() = runTest {
+        val api = mock(ApiClient::class.java)
+        val host = mock(OnboardingHost::class.java)
+        whenever(host.consumePendingRecoveryKit()).thenReturn(null)
+        PostAuthGlueVM(api, host).registerDeferredRecoveryKit()
+        verify(api, never()).registerDeferredRecoveryKit(org.mockito.ArgumentMatchers.anyString())
+    }
+
+    private companion object {
+        const val KIT =
+            "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
     }
 }

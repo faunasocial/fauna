@@ -85,7 +85,12 @@ knowing which readers carry the previous launch's words across that:
 * **windows — genuinely cumulative** (`drivers/windows.py::_app_log_since`
   documents the append-shared data-dir log), **and irrelevant here:** windows
   takes the readiness-poll branch and never reaches this control.
-* **android — no reader at all**, so it takes the declared skip above.
+* **android — per-launch, by a byte floor.** The app's `filesDir` (and so its
+  `fauna_log` `logs/*`) survives every relaunch and `adb install -r`, so the
+  reader (`drivers/android.py::app_log_text`, over the bridge's `GET /app-log`)
+  slices from a floor `_mark_log_baseline()` takes before `/session` starts the
+  app — the iOS shape. It reads the shared rolling file, not `adb logcat`: the
+  Rust tracing output never reaches logcat.
 
 ⚠ **An earlier version of this note claimed the readers are "cumulative for the
 driver's lifetime" outright.** That was wrong, and wrong in the direction that
@@ -165,19 +170,21 @@ def witness_real_rail(driver, *, context: str, budget_s: float = STAGE_BUDGET_S)
                    "app's own account of its launch, and this driver answers "
                    "neither app_log_text nor app_stderr_text — so the absence of "
                    "the marker here would be no evidence at all",
-            tracked="docs/goal/architecture/e2e-conventions.md § point 6"
-                    "",
+            tracked="docs/goal/architecture/e2e-self-diagnosing-failures.md § The convention",
         )
     if driver.is_web():
-        app_surface.skip_unbuilt(
+        # Not debt: no reader of ANY size could make web pass this control. The
+        # `mls-sync:` marker is native-only (`libs/fauna-wasm` never emits it),
+        # and web is a runtime toggle with its own readiness poll
+        # (`data.conv_real_backend_active`). Its reader is also the declared
+        # `"evicting"` console ring (`drivers/base.py::log_scope_across_relaunch`),
+        # whose absence is never evidence.
+        app_surface.declared_absence(
             driver,
-            surface="a non-evicting app-log reader on the e2e driver",
-            detail="web's reader is a 500-entry console ring (drivers/web.py::"
-                   "app_stderr_text) whose own eviction warning states that an "
-                   "absent line is NOT evidence it was never logged — sound for "
-                   "diagnosis, unsound as the negative half of a control",
-            tracked="docs/goal/architecture/e2e-conventions.md § point 6"
-                    "",
+            capability="non-evicting app-log reader with a native `mls-sync:` marker "
+                       "(web's console ring evicts, and the wasm path never emits "
+                       "the marker — it polls `data.conv_real_backend_active` instead)",
+            doc="docs/goal/architecture/e2e-self-diagnosing-failures.md § The convention",
         )
 
     # Stage 1 — the shell's own verdict on the gate. Apple stamps it on BOTH

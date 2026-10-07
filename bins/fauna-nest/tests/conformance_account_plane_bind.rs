@@ -337,6 +337,8 @@ impl Nest {
         let mut b = RpcRouter::builder();
         folder_handlers::register_folders_handlers(&mut b);
         sync_handlers::register_sync_handlers(&mut b);
+        // `fauna.capabilities.reconcile` — every full pass enumerates it.
+        fauna_nest::bridge_blob_handlers::register_capability_handlers(&mut b);
         fauna_nest::generation_escrow_handlers::register_generation_escrow_handlers(&mut b);
         // `fauna.auth.rotation_chain` — what the bind leg reads the ancestry from.
         fauna_nest::auth_handlers::register_auth_handlers(&mut b);

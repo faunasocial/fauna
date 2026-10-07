@@ -9080,6 +9080,11 @@ mod tests {
                 kind: "k".repeat(MAX_DESTINATION_KIND_BYTES),
                 custodian_device_id: Some("c".repeat(MAX_CUSTODIAN_DEVICE_ID_BYTES)),
                 capacity_cap_bytes: Some(u64::MAX),
+                folder_display_name: Some("d".repeat(MAX_COVERED_FOLDER_NAME_BYTES)),
+                folder_label: Some(fauna_core::data::CoveredFolderLabel {
+                    name_hash: [0xCC; 32],
+                    name_sealed: vec![0xBB; MAX_COVERED_FOLDER_SEAL_BYTES],
+                }),
             }
         };
         let row_of = |n: usize| BackupDestinationsRow {

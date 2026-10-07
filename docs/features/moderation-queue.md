@@ -70,6 +70,6 @@ Stamped 2026-10-01 at e5a7e5d758.
 | 6 | app | `tests/e2e-unified/tests/test_admin_legal_takedown.py::test_the_admin_takes_down_and_restores_a_post_through_the_app` | linux (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/api/test_moderation_appeal.py::test_a_post_appeal_is_the_authors_bounded_and_once_per_decision` | nest (linux): passed |
 | 8 | nest | `tests/e2e-unified/tests/api/test_moderation_appeal.py::test_an_appeal_needs_a_real_enforcement_record` | nest (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_an_account_report_shows_in_the_ledger_and_can_be_withdrawn` | tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_an_account_report_shows_in_the_ledger_and_can_be_withdrawn` | web (linux): passed, tui (linux): passed |
 | 10 | nest | (none) | — |
 <!-- features-render:end -->
