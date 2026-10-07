@@ -48,7 +48,7 @@ Stamped 2026-10-01 at e129e78aa0.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | 0.1.2-dev+f3c1e99a standalone |
-| linux | ⚠ partial | 0.1.2-dev+d4125106 standalone |
+| linux | ⚠ partial | 0.1.2-dev+78e73031 standalone |
 | windows | ⚠ partial | |
 | macos | ⚠ partial | 0.1.2-dev+8b423269 standalone |
 | ios | ⚠ partial | 0.1.2-dev+c438a386 standalone |

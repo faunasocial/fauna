@@ -39,6 +39,7 @@ use fauna_client_carddav::{
 
 use crate::FfiError;
 use crate::caldav_client::dav_store_context;
+use fauna_client_config::DavStoreContext;
 
 // ── reply mirrors (only the Address-Book-rendered fields) ──────────────────────
 
@@ -171,7 +172,12 @@ impl FfiCarddavClient {
     /// no book yet (there is **no** lazy provisioning — the read seam never writes;
     /// a book is minted by the write slice or a CardDAV MUA).
     pub async fn list_addressbooks(&self) -> Result<Vec<FfiAddressbookRow>, FfiError> {
-        let Some((actor_id, msek)) = dav_store_context(&self.nest).await else {
+        let Some(DavStoreContext {
+            actor_id,
+            msek,
+            prior_mseks,
+        }) = dav_store_context(&self.nest).await
+        else {
             return Ok(vec![]);
         };
         let books = self
@@ -180,7 +186,7 @@ impl FfiCarddavClient {
                 ListAddressbooksRequest {
                     actor_id: actor_id.to_vec(),
                 },
-                &DavRecipientKeys::derive(&msek),
+                &DavRecipientKeys::from_mseks(&msek, &prior_mseks),
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -199,7 +205,12 @@ impl FfiCarddavClient {
                 msg: "address book id must be 64 hex chars".to_string(),
             });
         };
-        let Some((actor_id, msek)) = dav_store_context(&self.nest).await else {
+        let Some(DavStoreContext {
+            actor_id,
+            msek,
+            prior_mseks,
+        }) = dav_store_context(&self.nest).await
+        else {
             return Ok(vec![]);
         };
         let page = self
@@ -212,7 +223,7 @@ impl FfiCarddavClient {
                     after_card_id: None,
                     limit: 0,
                 },
-                &DavRecipientKeys::derive(&msek),
+                &DavRecipientKeys::from_mseks(&msek, &prior_mseks),
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -244,7 +255,12 @@ impl FfiCarddavClient {
                 msg: "uid_hash must be 64 hex chars".to_string(),
             });
         };
-        let Some((actor_id, msek)) = dav_store_context(&self.nest).await else {
+        let Some(DavStoreContext {
+            actor_id,
+            msek,
+            prior_mseks,
+        }) = dav_store_context(&self.nest).await
+        else {
             return Ok(FfiLocatedCard {
                 books: vec![],
                 found: None,
@@ -252,7 +268,7 @@ impl FfiCarddavClient {
         };
         let located = self
             .client()
-            .locate_card_by_uid_hash(actor_id.to_vec(), &msek, &uid_hash)
+            .locate_card_by_uid_hash(actor_id.to_vec(), &msek, &prior_mseks, &uid_hash)
             .await
             .map_err(|e| e.to_string())?;
         Ok(FfiLocatedCard {

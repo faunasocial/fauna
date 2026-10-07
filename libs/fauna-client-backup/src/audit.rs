@@ -1737,7 +1737,7 @@ fn retained_as_custody(g: &GenerationItem) -> CustodyItem {
         manifest_hash: g.manifest_hash.clone(),
         size_bytes: g.size_bytes,
         updated_at: g.superseded_at,
-        extra: Default::default(),
+        ..Default::default()
     }
 }
 
@@ -2690,7 +2690,7 @@ mod tests {
             manifest_hash: manifest_hash_hex(),
             size_bytes: 4096,
             updated_at,
-            extra: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -2909,7 +2909,7 @@ mod tests {
             manifest_hash: hex::encode(ContentHash::of_raw(&mirror_manifest_bytes()).digest()),
             size_bytes: 4096,
             updated_at: NOW,
-            extra: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -3093,7 +3093,7 @@ mod tests {
             manifest_hash: manifest_hash_hex(),
             size_bytes: 4096,
             updated_at,
-            extra: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -5698,7 +5698,7 @@ mod tests {
             manifest_hash: manifest_hex,
             size_bytes: 1,
             updated_at: NOW,
-            extra: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -6041,7 +6041,7 @@ mod tests {
             manifest_hash: manifest_hex,
             size_bytes: 1,
             updated_at: NOW,
-            extra: Default::default(),
+            ..Default::default()
         }
     }
 

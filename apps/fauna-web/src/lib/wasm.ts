@@ -1285,6 +1285,152 @@ export function takedownVerdict(restore: boolean, error: string | null): Localiz
   return wasm().takedownVerdict(restore, error ?? undefined) as LocalizedText;
 }
 
+// ── User-initiated reporting (`moderation.md` § User-initiated reporting →
+// *Where logic lives*) — the wasm twins of the UniFFI `abuse_report.rs` faces.
+// The sheet's gating and every sentence are shared Rust's
+// (`fauna_client_moderation::report`); the SPA paints what comes back.
+
+/** The wire's tagged `AbuseReportSubject`. */
+export type AbuseReportSubject =
+  | { kind: 'post'; cid: string }
+  | { kind: 'message'; channel: string; record_cid: string }
+  | { kind: 'actor'; actor_id: string };
+
+/** What a surface holds when it opens the sheet. */
+export interface ReportTarget {
+  subject: AbuseReportSubject;
+  /** The nest holds no readable bytes for it (a message; a gated post). */
+  sealed: boolean;
+  /** The author's hex actor id — routes the report to their home nest. */
+  author: string | null;
+  /** The text the client already holds — the excerpt source. */
+  plaintext: string | null;
+}
+
+/** The sheet's draft; `reason` is a wire token (`spam`, `harassment`, …) or null. */
+export interface ReportForm {
+  reason: string | null;
+  note: string;
+  include_text: boolean;
+  block_author: boolean;
+}
+
+export interface ReportSheetView {
+  title: LocalizedText;
+  reason_label: LocalizedText;
+  reasons: { reason: string; label: LocalizedText }[];
+  note_label: LocalizedText;
+  show_include_text: boolean;
+  include_text_label: LocalizedText;
+  block_author_label: LocalizedText;
+  submit_label: LocalizedText;
+  cancel_label: LocalizedText;
+  can_submit: boolean;
+  blocked_reason: LocalizedText | null;
+}
+
+/** `ReportTarget::post` — a feed post; `gated` is the sealed rule's post arm
+ *  (the post was opened through a key). */
+export function reportPostTarget(
+  cid: string,
+  author: string,
+  plaintext: string,
+  gated: boolean,
+): ReportTarget {
+  return wasm().reportPostTarget(cid, author, plaintext, gated) as ReportTarget;
+}
+
+/** `ReportTarget::actor` — the OTHER profile. */
+export function reportActorTarget(actorId: string): ReportTarget {
+  return wasm().reportActorTarget(actorId) as ReportTarget;
+}
+
+/** `ReportTarget::message` — a conversation message off its plane ref; `null`
+ *  for a mail / bridged message, which paints no report verb. */
+export function reportMessageTarget(
+  planeScope: string,
+  recordDigest: string,
+  senderActor: string | null,
+  plaintext: string,
+): ReportTarget | null {
+  return wasm().reportMessageTarget(
+    planeScope,
+    recordDigest,
+    senderActor ?? undefined,
+    plaintext,
+  ) as ReportTarget | null;
+}
+
+/** `report::report_sheet_view` — the sheet's per-keystroke fold. */
+export function reportSheetView(target: ReportTarget, form: ReportForm): ReportSheetView {
+  return wasm().reportSheetView(target, form) as ReportSheetView;
+}
+
+/** `report::report_failed` — the line a failed send paints on `error-message`. */
+export function reportFailed(error: string): LocalizedText {
+  return wasm().reportFailed(error) as LocalizedText;
+}
+
+/** `report::ledger_title` / `ledger_empty`. */
+export function reportLedgerWords(): { title: LocalizedText; empty: LocalizedText } {
+  return wasm().reportLedgerWords() as { title: LocalizedText; empty: LocalizedText };
+}
+
+/** `report::withdraw_verdict` — `null` on success. */
+export function reportWithdrawVerdict(error: string | null): LocalizedText | null {
+  return wasm().reportWithdrawVerdict(error ?? undefined) as LocalizedText | null;
+}
+
+/** `report::resolve_verdict` — `acted` false is a dismissal. */
+export function reportResolveVerdict(acted: boolean, error: string | null): LocalizedText {
+  return wasm().reportResolveVerdict(acted, error ?? undefined) as LocalizedText;
+}
+
+/** `report::message_subject` — the subject for a conversation message from its
+ *  plane ref; `null` for a mail / bridged message (no report verb). */
+export function reportMessageSubject(
+  planeScope: string,
+  recordDigest: string,
+): AbuseReportSubject | null {
+  return wasm().reportMessageSubject(planeScope, recordDigest) as AbuseReportSubject | null;
+}
+
+/** `report::takedown_prefill` — what *open takedown* pre-fills the console
+ *  with; `null` for an account. */
+export function reportTakedownPrefill(
+  subject: AbuseReportSubject,
+): { content_id: string; conversation: boolean } | null {
+  return wasm().reportTakedownPrefill(subject) as {
+    content_id: string;
+    conversation: boolean;
+  } | null;
+}
+
+/** One reporter-ledger row (`moderation-report-item`), worded by the shared fold. */
+export interface ReportLedgerRow {
+  report_id: string;
+  subject: AbuseReportSubject;
+  created_at: number;
+  reason: LocalizedText;
+  status: LocalizedText;
+  outcome: LocalizedText | null;
+  routed_to: LocalizedText;
+  can_withdraw: boolean;
+}
+
+/** One admin-queue row (`admin-nest-report-item`), worded by the shared fold. */
+export interface ReportQueueRow {
+  report_id: string;
+  subject: AbuseReportSubject;
+  subject_actor: string | null;
+  reason: LocalizedText;
+  note: string | null;
+  excerpt: string | null;
+  origin: LocalizedText;
+  created_at: number;
+  can_open_takedown: boolean;
+}
+
 // ── Outside-app sign-in keys (`admin-nest-oauth-*`) — the pure word folds of
 // `fauna_client_admin` (authorization-server.md § The issuer → Two rotation
 // arms), the wasm twins of the UniFFI faces the natives render. The section
@@ -2378,6 +2524,34 @@ export interface RegionPlaceholder {
 export interface ContentRender {
   verdict: ContentRenderVerdict;
   placeholder: RegionPlaceholder | null;
+  /** `block` because the viewer reported the item or its author
+   *  (`moderation.md` § Corollary — block also hides): the surface paints
+   *  "You reported this" in place of the body. */
+  reported?: boolean;
+}
+
+/** `contentRenderForItem` — the render decision for one identified item
+ *  honouring the viewer's own reports (`hiddenContent` is `loadHiddenContent`).
+ *  Region policies are composed separately by the region plane; pass none. */
+export function contentRenderForItem(
+  hiddenContent: string[],
+  itemId: string,
+  authorId: string | null,
+  labels: ContentLabelEntry[],
+  contentPolicy: ContentPolicyValue | null | undefined,
+  ownSpamPermille?: number,
+  ownPhishingPermille?: number,
+): { verdict: ContentRenderVerdict; reported: boolean } {
+  return wasm().contentRenderForItem(
+    hiddenContent,
+    itemId,
+    authorId ?? undefined,
+    labels,
+    contentPolicy ?? null,
+    ownSpamPermille,
+    ownPhishingPermille,
+    [],
+  ) as { verdict: ContentRenderVerdict; reported: boolean };
 }
 
 /** The settings region surface's read (`RegionPlane::view`); times are unix
@@ -2401,6 +2575,13 @@ export interface RegionView {
 export interface RegionItem {
   contentIdHex?: string | null;
   authorHex?: string | null;
+  /** The key the viewer's own reports are matched on, when it is not the
+   *  region's content id: a conversation message is reported by its plane
+   *  record digest, not its `message_id` (`moderation.md` § App surface). */
+  reportIdHex?: string | null;
+  /** The author a report of this item hides, when the region's `authorHex`
+   *  is deliberately null (a conversation message: the sender's actor id). */
+  reportAuthorHex?: string | null;
   text: string;
   hashtags: string[];
   hasMedia: boolean;

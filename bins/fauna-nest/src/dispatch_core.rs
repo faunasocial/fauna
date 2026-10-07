@@ -13,9 +13,11 @@
 //!
 //! What the two paths do **not** share is how a Reply is *carried + cached*, so
 //! that is the [`DispatchSink`] trait:
-//! - **per-actor** encodes a `Frame::Reply` to bytes and `try_send`s it on the
-//!   bounded outbound channel, caching the **frame bytes** verbatim (a replay
-//!   re-sends them as-is — the established behavior);
+//! - **per-actor** encodes a `Frame::Reply` to bytes and sends it through the
+//!   outbound slot its reader reserved when it admitted the request
+//!   (`RpcConnection::reply_slots` — the per-connection admission cap), caching
+//!   the **frame bytes** verbatim (a replay re-sends them as-is — the
+//!   established behavior);
 //! - **federation** builds a `Reply` and routes it through
 //!   `RpcDispatcher::send_reply`, caching the **(payload, ok)** so a replay
 //!   rebuilds the `Reply` with the *current* correlation_id — a federation

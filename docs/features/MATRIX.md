@@ -27,10 +27,10 @@ code it saw — the next run from a clean tree supersedes it.
 | [Get the app](get-the-app.md) |  | ⚠ | ⚠ 0.1.2-dev+2f8445a0 standalone | ⚠ | ⚠ | ⚠ | ⚠ 0.1.2-dev+38eef7c4 standalone |
 | [Join an existing nest](join-a-nest.md) | ⚠ 0.1.2-dev+4bc2efab standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone |  | ⚠ 0.1.2-dev+7663afa6 standalone |
 | [Recover a lost nest](recover-a-lost-nest.md) | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone |  |  | ⚠ 0.1.2-dev+7663afa6 standalone |
-| [Recovery kit at sign-up](recovery-kit-at-sign-up.md) | ❌ 0.1.2-dev+45b4b867 standalone | ✅ 0.1.2-dev+c4a95c20 standalone | ✅ 0.1.2-dev+3f8c34d8.dirty standalone | ✅ 0.1.2-dev+abeb05ca standalone | ✅ 0.1.2-dev+abeb05ca standalone |  | ✅ 0.1.2-dev+7663afa6 standalone |
+| [Recovery kit at sign-up](recovery-kit-at-sign-up.md) | ✅ 0.1.2-dev+a8404441 standalone | ✅ 0.1.2-dev+c4a95c20 standalone | ✅ 0.1.2-dev+3f8c34d8.dirty standalone | ✅ 0.1.2-dev+abeb05ca standalone | ✅ 0.1.2-dev+abeb05ca standalone |  | ✅ 0.1.2-dev+7663afa6 standalone |
 | [Set up a nest in the cloud from the app](set-up-a-nest-from-the-app.md) | ⚠ | ⚠ | ⚠ | ⚠ | ⚠ |  | ⚠ |
 | [Use your identity on another device](identity-on-another-device.md) | ✅ 0.1.2-dev+4bc2efab standalone | ✅ 0.1.2-dev+c4a95c20 standalone | ⚠ | ⚠ | ⚠ |  | ✅ 0.1.2-dev+831d48ef live |
-| [Your app's version, and news of a newer one](app-version-and-updates.md) |  | ✅ 0.1.2-dev+d4125106 standalone |  |  |  |  | ✅ 0.1.2-dev+ef35c9ce.dirty standalone |
+| [Your app's version, and news of a newer one](app-version-and-updates.md) |  | ✅ 0.1.2-dev+78e73031 standalone |  |  |  |  | ✅ 0.1.2-dev+ef35c9ce.dirty standalone |
 
 ## Everyday
 
@@ -60,7 +60,7 @@ code it saw — the next run from a clean tree supersedes it.
 | [Ready for new conversations](encryption-settings.md) | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone |
 | [Replies, recipients and threads](replies-and-threads.md) | ⚠ | ✅ 0.1.2-dev+c4a95c20 standalone | ⚠ | ⚠ | ⚠ |  | ✅ 0.1.2-dev+7663afa6 standalone |
 | [Search](search.md) | ⚠ 0.1.2-dev+e48628f5 standalone | ✅ 0.1.2-dev+c4a95c20 standalone | ✅ 0.1.2-dev+6d8dc256.dirty standalone | ✅ | ⚠ |  | ⚠ 0.1.2-dev+7663afa6 standalone |
-| [Search within a feed](feed-search.md) | ⚠ 0.1.2-dev+9bf9020c standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ✅ 0.1.2-dev+6d8dc256.dirty standalone | ✅ 0.1.2-dev+a1f84cc6 standalone | ✅ 0.1.2-dev+a1f84cc6 standalone |  | ✅ 0.1.2-dev+f872d502 live |
+| [Search within a feed](feed-search.md) | ✅ 0.1.2-dev+9bf9020c standalone | ✅ 0.1.2-dev+a1f84cc6 standalone | ✅ 0.1.2-dev+6d8dc256.dirty standalone | ✅ 0.1.2-dev+a1f84cc6 standalone | ✅ 0.1.2-dev+a1f84cc6 standalone |  | ✅ 0.1.2-dev+f872d502 live |
 | [Search your own mail and files, privately, on this device](private-search-index.md) | — | ✅ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+6d8dc256.dirty standalone | ✅ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+9b7a1a50 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+7663afa6 standalone |
 | [See what is trending](trending.md) | ✅ 0.1.2-dev+72d6a508 standalone | ✅ 0.1.2-dev+a1f84cc6 standalone | ✅ 0.1.2-dev+301434f2.dirty standalone | ✅ 0.1.2-dev+a1f84cc6 standalone | ✅ 0.1.2-dev+a1f84cc6 standalone |  | ⚠ 0.1.2-dev+831d48ef live |
 | [See your formatting as you type](formatting-as-you-type.md) |  | ✅ 0.1.2-dev+c4a95c20 standalone |  |  |  |  | — |
@@ -77,7 +77,7 @@ code it saw — the next run from a clean tree supersedes it.
 | [A second identity in its own window](second-identity-in-its-own-window.md) | ⚠ 0.1.2-dev+e7095c29 standalone | ✅ 0.1.2-dev+c4a95c20 standalone | ⚠ | ✅ | — | — | ✅ 0.1.2-dev+831d48ef live |
 | [Back up your photos](photo-backup.md) | — | — | — |  | ✅ 0.1.2-dev+fe03cd4e standalone |  | — |
 | [Backup destinations and restore](backup-destinations-and-restore.md) | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone |  | ⚠ 0.1.2-dev+7663afa6 standalone |
-| [Backups: snapshots](snapshots.md) | ⚠ 0.1.2-dev+27a1b955 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone |  | ⚠ 0.1.2-dev+831d48ef live |
+| [Backups: snapshots](snapshots.md) | ⚠ 0.1.2-dev+27a1b955 standalone | ⚠ 0.1.2-dev+78e73031 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone |  | ⚠ 0.1.2-dev+831d48ef live |
 | [Choose which device does the heavy lifting](task-delegation.md) | ⚠ 0.1.2-dev+05497413 docker | ✅ 0.1.2-dev+05497413 docker | ✅ 0.1.2-dev+05497413 docker | ✅ 0.1.2-dev+05497413 docker | ⚠ 0.1.2-dev+05497413 docker |  | ✅ 0.1.2-dev+05497413 docker |
 | [Connected apps](connected-apps.md) | ⚠ 0.1.2-dev+c207590c.dirty standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+be5542fa.dirty standalone | ⚠ 0.1.2-dev+e17a00b6.dirty standalone |  |  | ⚠ 0.1.2-dev+46de983d.dirty standalone |
 | [Direct connections between your devices](direct-device-connections.md) | — | ✅ 0.1.2-dev+c4a95c20 standalone | — | — | — | — | — |
@@ -91,7 +91,7 @@ code it saw — the next run from a clean tree supersedes it.
 | [Privacy: who can reach you, and your spam threshold](privacy-settings.md) | ⚠ 0.1.2-dev+4ca6f9ab standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+6d8dc256.dirty standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone |  | ⚠ 0.1.2-dev+7663afa6 standalone |
 | [Publish to the web](personal-website.md) | ⚠ 0.1.2-dev+72d6a508 standalone | ⚠ 0.1.2-dev+b3cb40c5 docker | ⚠ 0.1.2-dev+c04c2468 standalone | ⚠ 0.1.2-dev+b3cb40c5 docker | ⚠ 0.1.2-dev+b3cb40c5 docker |  | ⚠ 0.1.2-dev+b3cb40c5 docker |
 | [Run a job on this device](pin-a-job-to-this-device.md) | — | ✅ 0.1.2-dev+c4a95c20 standalone | ✅ 0.1.2-dev+0d1e684d standalone | ✅ 0.1.2-dev+f85ee000 standalone | — | — | ✅ 0.1.2-dev+831d48ef live |
-| [Several identities in one app](multiple-accounts.md) | ⚠ | ⚠ 0.1.2-dev+d4125106 standalone | ⚠ 0.1.2-dev+a3582c8b.dirty standalone | ⚠ 0.1.2-dev+4bba6f8f standalone | ⚠ 0.1.2-dev+4bba6f8f standalone |  | ⚠ 0.1.2-dev+95b53391 standalone |
+| [Several identities in one app](multiple-accounts.md) | ⚠ | ⚠ 0.1.2-dev+78e73031 standalone | ⚠ 0.1.2-dev+a3582c8b.dirty standalone | ⚠ 0.1.2-dev+4bba6f8f standalone | ⚠ 0.1.2-dev+4bba6f8f standalone |  | ⚠ 0.1.2-dev+95b53391 standalone |
 | [Share a folder in person, with no nest in between](offline-sharing.md) | — | ✅ 0.1.2-dev+c4a95c20 standalone | ⚠ 0.1.2-dev+2a213a2d.dirty standalone | ⚠ 0.1.2-dev+3fd2455c standalone | ⚠ 0.1.2-dev+7f22a381 standalone |  | ⚠ 0.1.2-dev+7663afa6 standalone |
 | [Share a folder with people](share-a-folder.md) | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone |  | ⚠ 0.1.2-dev+a1f84cc6 standalone |
 | [Share a link to a file](share-links.md) | ⚠ 0.1.2-dev+7739afc6.dirty standalone | ⚠ 0.1.2-dev+7739afc6.dirty standalone | ⚠ 0.1.2-dev+9a58388f.dirty standalone | ⚠ 0.1.2-dev+39cf14cf standalone |  |  | ⚠ 0.1.2-dev+7739afc6.dirty standalone |
@@ -147,7 +147,7 @@ code it saw — the next run from a clean tree supersedes it.
 | [Correct the classifier](moderation-queue.md) | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+068e152c.dirty standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone |  | ⚠ 0.1.2-dev+7663afa6 standalone |
 | [Learn from my activity](learn-from-my-activity.md) | ⚠ 0.1.2-dev+86db0698 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+98b03c39 standalone | ⚠ 0.1.2-dev+ac32864b standalone | ⚠ 0.1.2-dev+ac32864b standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+831d48ef live |
 | [Muted words](muted-words.md) | ⚠ | ⚠ 0.1.2-dev+64866f6d standalone | ⚠ | ⚠ | ⚠ |  | ⚠ 0.1.2-dev+831d48ef live |
-| [Report a post, a message or an account](report-abuse.md) |  |  |  |  |  |  | ⚠ 0.1.2-dev+b265ecfe.dirty standalone |
+| [Report a post, a message or an account](report-abuse.md) | ⚠ 0.1.2-dev+cfad4af4 standalone |  |  |  |  |  | ⚠ 0.1.2-dev+b265ecfe.dirty standalone |
 | [Supervised accounts for children](family-safety.md) | ⚠ 0.1.2-dev+019e87f9 standalone | ⚠ 0.1.2-dev+b3cb40c5 docker | ⚠ 0.1.2-dev+b3cb40c5 docker | ⚠ 0.1.2-dev+b3cb40c5 docker | ⚠ 0.1.2-dev+b3cb40c5 docker |  | ⚠ 0.1.2-dev+b3cb40c5 docker |
 | [Train your own topics](trained-topics.md) | ⚠ 0.1.2-dev+8999339a.dirty standalone | ⚠ 0.1.2-dev+c4a95c20 standalone | ⚠ 0.1.2-dev+0d1e684d standalone | ⚠ 0.1.2-dev+f85ee000 standalone | ⚠ 0.1.2-dev+f85ee000 standalone |  | ⚠ 0.1.2-dev+f872d502 live |
 
@@ -156,7 +156,7 @@ code it saw — the next run from a clean tree supersedes it.
 | Feature | web | linux | windows | macos | ios | android | tui |
 |---|---|---|---|---|---|---|---|
 | [Aliases that forward outside](admin-forwarders.md) | ⚠ 0.1.2-dev+cdb1bad0 standalone | ⚠ 0.1.2-dev+8b423269 standalone | ⚠ 0.1.2-dev+a704dbe4.dirty standalone | ⚠ 0.1.2-dev+8b423269 standalone |  |  | ⚠ 0.1.2-dev+8b423269 standalone |
-| [Bridges: approve and rotate keys](admin-bridges.md) | ⚠ 0.1.2-dev+cdb1bad0 standalone | ⚠ 0.1.2-dev+d4125106 standalone | ⚠ 0.1.2-dev+a704dbe4.dirty standalone | ⚠ 0.1.2-dev+8b423269 standalone |  |  | ⚠ 0.1.2-dev+9746302c.dirty standalone |
+| [Bridges: approve and rotate keys](admin-bridges.md) | ⚠ 0.1.2-dev+cdb1bad0 standalone | ⚠ 0.1.2-dev+78e73031 standalone | ⚠ 0.1.2-dev+a704dbe4.dirty standalone | ⚠ 0.1.2-dev+8b423269 standalone |  |  | ⚠ 0.1.2-dev+9746302c.dirty standalone |
 | [Calendar, Contacts and Files switches](admin-calendar-contacts-files.md) | ⚠ 0.1.2-dev+c438a386 standalone | ⚠ 0.1.2-dev+c438a386 standalone | ⚠ 0.1.2-dev+c438a386 standalone | ⚠ 0.1.2-dev+c438a386 standalone | ⚠ 0.1.2-dev+c438a386 standalone |  | ⚠ 0.1.2-dev+c438a386 standalone |
 | [Domains, DNS records and certificates](admin-dns-and-certificates.md) | ⚠ 0.1.2-dev+b3cb40c5 docker | ⚠ 0.1.2-dev+b3cb40c5 docker | ⚠ 0.1.2-dev+b3cb40c5 docker | ⚠ 0.1.2-dev+b3cb40c5 docker | ⚠ 0.1.2-dev+b3cb40c5 docker |  | ⚠ 0.1.2-dev+b3cb40c5 docker |
 | [Factory reset and set up again](factory-reset.md) | ⚠ | ⚠ 0.1.2-dev+b3cb40c5 docker | ⚠ | ⚠ | ⚠ |  | ⚠ |
@@ -164,10 +164,10 @@ code it saw — the next run from a clean tree supersedes it.
 | [Logs](admin-logs.md) | ⚠ 0.1.2-dev+f3c1e99a standalone | ⚠ 0.1.2-dev+b3cb40c5 docker | ⚠ 0.1.2-dev+ab96a0f8.dirty standalone | ⚠ 0.1.2-dev+8b423269 standalone | ⚠ 0.1.2-dev+c438a386 standalone |  | ⚠ 0.1.2-dev+b3cb40c5 docker |
 | [Mail health at a glance](admin-mail-health.md) | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+4ad1c6f0.dirty standalone |
 | [Mail policy](admin-mail-policy.md) | ⚠ 0.1.2-dev+f3c1e99a standalone | ⚠ 0.1.2-dev+8b423269 standalone | ⚠ 0.1.2-dev+ab96a0f8.dirty standalone | ⚠ 0.1.2-dev+8b423269 standalone | ⚠ 0.1.2-dev+8b423269 standalone |  | ⚠ 0.1.2-dev+8b423269 standalone |
-| [Members: requests, registration, invites and actions](admin-users.md) | ⚠ 0.1.2-dev+f3c1e99a standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone |  | ⚠ 0.1.2-dev+7663afa6 standalone |
+| [Members: requests, registration, invites and actions](admin-users.md) | ⚠ 0.1.2-dev+f3c1e99a standalone | ⚠ 0.1.2-dev+78e73031 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone |  | ⚠ 0.1.2-dev+7663afa6 standalone |
 | [Nest: network mode, pairing, ports, updates, region, identity, sign-in keys and takedowns](admin-nest.md) | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone |  | ⚠ 0.1.2-dev+7663afa6 standalone |
 | [The admin area](admin-dashboard.md) | ⚠ 0.1.2-dev+f3c1e99a standalone | ⚠ 0.1.2-dev+c438a386 standalone | ⚠ 0.1.2-dev+c438a386 standalone | ⚠ 0.1.2-dev+8b423269 standalone | ⚠ 0.1.2-dev+c438a386 standalone |  | ⚠ 0.1.2-dev+c438a386 standalone |
-| [Tiers and paid membership](admin-tiers.md) | ⚠ 0.1.2-dev+f3c1e99a standalone | ⚠ 0.1.2-dev+d4125106 standalone | ⚠ | ⚠ 0.1.2-dev+8b423269 standalone | ⚠ 0.1.2-dev+c438a386 standalone |  | ⚠ 0.1.2-dev+7663afa6 standalone |
+| [Tiers and paid membership](admin-tiers.md) | ⚠ 0.1.2-dev+f3c1e99a standalone | ⚠ 0.1.2-dev+78e73031 standalone | ⚠ | ⚠ 0.1.2-dev+8b423269 standalone | ⚠ 0.1.2-dev+c438a386 standalone |  | ⚠ 0.1.2-dev+7663afa6 standalone |
 | [Web: whose site is the front page](admin-front-page.md) | ⚠ 0.1.2-dev+00c39e3e.dirty standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+c04c2468 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone | ⚠ 0.1.2-dev+a1f84cc6 standalone |  | ⚠ 0.1.2-dev+7663afa6 standalone |
 
 ## Your nest

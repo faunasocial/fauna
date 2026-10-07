@@ -763,14 +763,33 @@ pub fn process_session_account() -> Option<String> {
         .map(str::to_string)
 }
 
-/// The account this window is using: [`process_session_account`], or — before
-/// any account has been admitted, which only a primary can be — the registry's
-/// active account, which is what a primary resolves to.
+/// The account this window is using: [`process_session_account`]; before the
+/// launch has admitted an account, the process's binding
+/// ([`session_launch_binding`]) for a bound seat, and the registry's active
+/// account — what a primary resolves to — for a plain one.
 ///
 /// The key both account switchers mark "this is the account you are using"
-/// by, so a bound instance never offers to remove the account it serves.
+/// by, so a bound instance never offers to remove the account it serves. The
+/// binding step is load-bearing: a seat may render before it is admitted
+/// (linux builds its Account page once, ahead of the session's lock), and a
+/// bound seat keyed on the active pointer would mark the PRIMARY's account in
+/// use and offer its own.
 pub fn session_account(registry: &crate::AccountRegistry) -> Option<String> {
-    process_session_account().or_else(|| registry.active())
+    session_account_from(
+        process_session_account(),
+        session_launch_binding(),
+        registry,
+    )
+}
+
+/// The pure half of [`session_account`], the two process-global reads passed
+/// in so a test need not seed them.
+fn session_account_from(
+    serving: Option<String>,
+    bound: Option<String>,
+    registry: &crate::AccountRegistry,
+) -> Option<String> {
+    serving.or(bound).or_else(|| registry.active())
 }
 
 /// This process's **launch binding** — the account it runs as when it is not
@@ -1425,6 +1444,40 @@ mod tests {
                 .map(|(id, _)| id.as_str())
                 .collect::<Vec<_>>(),
             vec![actor(b'a').as_str(), actor(b'b').as_str()],
+        );
+    }
+
+    /// "Which account is this window using" before the launch has admitted
+    /// one: a BOUND seat is using its binding, never the registry's active
+    /// pointer, which a secondary does not move. linux builds its Account
+    /// page once, before its session takes the lock; keyed on the pointer, a
+    /// seat bound to V marked the primary's U "in use" and offered V — the
+    /// account it serves — for removal.
+    #[test]
+    fn a_bound_seat_is_using_its_binding_before_admission() {
+        let registry =
+            crate::AccountRegistry::new(std::sync::Arc::new(crate::InMemorySecretStore::default()));
+        let active = registry
+            .add_account(&"11".repeat(32), Some("https://box.example.com"), None)
+            .expect("a real secret adds an account");
+        registry
+            .set_active(&active)
+            .expect("the fresh account activates");
+
+        assert_eq!(
+            session_account_from(None, Some(actor(b'v')), &registry),
+            Some(actor(b'v')),
+            "an un-admitted bound seat is using its binding"
+        );
+        assert_eq!(
+            session_account_from(None, None, &registry),
+            Some(active.clone()),
+            "an un-admitted primary is using the store-active account"
+        );
+        assert_eq!(
+            session_account_from(Some(actor(b'w')), Some(actor(b'v')), &registry),
+            Some(actor(b'w')),
+            "once admitted, the served account answers"
         );
     }
 

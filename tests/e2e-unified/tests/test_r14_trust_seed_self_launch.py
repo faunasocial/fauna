@@ -199,6 +199,10 @@ UNSEEDED: dict[tuple[str, str], str] = {
     ): "a stubbed android driver (tier_1): no bridge and no app process start",
     (
         "tests/e2e-unified/tests/test_android_driver_adb.py",
+        "test_launch_takes_the_log_floor_before_the_session_post",
+    ): "a stubbed android driver (tier_1): no bridge and no app process start",
+    (
+        "tests/e2e-unified/tests/test_android_driver_adb.py",
         "test_without_a_serial_no_dash_s_is_passed",
     ): "a stubbed android driver (tier_1): no bridge and no app process start",
     (

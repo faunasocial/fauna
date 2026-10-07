@@ -114,6 +114,7 @@
 //! skips them. The seed pass is driven and contained like any pass, moves no
 //! pass counter, and reports `skipped_non_holder` with its own slots filled.
 
+mod capability_sweep;
 mod drive;
 #[cfg(any(debug_assertions, feature = "e2e-agent"))]
 pub mod e2e_readers;
@@ -123,6 +124,7 @@ mod handle_source;
 mod pass;
 mod stop;
 
+pub use capability_sweep::CapabilitySweep;
 pub use drive::SIGN_OUT_PASS_GRACE;
 pub use enrollment::{
     ENROLLMENT_RETIRE_BUDGET, EnrollmentPass, EnrollmentRetirement, FleetBootstrapRows,
@@ -1296,13 +1298,24 @@ impl AccountDriver {
                 own_scopes: &own_scopes,
                 membership_answered: answered,
                 endpoint_facts: facts.as_ref(),
+                ledger_actor: actor.map(ActorId),
             };
+            // Every full pass is boxed, as the seed pass is: inline, the pump's
+            // future would sit in the serve's own (`native-async-execution.md`
+            // § The rule) — it pushed the serve past the bound on 2026-10-07.
             let outcome = contained_pump(
                 "prologue",
                 Some(cycles),
                 sign_out,
                 &mut drive!(),
-                pump(store, planes, data_rpc, writer!(), &mut *legs, &inputs),
+                Box::pin(pump(
+                    store,
+                    planes,
+                    data_rpc,
+                    writer!(),
+                    &mut *legs,
+                    &inputs,
+                )),
             )
             .await;
             let Ok(report) = outcome else {
@@ -1483,13 +1496,21 @@ impl AccountDriver {
                                 own_scopes: &own_scopes,
                                 membership_answered: answered,
                                 endpoint_facts: facts.as_ref(),
+                                ledger_actor: actor.map(ActorId),
                             };
                             let outcome = contained_pump(
                                 "reconcile-now",
                                 Some(cycles),
                                 sign_out,
                                 &mut drive!(),
-                                pump(store, planes, data_rpc, writer!(), &mut *legs, &inputs),
+                                Box::pin(pump(
+                                    store,
+                                    planes,
+                                    data_rpc,
+                                    writer!(),
+                                    &mut *legs,
+                                    &inputs,
+                                )),
                             )
                             .await;
                             let Ok(report) = outcome else {
@@ -1701,13 +1722,21 @@ impl AccountDriver {
                                 own_scopes: &own_scopes,
                                 membership_answered: answered,
                                 endpoint_facts: facts.as_ref(),
+                                ledger_actor: actor.map(ActorId),
                             };
                             let outcome = contained_pump(
                                 "reconnect",
                                 Some(cycles),
                                 sign_out,
                                 &mut drive!(),
-                                pump(store, planes, data_rpc, writer!(), &mut *legs, &inputs),
+                                Box::pin(pump(
+                                    store,
+                                    planes,
+                                    data_rpc,
+                                    writer!(),
+                                    &mut *legs,
+                                    &inputs,
+                                )),
                             )
                             .await;
                             let Ok(report) = outcome else {
@@ -1797,13 +1826,21 @@ impl AccountDriver {
                         own_scopes: &own_scopes,
                         membership_answered: answered,
                         endpoint_facts: facts.as_ref(),
+                        ledger_actor: actor.map(ActorId),
                     };
                     let outcome = contained_pump(
                         label,
                         Some(cycles),
                         sign_out,
                         &mut drive!(),
-                        pump(store, planes, data_rpc, writer!(), &mut *legs, &inputs),
+                        Box::pin(pump(
+                            store,
+                            planes,
+                            data_rpc,
+                            writer!(),
+                            &mut *legs,
+                            &inputs,
+                        )),
                     )
                     .await;
                     let Ok(report) = outcome else {

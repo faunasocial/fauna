@@ -238,7 +238,7 @@ async fn inbound_reply_merges_into_organizers_stored_event_end_to_end() {
     // 3. Alice reads the sealed REPLY from her INBOX and merges it.
     let raw = open_only_inbox_message(&router, &state, ALICE, &alice_secret).await;
     let outcome = alice
-        .apply_inbound_reply_from_mail(&ALICE, &ALICE_MSEK, &raw, 1_700_000_100)
+        .apply_inbound_reply_from_mail(&ALICE, &ALICE_MSEK, &[], &raw, 1_700_000_100)
         .await
         .expect("apply inbound reply ok");
     match &outcome {
@@ -311,7 +311,7 @@ Content-Type: text/plain; charset=UTF-8\r\n\
 \r\n\
 Want to grab lunch?\r\n";
     let outcome = alice
-        .apply_inbound_reply_from_mail(&ALICE, &ALICE_MSEK, plain, 1_700_000_000)
+        .apply_inbound_reply_from_mail(&ALICE, &ALICE_MSEK, &[], plain, 1_700_000_000)
         .await
         .expect("ok");
     assert_eq!(outcome, InboundReplyOutcome::NotCalendarReply);
@@ -467,7 +467,7 @@ async fn assert_refused_and_untouched(
     expect_sender: &str,
 ) {
     let outcome = alice
-        .apply_inbound_reply_from_mail(&ALICE, &ALICE_MSEK, raw, 1_700_000_100)
+        .apply_inbound_reply_from_mail(&ALICE, &ALICE_MSEK, &[], raw, 1_700_000_100)
         .await
         .expect("a refusal is an outcome, not an error");
     match &outcome {

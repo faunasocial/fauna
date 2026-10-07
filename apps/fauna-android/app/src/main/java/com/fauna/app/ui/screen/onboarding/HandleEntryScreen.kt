@@ -181,6 +181,9 @@ private fun inFlightPhaseString(phase: HandleCheckPhase): String? = when (phase)
     HandleCheckPhase.IDLE, HandleCheckPhase.COMPLETE -> null
 }
 
+internal const val RECOVERY_KIT_ROUTE = "onboarding/recovery-kit"
+internal const val RECOVERY_ENTRY_ROUTE = "onboarding/recovery-entry"
+
 internal fun routeForStep(step: OnboardingStep): String = when (step) {
     OnboardingStep.IDENTITY_CHOICE -> "onboarding/identity-choice"
     OnboardingStep.IDENTITY_CREATED -> "onboarding/identity-created"
@@ -193,13 +196,11 @@ internal fun routeForStep(step: OnboardingStep): String = when (step) {
     OnboardingStep.DNS_POST_INSTRUCTIONS -> "onboarding/dns-post-instructions"
     OnboardingStep.CLAIM_CODE -> "onboarding/claim-code"
     OnboardingStep.DONE -> "onboarding/handle-entry"  // unreachable; caller routes via WizardOutcome
-    // Identity-recovery steps (onboarding.md § 1 Identity, 2026-08-01) —
-    // unreachable on android until its trickle-down lands: the machine only
-    // routes into RECOVERY_KIT for apps that declared setRendersRecoveryKit
-    // (android has not), and RECOVERY_ENTRY needs a restore button android
-    // doesn't render yet. tui leads.
-    OnboardingStep.RECOVERY_KIT -> "onboarding/handle-entry"
-    OnboardingStep.RECOVERY_ENTRY -> "onboarding/handle-entry"
+    // Identity-recovery steps (onboarding.md § 1 Identity): the sign-up kit
+    // offer (reached because OnboardingHost declares setRendersRecoveryKit)
+    // and the phrase restore (identity_choice's restore-from-recovery-kit-button).
+    OnboardingStep.RECOVERY_KIT -> RECOVERY_KIT_ROUTE
+    OnboardingStep.RECOVERY_ENTRY -> RECOVERY_ENTRY_ROUTE
     // The one-tap trust offer (onboarding.md § 3b-ter) — android declares
     // setRendersTrustPrompt (OnboardingHost), so the machine routes both
     // nat_mode_choice exits through it.

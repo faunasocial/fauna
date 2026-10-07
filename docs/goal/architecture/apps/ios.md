@@ -10,7 +10,7 @@ Broadly implemented. Declared gaps: none on the transport — the legacy URLSess
 
 ## Goal
 
-A SwiftUI iOS 17+ app that consumes the shared Rust core through `FaunaFFI.xcframework` (UniFFI), follows the cross-app behavior in `common.md`, shares FaunaKit with macOS, and adds iOS-specific subsystems — APNs push with a Notification Service Extension for end-to-end-encrypted previews, photo backup, and a `BGProcessingTask`-driven background scheduler.
+A SwiftUI iOS 17+ app that consumes the shared Rust core through `FaunaFFI.xcframework` (UniFFI), follows the cross-app behavior in `common.md`, shares FaunaKit with macOS, and adds iOS-specific subsystems — APNs push with a Notification Service Extension for end-to-end-encrypted previews, photo backup, and a `BGProcessingTask`-driven background scheduler. How a user obtains it — TestFlight, then the App Store — is owned by [`../installers/ios.md`](../installers/ios.md).
 
 ---
 

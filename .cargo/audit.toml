@@ -38,6 +38,17 @@ ignore = [
     # it, so it leaves when libcrux moves to hax-lib 0.4. Approved 2026-10-05.
     "RUSTSEC-2026-0173",
 
+    # libcrux-kem 0.0.9 — two panics in the hybrid KEM API (short seed in
+    # seeded encapsulation; short hybrid key on decode); fixed in 0.0.10.
+    # Lock-only: locked because hpke-rs 0.7's optional `libcrux` feature names
+    # it, which nothing enables — `cargo tree --workspace --all-features
+    # --target all -i libcrux-kem` prints nothing. 0.0.10 is unresolvable: it
+    # needs hpke-rs 0.8, and no openmls_rust_crypto release accepts it yet.
+    # Removed when one does and libcrux-kem moves (queued need). Approved
+    # 2026-10-07, bump round 4.
+    "RUSTSEC-2026-0330",
+    "RUSTSEC-2026-0331",
+
     # --- Temporary: each has a fix in hand, and its entry is deleted in the
     # commit that lands the fix. All approved individually 2026-10-05. ---
 

@@ -4265,6 +4265,7 @@ dependencies = [
  "fauna-conversations",
  "fauna-core",
  "fauna-i18n",
+ "fauna-index",
  "fauna-mail",
  "fauna-media",
  "fauna-mls",

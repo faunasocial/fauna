@@ -253,6 +253,11 @@ fauna-client-config = { path = "../fauna-client-config", features = ["test-helpe
 # the crate itself renders nothing, it classifies (`fauna-protocol` owns the
 # lookup and already depends on this).
 fauna-i18n = { path = "../fauna-i18n" }
+# Seals a mail/calendar manifest under a prior MSEK generation, so the
+# `MailKeys::index_ring` test can prove the client leg opens what it wrote
+# before a rotation. Dev-only: the crate reaches the index through
+# `fauna-client-index`, never the format crate.
+fauna-index = { path = "../fauna-index" }
 # Names the serde bounds the `RpcRequester::request` method requires, for the
 # wire-contract tests' `RecordingRequester` mock impl. No `derive` needed
 # (trait paths only); mirrors fauna-client-events / -snapshots / -sync.

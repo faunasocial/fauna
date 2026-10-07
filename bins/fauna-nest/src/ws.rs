@@ -235,6 +235,22 @@ pub struct RpcConnection {
     pub pending_handlers: Mutex<HashMap<u64, AbortHandle>>,
     /// Bounded outbound channel toward the WS writer.
     pub ws_tx: mpsc::Sender<Bytes>,
+    /// One outbound slot per admitted request, keyed by `correlation_id`:
+    /// reserved from [`Self::ws_tx`]'s capacity when the reader loop admits
+    /// the Request (`routes::run_connection`), consumed by whichever Reply
+    /// emitter answers it ([`Self::emit_reply`]).
+    ///
+    /// This is the per-connection admission cap and the reason a Reply cannot
+    /// overflow a draining connection. Replies and pushes share the one
+    /// 256-frame queue; a push `try_send`s into the capacity no admitted
+    /// request holds, so a push burst degrades to `ResyncRequired` and never
+    /// takes the place a Reply was promised, and at most
+    /// [`WS_OUTBOUND_BOUND`] requests are in flight because the 257th
+    /// admission parks the reader until a Reply has gone out — the
+    /// per-channel cap the peer-symmetric planes take as `SERVE_MAX_INFLIGHT`
+    /// (`transport.md` § Request lifecycle). A slot dropped without a send
+    /// (an encode failure, the connection's own drop) returns its capacity.
+    reply_slots: std::sync::Mutex<HashMap<u64, mpsc::OwnedPermit<Bytes>>>,
     /// The peer's socket address, when known. Populated on **both** listener
     /// paths: the plain-HTTP listener (axum's
     /// `into_make_service_with_connect_info`) and the TLS-terminating listener
@@ -425,6 +441,7 @@ impl RpcConnection {
             idempotency_cache: IdempotencyCache::new(),
             pending_handlers: Mutex::new(HashMap::new()),
             ws_tx,
+            reply_slots: std::sync::Mutex::new(HashMap::new()),
             peer_addr,
             revoked_tx: tokio::sync::watch::channel(false).0,
             spare_until_tx: tokio::sync::watch::channel(None).0,
@@ -457,6 +474,72 @@ impl RpcConnection {
         // Pre-increment: spec § 1.5 says "increments on every successful
         // Push frame send"; we allocate the value to use, then send.
         self.seq.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Wait for one free place in the outbound queue and reserve it for a
+    /// Reply ([`Self::reply_slots`]). `None` once the writer is gone. The
+    /// reader loop races this against its revoke, fatal, shutdown and
+    /// liveness watches, so a parked admission never outlives the connection.
+    pub async fn reserve_reply_slot(&self) -> Option<mpsc::OwnedPermit<Bytes>> {
+        self.ws_tx.clone().reserve_owned().await.ok()
+    }
+
+    /// Hold `slot` for the Reply to `correlation_id`. A client reusing a
+    /// correlation id still in flight replaces the earlier slot, whose Reply
+    /// then falls back to a plain `try_send` — the client's own bug, and the
+    /// queue's capacity is still never over-promised.
+    pub fn hold_reply_slot(&self, correlation_id: u64, slot: mpsc::OwnedPermit<Bytes>) {
+        self.reply_slots
+            .lock()
+            .unwrap()
+            .insert(correlation_id, slot);
+    }
+
+    /// Give back the slot held for `correlation_id` without sending anything —
+    /// a Reply that could not be encoded.
+    pub fn release_reply_slot(&self, correlation_id: u64) {
+        self.reply_slots.lock().unwrap().remove(&correlation_id);
+    }
+
+    /// Put the encoded Reply frame for `correlation_id` on the outbound queue
+    /// — the one carriage every per-actor Reply emitter shares.
+    ///
+    /// Through the slot reserved at admission when there is one, which cannot
+    /// fail; a send into a closed queue then drops the frame with its
+    /// connection. Without one (a request no reader admitted — a test driving
+    /// the sink directly) it is a `try_send`, and the two failures mean
+    /// different things: **Full** is a peer that is not draining, fatal 1011
+    /// by `transport.md` § Backpressure; **Closed** is a writer that is
+    /// already gone (the socket closed, a 4401 revoke), with nothing left to
+    /// tear down — the same split the Push path makes.
+    fn emit_reply(&self, correlation_id: u64, frame: Bytes) {
+        let slot = self.reply_slots.lock().unwrap().remove(&correlation_id);
+        if let Some(slot) = slot {
+            slot.send(frame);
+            return;
+        }
+        match self.ws_tx.try_send(frame) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::error!(
+                    actor = %hex::encode(self.actor_id),
+                    correlation_id,
+                    "outbound queue saturated on Reply; connection will be torn down"
+                );
+                // Until 2026-07-31 the log was the *whole* handling: the line
+                // claimed a teardown that no code performed, so the connection
+                // carried on and the caller waited out its full deadline for a
+                // Reply that had already been dropped.
+                self.signal_fatal(FatalCloseReason::ReplyOverflow);
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!(
+                    actor = %hex::encode(self.actor_id),
+                    correlation_id,
+                    "outbound queue closed; Reply dropped with its connection"
+                );
+            }
+        }
     }
 
     /// Signal that this connection's actor has lost its authority. Idempotent.
@@ -660,8 +743,9 @@ impl RpcConnection {
 }
 
 /// The per-actor side of the shared dispatch core (Spec Y2 slice 4 §4.C / §5).
-/// Reply carriage: encode a `Frame::Reply` to bytes and `try_send` on the bounded
-/// outbound channel; the idempotency cache stores the **frame bytes** verbatim, so
+/// Reply carriage: encode a `Frame::Reply` to bytes and send it through the
+/// outbound slot reserved when the request was admitted
+/// ([`RpcConnection::emit_reply`]); the idempotency cache stores the **frame bytes** verbatim, so
 /// a replay re-sends them as-is (the established behavior — the cached frame's
 /// correlation_id is preserved, not rebuilt). See [`crate::dispatch_core`].
 impl DispatchSink for RpcConnection {
@@ -686,15 +770,12 @@ impl DispatchSink for RpcConnection {
         Box::pin(async move { RpcConnection::lookup_idempotent(self, &key).await })
     }
 
-    fn replay(self: Arc<Self>, _correlation_id: u64, cached: Bytes) -> BoxFuture<'static, ()> {
+    fn replay(self: Arc<Self>, correlation_id: u64, cached: Bytes) -> BoxFuture<'static, ()> {
         // Per-actor replays the cached Reply *frame* verbatim (the cached frame
         // already carries the original correlation_id; this matches the existing
-        // behavior pre-extraction).
-        Box::pin(async move {
-            if self.ws_tx.try_send(cached).is_err() {
-                self.signal_fatal(FatalCloseReason::ReplyOverflow);
-            }
-        })
+        // behavior pre-extraction). The slot is the *current* request's: it is
+        // the one this frame answers.
+        Box::pin(async move { self.emit_reply(correlation_id, cached) })
     }
 
     fn replay_rebuilt(
@@ -730,10 +811,9 @@ impl DispatchSink for RpcConnection {
                 payload,
                 ok,
             });
-            if let Ok(bytes) = encode_frame(&frame)
-                && self.ws_tx.try_send(bytes).is_err()
-            {
-                self.signal_fatal(FatalCloseReason::ReplyOverflow);
+            match encode_frame(&frame) {
+                Ok(bytes) => self.emit_reply(correlation_id, bytes),
+                Err(_) => self.release_reply_slot(correlation_id),
             }
         })
     }
@@ -757,6 +837,7 @@ impl DispatchSink for RpcConnection {
                 Ok(b) => b,
                 Err(e) => {
                     tracing::error!(error = %e, "Reply frame encode failed");
+                    self.release_reply_slot(correlation_id);
                     return;
                 }
             };
@@ -769,17 +850,7 @@ impl DispatchSink for RpcConnection {
                 self.record_durable_idempotent(idempotency_key, &kind, &payload_bytes)
                     .await;
             }
-            if self.ws_tx.try_send(frame_bytes).is_err() {
-                tracing::error!(
-                    actor = %hex::encode(self.actor_id),
-                    "outbound queue saturated on Reply; connection will be torn down"
-                );
-                // Until 2026-07-31 this log was the *whole* handling: the line
-                // claimed a teardown that no code performed, so the connection
-                // carried on and the caller waited out its full deadline for a
-                // Reply that had already been dropped.
-                self.signal_fatal(FatalCloseReason::ReplyOverflow);
-            }
+            self.emit_reply(correlation_id, frame_bytes);
         })
     }
 
@@ -791,13 +862,12 @@ impl DispatchSink for RpcConnection {
                 payload: err_to_value(err),
                 ok: false,
             });
-            if let Ok(bytes) = encode_frame(&frame)
-                && self.ws_tx.try_send(bytes).is_err()
-            {
-                // An error Reply is still a Reply: same fatal rule, or a
-                // saturated connection would go on silently swallowing exactly
-                // the frames that tell a caller its request failed.
-                self.signal_fatal(FatalCloseReason::ReplyOverflow);
+            // An error Reply is still a Reply: same slot, same fatal rule, or a
+            // saturated connection would go on silently swallowing exactly the
+            // frames that tell a caller its request failed.
+            match encode_frame(&frame) {
+                Ok(bytes) => self.emit_reply(correlation_id, bytes),
+                Err(_) => self.release_reply_slot(correlation_id),
             }
         })
     }
@@ -2344,6 +2414,158 @@ mod tests {
             Some(FatalCloseReason::ReplyOverflow),
             "a replayed Reply that cannot be delivered is fatal too"
         );
+    }
+
+    // ── A Reply's slot is reserved at admission (transport.md § Backpressure) ──
+    //
+    // The fatal rule above is for a peer that is *not draining*. A draining
+    // peer whose queue was momentarily filled by pushes, or by its own burst of
+    // replies, must never meet it: the slot its Reply goes out through was
+    // taken from the queue's capacity when the request was admitted, so pushes
+    // only ever fill what no admitted request holds.
+
+    fn knock() -> PushEvent {
+        PushEvent::Knock(KnockPayload {
+            sender_id: "x".into(),
+            summary: "y".into(),
+            ..Default::default()
+        })
+    }
+
+    /// A durable-tier record as `replay_rebuilt` takes it: the canonical CBOR
+    /// of the Reply's payload `Value`.
+    fn recorded_payload() -> Bytes {
+        Bytes::from(encode_canonical(&"v").unwrap().to_vec())
+    }
+
+    #[tokio::test]
+    async fn an_admitted_reply_survives_a_queue_filled_by_pushes() {
+        let ws = WsState::new();
+        let actor = [12u8; 32];
+        let (conn, mut rx) = ws.subscribe(actor);
+        let slot = conn
+            .reserve_reply_slot()
+            .await
+            .expect("an open queue grants a slot");
+        conn.hold_reply_slot(7, slot);
+
+        // More pushes than the queue holds: everything past the unreserved
+        // capacity degrades to ResyncRequired, as a push overflow should.
+        for _ in 0..(WS_OUTBOUND_BOUND + 5) {
+            ws.notify_push(&actor, knock());
+        }
+        assert!(conn.needs_resync.load(Ordering::Relaxed));
+
+        Arc::clone(&conn)
+            .finish(
+                7,
+                [1u8; 16],
+                "fauna.test.kind".to_string(),
+                ok_outcome("answer"),
+            )
+            .await;
+
+        assert_eq!(
+            conn.fatal_close(),
+            None,
+            "a Reply whose slot was reserved at admission cannot overflow"
+        );
+        let mut replies = 0;
+        while let Ok(bytes) = rx.try_recv() {
+            if let Ok(Frame::Reply(r)) = fauna_protocol::decode_frame(&bytes) {
+                assert_eq!(r.correlation_id, 7);
+                replies += 1;
+            }
+        }
+        assert_eq!(replies, 1, "the Reply went out through its reserved slot");
+    }
+
+    #[tokio::test]
+    async fn every_reply_emitter_sends_through_the_reserved_slot() {
+        let ws = WsState::new();
+        let (conn, mut rx) = ws.subscribe([13u8; 32]);
+        for cid in 1..=3 {
+            let slot = conn.reserve_reply_slot().await.expect("slot");
+            conn.hold_reply_slot(cid, slot);
+        }
+        // Fill every unreserved place, so only the reservations remain.
+        while conn.ws_tx.try_send(Bytes::from_static(b"x")).is_ok() {}
+
+        Arc::clone(&conn)
+            .send_error(1, RpcError::new("fauna.test.boom", "boom"))
+            .await;
+        Arc::clone(&conn)
+            .replay(2, Bytes::from_static(b"cached-reply-frame"))
+            .await;
+        Arc::clone(&conn)
+            .replay_rebuilt(3, recorded_payload(), true)
+            .await;
+
+        assert_eq!(conn.fatal_close(), None, "no emitter overflowed");
+        let mut drained = 0;
+        while rx.try_recv().is_ok() {
+            drained += 1;
+        }
+        assert_eq!(
+            drained, WS_OUTBOUND_BOUND,
+            "the three Replies used the three reserved slots"
+        );
+    }
+
+    #[tokio::test]
+    async fn reserved_slots_cap_admission_at_the_queue_bound() {
+        let ws = WsState::new();
+        let (conn, _rx) = ws.subscribe([14u8; 32]);
+        for cid in 0..WS_OUTBOUND_BOUND as u64 {
+            let slot = conn.reserve_reply_slot().await.expect("slot");
+            conn.hold_reply_slot(cid, slot);
+        }
+        // The next admission parks — that is the per-connection cap, and the
+        // reader loop parked on it is the backpressure.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), conn.reserve_reply_slot())
+                .await
+                .is_err(),
+            "admission beyond the queue bound waits for a slot to free"
+        );
+        // A held slot dropped without a Reply (an encode failure) frees it.
+        conn.release_reply_slot(1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), conn.reserve_reply_slot())
+                .await
+                .is_ok(),
+            "a released slot admits the next request"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reply_into_a_closed_queue_is_not_an_overflow() {
+        // The writer is gone (the socket closed — a 4401 revoke, a peer
+        // close): there is nothing left to tear down, and reporting it as
+        // saturation put every such close into the overflow log.
+        for emitter in 0..4u8 {
+            let ws = WsState::new();
+            let (conn, rx) = ws.subscribe([20 + emitter; 32]);
+            drop(rx);
+            let c = Arc::clone(&conn);
+            match emitter {
+                0 => {
+                    c.finish(1, [2u8; 16], "fauna.test.kind".into(), ok_outcome("a"))
+                        .await
+                }
+                1 => {
+                    c.send_error(1, RpcError::new("fauna.test.boom", "boom"))
+                        .await
+                }
+                2 => c.replay(1, Bytes::from_static(b"cached")).await,
+                _ => c.replay_rebuilt(1, recorded_payload(), true).await,
+            }
+            assert_eq!(
+                conn.fatal_close(),
+                None,
+                "emitter {emitter}: a Closed queue is not a ReplyOverflow"
+            );
+        }
     }
 
     #[tokio::test]

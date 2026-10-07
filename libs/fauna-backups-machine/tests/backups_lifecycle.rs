@@ -179,6 +179,67 @@ async fn a_load_never_paints_the_outgoing_folders_rows_under_a_new_pick() {
 }
 
 #[tokio::test]
+async fn a_refresh_asked_for_while_an_op_is_in_flight_re_reads_when_it_ends() {
+    // The page asks for a re-read when it comes into view; the app also loads it
+    // at sign-in. When the sign-in load is still in flight as the page maps, the
+    // second refresh used to be dropped by the single-flight gate — and the load
+    // that kept the slot had read the folder list BEFORE a set added meanwhile,
+    // so the picker never offered that set (a linux sweep, 2026-10-06: four
+    // freshly seeded sets "not selectable on the dropdown" for 25 s).
+    let (machine, fake) = machine_with(vec![set("alpha")], vec![("alpha", vec![row(1, 100)])]);
+
+    // The first load has read the folder list and is fetching alpha's rows when
+    // a set is added and the second refresh is asked for.
+    fake.pause_next_list_snapshots();
+    let m2 = Arc::clone(&machine);
+    let fake2 = Arc::clone(&fake);
+    tokio::join!(machine.refresh(), async move {
+        fake2.set_folders(vec![set("alpha"), set("bravo")]);
+        m2.refresh().await
+    });
+
+    let snap = machine.snapshot();
+    assert_eq!(
+        snap.folders
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "bravo"],
+        "the refresh asked for mid-load re-read the list when the slot freed"
+    );
+    assert_eq!(
+        snap.selected_folder.as_deref(),
+        Some("alpha"),
+        "a re-read keeps the standing selection"
+    );
+    assert!(snap.in_progress_op.is_none(), "the slot is released");
+}
+
+#[tokio::test]
+async fn a_refresh_queued_behind_an_op_keeps_that_ops_result() {
+    // The queued re-read is a READ, not a pick: it must not clear the verdict
+    // the op it waited behind just produced (a pick does, because the verdict
+    // describes the outgoing set; a re-read stays on the same set).
+    let (machine, fake) = machine_with(vec![set("alpha")], vec![("alpha", vec![row(1, 100)])]);
+    fake.set_check_reply(SnapshotCheckReply {
+        status: "ok".to_string(),
+        ..Default::default()
+    });
+    machine.refresh().await;
+
+    fake.pause_next_call();
+    let m2 = Arc::clone(&machine);
+    tokio::join!(machine.check(), async move { m2.refresh().await });
+
+    let snap = machine.snapshot();
+    assert!(
+        snap.check_result.is_some(),
+        "the check's verdict survives the re-read queued behind it"
+    );
+    assert!(snap.in_progress_op.is_none(), "the slot is released");
+}
+
+#[tokio::test]
 async fn no_folders_at_all_selects_nothing_and_lists_nothing() {
     let (machine, _fake) = machine_with(vec![], vec![]);
     machine.refresh().await;

@@ -489,17 +489,11 @@ mod tests {
     use super::*;
     use fauna_conversations::capabilities::{DeliveryMode, ThreadEncryption};
     use fauna_mls::wrapped_blob::{
-        MailRecordEnvelope, derive_mail_epoch_root, derive_recipient_hpke_keypair,
-        derive_standing_mail_keypairs, unseal_mail_record,
+        MailRecordEnvelope, derive_recipient_hpke_keypair, unseal_mail_record,
     };
 
     fn keys(msek: [u8; 32]) -> MailKeys {
-        MailKeys {
-            standing: derive_standing_mail_keypairs(&[msek]),
-            msek,
-            actor_id: [0; 32],
-            epoch_roots: vec![*derive_mail_epoch_root(&msek)],
-        }
+        MailKeys::from_custody([0; 32], &msek, &[])
     }
 
     fn info() -> BridgedRoomInfo {

@@ -31,7 +31,7 @@ use fauna_client_capabilities::custody_hosting::AdminHostingClient;
 use fauna_client_capabilities::view_model::{ReceiptState, admin_hosting_rows};
 use fauna_client_carddav as carddav;
 use fauna_client_config::{
-    ResolvedDestination, attach_folder_to_destination, decide_filter_mark,
+    DavStoreContext, ResolvedDestination, attach_folder_to_destination, decide_filter_mark,
     deregister_backup_destination, detach_folder_from_destination, edit_backup_destination,
     enroll_backup_destination, keep_backup_destination_at_rest, list_folder_destinations,
     load_filter_marks, mutate_backup, read_backup_status,
@@ -258,7 +258,7 @@ fn hex_array_32(hex_str: &str) -> Result<[u8; 32], JsValue> {
 /// caller degrades to an empty list rather than erroring (events.md /
 /// carddav-server.md § Persistence — the encrypted path is msek-gated;
 /// localhost/IP/mail-off ⇒ empty).
-pub(crate) async fn dav_ctx(secret_hex: &str) -> Result<Option<([u8; 32], [u8; 32])>, JsValue> {
+pub(crate) async fn dav_ctx(secret_hex: &str) -> Result<Option<DavStoreContext>, JsValue> {
     let secret = hex_bytes(secret_hex)?;
     let arr: [u8; 32] = secret
         .as_slice()
@@ -282,6 +282,7 @@ async fn caldav_find_event(
     calendar_id: &[u8; 32],
     uid_hash_target: &[u8],
     msek: &[u8; 32],
+    prior_mseks: &[[u8; 32]],
 ) -> Result<(String, Option<caldav::FaunaEventExt>), JsValue> {
     let reply = caldav::CalDavClient::new(client)
         .query_events(caldav::bridge_routing::QueryEventsRequest {
@@ -308,7 +309,7 @@ async fn caldav_find_event(
     // recipient keypair, so this saves the second re-derivation
     // `unseal_event_body` + `unseal_fauna_ext` would otherwise each pay
     // .
-    let keys = caldav::DavRecipientKeys::derive(msek);
+    let keys = caldav::DavRecipientKeys::from_mseks(msek, prior_mseks);
     let plaintext = keys.unseal(&entry.encrypted_body).map_err(err_to_js)?;
     let ics = String::from_utf8(plaintext)
         .map_err(|e| JsValue::from_str(&format!("VEVENT body not UTF-8: {e}")))?;
@@ -3960,7 +3961,12 @@ impl WsRpcClient {
     pub fn caldav_list_calendars(&self, secret_hex: String) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
-            let Some((actor_id, msek)) = dav_ctx(&secret_hex).await? else {
+            let Some(DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            }) = dav_ctx(&secret_hex).await?
+            else {
                 return to_js(&serde_json::json!({ "calendars": [] }));
             };
             let dav = caldav::CalDavClient::new(client);
@@ -3998,7 +4004,7 @@ impl WsRpcClient {
             }
             // Derived once for the whole list — every row's metadata reuses it
             // instead of paying its own X-Wing keygen .
-            let keys = caldav::DavRecipientKeys::derive(&msek);
+            let keys = caldav::DavRecipientKeys::from_mseks(&msek, &prior_mseks);
             let calendars: Vec<serde_json::Value> = reply
                 .calendars
                 .iter()
@@ -4032,7 +4038,11 @@ impl WsRpcClient {
     ) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
-            let (actor_id, msek) = dav_ctx(&secret_hex)
+            let DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            } = dav_ctx(&secret_hex)
                 .await?
                 .ok_or_else(|| JsValue::from_str("calendar requires mail to be enabled"))?;
             let calendar_id = hex_array_32(&calendar_id_hex)?;
@@ -4069,7 +4079,12 @@ impl WsRpcClient {
     ) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
-            let Some((actor_id, msek)) = dav_ctx(&secret_hex).await? else {
+            let Some(DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            }) = dav_ctx(&secret_hex).await?
+            else {
                 return to_js(&serde_json::json!({ "events": [] }));
             };
             let calendar_id = hex_array_32(&calendar_id_hex)?;
@@ -4092,7 +4107,7 @@ impl WsRpcClient {
             };
             // Derived once for the whole page — every row reuses it instead of
             // paying its own X-Wing keygen .
-            let keys = caldav::DavRecipientKeys::derive(&msek);
+            let keys = caldav::DavRecipientKeys::from_mseks(&msek, &prior_mseks);
             let events: Vec<serde_json::Value> = entries
                 .iter()
                 .filter_map(|e| caldav::decode_event_entry_flat(e, &keys).ok())
@@ -4122,10 +4137,15 @@ impl WsRpcClient {
     pub fn carddav_list_addressbooks(&self, secret_hex: String) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
-            let Some((actor_id, msek)) = dav_ctx(&secret_hex).await? else {
+            let Some(DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            }) = dav_ctx(&secret_hex).await?
+            else {
                 return to_js(&serde_json::json!({ "addressbooks": [] }));
             };
-            let keys = carddav::DavRecipientKeys::derive(&msek);
+            let keys = carddav::DavRecipientKeys::from_mseks(&msek, &prior_mseks);
             let books = carddav::CardDavClient::new(client)
                 .list_addressbooks_decoded(
                     carddav::bridge_routing::ListAddressbooksRequest {
@@ -4153,11 +4173,16 @@ impl WsRpcClient {
     ) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
-            let Some((actor_id, msek)) = dav_ctx(&secret_hex).await? else {
+            let Some(DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            }) = dav_ctx(&secret_hex).await?
+            else {
                 return to_js(&serde_json::json!({ "cards": [] }));
             };
             let addressbook_id = hex_array_32(&addressbook_id_hex)?;
-            let keys = carddav::DavRecipientKeys::derive(&msek);
+            let keys = carddav::DavRecipientKeys::from_mseks(&msek, &prior_mseks);
             let page = carddav::CardDavClient::new(client)
                 .query_cards_decoded(
                     carddav::bridge_routing::QueryCardsRequest {
@@ -4200,14 +4225,19 @@ impl WsRpcClient {
     ) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
-            let Some((actor_id, msek)) = dav_ctx(&secret_hex).await? else {
+            let Some(DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            }) = dav_ctx(&secret_hex).await?
+            else {
                 return to_js(&serde_json::json!({
                     "addressbooks": [], "addressbook_id": null, "card_id": null, "cards": [],
                 }));
             };
             let uid_hash = hex_array_32(&uid_hash_hex)?;
             let located = carddav::CardDavClient::new(client)
-                .locate_card_by_uid_hash(actor_id.to_vec(), &msek, &uid_hash)
+                .locate_card_by_uid_hash(actor_id.to_vec(), &msek, &prior_mseks, &uid_hash)
                 .await
                 .map_err(err_to_js)?;
             let addressbooks: Vec<serde_json::Value> = located
@@ -4253,7 +4283,11 @@ impl WsRpcClient {
     ) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
-            let (actor_id, msek) = dav_ctx(&secret_hex)
+            let DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            } = dav_ctx(&secret_hex)
                 .await?
                 .ok_or_else(|| JsValue::from_str("calendar requires mail to be enabled"))?;
             let calendar_id = hex_array_32(&calendar_id_hex)?;
@@ -4298,7 +4332,7 @@ impl WsRpcClient {
     ) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
-            let (actor_id, _msek) = dav_ctx(&secret_hex)
+            let DavStoreContext { actor_id, .. } = dav_ctx(&secret_hex)
                 .await?
                 .ok_or_else(|| JsValue::from_str("calendar requires mail to be enabled"))?;
             let calendar_id = hex_array_32(&calendar_id_hex)?;
@@ -4338,14 +4372,24 @@ impl WsRpcClient {
     ) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
-            let (actor_id, msek) = dav_ctx(&secret_hex)
+            let DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            } = dav_ctx(&secret_hex)
                 .await?
                 .ok_or_else(|| JsValue::from_str("calendar requires mail to be enabled"))?;
             let calendar_id = hex_array_32(&calendar_id_hex)?;
             let uid_hash = hex_bytes(&uid_hash_hex)?;
-            let (ics, ext) =
-                caldav_find_event(client.clone(), &actor_id, &calendar_id, &uid_hash, &msek)
-                    .await?;
+            let (ics, ext) = caldav_find_event(
+                client.clone(),
+                &actor_id,
+                &calendar_id,
+                &uid_hash,
+                &msek,
+                &prior_mseks,
+            )
+            .await?;
             let rw = caldav::apply_rsvp(&ics, ext.as_ref(), &self_email, &response)
                 .map_err(|e| JsValue::from_str(&e))?;
             caldav_put_rewrite(
@@ -4383,13 +4427,24 @@ impl WsRpcClient {
     ) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
-            let (actor_id, msek) = dav_ctx(&secret_hex)
+            let DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            } = dav_ctx(&secret_hex)
                 .await?
                 .ok_or_else(|| JsValue::from_str("calendar requires mail to be enabled"))?;
             let calendar_id = hex_array_32(&calendar_id_hex)?;
             let uid_hash = hex_bytes(&uid_hash_hex)?;
-            let (ics, _ext) =
-                caldav_find_event(client, &actor_id, &calendar_id, &uid_hash, &msek).await?;
+            let (ics, _ext) = caldav_find_event(
+                client,
+                &actor_id,
+                &calendar_id,
+                &uid_hash,
+                &msek,
+                &prior_mseks,
+            )
+            .await?;
             let fields = caldav::parse_ical(&ics).map_err(err_to_js)?;
             if fields.alarm.is_empty() {
                 Ok(JsValue::NULL)
@@ -4413,14 +4468,24 @@ impl WsRpcClient {
     ) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
-            let (actor_id, msek) = dav_ctx(&secret_hex)
+            let DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            } = dav_ctx(&secret_hex)
                 .await?
                 .ok_or_else(|| JsValue::from_str("calendar requires mail to be enabled"))?;
             let calendar_id = hex_array_32(&calendar_id_hex)?;
             let uid_hash = hex_bytes(&uid_hash_hex)?;
-            let (ics, ext) =
-                caldav_find_event(client.clone(), &actor_id, &calendar_id, &uid_hash, &msek)
-                    .await?;
+            let (ics, ext) = caldav_find_event(
+                client.clone(),
+                &actor_id,
+                &calendar_id,
+                &uid_hash,
+                &msek,
+                &prior_mseks,
+            )
+            .await?;
             let rw = caldav::set_reminder(&ics, ext.as_ref(), &offset)
                 .map_err(|e| JsValue::from_str(&e))?;
             caldav_put_rewrite(client, &actor_id, &calendar_id, &msek, &rw, now_secs as i64)
@@ -4441,14 +4506,24 @@ impl WsRpcClient {
     ) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
-            let (actor_id, msek) = dav_ctx(&secret_hex)
+            let DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            } = dav_ctx(&secret_hex)
                 .await?
                 .ok_or_else(|| JsValue::from_str("calendar requires mail to be enabled"))?;
             let calendar_id = hex_array_32(&calendar_id_hex)?;
             let uid_hash = hex_bytes(&uid_hash_hex)?;
-            let (ics, ext) =
-                caldav_find_event(client.clone(), &actor_id, &calendar_id, &uid_hash, &msek)
-                    .await?;
+            let (ics, ext) = caldav_find_event(
+                client.clone(),
+                &actor_id,
+                &calendar_id,
+                &uid_hash,
+                &msek,
+                &prior_mseks,
+            )
+            .await?;
             let rw =
                 caldav::set_reminder(&ics, ext.as_ref(), "").map_err(|e| JsValue::from_str(&e))?;
             caldav_put_rewrite(client, &actor_id, &calendar_id, &msek, &rw, now_secs as i64)
@@ -4476,14 +4551,24 @@ impl WsRpcClient {
     ) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
-            let (actor_id, msek) = dav_ctx(&secret_hex)
+            let DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            } = dav_ctx(&secret_hex)
                 .await?
                 .ok_or_else(|| JsValue::from_str("calendar requires mail to be enabled"))?;
             let calendar_id = hex_array_32(&calendar_id_hex)?;
             let uid_hash = hex_bytes(&uid_hash_hex)?;
-            let (ics, ext) =
-                caldav_find_event(client.clone(), &actor_id, &calendar_id, &uid_hash, &msek)
-                    .await?;
+            let (ics, ext) = caldav_find_event(
+                client.clone(),
+                &actor_id,
+                &calendar_id,
+                &uid_hash,
+                &msek,
+                &prior_mseks,
+            )
+            .await?;
             let rw = caldav::add_attendee(&ics, ext.as_ref(), &self_email, &attendee_email)
                 .map_err(|e| JsValue::from_str(&e))?;
             caldav_put_rewrite(
@@ -4523,7 +4608,11 @@ impl WsRpcClient {
     ) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
-            let (actor_id, msek) = dav_ctx(&secret_hex)
+            let DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            } = dav_ctx(&secret_hex)
                 .await?
                 .ok_or_else(|| JsValue::from_str("calendar requires mail to be enabled"))?;
             let calendar_id = hex_array_32(&calendar_id_hex)?;
@@ -4533,7 +4622,7 @@ impl WsRpcClient {
                 .export_calendar_ics(
                     &actor_id,
                     &calendar_id,
-                    &caldav::DavRecipientKeys::derive(&msek),
+                    &caldav::DavRecipientKeys::from_mseks(&msek, &prior_mseks),
                 )
                 .await
                 .map_err(|e| match e {
@@ -4561,7 +4650,11 @@ impl WsRpcClient {
     ) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
-            let (actor_id, msek) = dav_ctx(&secret_hex)
+            let DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            } = dav_ctx(&secret_hex)
                 .await?
                 .ok_or_else(|| JsValue::from_str("calendar requires mail to be enabled"))?;
             let calendar_id = hex_array_32(&calendar_id_hex)?;
@@ -7506,15 +7599,17 @@ impl WsRpcClient {
                 .reports
                 .iter()
                 .map(|entry| {
+                    let view = fauna_client_moderation::report::queue_row_view(entry);
                     serde_json::json!({
                         "report_id": entry.report_id,
                         "subject": entry.subject,
                         "subject_actor": entry.subject_actor,
-                        "reason": fauna_client_moderation::report::reason_label(entry.reason),
-                        "note": entry.note,
-                        "excerpt": entry.excerpt,
-                        "origin": fauna_client_moderation::report::queue_origin(entry),
+                        "reason": view.reason,
+                        "note": view.note,
+                        "excerpt": view.excerpt,
+                        "origin": view.origin,
                         "created_at": entry.created_at,
+                        "can_open_takedown": view.can_open_takedown,
                     })
                 })
                 .collect();

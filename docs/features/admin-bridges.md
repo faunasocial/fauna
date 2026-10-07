@@ -66,7 +66,7 @@ Stamped 2026-10-01 at 308c995169.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | 0.1.2-dev+cdb1bad0 standalone |
-| linux | ⚠ partial | 0.1.2-dev+d4125106 standalone |
+| linux | ⚠ partial | 0.1.2-dev+78e73031 standalone |
 | windows | ⚠ partial | 0.1.2-dev+a704dbe4.dirty standalone |
 | macos | ⚠ partial | 0.1.2-dev+8b423269 standalone |
 | ios |  no run recorded | |

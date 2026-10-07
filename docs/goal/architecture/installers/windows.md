@@ -624,6 +624,18 @@ MSI/EXE Store listing needs its own certificate (ruled out by the channel decisi
 is the only Store shape that gets Store signing
 ([packaging overview](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/packaging/)).
 
+**Alpha visibility — a private audience, not a public listing (ruled 2026-10-07).** The alpha submission is published with Partner Center's *Private audience* visibility: a
+known-user group holding the alpha testers' Microsoft accounts, created under the account's *Audience*
+page and chosen on the submission's *Visibility* step. The package still passes certification, the
+listing address (§ Identity & coexistence) resolves only for a signed-in member of the group, and the
+Store serves each member the package for their device's architecture — so the x64 package joins the
+same submission beside arm64 before the group is widened. Going public is a later submission that
+changes the visibility; the official-apps manifest's `microsoft-store-listing` entry flips with that
+public submission, not with the private one ([`../release-integrity.md`](../release-integrity.md)
+§ Release signing → *The official-apps list*, the listing rule). Testers' accounts live in the group
+only — never in a file. Which commit the uploaded package is built from → the same section's *A store
+upload is built from a recorded public commit*.
+
 ### Feature subset — what the Store package carries
 
 Verified per-component against the packaged-app constraint set (2026-08-10):
@@ -804,6 +816,7 @@ internally).
 | Partner Center enrollment (company account, org verification) | **DONE 2026-08-22** — verified; publisher display name "Fauna Social" |
 | App name reserved + identity captured | **DONE 2026-08-22** — `FaunaSocial.FaunaSocial` / `CN=E8868D60-…`; § Identity & coexistence holds the values |
 | First Store submission | **Not done** — needs a real staged payload built on Windows; no longer blocked on identity |
+| Alpha visibility (private audience, the known-user group) | **Ruled 2026-10-07**, the group not yet created — § Store distribution's alpha paragraph; the submission that creates it is the first one |
 
 **Deployment paths — which one a local verification may use (learned 2026-08-11).** Three exist and
 only the third is both non-elevated and able to carry this package's extension set; the two dead

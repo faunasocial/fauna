@@ -194,6 +194,8 @@ async fn nest() -> (Arc<RouterRequester>, Arc<AppState>, tempfile::TempDir) {
     let mut b = RpcRouter::builder();
     folder_handlers::register_folders_handlers(&mut b);
     sync_handlers::register_sync_handlers(&mut b);
+    // `fauna.capabilities.reconcile` — every full pass enumerates it.
+    fauna_nest::bridge_blob_handlers::register_capability_handlers(&mut b);
     // Seed the one dispatch actor up front — see the note in `request`.
     common::seed_dispatch_actor(&state.db, &actor_bytes()).await;
     (
@@ -1128,6 +1130,8 @@ async fn nest_with_conv_membership(
         let mut b = RpcRouter::builder();
         folder_handlers::register_folders_handlers(&mut b);
         sync_handlers::register_sync_handlers(&mut b);
+        // `fauna.capabilities.reconcile` — every full pass enumerates it.
+        fauna_nest::bridge_blob_handlers::register_capability_handlers(&mut b);
         fauna_nest::conversations_handlers::register_conversations_handlers(&mut b);
         RouterRequester {
             router: b.build(),
@@ -1411,6 +1415,8 @@ async fn nest_with_escrow() -> (Arc<RouterRequester>, Arc<AppState>, tempfile::T
     let mut b = RpcRouter::builder();
     folder_handlers::register_folders_handlers(&mut b);
     sync_handlers::register_sync_handlers(&mut b);
+    // `fauna.capabilities.reconcile` — every full pass enumerates it.
+    fauna_nest::bridge_blob_handlers::register_capability_handlers(&mut b);
     fauna_nest::generation_escrow_handlers::register_generation_escrow_handlers(&mut b);
     // V12's peer-leg bind gate fetches `fauna.nest.info` for the `peer-sync`
     // brake — the REAL handler, so the always-on advertisement
@@ -1667,6 +1673,8 @@ async fn nest_with_escrow_lacking_deployment_identity()
     let mut b = RpcRouter::builder();
     folder_handlers::register_folders_handlers(&mut b);
     sync_handlers::register_sync_handlers(&mut b);
+    // `fauna.capabilities.reconcile` — every full pass enumerates it.
+    fauna_nest::bridge_blob_handlers::register_capability_handlers(&mut b);
     fauna_nest::generation_escrow_handlers::register_generation_escrow_handlers(&mut b);
     fauna_nest::discovery_handlers::register_discovery_handlers(&mut b);
     common::seed_dispatch_actor(&state.db, &actor_bytes()).await;
@@ -2697,6 +2705,8 @@ async fn start_listening_nest_with(
     let mut b = RpcRouter::builder();
     fauna_nest::auth_handlers::register_auth_handlers(&mut b);
     sync_handlers::register_sync_handlers(&mut b);
+    // `fauna.capabilities.reconcile` — every full pass enumerates it.
+    fauna_nest::bridge_blob_handlers::register_capability_handlers(&mut b);
     folder_handlers::register_folders_handlers(&mut b);
     fauna_nest::session_handlers::register_sessions_handlers(&mut b);
     let state = Arc::new(AppState {
@@ -2900,6 +2910,8 @@ async fn start_listening_nest_with_escrow() -> (String, Arc<AppState>, tempfile:
     let mut b = RpcRouter::builder();
     fauna_nest::auth_handlers::register_auth_handlers(&mut b);
     sync_handlers::register_sync_handlers(&mut b);
+    // `fauna.capabilities.reconcile` — every full pass enumerates it.
+    fauna_nest::bridge_blob_handlers::register_capability_handlers(&mut b);
     folder_handlers::register_folders_handlers(&mut b);
     fauna_nest::session_handlers::register_sessions_handlers(&mut b);
     fauna_nest::generation_escrow_handlers::register_generation_escrow_handlers(&mut b);

@@ -8417,8 +8417,8 @@ def real_faunamls_app(logged_in_app):
       ``ConversationsSession::start_receive_loop`` can put there and so only the
       real rail reaches. That module owns the whole rationale, including why the
       consuming test's own markers cannot answer the question and which of the
-      launcher's arms are observable. android takes its ``skip_unbuilt`` there
-      (no app-log reader on that driver at all).
+      launcher's arms are observable. A driver with no app-log reader takes its
+      ``skip_unbuilt`` there, and web its ``declared_absence`` (native-only marker).
       ⚠ **Not ``keypackage_count`` going non-zero**, which this docstring used to
       recommend and which is *unsound* here: ``test_user`` is session-scoped, so in a
       multi-app invocation an earlier app may have published alice's packages and the

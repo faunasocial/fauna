@@ -32,8 +32,10 @@ pub enum FeedStatus {
 
 /// Which empty state the Feed page shows — the answer of
 /// [`FeedSnapshot::empty_state`] (`feed.md` § Errors & edge cases: two
-/// elements, at most one present at a time).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// elements, at most one present at a time). Serializes as its variant name
+/// (`"NoPosts"` / `"NoMatches"`) — the string the web SPA reads off the wasm
+/// snapshot's derived `empty_state` key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum FeedEmptyState {
     /// `feed-empty-state` — the loaded feed holds no posts and no search is
@@ -861,5 +863,15 @@ mod tests {
             let s = snapshot(status, posts, search);
             assert_eq!(feed_empty_state(s.clone()), s.empty_state());
         }
+    }
+
+    /// The web SPA matches these exact strings off the wasm snapshot's derived
+    /// `empty_state` key — a variant rename must not silently blank it.
+    #[test]
+    fn the_empty_state_serializes_as_its_variant_name() {
+        let json = |v: Option<FeedEmptyState>| serde_json::to_string(&v).unwrap();
+        assert_eq!(json(Some(FeedEmptyState::NoPosts)), r#""NoPosts""#);
+        assert_eq!(json(Some(FeedEmptyState::NoMatches)), r#""NoMatches""#);
+        assert_eq!(json(None), "null");
     }
 }

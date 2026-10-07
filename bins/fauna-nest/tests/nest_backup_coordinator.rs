@@ -6686,6 +6686,446 @@ impl fauna_client_backup::audit::BackupInclusionSource for OwnerInclusion {
     }
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// Phase 3c — the nest-held pull-back
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// `segment-backup-protocol.md` § Client-device custodian (pull) → *Restore* →
+// *The nest-held pull-back*, the proof obligation: the real coordinator backs
+// A up to B; A is lost; a rebuilt A′ (fresh, and in a second arm under A's own
+// identity) is filled from B by the owner's app through the shared driver
+// `run_reseed` over the pull-back leg; the mail reads back through A′'s
+// ordinary read path, the covered folder comes back as a live folder, the
+// delivered custody is byte-identical to B's, a torn run resumes, the
+// generation the owner rolled back on B is what arrives — and the post-
+// ceremony re-enrollment carries B's writer seat to A′.
+
+/// The rebuilt nest's write device, registered there for the custody records.
+const RESTORE_DEVICE: [u8; 32] = [0x0E; 32];
+
+/// An owner connection whose error the driver can classify — what
+/// `run_reseed` and the enroll sequence need of a transport. `tear` fails the
+/// first `.meta` custody record, after its `.dat` landed.
+struct PullLink {
+    nest: Arc<AppState>,
+    tear: std::sync::atomic::AtomicBool,
+}
+
+impl PullLink {
+    fn to(nest: &Arc<AppState>) -> Self {
+        Self {
+            nest: nest.clone(),
+            tear: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum LinkError {
+    Rejected(RpcError),
+    Torn,
+}
+
+impl std::fmt::Display for LinkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(e) => write!(f, "{}: {:?}", e.code, e.message),
+            Self::Torn => write!(f, "torn: the connection dropped before the sidecar"),
+        }
+    }
+}
+
+impl fauna_protocol::RpcErrorClass for LinkError {
+    fn is_rejection(&self) -> bool {
+        matches!(self, Self::Rejected(_))
+    }
+    fn as_rpc_error(&self) -> Option<&RpcError> {
+        match self {
+            Self::Rejected(e) => Some(e),
+            Self::Torn => None,
+        }
+    }
+}
+
+impl fauna_protocol::RpcRequester for PullLink {
+    type Error = LinkError;
+
+    async fn request<Req, Reply>(
+        &self,
+        kind: &'static str,
+        payload: Req,
+    ) -> Result<Reply, LinkError>
+    where
+        Req: Serialize,
+        Reply: DeserializeOwned,
+    {
+        let bytes = bytes::Bytes::from(encode_canonical(&payload).unwrap().to_vec());
+        if kind == "fauna.sync.changes.record" {
+            let req: fauna_protocol::sync::SyncChangeRecordRequest = decode(&bytes).unwrap();
+            if req.path.ends_with(".meta")
+                && self.tear.swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(LinkError::Torn);
+            }
+        }
+        let meta = self
+            .nest
+            .rpc_router
+            .kind_meta(kind)
+            .unwrap_or_else(|| panic!("kind not registered: {kind}"));
+        let out = (meta.handler)(self.nest.clone(), OWNER, bytes)
+            .await
+            .map_err(LinkError::Rejected)?;
+        Ok(decode(&out).unwrap())
+    }
+}
+
+fauna_client_backup::impl_backup_nest_seam!(struct PullSeam<PullLink>);
+
+/// The driver's seam over the pull-back leg for this test's transport — the
+/// production impl is for the owner's `NestClient`.
+struct PullLeg<'a>(fauna_sync_engine::reseed_pull::NestPullBack<'a, SourceBytePlane, PullLink>);
+
+#[async_trait::async_trait]
+impl fauna_client_backup::reseed::ReseedDeliveryLeg for PullLeg<'_> {
+    async fn deliver(&self) -> Result<fauna_client_backup::reseed::DeliveredCorpus, String> {
+        self.0.deliver_corpus().await
+    }
+
+    async fn sign_rehome(
+        &self,
+        set: &fauna_client_backup::reseed::DeliveredSet,
+    ) -> fauna_client_backup::reseed::FolderRehome {
+        self.0.sign_folder_rehome(set).await
+    }
+}
+
+/// Every live custody row a nest holds for `OWNER` as `(set, path, manifest
+/// hash)`, sorted — the byte-identity comparison's key.
+async fn custody_identity(nest: &Arc<AppState>) -> Vec<(String, Option<String>, Vec<u8>)> {
+    let mut rows: Vec<_> = nest
+        .db
+        .list_backup_custody(&OWNER, None, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.folder_name, r.path, r.manifest_hash))
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// **A backup held on another nest comes back onto a rebuilt nest, and the
+/// destination's writer seat moves to it.** `same_identity` rebuilds A′ under
+/// A's own identity (the deployment seed); otherwise A′ is a fresh box.
+async fn a_nest_held_backup_is_pulled_back(same_identity: bool) {
+    let owner_key_bytes = NestBackupKey::derive(&OWNER_SECRET).to_bytes();
+    let grant = |nest: &Arc<AppState>| {
+        let nest = Arc::clone(nest);
+        async move {
+            let reply: NestKeyGrantReply = client_call(
+                &nest,
+                OWNER,
+                "fauna.backup.nest_key.grant",
+                &NestKeyGrantRequest {
+                    nest_backup_key: serde_bytes::ByteBuf::from(owner_key_bytes.to_vec()),
+                    extra: Default::default(),
+                },
+            )
+            .await
+            .unwrap();
+            assert!(reply.ok);
+        }
+    };
+
+    // ── A backs its mail and a covered folder up to B ────────────────────
+    let mut a_secret = [0u8; 32];
+    getrandom::fill(&mut a_secret).unwrap();
+    let (_a_url, a, _a_blobs) = start_nest_on(
+        kept_tempdir(),
+        Arc::new(CacheDb::open_in_memory().unwrap()),
+        a_secret,
+    )
+    .await;
+    let b_dir = kept_tempdir();
+    let mut b_secret = [0u8; 32];
+    getrandom::fill(&mut b_secret).unwrap();
+    let b_db = Arc::new(CacheDb::open(b_dir.join("nest.db")).unwrap());
+    let (b_url, b, _b_blobs) = start_nest_on(b_dir.clone(), b_db, b_secret).await;
+    register_user(&a, OWNER, "alice").await;
+    register_user(&b, OWNER, "alice").await;
+    file_mail(&a, &OWNER, FILED).await;
+    grant(&a).await;
+    let reg: DestinationRegisterReply = client_call(
+        &a,
+        OWNER,
+        "fauna.backup.destination.register",
+        &DestinationRegisterRequest {
+            destination_id: DEST_ID.to_string(),
+            destination_nest_url: b_url.clone(),
+            destination_nest_id: hex::encode(b.nest_identity.public_key_bytes()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(reg.ok);
+    assert!(grant_writer(&a, &b).await.unwrap().ok);
+
+    let photos =
+        a.db.create_folder_with_options("Photos", &OWNER, fauna_nest::db::FolderOptions::default())
+            .await
+            .unwrap();
+    let (cat, cat_v1, _) = seed_folder_file(&a, photos, "photos/cat.jpg", 0x41).await;
+    let (dog, dog_v1, _) = seed_folder_file(&a, photos, "photos/dog.jpg", 0x51).await;
+    let attach: fauna_protocol::backup::AttachFolderReply = client_call(
+        &a,
+        OWNER,
+        "fauna.backup.destination.attach_folder",
+        &fauna_protocol::backup::AttachFolderRequest {
+            destination_id: DEST_ID.to_string(),
+            folder_id: photos,
+            extra: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let folder_set = attach.folder_set;
+    let sweep = |nest: &Arc<AppState>| {
+        let nest = Arc::clone(nest);
+        async move {
+            NestBackupWorker::new(nest, std::time::Duration::MAX)
+                .run_once()
+                .await
+                .expect("the hosting sweep runs");
+        }
+    };
+    sweep(&a).await;
+
+    // The owner overwrites the cat, the sweep mirrors it, and then — wanting
+    // the old cat back — rolls B's copy back to it. The pull takes B's live
+    // head, so the rolled-back generation is the one that must arrive.
+    let (_, cat_v2, _) = seed_folder_file(&a, photos, "photos/cat.jpg", 0x42).await;
+    assert_ne!(cat_v2, cat_v1);
+    sweep(&a).await;
+    let retained: fauna_protocol::backup::GenerationListReply = client_call(
+        &b,
+        OWNER,
+        "fauna.backup.generation.list",
+        &fauna_protocol::backup::GenerationListRequest::default(),
+    )
+    .await
+    .unwrap();
+    let old_cat = retained
+        .generations
+        .iter()
+        .find(|g| g.manifest_hash == hex::encode(cat_v1.digest()))
+        .expect("B retains the overwritten cat");
+    let restored: fauna_protocol::backup::GenerationRestoreReply = client_call(
+        &b,
+        OWNER,
+        "fauna.backup.generation.restore",
+        &fauna_protocol::backup::GenerationRestoreRequest {
+            folder_name: old_cat.folder_name.clone(),
+            path_hash: old_cat.path_hash.clone(),
+            manifest_hash: old_cat.manifest_hash.clone(),
+            extra: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(restored.restored);
+
+    let mail_on_a: Vec<_> = {
+        let mut out = Vec::new();
+        for mailbox in ["INBOX", "Archive"] {
+            out.push(serve_mailbox(&a, &OWNER, mailbox).await);
+        }
+        out
+    };
+    let lost_box = a.nest_identity.public_key_bytes();
+
+    // ── A is lost; B reboots (its boot scrub runs) ───────────────────────
+    drop(a);
+    let b_db = Arc::new(CacheDb::open(b_dir.join("nest.db")).unwrap());
+    let (b_url, b, _b_blobs) = start_nest_on(b_dir.clone(), b_db, b_secret).await;
+    assert!(
+        custody_identity(&b)
+            .await
+            .iter()
+            .filter(|(set, _, _)| *set == folder_set)
+            .all(|(_, path, _)| path.is_some()),
+        "the boot scrub keeps a mirror row's leaf: the pull-back addresses by it"
+    );
+
+    // ── A′, enrolled: the owner's sign-in and a write device ─────────────
+    let a2_secret = if same_identity {
+        a_secret
+    } else {
+        let mut s = [0u8; 32];
+        getrandom::fill(&mut s).unwrap();
+        s
+    };
+    let (_a2_url, a2, _a2_blobs) = start_nest_on(
+        kept_tempdir(),
+        Arc::new(CacheDb::open_in_memory().unwrap()),
+        a2_secret,
+    )
+    .await;
+    register_user(&a2, OWNER, "alice").await;
+    register_device(&a2, RESTORE_DEVICE).await;
+    // The seed-holding process prepares the folder's target set first
+    // (`writer-signed-change-records.md` ruling (7)(a)(i)).
+    let target_folder = prepare_target(&a2, "Photos").await;
+
+    // ── The ceremony: run_reseed over the pull-back leg ─────────────────
+    // The folder's name comes off the lost box's coverage row, as the
+    // account plane keeps it.
+    let coverage = [fauna_core::data::BackupDestination {
+        destination_id: DEST_ID.to_string(),
+        folder_name: folder_set.clone(),
+        folder_display_name: Some("Photos".to_string()),
+        ..Default::default()
+    }];
+    let names =
+        fauna_sync_engine::reseed_pull::folder_names_from_coverage(&coverage, DEST_ID, None);
+    let seam = PullSeam {
+        client: fauna_client_backup::BackupClient::new(PullLink::to(&b)),
+    };
+    let fetcher = OpenRouteFetcher {
+        base: b_url.clone(),
+        http: reqwest::Client::new(),
+    };
+    let sink = SourceBytePlane(a2.clone());
+    let target_link = PullLink::to(&a2);
+    let leg = PullLeg(
+        fauna_sync_engine::reseed_pull::NestPullBack::new(
+            fauna_sync_engine::reseed_pull::PullBackDestination {
+                seam: &seam,
+                bytes: &fetcher,
+            },
+            fauna_sync_engine::reseed_pull::PullBackTarget {
+                bytes: &sink,
+                nest: &target_link,
+                device_id: hex::encode(RESTORE_DEVICE),
+            },
+            OWNER,
+        )
+        .with_folder_names(names)
+        .with_rehome_signing(fauna_client_sync::RecordSigning {
+            signer: Arc::new(fauna_protocol::sync_writer_sig::ChangeSigner::direct(
+                &owner_key(),
+            )),
+            set_nonce: fauna_client_sync::SetNonceSource::Fixed(TARGET_NONCE),
+        }),
+    );
+    let target = fauna_client_backup::BackupClient::new(PullLink::to(&a2));
+
+    // Torn after a `.dat` and before its `.meta`: nothing is materialized.
+    target_link
+        .tear
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let torn =
+        fauna_client_backup::reseed::run_reseed(&target, owner_key_bytes.to_vec(), &leg).await;
+    assert!(
+        matches!(
+            torn,
+            Err(fauna_client_backup::reseed::ReseedError::Delivery(_))
+        ),
+        "{torn:?}"
+    );
+    assert!(serve_mailbox(&a2, &OWNER, "INBOX").await.is_empty());
+
+    // The re-run resumes to the whole corpus.
+    let outcome = fauna_client_backup::reseed::run_reseed(&target, owner_key_bytes.to_vec(), &leg)
+        .await
+        .expect("the re-run completes");
+    assert!(outcome.is_whole(), "{outcome:?}");
+
+    // The mail reads back through A′'s ordinary read path, where it was.
+    for (i, mailbox) in ["INBOX", "Archive"].into_iter().enumerate() {
+        assert_eq!(
+            serve_mailbox(&a2, &OWNER, mailbox).await,
+            mail_on_a[i],
+            "{mailbox}: same messages, same UIDs, same flags"
+        );
+    }
+    // The folder is live, its rows the source's: path hashes, sealed names,
+    // and the cat B was rolled back to.
+    let mut rows = live_rows(&a2, target_folder).await;
+    rows.sort();
+    let mut expected = vec![
+        (
+            cat,
+            Some(b"sealed-name-label".to_vec()),
+            Some(cat_v1.digest()),
+        ),
+        (
+            dog,
+            Some(b"sealed-name-label".to_vec()),
+            Some(dog_v1.digest()),
+        ),
+    ];
+    expected.sort();
+    assert_eq!(rows, expected);
+    // What A′ holds as custody is what B holds, row for row.
+    assert_eq!(custody_identity(&a2).await, custody_identity(&b).await);
+
+    // ── The post-ceremony duty: B becomes A′'s destination ──────────────
+    let restored_box = a2.nest_identity.public_key_bytes();
+    assert_eq!(restored_box == lost_box, same_identity);
+    let store = fauna_client_config::test_helpers::FakeBackupStateStore::empty();
+    let row = fauna_core::data::BackupDestination {
+        destination_id: DEST_ID.to_string(),
+        destination_nest_url: b_url.clone(),
+        destination_actor_pubkey: b.nest_identity.public_key_bytes(),
+        display_name: Some("Off-site".to_string()),
+        ..Default::default()
+    };
+    let list = fauna_client_config::reenroll_nest_destination_after_reseed(
+        PullLink::to(&a2),
+        PullLink::to(&b),
+        &store,
+        OWNER_SECRET,
+        restored_box,
+        &row,
+        &outcome,
+    )
+    .await
+    .expect("a whole outcome re-enrolls")
+    .expect("the destination accepts the restored nest");
+    assert_eq!(list.len(), 1);
+    assert_eq!(
+        writer_seat(&b)
+            .await
+            .iter()
+            .map(|g| g.writer_nest_id.clone())
+            .collect::<Vec<_>>(),
+        vec![hex::encode(restored_box)],
+        "the seat names the restored nest alone"
+    );
+    // And A′'s next backup pass to B is accepted.
+    let coordinator = NestBackupCoordinator::open_for_owner(Arc::clone(&a2), OWNER)
+        .await
+        .unwrap()
+        .expect("A′ is enrolled");
+    let dest_row = coordinator.destinations()[0].clone();
+    coordinator
+        .run_once(&dest_row, KIND)
+        .await
+        .expect("B accepts the restored nest's pass");
+}
+
+#[tokio::test]
+async fn a_nest_held_backup_is_pulled_back_onto_a_fresh_nest_and_its_seat_moves() {
+    a_nest_held_backup_is_pulled_back(false).await;
+}
+
+#[tokio::test]
+async fn a_nest_held_backup_is_pulled_back_onto_a_rebuild_under_the_lost_boxs_identity() {
+    a_nest_held_backup_is_pulled_back(true).await;
+}
+
 /// The audit's client-local store, in memory.
 #[derive(Default)]
 struct MemAuditStore(std::sync::Mutex<fauna_client_backup::audit::AuditStateSnapshot>);

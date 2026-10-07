@@ -7480,11 +7480,12 @@ mod tests {
         assert_eq!(current[0].scope[0].kind.as_deref(), Some("folder"));
     }
 
-    /// The trust facet's reconcile sweep revokes every grant id the nest
-    /// holds that the log does not hold live (`reconcile_sweep` →
-    /// `grant_log::unrecognized_grant_ids`). Before the paywall legs recorded,
-    /// that was the paywall grant, at every refresh; now a live paywall grant
-    /// survives it, and so do its renewals.
+    /// The reconcile sweep revokes every grant id the nest holds that the log
+    /// does not hold live — a step of the engine holder's full pump pass,
+    /// judging with `grant_log::unrecognized_grant_ids`
+    /// (`fauna_account_plane::account_driver::capability_sweep`). Before the
+    /// paywall legs recorded, that was the paywall grant, at every sweep; now a
+    /// live paywall grant survives the judgement, and so do its renewals.
     #[cfg(feature = "mls")]
     #[test]
     fn a_live_paywall_grant_survives_the_reconcile_sweep() {

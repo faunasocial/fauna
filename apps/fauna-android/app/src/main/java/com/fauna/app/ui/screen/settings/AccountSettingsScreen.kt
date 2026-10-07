@@ -22,6 +22,7 @@ import com.fauna.app.ui.components.AccountSwitcherSection
 import com.fauna.app.ui.components.CopyableRow
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.components.IdentityExportSection
+import com.fauna.app.ui.components.RecoveryKitSection
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.localized
@@ -209,6 +210,7 @@ fun AccountSettingsScreen(
             // FaunaNavHost, before this button lived here).
             vm.signOut(onSignOut)
         },
+        recoveryKitSection = { RecoveryKitSection(sessionActorIdHex = actorId) },
     )
 }
 
@@ -289,6 +291,9 @@ fun AccountSettingsContent(
     // § Absolute local timestamp display) — the pending-action row's
     // execute-after text; injected FFI-free for the same reason.
     absoluteLocal: (Long) -> String = { com.fauna.app.ui.util.ValueFormat.absoluteLocal(it) },
+    // The stateful Recovery kit section ([RecoveryKitSection], VM-backed) —
+    // supplied by [AccountSettingsScreen]; empty under the Content harness.
+    recoveryKitSection: @Composable () -> Unit = {},
 ) {
     val context = LocalContext.current
     val appMessages = LocalAppMessages.current
@@ -454,6 +459,11 @@ fun AccountSettingsContent(
             // identity (settings.md § Identity export). Placed before Change handle,
             // mirroring the shipped Apple order.
             IdentityExportSection(secretHex = secretHex, handle = handle)
+
+            // Recovery kit — immediately after Identity export (settings.md
+            // § Layout & flow item 4, § Recovery kit): a slot, so this
+            // Content stays FFI- and Hilt-free under Robolectric.
+            recoveryKitSection()
 
             // Change Handle Section
             ChangeHandleCard(

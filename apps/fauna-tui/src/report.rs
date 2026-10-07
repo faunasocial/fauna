@@ -491,38 +491,28 @@ pub fn elements(app: &App) -> Vec<Element> {
 /// identity (mail and bridged rails) — there is nothing to report it against.
 pub fn message_target(msg: &fauna_conversations::MessageSnapshot) -> Option<ReportTarget> {
     let plane = msg.plane_ref.as_ref()?;
-    let subject = report::message_subject(&plane.scope, &plane.record_digest)?;
-    Some(ReportTarget {
-        subject,
-        sealed: true,
-        author: msg.sender.person_actor_id().map(|a| a.to_hex()),
-        plaintext: Some(msg.document.to_plaintext()),
-    })
+    ReportTarget::message(
+        &plane.scope,
+        &plane.record_digest,
+        msg.sender.person_actor_id().map(|a| a.to_hex()),
+        &msg.document.to_plaintext(),
+    )
 }
 
 /// The report target for a feed post. A gated post was opened through a key,
 /// so the nest holds no readable bytes of it — the sealed rule's post arm.
 pub fn post_target(post: &fauna_feed::PostSummary) -> ReportTarget {
-    ReportTarget {
-        subject: fauna_protocol::moderation::AbuseReportSubject::Post {
-            cid: post.post_id.clone(),
-        },
-        sealed: post.gated_tier.is_some() || post.gated_room.is_some(),
-        author: Some(post.author.clone()),
-        plaintext: Some(post.body.clone()),
-    }
+    ReportTarget::post(
+        &post.post_id,
+        &post.author,
+        &post.body,
+        post.gated_tier.is_some() || post.gated_room.is_some(),
+    )
 }
 
 /// The report target for an account (the OTHER profile).
 pub fn actor_target(actor_id: &str) -> ReportTarget {
-    ReportTarget {
-        subject: fauna_protocol::moderation::AbuseReportSubject::Actor {
-            actor_id: actor_id.to_string(),
-        },
-        sealed: false,
-        author: Some(actor_id.to_string()),
-        plaintext: None,
-    }
+    ReportTarget::actor(actor_id)
 }
 
 /// Clear the page-scoped acknowledgement when the user leaves its page — the

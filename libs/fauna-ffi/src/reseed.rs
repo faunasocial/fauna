@@ -189,7 +189,7 @@ mod tests {
 
     /// The orphaned store first, then this device's own custodian row — and
     /// neither another device's row (only the holder can push) nor a nest row
-    /// (its pull-back leg is not built).
+    /// (no app hosts its pull-back leg yet).
     #[test]
     fn the_rows_are_the_orphaned_store_and_this_devices_own_row_only() {
         let rows = vec![

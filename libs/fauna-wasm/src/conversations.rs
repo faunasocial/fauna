@@ -76,6 +76,8 @@ use fauna_client_config::{decide_member_review, load_member_reviews};
 // through the tab's runtime handle — the wasm twin of fauna-ffi's
 // `nostr_npub_confirm.rs`.
 #[cfg(target_arch = "wasm32")]
+use fauna_client_config::DavStoreContext;
+#[cfg(target_arch = "wasm32")]
 use fauna_client_config::npub_confirmation_owed_for;
 #[cfg(target_arch = "wasm32")]
 use fauna_client_conversations::ConversationsClient;
@@ -229,8 +231,9 @@ impl OutboundMailSink for ReceiveOnlySink {
 #[cfg(target_arch = "wasm32")]
 struct WebSchedulingSink {
     client: fauna_rpc_wasm::WsRpcClient,
-    actor_id: [u8; 32],
-    msek: [u8; 32],
+    /// The actor and its MSEK history: a write seals to the current
+    /// generation, a lookup of the stored event walks the whole ring.
+    ctx: DavStoreContext,
     /// The write's epoch-seconds CREATED/LAST-MODIFIED surrogate, from JS (the
     /// wasm-time discipline — no `Date::now()` in wasm).
     now_secs: i64,
@@ -365,8 +368,9 @@ impl SchedulingSink for WebSchedulingSink {
         };
         let outcome = fauna_client_caldav::CalDavClient::new(self.client.clone())
             .apply_inbound_scheduling_from_message(
-                &self.actor_id,
-                &self.msek,
+                &self.ctx.actor_id,
+                &self.ctx.msek,
+                &self.ctx.prior_mseks,
                 &raw_rfc5322,
                 self.now_secs,
                 // Pass-through only — who may create / change / cancel is
@@ -1250,7 +1254,11 @@ impl WasmConversationsManager {
         let refused = self.manager.refused_changes();
         let now_secs = now_secs as i64;
         wasm_bindgen_futures::spawn_local(async move {
-            let (actor_id, msek) = match crate::rpc::dav_ctx(&secret_hex).await {
+            let DavStoreContext {
+                actor_id,
+                msek,
+                prior_mseks,
+            } = match crate::rpc::dav_ctx(&secret_hex).await {
                 Ok(Some(ctx)) => ctx,
                 Ok(None) => return,
                 Err(e) => {
@@ -1261,7 +1269,7 @@ impl WasmConversationsManager {
                 }
             };
             match fauna_client_caldav::CalDavClient::new(client)
-                .apply_inbound_reply_from_mail(&actor_id, &msek, &raw, now_secs)
+                .apply_inbound_reply_from_mail(&actor_id, &msek, &prior_mseks, &raw, now_secs)
                 .await
             {
                 Ok(outcome) => {
@@ -3019,7 +3027,7 @@ impl WasmConversationsManager {
             // The native sink treats this the same way (a no-op the loop retries
             // once the user provisions), so an un-provisioned seat neither errors
             // nor burns its cursor on an iMIP it could not apply.
-            let Some((actor_id, msek)) = crate::rpc::dav_ctx(&secret_hex).await? else {
+            let Some(ctx) = crate::rpc::dav_ctx(&secret_hex).await? else {
                 return Ok(JsValue::UNDEFINED);
             };
             let resolver = fauna_client_caldav::MemoizedSuccessionResolver {
@@ -3035,8 +3043,7 @@ impl WasmConversationsManager {
             };
             let sink: Option<Arc<dyn SchedulingSink>> = Some(Arc::new(WebSchedulingSink {
                 client,
-                actor_id,
-                msek,
+                ctx,
                 now_secs: now_secs as i64,
                 refused,
                 resolver,

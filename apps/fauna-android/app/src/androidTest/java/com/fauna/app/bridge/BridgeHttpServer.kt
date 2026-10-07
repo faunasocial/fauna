@@ -113,6 +113,33 @@ class BridgeHttpServer(
                 }
                 newFixedLengthResponse(Response.Status.OK, "application/octet-stream", stream, file.length())
             }
+            // The app's own log (`drivers/android.py::app_log_text`): the shared
+            // `fauna_log` rolling files under `<filesDir>/logs/`, listed flat
+            // (name + size, so the driver can take a per-launch byte floor),
+            // then one file's bytes from an offset. The app's tracing never
+            // reaches logcat, and no host path reaches filesDir.
+            "/app-log" -> {
+                val files = JSONArray()
+                launcher.logFiles().forEach { f ->
+                    files.put(JSONObject().put("name", f.name).put("size", f.length()))
+                }
+                json(Response.Status.OK, JSONObject().put("files", files).toString())
+            }
+            "/app-log-file" -> {
+                val name = session.parms["name"] ?: return badReq("name required")
+                val from = (session.parms["from"]?.toLongOrNull() ?: 0L).coerceAtLeast(0L)
+                val file = launcher.logFile(name)
+                    ?: return json(Response.Status.NOT_FOUND, """{"error":"no such log"}""")
+                val stream = try {
+                    java.io.FileInputStream(file).also { it.skip(from) }
+                } catch (_: java.io.IOException) {
+                    return json(Response.Status.NOT_FOUND, """{"error":"no such log"}""")
+                }
+                newFixedLengthResponse(
+                    Response.Status.OK, "application/octet-stream", stream,
+                    (file.length() - from).coerceAtLeast(0L),
+                )
+            }
             else -> json(Response.Status.NOT_FOUND, """{"error":"Unknown: GET $uri"}""")
         }
 
@@ -317,6 +344,17 @@ class AppLauncher(private val instrumentation: android.app.Instrumentation) {
     fun downloadFile(name: String): java.io.File? {
         if (name.isEmpty() || name == "." || name == ".." || '/' in name || '\u0000' in name) return null
         return java.io.File(downloadRoot(), name).takeIf { it.isFile }
+    }
+
+    /** The app's `fauna_log` rolling files (`<filesDir>/logs/`), flat, or none before it logs. */
+    fun logFiles(): List<java.io.File> =
+        java.io.File(instrumentation.targetContext.filesDir, "logs").listFiles()
+            ?.filter { it.isFile }?.sortedBy { it.name } ?: emptyList()
+
+    /** The log file named [name], or `null`; a [name] that is not a bare file name is absent. */
+    fun logFile(name: String): java.io.File? {
+        if (name.isEmpty() || name == "." || name == ".." || '/' in name || '\u0000' in name) return null
+        return logFiles().firstOrNull { it.name == name }
     }
 
     private val inputFileSeq = java.util.concurrent.atomic.AtomicInteger()

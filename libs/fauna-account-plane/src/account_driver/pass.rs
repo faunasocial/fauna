@@ -1,6 +1,7 @@
 //! One pump pass and its report: departures → the bind leg's replica check →
-//! enrollment → publish → reconcile → escrow recovery + re-escrow → the
-//! host's legs → device-endpoints → the rest of the generation machinery →
+//! enrollment → publish → reconcile (the capability sweep's enumerate ahead
+//! of the fleet walk, its judge behind it — `capability_sweep`) → escrow
+//! recovery + re-escrow → the host's legs → device-endpoints → the rest of the generation machinery →
 //! removals → severance → content walks → seen-set
 //! (`account-client-lifecycle.md` § The client-side lifecycle, the pump bullet).
 //!
@@ -101,6 +102,10 @@ pub struct PumpReport {
     /// The fleet-only scope walk — how this replica learns the device set,
     /// mints, wraps and escrow receipts its siblings wrote.
     pub fleet_walk: Option<WalkReport>,
+    /// The capability reconcile sweep (`super::capability_sweep`): enumerated
+    /// before the fleet walk, judged after it — in every full pass, and in no
+    /// other unit. `None` when no full pass ran this far.
+    pub capability_sweep: Option<super::CapabilitySweep>,
     /// The `ext:<kind>` walks, one per kind the account's verified manifests
     /// admitted (`third-party-kinds.md` § The `ext` sub-scope), in the
     /// overlay's order: the scope beside its walk.
@@ -545,6 +550,10 @@ pub(crate) struct PassInputs<'a> {
     /// The app-fed transport facts for the device-endpoints step — `None`
     /// until `set_endpoint_facts`, which publishes the node-id-only floor.
     pub(crate) endpoint_facts: Option<&'a EndpointFacts>,
+    /// The account's identity — the actor the capability sweep folds the
+    /// succession ledger as; `None` when the account id did not decode (the
+    /// sweep then judges nothing).
+    pub(crate) ledger_actor: Option<ActorId>,
 }
 
 /// The fleet-plane writer identity + trust + principal bundle, bundled for
@@ -767,6 +776,7 @@ where
         own_scopes,
         membership_answered,
         endpoint_facts,
+        ledger_actor,
     } = *pass;
     let pass_started = now_ms();
     let mut report = PumpReport::default();
@@ -849,6 +859,11 @@ where
     // per-device: a sibling's enrollment, a sibling's mint and its escrow
     // receipt only become this replica's merged state — and so only become
     // resolvable as a tip — by walking this scope.
+    // The capability sweep's enumerate, right before the fleet walk: every
+    // row it names was deposited after its `Mint` reached the nest, so the walk
+    // below serves this replica every event the judge needs
+    // (`ui/nests.md` § Trust facet — grants → *Reconcile*).
+    let enumerated = super::capability_sweep::enumerate(rpc).await;
     let step = now_ms();
     match planes.fleet.reconcile().await {
         Ok(w) => report.fleet_walk = Some(w),
@@ -938,6 +953,23 @@ where
         }
         report.timings.escrow_recovery = since(step);
     }
+    // The capability sweep's judge, behind the fleet walk — and behind the
+    // re-walk an escrow recovery ran, whose listing opened what the first one
+    // could not. A walk that erred judges nothing.
+    let walked = report
+        .fleet_rewalk
+        .clone()
+        .or_else(|| report.fleet_walk.clone());
+    let sweep = super::capability_sweep::judge_and_revoke(
+        store,
+        rpc,
+        ledger_actor,
+        enumerated,
+        walked.as_ref(),
+        &mut report.errors,
+    )
+    .await;
+    report.capability_sweep = Some(sweep);
     // The re-escrow pass — the succession rider (`generation_reescrow`
     // module docs): every live generation this device keys is escrowed under
     // THIS identity's target at the trusted holder. Deposits only, never a

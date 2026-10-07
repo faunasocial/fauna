@@ -20,8 +20,9 @@
 //!    not a call, because its production implementation
 //!    (`fauna_sync_engine::reseed::ReseedDelivery`) opens a native sealed store
 //!    this wasm-clean crate cannot name, and because a *surviving nest
-//!    destination's* custody needs no push at all — the materialize half below
-//!    is one shared design for both restore sources.
+//!    destination's* custody arrives by a second leg, the nest-held pull-back
+//!    (`fauna_sync_engine::reseed_pull::NestPullBack`) — the materialize half
+//!    below is one shared design for both restore sources.
 //! 3. **Materialize behind the owner's gesture** — one
 //!    [`BackupClient::custody_materialize`] per delivered segment set (the
 //!    account rails) first, then each covered folder in pages of the owner's
@@ -619,14 +620,19 @@ pub fn result_lines(outcome: &ReseedOutcome) -> Vec<fauna_core::localized::Local
 pub enum ReseedLeg {
     /// This device's own sealed custodian store: re-sealed and pushed from here.
     ThisDeviceStore,
-    /// A surviving nest destination's custody, pulled back by the owner's app.
-    /// Not built yet (`segment-backup-protocol.md` § *The nest-held
-    /// pull-back*), so no app offers it.
+    /// A surviving nest destination's custody, pulled back by the owner's app
+    /// (`segment-backup-protocol.md` § *The nest-held pull-back*). The leg is
+    /// built in shared Rust (`fauna_sync_engine::reseed_pull::NestPullBack`)
+    /// but no app hosts it yet, so it is not [`Self::is_built`] and no app
+    /// offers it.
     NestHeldPullBack,
 }
 
 impl ReseedLeg {
-    /// Whether this build can run the leg.
+    /// Whether an app can run the leg — what every app paints the restore
+    /// gesture by. The pull-back joins when a host runs it and its gesture's
+    /// place on a nest-kind row is settled (`ui/backups.md`): flipping this
+    /// alone would paint the button on a nest row with nothing behind it.
     pub fn is_built(self) -> bool {
         matches!(self, Self::ThisDeviceStore)
     }

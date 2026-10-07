@@ -91,6 +91,7 @@ Stamped 2026-09-25 at efcea449ea.
    - `tests/e2e-unified/tests/test_push_settings.py::test_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting`
 12. [app] An identity another Fauna window on this device is using cannot be removed — nothing is erased and you are told to close that window first — and the identity this window is using is never offered for removal — `docs/goal/architecture/apps/account-scoping.md` § Concurrent instances
    - `tests/e2e-unified/tests/test_remove_account_refused_other_tab_web.py::test_web_remove_account_refuses_an_account_another_tab_serves`
+   - `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_remove_account_refuses_while_another_instance_serves_it`
 13. [app] Adding an identity that sets up its own nest keeps you on the identity you had until that setup finishes, and a setup you walked away from waits in the switcher instead of taking over — `docs/goal/behavior/onboarding.md` § Multi-account (add-account = append-mode onboarding)
    - `tests/e2e-unified/tests/test_add_account_provisioning.py::test_an_add_account_provisioning_run_holds_custody_without_hijacking_the_live_session`
    - `tests/e2e-unified/tests/test_add_account_provisioning.py::test_an_add_account_deferred_dns_exit_switches_to_the_appended_identity_and_survives_a_relaunch`
@@ -103,7 +104,7 @@ Stamped 2026-09-25 at efcea449ea.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | |
-| linux | ⚠ partial | 0.1.2-dev+d4125106 standalone |
+| linux | ⚠ partial | 0.1.2-dev+78e73031 standalone |
 | windows | ⚠ partial | 0.1.2-dev+a3582c8b.dirty standalone |
 | macos | ⚠ partial | 0.1.2-dev+4bba6f8f standalone |
 | ios | ⚠ partial | 0.1.2-dev+4bba6f8f standalone |
@@ -173,6 +174,7 @@ Stamped 2026-09-25 at efcea449ea.
 | 10 | app | `tests/e2e-unified/tests/test_account_switcher_windows.py::test_windows_switching_identity_keeps_device_settings_and_moves_drafts` | windows (windows): passed |
 | 11 | app | `tests/e2e-unified/tests/test_push_settings.py::test_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_remove_account_refused_other_tab_web.py::test_web_remove_account_refuses_an_account_another_tab_serves` | web (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_remove_account_refuses_while_another_instance_serves_it` | linux (linux): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_add_account_provisioning.py::test_an_add_account_provisioning_run_holds_custody_without_hijacking_the_live_session` | linux (linux): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_add_account_provisioning.py::test_an_add_account_deferred_dns_exit_switches_to_the_appended_identity_and_survives_a_relaunch` | linux (linux): passed, tui (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_account_registry_mutation_lock_web.py::test_a_registry_write_queues_behind_a_sibling_tabs_mutation_lock` | — |

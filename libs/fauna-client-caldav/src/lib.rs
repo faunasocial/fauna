@@ -1769,6 +1769,7 @@ impl<R: RpcRequester> CalDavClient<R> {
         &self,
         actor_id: &[u8; 32],
         msek: &[u8; 32],
+        prior_mseks: &[[u8; 32]],
         reply_ics: &str,
         timestamp: i64,
         authority: ReplyAuthority<'_, P>,
@@ -1779,7 +1780,9 @@ impl<R: RpcRequester> CalDavClient<R> {
             return Ok(InboundReplyOutcome::NoUid);
         }
         let target = uid_hash(&reply_fields.uid);
-        let Some((calendar_id, stored)) = self.find_stored_event(actor_id, msek, &target).await?
+        let Some((calendar_id, stored)) = self
+            .find_stored_event(actor_id, msek, prior_mseks, &target)
+            .await?
         else {
             return Ok(InboundReplyOutcome::NoMatchingEvent);
         };
@@ -1826,10 +1829,12 @@ impl<R: RpcRequester> CalDavClient<R> {
     /// The sealed rail's `REPLY`: [`Self::apply_reply_under`] with the
     /// nest-attested `origin` as the authority, each on-roster attendee
     /// resolved through `resolver` ([`Self::authorize_reply`]).
+    #[allow(clippy::too_many_arguments)]
     async fn apply_authorized_reply<P: PrincipalResolver>(
         &self,
         actor_id: &[u8; 32],
         msek: &[u8; 32],
+        prior_mseks: &[[u8; 32]],
         reply_ics: &str,
         timestamp: i64,
         origin: &InboundOrigin,
@@ -1838,6 +1843,7 @@ impl<R: RpcRequester> CalDavClient<R> {
         self.apply_reply_under(
             actor_id,
             msek,
+            prior_mseks,
             reply_ics,
             timestamp,
             ReplyAuthority::Rail { origin, resolver },
@@ -1870,6 +1876,7 @@ impl<R: RpcRequester> CalDavClient<R> {
         &self,
         actor_id: &[u8; 32],
         msek: &[u8; 32],
+        prior_mseks: &[[u8; 32]],
         raw_rfc5322: &[u8],
         timestamp: i64,
     ) -> Result<InboundReplyOutcome, InboundScheduleError<R::Error>> {
@@ -1887,6 +1894,7 @@ impl<R: RpcRequester> CalDavClient<R> {
         self.apply_reply_under::<NoPrincipalResolver>(
             actor_id,
             msek,
+            prior_mseks,
             &part.ics,
             timestamp,
             ReplyAuthority::Mail {
@@ -1917,10 +1925,12 @@ impl<R: RpcRequester> CalDavClient<R> {
     /// rail): `origin` is the record's nest-attested author + the channel's
     /// home nest, and a message whose origin may not make the change comes back
     /// `Refused` with the stored event untouched.
+    #[allow(clippy::too_many_arguments)]
     pub async fn apply_inbound_scheduling_from_message<P: PrincipalResolver>(
         &self,
         actor_id: &[u8; 32],
         msek: &[u8; 32],
+        prior_mseks: &[[u8; 32]],
         raw_rfc5322: &[u8],
         timestamp: i64,
         origin: &InboundOrigin,
@@ -1933,17 +1943,33 @@ impl<R: RpcRequester> CalDavClient<R> {
             return Ok(SchedulingApplyOutcome::NotScheduling);
         };
         if method.eq_ignore_ascii_case("REQUEST") {
-            self.apply_inbound_request(actor_id, msek, &part.ics, timestamp, origin, resolver)
-                .await
-                .map(SchedulingApplyOutcome::Request)
+            self.apply_inbound_request(
+                actor_id,
+                msek,
+                prior_mseks,
+                &part.ics,
+                timestamp,
+                origin,
+                resolver,
+            )
+            .await
+            .map(SchedulingApplyOutcome::Request)
         } else if method.eq_ignore_ascii_case("CANCEL") {
-            self.apply_inbound_cancel(actor_id, msek, &part.ics, origin, resolver)
+            self.apply_inbound_cancel(actor_id, msek, prior_mseks, &part.ics, origin, resolver)
                 .await
                 .map(SchedulingApplyOutcome::Request)
         } else if method.eq_ignore_ascii_case("REPLY") {
-            self.apply_authorized_reply(actor_id, msek, &part.ics, timestamp, origin, resolver)
-                .await
-                .map(SchedulingApplyOutcome::Reply)
+            self.apply_authorized_reply(
+                actor_id,
+                msek,
+                prior_mseks,
+                &part.ics,
+                timestamp,
+                origin,
+                resolver,
+            )
+            .await
+            .map(SchedulingApplyOutcome::Reply)
         } else {
             Ok(SchedulingApplyOutcome::NotScheduling)
         }
@@ -1970,10 +1996,12 @@ impl<R: RpcRequester> CalDavClient<R> {
     /// stranger reach: the event is created and **bound** to `origin` in its
     /// sealed sidecar — unless the `ORGANIZER` definitively resolves to someone
     /// else, which is a spoof and is refused.
+    #[allow(clippy::too_many_arguments)]
     pub async fn apply_inbound_request<P: PrincipalResolver>(
         &self,
         actor_id: &[u8; 32],
         msek: &[u8; 32],
+        prior_mseks: &[[u8; 32]],
         request_ics: &str,
         timestamp: i64,
         origin: &InboundOrigin,
@@ -1991,72 +2019,74 @@ impl<R: RpcRequester> CalDavClient<R> {
         // A REQUEST carries no collection hint: an existing row anywhere is an
         // organizer re-send (update in place), otherwise materialize into the
         // recipient's lazy Personal calendar.
-        let (calendar_id, created, binding) =
-            match self.find_stored_event(actor_id, msek, &target).await? {
-                Some((existing, stored)) => {
-                    let rebind = match Self::authorize_organizer_mutation(
-                        &stored,
-                        request_ics,
-                        origin,
-                        resolver,
-                    )
-                    .await
-                    {
-                        Ok(rebind) => rebind,
-                        Err(reason) => {
+        let (calendar_id, created, binding) = match self
+            .find_stored_event(actor_id, msek, prior_mseks, &target)
+            .await?
+        {
+            Some((existing, stored)) => {
+                let rebind = match Self::authorize_organizer_mutation(
+                    &stored,
+                    request_ics,
+                    origin,
+                    resolver,
+                )
+                .await
+                {
+                    Ok(rebind) => rebind,
+                    Err(reason) => {
+                        return Ok(InboundRequestOutcome::Refused {
+                            uid_hash: target,
+                            // The STORED title, never the rewriting
+                            // message's: the user is being told about the
+                            // event they hold, and the sender chooses its
+                            // own `SUMMARY` as freely as its `ORGANIZER`.
+                            summary: stored.fields.summary.clone(),
+                            reason,
+                        });
+                    }
+                };
+                // Admitted through a verified succession: re-bind to the
+                // successor, every other sidecar field carried over, so the
+                // line is walked once and the retired id stops matching.
+                let rebound = rebind.map(|successor| FaunaEventExt {
+                    organizer_actor_id: Some(successor),
+                    ..stored.fauna_ext.clone().unwrap_or_default()
+                });
+                (existing, false, rebound)
+            }
+            None => {
+                // Bind on first use — but never to an origin the ORGANIZER
+                // line definitively contradicts.
+                let binding = match origin.author.as_deref() {
+                    Some(author) => {
+                        if let Some(named) = resolver.resolve_principal(&organizer).await
+                            && !named.matches(author, &origin.home_nest_url)
+                        {
                             return Ok(InboundRequestOutcome::Refused {
                                 uid_hash: target,
-                                // The STORED title, never the rewriting
-                                // message's: the user is being told about the
-                                // event they hold, and the sender chooses its
-                                // own `SUMMARY` as freely as its `ORGANIZER`.
-                                summary: stored.fields.summary.clone(),
-                                reason,
+                                // Nothing is stored under this UID — this
+                                // branch is the miss — so the title can
+                                // only be the one the message brought.
+                                summary: fields.summary.clone(),
+                                reason: RefusalReason::SpoofedOrganizer,
                             });
                         }
-                    };
-                    // Admitted through a verified succession: re-bind to the
-                    // successor, every other sidecar field carried over, so the
-                    // line is walked once and the retired id stops matching.
-                    let rebound = rebind.map(|successor| FaunaEventExt {
-                        organizer_actor_id: Some(successor),
-                        ..stored.fauna_ext.clone().unwrap_or_default()
-                    });
-                    (existing, false, rebound)
-                }
-                None => {
-                    // Bind on first use — but never to an origin the ORGANIZER
-                    // line definitively contradicts.
-                    let binding = match origin.author.as_deref() {
-                        Some(author) => {
-                            if let Some(named) = resolver.resolve_principal(&organizer).await
-                                && !named.matches(author, &origin.home_nest_url)
-                            {
-                                return Ok(InboundRequestOutcome::Refused {
-                                    uid_hash: target,
-                                    // Nothing is stored under this UID — this
-                                    // branch is the miss — so the title can
-                                    // only be the one the message brought.
-                                    summary: fields.summary.clone(),
-                                    reason: RefusalReason::SpoofedOrganizer,
-                                });
-                            }
-                            Some(FaunaEventExt {
-                                organizer_actor_id: Some(author.to_ascii_lowercase()),
-                                organizer_home_nest_url: Some(origin.home_nest_url.clone()),
-                                ..Default::default()
-                            })
-                        }
-                        // No attested author: the invite still lands (creation
-                        // is open), unbound — later mutation is resolve-or-refuse.
-                        None => None,
-                    };
-                    let personal = personal_calendar_id();
-                    self.ensure_personal_calendar(actor_id, msek, &personal)
-                        .await?;
-                    (personal, true, binding)
-                }
-            };
+                        Some(FaunaEventExt {
+                            organizer_actor_id: Some(author.to_ascii_lowercase()),
+                            organizer_home_nest_url: Some(origin.home_nest_url.clone()),
+                            ..Default::default()
+                        })
+                    }
+                    // No attested author: the invite still lands (creation
+                    // is open), unbound — later mutation is resolve-or-refuse.
+                    None => None,
+                };
+                let personal = personal_calendar_id();
+                self.ensure_personal_calendar(actor_id, msek, &personal)
+                    .await?;
+                (personal, true, binding)
+            }
+        };
 
         // On an UPDATE the sidecar is `None` — write none, so the nest preserves
         // the recipient's prior Fauna refinement AND the organizer binding (the
@@ -2102,9 +2132,10 @@ impl<R: RpcRequester> CalDavClient<R> {
         &self,
         actor_id: &[u8; 32],
         msek: &[u8; 32],
+        prior_mseks: &[[u8; 32]],
         target: &[u8; 32],
     ) -> Result<Option<([u8; 32], FlatEvent)>, InboundScheduleError<R::Error>> {
-        let keys = DavRecipientKeys::derive(msek);
+        let keys = DavRecipientKeys::from_mseks(msek, prior_mseks);
         let listing = self
             .list_calendars(ListCalendarsRequest {
                 actor_id: actor_id.to_vec(),
@@ -2277,6 +2308,7 @@ impl<R: RpcRequester> CalDavClient<R> {
         &self,
         actor_id: &[u8; 32],
         msek: &[u8; 32],
+        prior_mseks: &[[u8; 32]],
         cancel_ics: &str,
         origin: &InboundOrigin,
         resolver: &P,
@@ -2287,7 +2319,10 @@ impl<R: RpcRequester> CalDavClient<R> {
             return Ok(InboundRequestOutcome::NoUid);
         }
         let target = uid_hash(&fields.uid);
-        match self.find_stored_event(actor_id, msek, &target).await? {
+        match self
+            .find_stored_event(actor_id, msek, prior_mseks, &target)
+            .await?
+        {
             Some((calendar_id, stored)) => {
                 if let Err(reason) =
                     Self::authorize_organizer_mutation(&stored, cancel_ics, origin, resolver).await
@@ -4307,6 +4342,7 @@ mod tests {
         let outcome = block_on(client.apply_inbound_scheduling_from_message(
             &ACTOR,
             &MSEK,
+            &[],
             &forged,
             1_700_000_000,
             &mallory_origin(),
@@ -4342,6 +4378,7 @@ mod tests {
         let applied = block_on(client.apply_inbound_scheduling_from_message(
             &ACTOR,
             &MSEK,
+            &[],
             &forged,
             1_700_000_000,
             &organizer_origin(),
@@ -4374,6 +4411,7 @@ mod tests {
             let outcome = block_on(client.apply_inbound_cancel(
                 &ACTOR,
                 &MSEK,
+                &[],
                 &cancel_ics(uid),
                 &mallory_origin(),
                 &fan_resolver(),
@@ -4410,6 +4448,7 @@ mod tests {
         let outcome = block_on(client.apply_inbound_request(
             &ACTOR,
             &MSEK,
+            &[],
             &request_ics(uid),
             1_700_000_000,
             &mallory_origin(),
@@ -4455,6 +4494,7 @@ mod tests {
             let outcome = block_on(client.apply_inbound_request(
                 &ACTOR,
                 &MSEK,
+                &[],
                 &repointed,
                 1_700_000_000,
                 &organizer_origin(),
@@ -4493,6 +4533,7 @@ mod tests {
         let outcome = block_on(client.apply_inbound_cancel(
             &ACTOR,
             &MSEK,
+            &[],
             &cancel_ics(uid),
             &forged,
             &fan_resolver(),
@@ -4521,6 +4562,7 @@ mod tests {
         let outcome = block_on(client.apply_inbound_cancel(
             &ACTOR,
             &MSEK,
+            &[],
             &cancel_ics(uid),
             &unattested,
             &fan_resolver(),
@@ -4538,6 +4580,7 @@ mod tests {
         let outcome = block_on(client.apply_inbound_cancel(
             &ACTOR,
             &MSEK,
+            &[],
             &cancel_ics(uid),
             &organizer_origin(),
             &NoPrincipalResolver,
@@ -4569,6 +4612,7 @@ mod tests {
         let outcome = block_on(client.apply_inbound_cancel(
             &ACTOR,
             &MSEK,
+            &[],
             &cancel_ics(uid),
             &organizer_origin(),
             &NoPrincipalResolver,
@@ -4576,6 +4620,57 @@ mod tests {
         .expect("apply");
         assert!(matches!(outcome, InboundRequestOutcome::Cancelled { .. }));
         assert_eq!(rec.count("fauna.bridges.delete_event"), 1);
+    }
+
+    /// The organizer's CANCEL for an event stored before the recipient rotated
+    /// their mail keys still finds it: the inbound lookup opens bodies through
+    /// the whole MSEK ring, not the current generation alone
+    /// (`mail-credentials.md` § Rotation and recovery → *DAV bodies across a
+    /// rotation*, ruling 1). Without the prior generation the same CANCEL fails
+    /// to read the stored event at all — the miss the ring exists to close.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_inbound_cancel_finds_an_event_sealed_before_a_rotation() {
+        const PRIOR: [u8; 32] = [0x5A; 32];
+        let uid = "pre-rotation@example.com";
+        let ics = request_ics(uid);
+        let ext = FaunaEventExt {
+            organizer_actor_id: Some(ORGANIZER_ACTOR.into()),
+            organizer_home_nest_url: Some(String::new()),
+            ..Default::default()
+        };
+        let entry = || EventEntry {
+            encrypted_body: seal_event_body(ics.as_bytes(), &PRIOR).expect("seal body"),
+            encrypted_index_hint: seal_event_body(b"", &PRIOR).expect("seal hint"),
+            encrypted_fauna_ext: Some(seal_fauna_ext(&ext, &PRIOR).expect("seal ext")),
+            ..sealed_entry_for_uid(&ics, uid)
+        };
+        let cancel = |prior_mseks: &[[u8; 32]]| {
+            let rec = requester_holding(entry());
+            let outcome = block_on(CalDavClient::new(rec.clone()).apply_inbound_cancel(
+                &ACTOR,
+                &MSEK,
+                prior_mseks,
+                &cancel_ics(uid),
+                &organizer_origin(),
+                &NoPrincipalResolver,
+            ));
+            (outcome, rec.count("fauna.bridges.delete_event"))
+        };
+
+        let (outcome, deletes) = cancel(&[]);
+        assert!(
+            matches!(outcome, Err(InboundScheduleError::Read(_))),
+            "the current generation alone cannot read a pre-rotation event: {outcome:?}"
+        );
+        assert_eq!(deletes, 0);
+
+        let (outcome, deletes) = cancel(&[PRIOR]);
+        assert!(matches!(
+            outcome,
+            Ok(InboundRequestOutcome::Cancelled { .. })
+        ));
+        assert_eq!(deletes, 1);
     }
 
     /// `bound actor id -> verified successor`, counting how often it is asked;
@@ -4645,6 +4740,7 @@ mod tests {
         let refused = block_on(CalDavClient::new(rec.clone()).apply_inbound_cancel(
             &ACTOR,
             &MSEK,
+            &[],
             &cancel_ics(uid),
             &successor_origin(""),
             &NoPrincipalResolver,
@@ -4664,6 +4760,7 @@ mod tests {
         let outcome = block_on(CalDavClient::new(rec.clone()).apply_inbound_cancel(
             &ACTOR,
             &MSEK,
+            &[],
             &cancel_ics(uid),
             &successor_origin(""),
             &resolver,
@@ -4689,6 +4786,7 @@ mod tests {
         let outcome = block_on(CalDavClient::new(rec.clone()).apply_inbound_cancel(
             &ACTOR,
             &MSEK,
+            &[],
             &cancel_ics(uid),
             &mallory_origin(),
             &resolver,
@@ -4708,6 +4806,7 @@ mod tests {
         let outcome = block_on(CalDavClient::new(rec.clone()).apply_inbound_cancel(
             &ACTOR,
             &MSEK,
+            &[],
             &cancel_ics(uid),
             &successor_origin("https://elsewhere.example"),
             &resolver,
@@ -4765,6 +4864,7 @@ mod tests {
             let outcome = block_on(CalDavClient::new(rec.clone()).apply_inbound_cancel(
                 &ACTOR,
                 &MSEK,
+                &[],
                 &cancel_ics(uid),
                 &mallory_origin(),
                 &resolver,
@@ -4827,6 +4927,7 @@ mod tests {
         let outcome = block_on(CalDavClient::new(rec.clone()).apply_inbound_cancel(
             &ACTOR,
             &MSEK,
+            &[],
             &cancel_ics(uid),
             &mallory_origin(),
             &resolver(),
@@ -4845,6 +4946,7 @@ mod tests {
         let outcome = block_on(CalDavClient::new(rec.clone()).apply_inbound_cancel(
             &ACTOR,
             &MSEK,
+            &[],
             &cancel_ics(uid),
             &successor_origin(""),
             &resolver(),
@@ -4869,6 +4971,7 @@ mod tests {
         let outcome = block_on(CalDavClient::new(rec.clone()).apply_inbound_cancel(
             &ACTOR,
             &MSEK,
+            &[],
             &cancel_ics(uid),
             &organizer_origin(),
             &resolver,
@@ -4890,6 +4993,7 @@ mod tests {
         let outcome = block_on(CalDavClient::new(rec.clone()).apply_inbound_request(
             &ACTOR,
             &MSEK,
+            &[],
             &request_ics(uid),
             1_700_000_000,
             &successor_origin(""),
@@ -4924,6 +5028,7 @@ mod tests {
         let spoofed = block_on(client.apply_inbound_request(
             &ACTOR,
             &MSEK,
+            &[],
             &request_ics(uid),
             1_700_000_000,
             &mallory_origin(),
@@ -4945,6 +5050,7 @@ mod tests {
         let created = block_on(client.apply_inbound_request(
             &ACTOR,
             &MSEK,
+            &[],
             &request_ics(uid),
             1_700_000_000,
             &organizer_origin(),
@@ -5004,6 +5110,7 @@ mod tests {
         let outcome = block_on(client.apply_inbound_request(
             &ACTOR,
             &MSEK,
+            &[],
             &request_ics(uid),
             1_700_000_000,
             &organizer_origin(),
@@ -5058,6 +5165,7 @@ mod tests {
         let outcome = block_on(client.apply_inbound_request(
             &ACTOR,
             &MSEK,
+            &[],
             &request_ics(uid),
             1_700_000_000,
             &organizer_origin(),
@@ -5110,6 +5218,7 @@ mod tests {
         let outcome = block_on(client.apply_inbound_request(
             &ACTOR,
             &MSEK,
+            &[],
             &ics,
             1_700_000_000,
             &organizer_origin(),
@@ -5148,6 +5257,7 @@ mod tests {
         let outcome = block_on(client.apply_inbound_cancel(
             &ACTOR,
             &MSEK,
+            &[],
             &cancel,
             &organizer_origin(),
             &fan_resolver(),
@@ -5191,6 +5301,7 @@ mod tests {
         let outcome = block_on(client.apply_inbound_cancel(
             &ACTOR,
             &MSEK,
+            &[],
             &cancel,
             &organizer_origin(),
             &fan_resolver(),
@@ -5258,6 +5369,7 @@ mod tests {
         let outcome = block_on(client.apply_inbound_scheduling_from_message(
             &ACTOR,
             &MSEK,
+            &[],
             &raw,
             1_700_000_000,
             &organizer_origin(),
@@ -5294,6 +5406,7 @@ mod tests {
         let outcome = block_on(client.apply_inbound_scheduling_from_message(
             &ACTOR,
             &MSEK,
+            &[],
             &raw,
             1_700_000_000,
             &organizer_origin(),
@@ -5330,6 +5443,7 @@ mod tests {
         let outcome = block_on(client.apply_inbound_scheduling_from_message(
             &ACTOR,
             &MSEK,
+            &[],
             &raw,
             1_700_000_000,
             &bob_origin(),
@@ -5395,6 +5509,7 @@ mod tests {
             CalDavClient::new(rec.clone()).apply_inbound_scheduling_from_message(
                 &ACTOR,
                 &MSEK,
+                &[],
                 raw,
                 1_700_000_000,
                 origin,
@@ -5694,6 +5809,7 @@ mod tests {
             CalDavClient::new(rec.clone()).apply_inbound_reply_from_mail(
                 &ACTOR,
                 &MSEK,
+                &[],
                 raw,
                 1_700_000_000,
             ),
@@ -5878,6 +5994,7 @@ mod tests {
             CalDavClient::new(rec.clone()).apply_inbound_reply_from_mail(
                 &ACTOR,
                 &MSEK,
+                &[],
                 &raw,
                 1_700_000_000,
             ),
@@ -5933,6 +6050,7 @@ mod tests {
         let outcome = block_on(client.apply_inbound_scheduling_from_message(
             &ACTOR,
             &MSEK,
+            &[],
             &raw,
             1_700_000_000,
             &organizer_origin(),

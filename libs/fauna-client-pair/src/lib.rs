@@ -698,12 +698,11 @@ pub trait LinkedNestsNest: MaybeSendSync {
     /// `fauna.capabilities.revoke` — delete the `(owner, grant_id)` row; the
     /// holder's next fetch goes dark (honest box).
     async fn revoke_grant(&self, grant_id: [u8; 16]) -> Result<(), PairNestError>;
-    /// `fauna.capabilities.reconcile` — every `grant_id` this owner holds on
-    /// this nest (all rows, expired included). The **only** consumer is
-    /// [`LinkedNestsMachine`]'s reconcile sweep; nothing from the answer may
-    /// reach the trust facet's lenses (`ui/nests.md` § Trust facet — grants →
-    /// *Reconcile*).
-    async fn reconcile_grants(&self) -> Result<Vec<[u8; 16]>, PairNestError>;
+    // No `fauna.capabilities.reconcile` here: the reconcile sweep is a step of
+    // the engine holder's full pump pass, behind the fleet walk
+    // (`fauna_account_plane::account_driver::capability_sweep`; `ui/nests.md`
+    // § Trust facet — grants → *Reconcile*). The page neither enumerates nor
+    // judges.
 }
 
 // `CONTENT_PROCESSOR_ROLES`, `is_content_processor_holder`, and
@@ -875,12 +874,6 @@ impl LinkedNestsMachine {
                 .as_ref()
                 .map(|h| h.lens)
                 .unwrap_or_default();
-            // Enforce the log-most-permissive invariant against this nest BEFORE
-            // the row is built (`nests.md` § Trust facet — grants → *Reconcile*).
-            // Nothing it does can change what `build_home_row` renders — the
-            // sweep appends no event and writes no config — so its only ordering
-            // constraint is the one inside it: enumerate, then read the config.
-            self.reconcile_sweep().await;
             // The Nests page open is the app in the foreground on it: renew
             // what is due before the row is built, so it shows the result.
             if renew_sweep {
@@ -915,65 +908,6 @@ impl LinkedNestsMachine {
         self.set_status(LinkedNestStatus::Working);
         self.nest.forward_discard().await?;
         self.refresh().await
-    }
-
-    /// **The reconcile sweep** — revoke, on the answering nest, every grant row
-    /// the owner's own log does not hold live (`docs/goal/ui/nests.md` § Trust
-    /// facet — grants → *Reconcile*, ratified 2026-08-15, which owns every
-    /// constraint below and none of which may be relaxed).
-    ///
-    /// This is the retroactive enforcement of the invariant *the log is the more
-    /// permissive of the pair*: it reaches rows stranded before record-then-
-    /// deposit landed, and any row a hostile or buggy nest resurrects after a
-    /// revoke. It resolves every client/nest disagreement in the one safe
-    /// direction — narrow the nest — never the forbidden one, widening the
-    /// client's view from a nest read.
-    ///
-    /// **The order is the correctness argument, not a style choice.** Enumerate
-    /// *first*, then load the config: record-then-deposit guarantees an honest
-    /// deposit's `Mint` is durable **before** its row exists, so a config read
-    /// taken after the enumerate can only be *newer* than the row list, which
-    /// makes an honest-nest false orphan structurally impossible. Reading the
-    /// config first would reintroduce exactly the window that ordering closes —
-    /// a grant minted between the two reads would look like an orphan and be
-    /// revoked out from under the user.
-    ///
-    /// **Silent and best-effort by ratified constraint.** An orphan is invisible
-    /// by construction, so no user expectation can depend on it and there is no
-    /// UI surface, no confirm step, and no error to raise: every failure path
-    /// degrades to doing less rather than failing the page. A refusal or
-    /// transport fault on the enumerate is simply left alone; one failing revoke does not
-    /// abandon the rest, because each is independent and the next refresh
-    /// retries. Returns how many revokes it landed, which is local diagnostics
-    /// only — the log and both lenses are untouched.
-    async fn reconcile_sweep(&self) -> usize {
-        let Ok(seams) = self.trust_seams() else {
-            return 0;
-        };
-        // 1. Enumerate. Any refusal or transport fault ends the sweep here: the
-        //    orphans stay exactly as unreachable as they already were.
-        let Ok(nest_ids) = self.nest.reconcile_grants().await else {
-            return 0;
-        };
-        if nest_ids.is_empty() {
-            return 0;
-        }
-        // 2. Read the log fresh, strictly after the enumerate.
-        let Ok(ledger) = seams.ledger.load().await else {
-            return 0;
-        };
-        // 3. Judge against the log alone, bounded by the per-owner cap, and
-        //    revoke what it does not recognize — back to this same nest, and
-        //    with no `GrantEvent` recorded (the ledger is dropped unmodified: a
-        //    `Revoke` event for an id the log never minted would be
-        //    nest-influenced content entering the signed log).
-        let mut revoked = 0usize;
-        for grant_id in grant_log::unrecognized_grant_ids(&ledger, nest_ids) {
-            if self.nest.revoke_grant(grant_id).await.is_ok() {
-                revoked += 1;
-            }
-        }
-        revoked
     }
 
     /// Whether the user has blessed `nest_id` ([`BlessedNestsStore`]). An
@@ -1740,7 +1674,7 @@ impl LinkedNestsMachine {
     /// (`trust_clock`); the renewed windows are stamped from the real one, so a
     /// test that moves the render clock sees a real renewal on the nest.
     ///
-    /// **Silent and best-effort**, like [`Self::reconcile_sweep`]: every
+    /// **Silent and best-effort**, like the pass's reconcile sweep: every
     /// failure degrades to renewing less, and a grant the sweep could not renew
     /// keeps approaching its end, where its liveness says so. Returns how many
     /// grants it recorded as renewed (diagnostics only).
@@ -2884,10 +2818,6 @@ mod native_seam {
                 .map(|_| ())
                 .map_err(nest_error)
         }
-
-        async fn reconcile_grants(&self) -> Result<Vec<[u8; 16]>, PairNestError> {
-            self.caps().reconcile().await.map_err(nest_error)
-        }
     }
 
     /// Build a [`LinkedNestsMachine`] over a native bearer WS-RPC handle for the
@@ -3514,10 +3444,6 @@ mod wasm_seam {
                 .map(|_| ())
                 .map_err(nest_error)
         }
-
-        async fn reconcile_grants(&self) -> Result<Vec<[u8; 16]>, PairNestError> {
-            self.caps().reconcile().await.map_err(nest_error)
-        }
     }
 
     /// Build a [`LinkedNestsMachine`] over the browser WS-RPC handle for the web
@@ -3693,15 +3619,6 @@ mod tests {
         /// ordering pins: which side of a split-brain each call leaves behind.
         renew_refuses: bool,
         revoke_grant_refuses: bool,
-        /// The `(owner, grant_id)` rows this nest reports from
-        /// `fauna.capabilities.reconcile` — deliberately independent of
-        /// `minted_blobs`, because the whole point of the sweep is rows the
-        /// client's log does NOT account for (an interrupted deposit, a
-        /// resurrection, or a hostile invention).
-        nest_grant_rows: Vec<[u8; 16]>,
-        /// `reconcile_grants` refuses (any refusal or transport fault). The
-        /// sweep must degrade to a no-op, never fail the page.
-        reconcile_refuses: bool,
         /// Shared ordered call trace (see [`CallTrace`]); `None` in every test
         /// that does not pin ordering.
         trace: Option<CallTrace>,
@@ -3943,17 +3860,6 @@ mod tests {
             }
             s.revoked_grants.push(grant_id);
             Ok(())
-        }
-
-        async fn reconcile_grants(&self) -> Result<Vec<[u8; 16]>, PairNestError> {
-            let s = self.state.lock().unwrap();
-            if let Some(t) = &s.trace {
-                t.lock().unwrap().push("reconcile");
-            }
-            if s.reconcile_refuses {
-                return Err(PairNestError::Rejected("unknown kind".into()));
-            }
-            Ok(s.nest_grant_rows.clone())
         }
     }
 
@@ -5906,37 +5812,6 @@ mod tests {
         (machine, store, platform)
     }
 
-    // ── the reconcile sweep (`nests.md` § Trust facet — grants → *Reconcile*) ──
-    //
-    // The client half of the one admissible owner-side nest read: at every
-    // refresh, revoke on the answering nest each grant row the owner's own
-    // signed log does not hold live. These pin the machine wiring; the
-    // judgement itself is pinned in `fauna_client_capabilities::grant_log`, and
-    // the real-wire proof is `conformance_capability_reconcile_sweep_client.rs`.
-
-    /// Seed a signed `Mint` for `grant_id` into `cfg` — a grant the log knows.
-    fn logged_mint(
-        cfg: &mut fauna_core::succession_ledger::SuccessionLedger,
-        kp: &ActorKeypair,
-        grant_id: [u8; 16],
-    ) {
-        record_mint_cfg(
-            cfg,
-            kp.signing_key(),
-            grant_id,
-            [7u8; 32],
-            vec![fauna_core::grant_event::GrantEventScope {
-                class: "label.write".into(),
-                kind: None,
-                tier: None,
-            }],
-            NOW,
-            NOW + 86_400,
-            NOW,
-        )
-        .expect("seed a Mint event");
-    }
-
     // ── the paywall grant's folder (`nests.md` § Trust facet — grants) ──
 
     /// A set-name seam answering a fixed list, or `None` (unreadable now).
@@ -6062,92 +5937,22 @@ mod tests {
         }
     }
 
+    /// **The Nests page never sweeps** (`nests.md` § Trust facet — grants →
+    /// *Reconcile*, the *Automatic and silent, and only where the walk is*
+    /// bullet): the refresh reads the log and renders it, and judges no nest
+    /// row against it. The judging replica lags a sibling's fresh `Mint` until
+    /// the fleet walk pulls it, so the sweep lives in the engine holder's full
+    /// pass (`fauna_account_plane::account_driver::capability_sweep`), and
+    /// `LinkedNestsNest` carries no `fauna.capabilities.reconcile` at all. The
+    /// real-wire lag pin is `conformance_capability_reconcile_sweep_pass.rs`.
     #[tokio::test]
-    async fn refresh_revokes_the_orphan_row_and_leaves_the_live_one() {
-        let kp = ActorKeypair::generate();
-        let live = [1u8; 16];
-        let orphan = [2u8; 16];
-
-        let mut cfg = trust_cfg(kp.actor_id());
-        logged_mint(&mut cfg, &kp, live);
-
-        let nest = Arc::new(FakeNest::default());
-        // The nest holds both: one the log minted, one it never did — the row
-        // stranded by a deposit whose `Mint` never became durable, which is the
-        // live stake the ruling exists to heal.
-        nest.state.lock().unwrap().nest_grant_rows = vec![live, orphan];
-        let (machine, store, _plat) = trust_machine_with_cfg(nest.clone(), &kp, cfg);
-
-        machine.hydrate().await.expect("hydrate runs the sweep");
-
-        assert_eq!(
-            nest.state.lock().unwrap().revoked_grants.as_slice(),
-            &[orphan],
-            "exactly the unrecognized row is revoked, and the revoke lands on \
-             the nest that answered"
-        );
-        assert_eq!(
-            stored_events(&store).len(),
-            1,
-            "the sweep appends NO GrantEvent — only the seeded Mint remains"
-        );
-        assert!(
-            stored_events(&store)
-                .iter()
-                .all(|e| e.kind != GrantEventKind::Revoke),
-            "a Revoke event for an id the log never minted would be \
-             nest-influenced content entering the signed log"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_row_resurrected_after_a_revoke_is_swept_again() {
-        let kp = ActorKeypair::generate();
-        let resurrected = [3u8; 16];
-
-        let mut cfg = trust_cfg(kp.actor_id());
-        logged_mint(&mut cfg, &kp, resurrected);
-        record_revoke_cfg(&mut cfg, kp.signing_key(), resurrected, [7u8; 32], NOW + 10)
-            .expect("seed a Revoke event");
-        let events_before = cfg.grant_events.len();
-
-        // A hostile or buggy nest re-inserts the row it was told to delete.
-        let nest = Arc::new(FakeNest::default());
-        nest.state.lock().unwrap().nest_grant_rows = vec![resurrected];
-        let (machine, store, _plat) = trust_machine_with_cfg(nest.clone(), &kp, cfg);
-
-        machine.hydrate().await.expect("hydrate runs the sweep");
-
-        assert_eq!(
-            nest.state.lock().unwrap().revoked_grants.as_slice(),
-            &[resurrected],
-            "revocation is terminal in the log, so the row is revoked again — \
-             every refresh re-narrows the nest"
-        );
-        assert_eq!(
-            stored_events(&store).len(),
-            events_before,
-            "…and re-revoking still appends nothing to the log"
-        );
-    }
-
-    /// The ordering that makes the sweep safe: **enumerate, then read the
-    /// grant log**. Record-then-deposit makes an honest deposit's `Mint` durable
-    /// before its row exists, so a log read taken *after* the enumerate can
-    /// only be newer than the row list — which is what makes an honest-nest
-    /// false orphan structurally impossible. Read the log first and a grant
-    /// minted between the two reads looks like an orphan and gets revoked out
-    /// from under the user. The log is the succession ledger
-    /// (`fauna.state.succession-ledger`), so the pin traces the ledger seam's
-    /// `load`.
-    #[tokio::test]
-    async fn the_sweep_enumerates_before_it_reads_the_log() {
+    async fn a_refresh_never_revokes_a_grant() {
         let kp = ActorKeypair::generate();
         let trace: CallTrace = Arc::new(StdMutex::new(Vec::new()));
         let nest = Arc::new(FakeNest::default());
-        nest.state.lock().unwrap().nest_grant_rows = vec![[4u8; 16]];
+        nest.state.lock().unwrap().holders = vec![mda_holder()];
         let (machine, _store, _plat) = trust_machine_traced(
-            nest,
+            nest.clone(),
             &kp,
             trust_cfg(kp.actor_id()),
             Default::default(),
@@ -6155,90 +5960,12 @@ mod tests {
         );
 
         machine.hydrate().await.expect("hydrate");
-
-        let calls = trace.lock().unwrap().clone();
-        let first_reconcile = calls
-            .iter()
-            .position(|c| *c == "reconcile")
-            .expect("the sweep enumerated");
-        let first_log_read = calls
-            .iter()
-            .position(|c| *c == "ledger-load")
-            .expect("the sweep read the log");
-        assert!(
-            first_reconcile < first_log_read,
-            "enumerate must precede the grant-log read (got {calls:?})"
-        );
-    }
-
-    /// A refused `fauna.capabilities.reconcile`. The
-    /// sweep degrades to a no-op and the page still hydrates, and the orphans stay exactly as unreachable as they
-    /// already were rather than the Nests page blanking.
-    #[tokio::test]
-    async fn a_refused_reconcile_still_hydrates() {
-        let kp = ActorKeypair::generate();
-        let nest = Arc::new(FakeNest::default());
-        {
-            let mut s = nest.state.lock().unwrap();
-            s.reconcile_refuses = true;
-            s.nest_grant_rows = vec![[5u8; 16]]; // never seen — the call refuses
-        }
-        let (machine, store, _plat) = trust_machine(nest.clone(), &kp);
-
-        machine
-            .hydrate()
-            .await
-            .expect("a refused reconcile must not fail the page");
+        machine.hydrate().await.expect("a second refresh");
 
         assert!(
             nest.state.lock().unwrap().revoked_grants.is_empty(),
-            "no enumerate ⇒ no revokes"
-        );
-        assert!(stored_events(&store).is_empty(), "and no log writes");
-        assert!(
-            machine.snapshot().home.is_some(),
-            "the home row still renders"
-        );
-    }
-
-    /// One failing revoke must not abandon the rest: each is independent, and
-    /// the next refresh retries whatever did not land.
-    #[tokio::test]
-    async fn a_refused_revoke_does_not_abandon_the_sweep() {
-        let kp = ActorKeypair::generate();
-        let nest = Arc::new(FakeNest::default());
-        {
-            let mut s = nest.state.lock().unwrap();
-            s.nest_grant_rows = vec![[6u8; 16], [7u8; 16]];
-            s.revoke_grant_refuses = true;
-        }
-        let (machine, _store, _plat) = trust_machine(nest.clone(), &kp);
-
-        machine
-            .hydrate()
-            .await
-            .expect("a refused revoke must not fail the page either");
-
-        assert!(
-            nest.state.lock().unwrap().revoked_grants.is_empty(),
-            "the fake refused both; the point is that hydrate still succeeded"
-        );
-    }
-
-    /// A machine built without trust seams (the pairing-only page) has no log to
-    /// judge against, so it must not enumerate at all — the read is admissible
-    /// only as the sweep's first step.
-    #[tokio::test]
-    async fn a_pairing_only_machine_never_enumerates() {
-        let nest = Arc::new(FakeNest::default());
-        nest.state.lock().unwrap().nest_grant_rows = vec![[8u8; 16]];
-        let machine = LinkedNestsMachine::new(nest.clone() as Arc<dyn LinkedNestsNest>);
-
-        machine.hydrate().await.expect("pairing-only hydrate");
-
-        assert!(
-            nest.state.lock().unwrap().revoked_grants.is_empty(),
-            "no trust seams ⇒ no sweep, and certainly no revokes"
+            "a refresh revokes nothing (calls: {:?})",
+            trace.lock().unwrap()
         );
     }
 

@@ -33,9 +33,12 @@
 use zeroize::Zeroizing;
 
 use super::{
-    MailRecordEnvelope, mls_snapshot_plaintext::derive_recipient_hpke_keypair,
-    mls_snapshot_plaintext::derive_recipient_xwing_keypair, seal_to_recipient,
-    seal_to_recipient_xwing, unseal_mail_record_hybrid,
+    MailRecordEnvelope,
+    mls_snapshot_plaintext::{
+        StandingMailKeypair, derive_recipient_hpke_keypair, derive_recipient_xwing_keypair,
+        derive_standing_mail_keypairs, open_mail_record_standing,
+    },
+    seal_to_recipient, seal_to_recipient_xwing,
 };
 
 /// Seal/unseal failure for the DAV resource-body crypto layer.
@@ -117,52 +120,79 @@ pub fn seal_dav_body_typed_xwing<T: serde::Serialize>(
     seal_dav_body_xwing(&bytes, msek)
 }
 
-/// The actor's own DAV recipient keypair, derived once from `msek` and reused
-/// across every body opened under it — the fix for the finding that
-/// [`unseal_dav_body`] paid a fresh ML-KEM-768 keygen (plus the classical HPKE
-/// derive) on *every call*, even though both are fully deterministic in the
-/// 32-byte `msek` : a 200-row CardDAV/CalDAV list was 200
-/// keygens to render once. A batch-opening caller (`list_calendars`,
-/// `query_cards`, `query_events`, …) derives one of these and calls
-/// [`Self::unseal`] per item instead of [`unseal_dav_body`] per item.
+/// The actor's own DAV recipient **key ring** — one standing recipient keypair
+/// per MSEK generation the custody holds (`msek`, then `prior_mseks` newest
+/// first), derived once and reused across every body opened under it.
+///
+/// **Why a ring** (`mail-credentials.md` § Rotation and recovery → *DAV bodies
+/// across a rotation*, ruling 1): a body is sealed to ONE generation, carries
+/// no key id, and is never re-sealed — so after "Rotate mail keys" every body
+/// written before it opens only under a prior generation. The ring is exactly
+/// the standing set the MDA reads out of the snapshot and the receive path
+/// holds (`MailKeys.standing`): built by [`derive_standing_mail_keypairs`] and
+/// trialled newest-first by [`open_mail_record_standing`], so whatever the MDA
+/// can open, the owner's apps can too. Sealing stays current-generation only
+/// (`seal_dav_body*` take one MSEK). [`Self::derive`] is the ring of one.
+///
+/// **Why derived once** : [`unseal_dav_body`] paid a fresh
+/// ML-KEM-768 keygen (plus the classical HPKE derive) on *every call*, even
+/// though both are fully deterministic in the 32-byte `msek`: a 200-row
+/// CardDAV/CalDAV list was 200 keygens to render once. A batch-opening caller
+/// (`list_calendars`, `query_cards`, `query_events`, …) builds one of these and
+/// calls [`Self::unseal`] per item instead of [`unseal_dav_body`] per item.
 ///
 /// Threaded down from the caller rather than memoized behind a global cache —
 /// this holds secret key material, and a process-lifetime `static` would need
 /// its own zeroize-on-evict story for no benefit a short-lived, explicitly-
-/// scoped value doesn't already give for free. The X-Wing secret half already
-/// zeroizes on drop (`fauna_pq_kem::XWingSecretKey: ZeroizeOnDrop`); the
-/// classical X25519 secret is `Zeroizing`-wrapped here to match (PQ-2's
-/// discipline — `fauna_pq_kem`'s own secrets follow the same rule).
+/// scoped value doesn't already give for free. Every [`StandingMailKeypair`]
+/// is zeroize-on-drop.
 pub struct DavRecipientKeys {
-    hpke_secret: Zeroizing<[u8; 32]>,
-    xwing: fauna_pq_kem::XWingKeyPair,
+    ring: Vec<StandingMailKeypair>,
 }
 
 impl DavRecipientKeys {
-    /// Derive both halves once — the one ML-KEM-768 keygen (and classical HPKE
-    /// derive) a whole batch of DAV bodies under this `msek` now pays, instead
-    /// of one per body.
+    /// The ring of one: the current generation alone — for a custody that has
+    /// never rotated, and for a test sealing and opening under one MSEK. A
+    /// reader holding the custody's `prior_mseks` builds [`Self::from_mseks`].
     pub fn derive(msek: &[u8; 32]) -> Self {
+        Self::from_mseks(msek, &[])
+    }
+
+    /// The ring over the custody's whole MSEK history — `msek` (the current
+    /// generation) then `prior_mseks` (newest first, as the custody holds them)
+    /// — through the ONE derivation of the standing set
+    /// ([`derive_standing_mail_keypairs`]); the ring's width is that
+    /// function's, never this type's.
+    pub fn from_mseks(msek: &[u8; 32], prior_mseks: &[[u8; 32]]) -> Self {
         #[cfg(test)]
         tests::DERIVE_CALLS.with(|c| c.set(c.get() + 1));
-        let (secret, _pubkey) = derive_recipient_hpke_keypair(msek);
+        let mseks: Zeroizing<Vec<[u8; 32]>> = Zeroizing::new(
+            std::iter::once(*msek)
+                .chain(prior_mseks.iter().copied())
+                .collect(),
+        );
         Self {
-            hpke_secret: Zeroizing::new(secret),
-            xwing: derive_recipient_xwing_keypair(msek),
+            ring: derive_standing_mail_keypairs(&mseks),
         }
     }
 
-    /// Open one `encrypted_body` with the keys derived at construction — no
-    /// re-derivation. Suite-dispatching, same as [`unseal_dav_body`]: the
-    /// envelope names its own suite, so this serves the classical and X-Wing
-    /// paths alike (the classical seal is still written live, e.g. the
-    /// caldav index hint via `seal_event_body`).
+    /// Open one `encrypted_body` with the ring derived at construction — no
+    /// re-derivation — trialling each generation newest-first. Suite-
+    /// dispatching, same as [`unseal_dav_body`]: the envelope names its own
+    /// suite, so this serves the classical and X-Wing paths alike (the
+    /// classical seal is still written live, e.g. the caldav index hint via
+    /// `seal_event_body`). A body no generation opens is a ring exhaustion
+    /// naming the width tried (the `MailcalKeyRing` wording).
     pub fn unseal(&self, encrypted_body: &[u8]) -> Result<Vec<u8>, SealError> {
-        let mlkem_dk = *self.xwing.secret.mlkem_decaps_key();
         let envelope = MailRecordEnvelope::from_canonical_bytes(encrypted_body)
             .map_err(|e| SealError::Unseal(e.to_string()))?;
-        unseal_mail_record_hybrid(&envelope, &self.hpke_secret, &mlkem_dk)
-            .map_err(|e| SealError::Unseal(e.to_string()))
+        open_mail_record_standing(&envelope, &self.ring).ok_or_else(|| {
+            SealError::Unseal(format!(
+                "no key in the ring opens it ({} tried: current + {} grace)",
+                self.ring.len(),
+                self.ring.len().saturating_sub(1)
+            ))
+        })
     }
 }
 
@@ -294,5 +324,67 @@ mod tests {
             unseal_dav_body(&sealed, &other),
             Err(SealError::Unseal(_))
         ));
+    }
+
+    const PRIOR: [u8; 32] = [3u8; 32];
+    const OLDER: [u8; 32] = [4u8; 32];
+
+    /// A rotation must not hide the user's calendar and contacts
+    /// (`mail-credentials.md` § Rotation and recovery → *DAV bodies across a
+    /// rotation*, ruling 1): a body sealed under a prior generation — by an app
+    /// or by the MDA, in either suite — opens through the ring built from the
+    /// custody's whole history, and NOT through the current generation alone.
+    #[test]
+    fn a_body_sealed_before_a_rotation_opens_through_the_ring() {
+        let body = b"BEGIN:VEVENT\r\nSUMMARY:standup\r\nEND:VEVENT\r\n";
+        let ring = DavRecipientKeys::from_mseks(&MSEK, &[PRIOR, OLDER]);
+        for sealed in [
+            seal_dav_body(body, &PRIOR).expect("classical seal"),
+            seal_dav_body_xwing(body, &OLDER).expect("xwing seal"),
+        ] {
+            assert_eq!(ring.unseal(&sealed).expect("ring opens a grace body"), body);
+            assert!(
+                DavRecipientKeys::derive(&MSEK).unseal(&sealed).is_err(),
+                "the current generation alone must not open a prior-sealed body"
+            );
+        }
+        // The ring is derived once for the whole history — one construction,
+        // whatever its width (the batch-derivation pin, ).
+        DERIVE_CALLS.with(|c| c.set(0));
+        let _ = DavRecipientKeys::from_mseks(&MSEK, &[PRIOR, OLDER]);
+        assert_eq!(DERIVE_CALLS.with(Cell::get), 1);
+    }
+
+    /// A body no generation in the ring opens is refused as a ring exhaustion
+    /// that names how many keys were tried — the `MailcalKeyRing` wording, so a
+    /// rotation miss reads as one and not as corruption.
+    #[test]
+    fn a_body_outside_the_ring_is_a_named_ring_exhaustion() {
+        let sealed = seal_dav_body(b"foreign", &[9u8; 32]).expect("seal");
+        let err = DavRecipientKeys::from_mseks(&MSEK, &[PRIOR])
+            .unseal(&sealed)
+            .expect_err("no generation in the ring sealed it");
+        let SealError::Unseal(msg) = err else {
+            panic!("expected an unseal error, got {err:?}");
+        };
+        assert!(
+            msg.contains("no key in the ring opens it (2 tried: current + 1 grace)"),
+            "ring exhaustion must name its width: {msg}"
+        );
+    }
+
+    /// Writes seal to the current generation alone: a grace key may open, never
+    /// extend a superseded generation forward. A body written while the ring
+    /// holds prior generations opens under the current generation by itself.
+    #[test]
+    fn a_write_under_a_rotated_custody_seals_to_the_current_generation() {
+        let sealed = seal_dav_body_xwing(b"new event", &MSEK).expect("seal");
+        assert_eq!(
+            DavRecipientKeys::derive(&MSEK)
+                .unseal(&sealed)
+                .expect("current opens"),
+            b"new event"
+        );
+        assert!(DavRecipientKeys::derive(&PRIOR).unseal(&sealed).is_err());
     }
 }

@@ -144,6 +144,52 @@ pub struct ReportTarget {
     pub plaintext: Option<String>,
 }
 
+impl ReportTarget {
+    /// A feed post. A gated post was opened through a key, so the nest holds no
+    /// readable bytes of it — the sealed rule's post arm (`gated`).
+    pub fn post(cid: &str, author: &str, plaintext: &str, gated: bool) -> Self {
+        Self {
+            subject: AbuseReportSubject::Post {
+                cid: cid.to_string(),
+            },
+            sealed: gated,
+            author: Some(author.to_string()),
+            plaintext: Some(plaintext.to_string()),
+        }
+    }
+
+    /// An account (the OTHER profile) — nothing to attach, nothing sealed.
+    pub fn actor(actor_id: &str) -> Self {
+        Self {
+            subject: AbuseReportSubject::Actor {
+                actor_id: actor_id.to_string(),
+            },
+            sealed: false,
+            author: Some(actor_id.to_string()),
+            plaintext: None,
+        }
+    }
+
+    /// A conversation message, off the plane identity the thread already
+    /// carries ([`message_subject`]) plus the sender's actor id (routing and
+    /// the account-level hide) and the text the reporter may attach. Always
+    /// sealed. `None` for a message with no plane identity (mail and bridged
+    /// rails): there is nothing to report it against.
+    pub fn message(
+        plane_scope: &str,
+        record_digest: &str,
+        sender_actor: Option<String>,
+        plaintext: &str,
+    ) -> Option<Self> {
+        Some(Self {
+            subject: message_subject(plane_scope, record_digest)?,
+            sealed: true,
+            author: sender_actor,
+            plaintext: Some(plaintext.to_string()),
+        })
+    }
+}
+
 /// Build the submit request from a sheet the view said may be sent. Returns
 /// `None` when it may not (no reason, or an over-long note). The excerpt is
 /// attached only when the subject is sealed **and** the reporter ticked the
@@ -576,6 +622,38 @@ mod tests {
         assert!(message_subject(&format!("content:post:{channel}"), &digest).is_none());
         assert!(message_subject("content:conv:zz", &digest).is_none());
         assert!(message_subject(&format!("content:conv:{channel}"), "bafy").is_none());
+    }
+
+    /// The three targets every app opens the sheet with: a gated post is the
+    /// sealed rule's post arm, an account is never sealed and has nothing to
+    /// attach, and a message is always sealed and exists only with a plane ref.
+    #[test]
+    fn the_target_constructors_carry_the_sealed_rule_once() {
+        let public = ReportTarget::post("aa", "bb", "hello", false);
+        assert!(!public.sealed);
+        assert_eq!(public.author.as_deref(), Some("bb"));
+        assert_eq!(public.plaintext.as_deref(), Some("hello"));
+        assert!(ReportTarget::post("aa", "bb", "hello", true).sealed);
+
+        let account = ReportTarget::actor("cc");
+        assert!(!account.sealed);
+        assert_eq!(account.author.as_deref(), Some("cc"));
+        assert!(account.plaintext.is_none());
+
+        let channel = "cd".repeat(32);
+        let digest = "0e".repeat(32);
+        let message = ReportTarget::message(
+            &format!("content:conv:{channel}"),
+            &digest,
+            Some("dd".into()),
+            "hi",
+        )
+        .expect("a conversation record is reportable");
+        assert!(message.sealed);
+        assert_eq!(message.author.as_deref(), Some("dd"));
+        assert_eq!(message.plaintext.as_deref(), Some("hi"));
+        // A mail or bridged message has no plane identity — no target at all.
+        assert!(ReportTarget::message("", "", None, "hi").is_none());
     }
 
     /// Open takedown pre-fills a post or a message, never an account, and

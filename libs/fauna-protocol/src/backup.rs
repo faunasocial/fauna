@@ -831,6 +831,16 @@ pub struct CustodyItem {
     /// timestamp the writer supplied — which is what makes the audit's
     /// freshness check source-untrusted.
     pub updated_at: i64,
+    /// A covered-folder mirror row's sealed name — the **source** row's
+    /// `path_sealed`, carried through custody verbatim (ciphertext the
+    /// destination holds no key for). The nest-held pull-back re-records it on
+    /// the rebuilt nest, whose folder materialize re-homes from it
+    /// (`segment-backup-protocol.md` § Client-device custodian (pull) →
+    /// *Restore* → *The nest-held pull-back*). Additive (2026-10-06): absent on
+    /// every segment-plane row, on a folder row recorded without one, and from
+    /// an older destination's reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_sealed: Option<ByteBuf>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -1022,7 +1032,7 @@ mod tests {
                 manifest_hash: "bb".repeat(32),
                 size_bytes: 4096,
                 updated_at: 1_700_000_000,
-                extra: Default::default(),
+                ..Default::default()
             }],
             next_cursor: Some("1700000000:7".into()),
             extra: Default::default(),
@@ -1044,12 +1054,41 @@ mod tests {
             manifest_hash: "dd".repeat(32),
             size_bytes: 1,
             updated_at: 42,
-            extra: Default::default(),
+            ..Default::default()
         };
         let bytes = encode_canonical(&item).unwrap();
         let back: CustodyItem = decode(&bytes).unwrap();
         assert_eq!(back, item);
         assert!(back.path.is_none());
+    }
+
+    /// A covered-folder mirror row carries its sealed name for the nest-held
+    /// pull-back, and a row without one — every segment-plane row, and every
+    /// row an older destination lists — encodes no key at all, so an older
+    /// reader and a newer one agree on the bytes.
+    #[test]
+    fn a_folder_custody_row_carries_its_sealed_name_and_a_segment_row_none() {
+        let folder = CustodyItem {
+            folder_name: "__folder/aa/7".into(),
+            path: Some("ee".repeat(32)),
+            path_sealed: Some(ByteBuf::from(b"sealed-name".to_vec())),
+            ..Default::default()
+        };
+        let back: CustodyItem = decode(&encode_canonical(&folder).unwrap()).unwrap();
+        assert_eq!(back, folder);
+
+        let segment = CustodyItem {
+            folder_name: "__mail".into(),
+            ..Default::default()
+        };
+        let bytes = encode_canonical(&segment).unwrap();
+        assert!(
+            !bytes
+                .windows(b"path_sealed".len())
+                .any(|w| w == b"path_sealed"),
+            "an absent seal is no key on the wire"
+        );
+        assert_eq!(decode::<CustodyItem>(&bytes).unwrap().path_sealed, None);
     }
 
     #[test]

@@ -101,6 +101,8 @@
   import {
     keypackageCount as wsKeypackageCount,
     moderationActions,
+    moderationAbuseReportMine,
+    moderationAbuseReportWithdraw,
     mutedKeywordsList,
     mutedKeywordsAdd,
     mutedKeywordsRemove,
@@ -119,6 +121,9 @@
     obligationActionLabel,
     quotaPercent,
     shortId,
+    reportLedgerWords,
+    reportWithdrawVerdict,
+    type ReportLedgerRow,
     type LocalDetection,
     type QueueRow,
   } from '$lib/wasm';
@@ -1000,6 +1005,49 @@
     moderationQueue(serverModerationActions, localDetections),
   );
 
+  // The reporter's own ledger (`moderation-reports-section`; moderation.md
+  // § User-initiated reporting → What the reporter is told), read beside the
+  // queue on every Moderation entry. Every word is shared Rust's
+  // (`ledger_row_view`, `reportLedgerWords`, `reportWithdrawVerdict`); the empty
+  // line paints only off `reportLedgerLoaded`, so a read in flight never reads
+  // as "you have not reported anything".
+  let reportLedger = $state<ReportLedgerRow[]>([]);
+  let reportLedgerLoaded = $state(false);
+  let reportWithdrawStatus = $state('');
+  const ledgerWords = $derived(reportLedgerWords());
+
+  async function loadReportLedger(secretHex: string): Promise<void> {
+    try {
+      reportLedger = await moderationAbuseReportMine(secretHex);
+      reportLedgerLoaded = true;
+    } catch { /* ledger not available — the empty line stays off */ }
+  }
+
+  async function withdrawReport(row: ReportLedgerRow): Promise<void> {
+    const id = $identity;
+    if (!id) return;
+    let failure: string | null = null;
+    try {
+      await moderationAbuseReportWithdraw(id.secretHex, row.report_id);
+    } catch (e) {
+      failure = e instanceof Error ? e.message : String(e);
+    }
+    const verdict = reportWithdrawVerdict(failure);
+    reportWithdrawStatus = verdict ? resolveLocalized(verdict) : '';
+    await loadReportLedger(id.secretHex);
+  }
+
+  // One ledger row's line — reason · status · subject · outcome — destination(s).
+  function ledgerLine(row: ReportLedgerRow): string {
+    const subject =
+      row.subject.kind === 'post' ? row.subject.cid
+      : row.subject.kind === 'message' ? row.subject.record_cid
+      : row.subject.actor_id;
+    const parts = [resolveLocalized(row.reason), resolveLocalized(row.status), shortId(subject)];
+    if (row.outcome) parts.push(resolveLocalized(row.outcome));
+    return `${parts.join(' · ')} — ${resolveLocalized(row.routed_to)}`;
+  }
+
   // Re-read the local half whenever the receive loop pushes a new conversations
   // snapshot. The classify hook runs inside the manager during decrypt, so a spam
   // message arriving WHILE this page is open produces a detection with no page
@@ -1349,6 +1397,7 @@
     try {
       serverModerationActions = await moderationActions(id.secretHex);
     } catch { /* moderation actions not available */ }
+    await loadReportLedger(id.secretHex);
     // (The queue's local half is not read here — the `$effect` above keeps it in
     // sync with every receive-loop ingest, mount included.)
   }
@@ -2472,6 +2521,25 @@
           </div>
         {/each}
       {/if}
+    </div>
+    <div data-testid={IDS.MODERATION_REPORTS_SECTION}>
+      <h3>{resolveLocalized(ledgerWords.title)}</h3>
+      {#if reportLedgerLoaded && reportLedger.length === 0}
+        <p class="muted">{resolveLocalized(ledgerWords.empty)}</p>
+      {/if}
+      {#each reportLedger as row (row.report_id)}
+        <div class="flagged-item">
+          <span data-testid={IDS.MODERATION_REPORT_ITEM} data-status={row.status.key}>{ledgerLine(row)}</span>
+          {#if row.can_withdraw}
+            <button
+              data-testid={IDS.MODERATION_REPORT_WITHDRAW_BUTTON}
+              class="btn small"
+              onclick={() => withdrawReport(row)}
+            >{t.moderation.report.withdraw}</button>
+          {/if}
+        </div>
+      {/each}
+      {#if reportWithdrawStatus}<p class="muted">{reportWithdrawStatus}</p>{/if}
     </div>
   </section>
 

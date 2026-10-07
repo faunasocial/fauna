@@ -157,16 +157,19 @@ a message-kind since a cursor" pattern that `fauna.conversations.channel
   them through the same shared chain (`open_mail_record_standing`, the
   standing arm of `open_mail_epoch_chain`). So after a rotate-mail-keys the
   user's pre-rotation standing mail stays readable in the conversations view
-  for as long as the grace window holds it, on every app — a record the MDA
+  for ever — every generation is carried (`../architecture/owner-key-material.md`
+  § Path B-sibling-2 → *Pre-rotation mail at rest*, ruled 2026-10-06) — on
+  every app — a record the MDA
   can open, the app can open too, and vice versa. Before this the client
   opened with the current generation only (a drift from the snapshot set),
   so a rotation blinded it to every standing record sealed before it.
 - **Unopenable records — skip, count, keep receiving (ratified + built
   2026-09-15).** A record the client cannot open under that complete key set
-  — its seal is addressed to no generation the account still holds (a
-  rotation past the grace window; a mailbox turned off email-only and back on,
-  which mints a fresh MSEK and clears `prior_mseks` by design —
-  `mail-credentials.md` § MSEK lifecycle), or the envelope is malformed or
+  — its seal is addressed to no generation the account holds (another
+  recipient's record, or a generation this custody never had: a rotation
+  never produces one, every generation being carried, and neither does a
+  disable/re-enable, which keeps the MSEK dormant — `mail-credentials.md`
+  § Trigger taxonomy, the *Disable mail* row), or the envelope is malformed or
   tampered — is **deterministic** for that key set: the UID and segment-record
   id the cursor and dedup run on are feed metadata the seal never touches, so
   nothing about the page is in doubt, and a retry with the same keys can only

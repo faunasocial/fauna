@@ -125,6 +125,10 @@ version never moves backwards past a shipped number. This is the invariant that
 makes "one string everywhere" safe: the failure this doc exists to prevent is
 two stores silently disagreeing about what `0.1.1` means.
 
+**"Shipped" means SERVED, not uploaded (ruled 2026-10-07).** A version string is spent for a store once that store has served an artifact carrying it to anyone — a rollout to any track, Play internal testing or a TestFlight group included — or once the store refuses to take the string again, whichever comes first. An upload the store never served and lets the project take back (Play: discard the draft release, then delete the bundle from the App bundle explorer — a *draft* in Play's own release states is "not served to users yet") is withdrawn at the store and leaves the string and its derived `versionCode` **unspent**: the next upload carries the same version from a newer public commit. The reship rule (§ Reships) fires only if the store still demands a fresh number after the withdrawal — Play refusing the `versionCode` on the re-upload is that demand — and the answer is then the ordinary one-commit patch bump, never a second draft. Apple is the opposite case by construction: `CFBundleVersion` is pinned at `1` (§ Reships), and App Store Connect refuses a second build with the same version and build number whether or not the first was ever served, so an upload there spends the string at upload. Microsoft Store is unruled until a submission is first withdrawn. Precedent: Play's draft of `0.1.2`/`102` from the public first-push commit, uploaded 2026-10-07 and refused rollout under Play's API-36 target floor ([`installers/android.md`](installers/android.md) § Versioning), is withdrawn, and the next Play upload is `0.1.2`/`102` again, from the public commit carrying the targetSdk bump.
+
+**Corollary for the train: the commit a version string names is fixed by the first artifact a store SERVES.** Until then every public commit at that version is the same unshipped train: each store builds the newest public commit at the version when it builds, and the first store to serve fixes that commit for the rest — a store that built an earlier unserved commit rebuilds from the fixed one ([`release-integrity.md`](release-integrity.md) § Release signing → *A store upload is built from a recorded public commit*).
+
 ## The decision record (2026-08-23)
 
 The fleet had drifted into four hand-maintained values and no owner
@@ -153,8 +157,12 @@ store-mechanical reship of the snapshot, pre-model), so `0.1.1` is burned —
 reusing it for today's tree would give one string two meanings, and moving
 windows back down to `0.1.0` would break MSI upgrade monotonicity. `0.1.2` is
 the first string no store has ever seen. Shipped state per store: Microsoft
-Store `0.1.1`; Play holds **no release at all** (the app record is a draft and has
-never been uploaded to — see [`installers/android.md`](installers/android.md)
+Store `0.1.1`; Play holds **no release at all** — one draft upload of
+`0.1.2`/`102` from the public first-push commit on 2026-10-07 was refused
+rollout under Play's API-36 target floor and is withdrawn under § Version
+strings are never reused or re-meant → *"Shipped" means served*, so
+`0.1.2`/`102` is unspent and is the next Play upload, from the public commit
+carrying the targetSdk bump (see [`installers/android.md`](installers/android.md)
 § Implementation status today; an earlier revision of this section claimed a
 pre-model `1.0.0`/`versionCode 1` upload, corrected 2026-08-23); Apple and the
 linux channels have shipped nothing.

@@ -234,6 +234,7 @@ pub mod presence;
 pub mod progress;
 pub mod provider_face;
 pub mod reseed;
+pub mod reseed_pull;
 pub use fauna_account_plane::scope_set;
 pub mod seal;
 pub use fauna_account_plane::seen_set_producer;

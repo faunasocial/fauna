@@ -209,6 +209,11 @@ pub const MAX_DESTINATION_LABEL_BYTES: usize = 128;
 pub const MAX_DESTINATION_KIND_BYTES: usize = 32;
 /// Byte cap on `custodian_device_id`.
 pub const MAX_CUSTODIAN_DEVICE_ID_BYTES: usize = 128;
+/// Byte cap on a coverage row's `folder_display_name` — a folder's name.
+pub const MAX_COVERED_FOLDER_NAME_BYTES: usize = 255;
+/// Byte cap on a coverage row's `folder_label.name_sealed` — a sealed folder
+/// name: the name under its AEAD envelope.
+pub const MAX_COVERED_FOLDER_SEAL_BYTES: usize = 512;
 
 /// The key of `source_nest`'s destination-list row.
 #[must_use]
@@ -264,7 +269,7 @@ impl BackupDestinationsRow {
     /// The first bound the row breaks — [`BackupBoundsError`] says which.
     pub fn check_bounds(&self) -> std::result::Result<(), BackupBoundsError> {
         for d in &self.backup.destinations {
-            let fields: [(&'static str, usize, usize); 6] = [
+            let fields: [(&'static str, usize, usize); 8] = [
                 (
                     "destination_id",
                     d.destination_id.len(),
@@ -290,6 +295,16 @@ impl BackupDestinationsRow {
                     "custodian_device_id",
                     d.custodian_device_id.as_deref().map_or(0, str::len),
                     MAX_CUSTODIAN_DEVICE_ID_BYTES,
+                ),
+                (
+                    "folder_display_name",
+                    d.folder_display_name.as_deref().map_or(0, str::len),
+                    MAX_COVERED_FOLDER_NAME_BYTES,
+                ),
+                (
+                    "folder_label",
+                    d.folder_label.as_ref().map_or(0, |l| l.name_sealed.len()),
+                    MAX_COVERED_FOLDER_SEAL_BYTES,
                 ),
             ];
             for (field, len, cap) in fields {
@@ -843,5 +858,36 @@ mod tests {
         covered.backup.destinations[0].folder_name =
             format!("__folder/{}/{}", "a".repeat(64), i64::MAX);
         assert!(covered.check_bounds().is_ok());
+        // A coverage row's folder label is bounded like every other field.
+        let mut named = covered.clone();
+        named.backup.destinations[0].folder_display_name =
+            Some("n".repeat(MAX_COVERED_FOLDER_NAME_BYTES));
+        named.backup.destinations[0].folder_label = Some(crate::data::CoveredFolderLabel {
+            name_hash: [1; 32],
+            name_sealed: vec![2; MAX_COVERED_FOLDER_SEAL_BYTES],
+        });
+        assert!(named.check_bounds().is_ok());
+        let mut overlong = named.clone();
+        overlong.backup.destinations[0].folder_display_name =
+            Some("n".repeat(MAX_COVERED_FOLDER_NAME_BYTES + 1));
+        assert!(matches!(
+            overlong.check_bounds(),
+            Err(BackupBoundsError::FieldTooLong {
+                field: "folder_display_name",
+                ..
+            })
+        ));
+        let mut overlong = named;
+        overlong.backup.destinations[0].folder_label = Some(crate::data::CoveredFolderLabel {
+            name_hash: [1; 32],
+            name_sealed: vec![2; MAX_COVERED_FOLDER_SEAL_BYTES + 1],
+        });
+        assert!(matches!(
+            overlong.check_bounds(),
+            Err(BackupBoundsError::FieldTooLong {
+                field: "folder_label",
+                ..
+            })
+        ));
     }
 }

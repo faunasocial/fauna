@@ -186,8 +186,9 @@ def test_every_driver_declares_what_its_log_says_after_a_relaunch():
         WindowsBridgeDriver: "cumulative",
         # A 500-entry ring: absence is never evidence, whatever the launch.
         WebBridgeDriver: "evicting",
-        # No reader at all .
-        AndroidBridgeDriver: "none",
+        # filesDir (and its `fauna_log` files) survives every relaunch, so the
+        # reader slices from a byte floor taken before `/session` — the iOS shape.
+        AndroidBridgeDriver: "per-launch",
     }
     actual = {cls: cls().log_scope_across_relaunch() for cls in expected}
     assert actual == expected, (

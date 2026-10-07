@@ -173,7 +173,7 @@ impl BlobPushSink for SyncClientSink<'_> {
 /// nest's own folder pass records exactly the same spelling, so this is the
 /// delivery door's admission rule rather than a defensive guess: lowercase, so
 /// two spellings of one hash can never fork the target's path keying.
-fn is_path_hash_hex(leaf: &str) -> bool {
+pub(crate) fn is_path_hash_hex(leaf: &str) -> bool {
     fauna_core::hex32::is_lowercase_hex64(leaf)
 }
 
@@ -214,7 +214,7 @@ pub struct ReseedReport {
 }
 
 impl ReseedReport {
-    fn absorb(&mut self, other: ReseedReport) {
+    pub(crate) fn absorb(&mut self, other: ReseedReport) {
         self.delivered_paths.extend(other.delivered_paths);
         self.delivered_sets.extend(other.delivered_sets);
         self.sidecarless_segments.extend(other.sidecarless_segments);
@@ -705,7 +705,10 @@ impl<'a, P: BlobPushSink, R: RpcRequester> ReseedDelivery<'a, P, R> {
 /// The manifest lands **after** its chunks so the target never holds a
 /// manifest naming bytes it does not have — the same rule the custodian
 /// store's own `put` follows locally.
-async fn push_sealed<P: BlobPushSink>(sink: &P, sealed: &SealedBlob) -> Result<ReseedReport> {
+pub(crate) async fn push_sealed<P: BlobPushSink>(
+    sink: &P,
+    sealed: &SealedBlob,
+) -> Result<ReseedReport> {
     let mut report = ReseedReport::default();
     let keys: Vec<ContentHash> = sealed.chunks.iter().map(|(k, _)| *k).collect();
     let missing = sink
@@ -738,7 +741,7 @@ async fn push_sealed<P: BlobPushSink>(sink: &P, sealed: &SealedBlob) -> Result<R
 /// `record_change_core` exempts from the S9 seal requirement. Sending a seal
 /// here would not be safer — it would be a different path key than the one
 /// every other arm of the stack derives.
-async fn record_custody<R: RpcRequester>(
+pub(crate) async fn record_custody<R: RpcRequester>(
     nest: &R,
     set: &str,
     device_id: &str,
@@ -871,12 +874,60 @@ pub struct RecoveryReport {
 }
 
 /// One custody generation at the destination.
-struct DestGeneration {
-    path: String,
-    manifest_hash: ContentHash,
+pub(crate) struct DestGeneration {
+    pub(crate) path: String,
+    pub(crate) manifest_hash: ContentHash,
     /// Retained generations land first (oldest supersede first), the live one
     /// last, so the source's own live row at each path is the destination's.
-    order: (bool, i64),
+    pub(crate) order: (bool, i64),
+}
+
+/// The order a reserved segment set's generations land on a nest in — the one
+/// walk both legs that move a destination's copy share ([`RecoveryDelivery`]
+/// and [`crate::reseed_pull::NestPullBack`]): each family of `kind` in
+/// [`SegmentFamily::PASS_ORDER`], its segments by id with the `.dat` before the
+/// `.meta` (generations of one path oldest first), then every family's
+/// `manifest.<kind>` mirror **last** — a mirror naming a segment whose bytes
+/// have not landed is the ordering that makes a torn delivery look whole.
+///
+/// A generation whose path is neither a segment half nor a mirror of `kind` is
+/// not part of the corpus and is left out.
+pub(crate) fn segment_set_order<'g>(
+    kind: &str,
+    scope_hex: &str,
+    generations: &'g [DestGeneration],
+) -> Vec<&'g DestGeneration> {
+    let mut ordered: Vec<&DestGeneration> = Vec::new();
+    for family in SegmentFamily::PASS_ORDER {
+        if family.serve_kind(kind).is_none() {
+            continue;
+        }
+        let mut segs: Vec<(u32, u8, (bool, i64), &DestGeneration)> = generations
+            .iter()
+            .filter_map(|g| {
+                family.parse(scope_hex, &g.path).map(|(id, half)| {
+                    let half = match half {
+                        SegmentHalf::Dat => 0,
+                        SegmentHalf::Meta => 1,
+                    };
+                    (id, half, g.order, g)
+                })
+            })
+            .collect();
+        segs.sort_by_key(|(id, half, order, _)| (*id, *half, *order));
+        ordered.extend(segs.into_iter().map(|(_, _, _, g)| g));
+    }
+    for family in SegmentFamily::PASS_ORDER {
+        if family.serve_kind(kind).is_none() {
+            continue;
+        }
+        let path = family.mirror_path(scope_hex, kind);
+        let mut gens: Vec<&DestGeneration> =
+            generations.iter().filter(|g| g.path == path).collect();
+        gens.sort_by_key(|g| g.order);
+        ordered.extend(gens);
+    }
+    ordered
 }
 
 /// **The recovery's delivery leg** (`segment-backup-protocol.md` § Client-device
@@ -886,7 +937,9 @@ struct DestGeneration {
 /// source, then call `fauna.backup.custody.recover` there, then the
 /// post-recovery duties.
 ///
-/// The pull-back's fetch-and-land machinery, built here first: what the destination holds is the source's own
+/// The first leg to move a destination's copy onto a nest; the nest-held
+/// pull-back ([`crate::reseed_pull`]) lands in the same walk
+/// ([`segment_set_order`]), as-is. What the destination holds is the source's own
 /// nest-posture ciphertext under the `NestBackupKey` root the source holds a
 /// grant for, so the leg opens each generation under that root and re-seals it
 /// through the deterministic [`seal_blob`] — landing byte-identical custody,
@@ -992,39 +1045,9 @@ impl<'a, P: BlobPushSink, R: RpcRequester, D: RpcRequester> RecoveryDelivery<'a,
             .collect();
 
         // Segments of each family in pass order, then every mirror last.
-        let mut phases: Vec<Vec<&DestGeneration>> = Vec::new();
-        for family in SegmentFamily::PASS_ORDER {
-            if family.serve_kind(kind).is_none() {
-                continue;
-            }
-            let mut segs: Vec<(u32, u8, (bool, i64), &DestGeneration)> = generations
-                .iter()
-                .filter_map(|g| {
-                    family.parse(&scope_hex, &g.path).map(|(id, half)| {
-                        let half = match half {
-                            SegmentHalf::Dat => 0,
-                            SegmentHalf::Meta => 1,
-                        };
-                        (id, half, g.order, g)
-                    })
-                })
-                .collect();
-            segs.sort_by_key(|(id, half, order, _)| (*id, *half, *order));
-            phases.push(segs.into_iter().map(|(_, _, _, g)| g).collect());
-        }
-        let mut mirrors: Vec<&DestGeneration> = Vec::new();
-        for family in SegmentFamily::PASS_ORDER {
-            let path = family.mirror_path(&scope_hex, kind);
-            let mut gens: Vec<&DestGeneration> =
-                generations.iter().filter(|g| g.path == path).collect();
-            gens.sort_by_key(|g| g.order);
-            mirrors.extend(gens);
-        }
-        phases.push(mirrors);
-
         let held = self.source_segments(kind, &scope_hex).await;
         let mut report = RecoveryReport::default();
-        for g in phases.into_iter().flatten() {
+        for g in segment_set_order(kind, &scope_hex, &generations) {
             let plain = download_file_bytes_by_manifest(
                 self.destination.bytes,
                 &self.keys,
@@ -1167,7 +1190,7 @@ impl<'a, P: BlobPushSink, R: RpcRequester, D: RpcRequester> RecoveryDelivery<'a,
     }
 }
 
-fn parse_manifest_hex(hex_text: &str) -> Option<ContentHash> {
+pub(crate) fn parse_manifest_hex(hex_text: &str) -> Option<ContentHash> {
     let mut digest = [0u8; 32];
     hex::decode_to_slice(hex_text, &mut digest).ok()?;
     Some(ContentHash::from_digest_raw(digest))
@@ -1225,30 +1248,14 @@ impl<P: BlobPushSink, R: RpcRequester> ReseedDelivery<'_, P, R> {
     /// [`FolderRehome::Unsigned`] with the reason, never an unsigned request.
     pub async fn sign_folder_rehome(&self, set: &DeliveredSet) -> FolderRehome {
         let unsigned = |reason: String| FolderRehome::Unsigned { reason };
-        let Some(signing) = &self.signing else {
-            return unsigned("this device holds no change signer for the restored folder".into());
-        };
-        let Some(display_name) = set.folder_display_name.as_deref() else {
-            return unsigned(format!("no display name for {}", set.set_name));
-        };
-        let nonce = match signing.set_nonce.lookup(display_name).await {
-            Ok(Some(nonce)) => nonce,
-            Ok(None) => {
-                return unsigned(format!(
-                    "this device holds no set nonce for the folder {display_name}"
-                ));
-            }
-            Err(e) => {
-                return unsigned(format!(
-                    "reading the set nonce for the folder {display_name}: {e:#}"
-                ));
-            }
+        let (signing, nonce) = match rehome_nonce(self.signing.as_ref(), set).await {
+            Ok(resolved) => resolved,
+            Err(unsigned) => return unsigned,
         };
         let rows = match self.store.held().await {
             Ok(rows) => rows,
             Err(e) => return unsigned(format!("reading the store: {e:#}")),
         };
-        let owner = signing.signer.actor_id();
         let prefix = format!("{}/", set.set_name);
         let mut leaves: Vec<&str> = rows
             .iter()
@@ -1258,7 +1265,7 @@ impl<P: BlobPushSink, R: RpcRequester> ReseedDelivery<'_, P, R> {
         leaves.sort_unstable();
         leaves.dedup();
 
-        let mut signatures = Vec::with_capacity(leaves.len());
+        let mut rehomed = Vec::with_capacity(leaves.len());
         for leaf in leaves {
             let held = held_path(&set.set_name, leaf);
             let Some(row) = CustodianStore::live_at(&rows, &held) else {
@@ -1288,26 +1295,92 @@ impl<P: BlobPushSink, R: RpcRequester> ReseedDelivery<'_, P, R> {
                     ));
                 }
             };
+            rehomed.push(RehomeRow {
+                path_hash,
+                manifest_hash,
+                total_size: manifest.total_size,
+                path_sealed,
+            });
+        }
+        sign_rehome_rows(signing, nonce, &rehomed)
+    }
+}
+
+/// One custody row a folder materialize re-homes, as the owner's re-home
+/// statement names it (`writer-signed-change-records.md` ruling (7)(a)(ii)):
+/// the source `path_hash` (the row's leaf), the mirrored manifest, the
+/// manifest's own `total_size` and the source's sealed name, verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RehomeRow {
+    pub(crate) path_hash: [u8; 32],
+    pub(crate) manifest_hash: [u8; 32],
+    /// The manifest's `total_size` — never a custody row's declared or derived
+    /// size: both halves read the one figure both hold (ruling (7)(a)(ii),
+    /// *Where the statement reads its size*).
+    pub(crate) total_size: u64,
+    pub(crate) path_sealed: Vec<u8>,
+}
+
+/// The host's signer and the nonce of the live set `set` re-homes into — the
+/// set named by its display name, resolved through the host's
+/// [`fauna_client_sync::SetNonceSource`] as every other record's is. No
+/// signer, no display name, or no nonce → the [`FolderRehome::Unsigned`] the
+/// driver holds the set with.
+pub(crate) async fn rehome_nonce<'s>(
+    signing: Option<&'s fauna_client_sync::RecordSigning>,
+    set: &DeliveredSet,
+) -> std::result::Result<(&'s fauna_client_sync::RecordSigning, [u8; 32]), FolderRehome> {
+    let unsigned = |reason: String| FolderRehome::Unsigned { reason };
+    let Some(signing) = signing else {
+        return Err(unsigned(
+            "this device holds no change signer for the restored folder".into(),
+        ));
+    };
+    let Some(display_name) = set.folder_display_name.as_deref() else {
+        return Err(unsigned(format!("no display name for {}", set.set_name)));
+    };
+    match signing.set_nonce.lookup(display_name).await {
+        Ok(Some(nonce)) => Ok((signing, nonce)),
+        Ok(None) => Err(unsigned(format!(
+            "this device holds no set nonce for the folder {display_name}"
+        ))),
+        Err(e) => Err(unsigned(format!(
+            "reading the set nonce for the folder {display_name}: {e:#}"
+        ))),
+    }
+}
+
+/// The owner's signature over each row, one [`SignedChange::for_rehome`] per
+/// row under `nonce` — what both delivery legs hand the driver.
+pub(crate) fn sign_rehome_rows(
+    signing: &fauna_client_sync::RecordSigning,
+    nonce: [u8; 32],
+    rows: &[RehomeRow],
+) -> FolderRehome {
+    let owner = signing.signer.actor_id();
+    let signatures = rows
+        .iter()
+        .map(|row| {
             let statement = SignedChange::for_rehome(
                 nonce,
                 owner,
-                path_hash,
-                manifest_hash,
-                manifest.total_size as i64,
-                &path_sealed,
+                row.path_hash,
+                row.manifest_hash,
+                row.total_size as i64,
+                &row.path_sealed,
             );
-            signatures.push(fauna_protocol::backup::RehomeSignature {
-                path_hash: fauna_protocol::ByteBuf::from(path_hash.to_vec()),
+            fauna_protocol::backup::RehomeSignature {
+                path_hash: fauna_protocol::ByteBuf::from(row.path_hash.to_vec()),
                 signature: fauna_protocol::ByteBuf::from(
                     signing.signer.sign_statement(&statement).to_vec(),
                 ),
                 ..Default::default()
-            });
-        }
-        FolderRehome::Signed {
-            signer_key: signing.signer.signer_key().to_vec(),
-            signatures,
-        }
+            }
+        })
+        .collect();
+    FolderRehome::Signed {
+        signer_key: signing.signer.signer_key().to_vec(),
+        signatures,
     }
 }
 

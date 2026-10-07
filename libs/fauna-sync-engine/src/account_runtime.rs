@@ -103,7 +103,7 @@ use crate::principal_succession::WriterKeyProvenance;
 /// (`fauna_account_plane::account_driver` owns them since the pump split).
 pub use fauna_account_plane::account_driver::{
     ACCOUNT_HANDLE_WAIT, AccountDriver, AccountHandleSource, AccountMailStore, AccountStoreAccess,
-    AccountStoreHandle, Assembly, DEFAULT_BACKSTOP_INTERVAL, DriverConfig,
+    AccountStoreHandle, Assembly, CapabilitySweep, DEFAULT_BACKSTOP_INTERVAL, DriverConfig,
     ENROLLMENT_RETIRE_BUDGET, ElectionOutcome, EngineElection, EngineRole, EnrollmentPass,
     EnrollmentRefusal, EnrollmentRetirement, FleetBootstrapRows, GroupCeremonyAuthority, HostLegs,
     LegsCtx, LegsOutput, LinkedNestConnector, MembershipSource, NoLegs, OwedDeliveries,
@@ -226,6 +226,56 @@ pub const STORE_THREAD_STACK_BUDGET: usize = STORE_THREAD_STACK_BYTES / 2;
 /// on the phones*).
 pub fn production_credential_store() -> CredentialStore {
     CredentialStore::new(CRED_NAMESPACE)
+}
+
+/// One reconnect watch out of two: the returned receiver changes whenever
+/// either input does — the app session's watch and the data path's own
+/// client's watch, when the runtime rides a store principal
+/// ([`AccountRuntimeParams::process_rpc`]).
+///
+/// The two clients drop independently: a data-client reconnect the session
+/// never saw must still wake the pump (its push `seq` reset is the data
+/// path's), or a walk that failed on that drop waits for the backstop and
+/// every gated read stays refused until then (`account-client-lifecycle.md`
+/// § The client-side lifecycle (W3), the pump's reconnect arm).
+///
+/// A forwarding task, so the pump keeps its one reconnect slot. It stops when
+/// the pump drops the merged receiver, or once both inputs' senders are gone
+/// — and dropping the merged sender then disarms the pump's arm exactly as a
+/// single closed watch does. A change on both inputs at once is coalesced
+/// into one bump. Must be called inside a tokio runtime.
+pub fn merge_reconnect_watches(
+    mut session: watch::Receiver<u64>,
+    mut data: watch::Receiver<u64>,
+) -> watch::Receiver<u64> {
+    let (tx, rx) = watch::channel(0u64);
+    tokio::spawn(async move {
+        let (mut session_open, mut data_open) = (true, true);
+        while session_open || data_open {
+            let changed = tokio::select! {
+                () = tx.closed() => return,
+                r = session.changed(), if session_open => {
+                    session_open = r.is_ok();
+                    r.is_ok()
+                }
+                r = data.changed(), if data_open => {
+                    data_open = r.is_ok();
+                    r.is_ok()
+                }
+            };
+            if changed {
+                // Coalesce: whichever input did not wake us may have moved too.
+                if session_open {
+                    session.borrow_and_update();
+                }
+                if data_open {
+                    data.borrow_and_update();
+                }
+                tx.send_modify(|n| *n = n.wrapping_add(1));
+            }
+        }
+    });
+    rx
 }
 
 /// Everything [`AccountStoreRuntime::start`] needs. The caller is either a
@@ -2231,6 +2281,14 @@ mod tests {
                     })
                     .expect("encode grant revoke reply")
                     .to_vec()
+                }
+                // The full pass's capability reconcile sweep enumerates
+                // before its fleet walk; this box holds no grant rows, so
+                // the sweep judges an empty answer and revokes nothing.
+                "fauna.capabilities.reconcile" => {
+                    wire_encode(&fauna_protocol::wrapped_blob::ReconcileGrantsReply::default())
+                        .expect("encode reconcile grants reply")
+                        .to_vec()
                 }
                 // A box that never rotated serves an empty chain.
                 fauna_protocol::nest_rotation::ROTATION_CHAIN_KIND => {
@@ -9151,6 +9209,56 @@ mod tests {
         tx.send(1).expect("bump");
         eventually(|| fx.fake.list_calls() > before, "reconnect pumped").await;
         handle.shutdown().await;
+    }
+
+    /// **A first walk that failed on the data client's drop is retried on
+    /// that client's reconnect, not at the backstop**
+    /// (`account-client-lifecycle.md` § The client-side lifecycle (W3), the
+    /// pump's reconnect wake). The runtime's data path rides the store
+    /// principal's own client, which can drop and reconnect while the app
+    /// session stays up; its reconnect must wake the pump too, or every gated
+    /// read stays refused as not ready for the whole backstop interval.
+    ///
+    /// The session's watch never moves here; only the data client's does.
+    #[tokio::test]
+    async fn a_failed_first_walk_recovers_on_the_data_clients_reconnect() {
+        use crate::preference_surfaces::load_muted_words;
+
+        let fx = fixture();
+        let (_session_tx, session_rx) = watch::channel(0u64);
+        let (data_tx, data_rx) = watch::channel(0u64);
+        let mut params = fx.params("b");
+        params.backstop_interval = DEFAULT_BACKSTOP_INTERVAL;
+        params.reconnects = Some(merge_reconnect_watches(session_rx, data_rx));
+
+        fx.fake.walks_unreachable.store(true, Ordering::SeqCst);
+        let b = AccountStoreRuntime::start(params).await.expect("start b");
+        eventually(|| b.pump_cycles().1 > 0, "b's first pass ended").await;
+        assert!(
+            refused_as_not_listed(&load_muted_words(&b).await),
+            "the failed walk left the scope unlisted"
+        );
+
+        // The data client is back; the session never dropped.
+        fx.fake.walks_unreachable.store(false, Ordering::SeqCst);
+        data_tx.send_replace(1); // the data client reconnects
+        let answered = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let read = load_muted_words(&b).await;
+                if refused_as_not_listed(&read) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
+                break read.expect("the read answers once the scope is listed");
+            }
+        })
+        .await;
+        assert!(
+            answered.is_ok(),
+            "a gated read answers within seconds of the data client's reconnect, \
+             not at the {DEFAULT_BACKSTOP_INTERVAL:?} backstop"
+        );
+        b.shutdown().await;
     }
 
     #[tokio::test]

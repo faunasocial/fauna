@@ -5559,6 +5559,14 @@ pub(super) const BLANK_SEALED_FOLDER_NAME: &str = concat!(
 ///   never a row without the `name_hash` every address resolves by. The same
 ///   predicate blanks one row at a write ([`BLANK_SEALED_FOLDER_NAME`]), so the
 ///   boot pass only ever finds what a crash between a write and its blank left.
+/// - **`backup_custody.path` keeps a reserved (`__`) backup set's path.** On a
+///   covered-folder mirror (`__folder/<nest>/<id>`) the path is the source
+///   row's `path_hash`, hex-spelled — a machine-authored routing key, not a
+///   label, and the one thing nothing can re-derive from the custody row's own
+///   one-way `path_hash`. The sealed name beside it is the source file's, so
+///   scrubbing on its presence would leave the nest-held pull-back a row it
+///   cannot address (`segment-backup-protocol.md` § Client-device custodian
+///   (pull) → *Restore* → *The nest-held pull-back*, ruled 2026-10-06).
 pub(super) const SCRUB_PLANES: &[(&str, &str)] = &[
     (
         "folders.name",
@@ -5578,7 +5586,9 @@ pub(super) const SCRUB_PLANES: &[(&str, &str)] = &[
     ),
     (
         "backup_custody.path",
-        "UPDATE backup_custody SET path = NULL WHERE path_sealed IS NOT NULL AND path IS NOT NULL",
+        "UPDATE backup_custody SET path = NULL WHERE path_sealed IS NOT NULL AND path IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM folders f WHERE f.id = backup_custody.folder_id
+                           AND substr(COALESCE(f.name, ''), 1, 2) = '__')",
     ),
     (
         "folders.include_paths",

@@ -1425,6 +1425,16 @@ class ApiClient @Inject constructor(
         )
 
     /**
+     * Register the kit the sign-up `recovery_kit` page minted and the user
+     * confirmed — the UniFFI face of the shared
+     * `fauna_client_recovery::ceremony::register_deferred_kit` (registers THAT
+     * root, plus the profile-head mirror). Resolves once the attempt settles;
+     * throws only on a missing connection or a malformed identity secret.
+     */
+    suspend fun registerDeferredRecoveryKit(kitHex: String) =
+        com.fauna.ffi.recoveryRegisterDeferredKit(backupNest(), backupSecret(), kitHex)
+
+    /**
      * The whole S8 seal-backfill SWEEP — D1 (folder-plane) then D3 (owned
      * sets' snapshot tags), skipping `role == "member"` rows — the ONE
      * sequencing seam every UniFFI app now calls at its post-auth hook
@@ -3086,6 +3096,51 @@ class ApiClient @Inject constructor(
      *  gone is a success no-op. */
     suspend fun mutedKeywordsRemove(word: String): uniffi.fauna_client_config.MutedWordsSnapshot =
         com.fauna.ffi.removeMutedWord(word)
+
+    // ── Recovery kit (`settings.md` § Recovery kit) ──
+    //
+    // Thin wrappers over `libs/fauna-ffi/src/recovery.rs` — the same ceremonies
+    // apple's `APIClient` and windows' `NestRpcClient` call, so the section
+    // decides nothing of its own (priority #2). Every one runs on THIS
+    // session's connected client and its own secret: the status is read off the
+    // registration chain, never a local flag.
+
+    /** `recovery-kit-status` plus every action's enablement, in one round trip. */
+    suspend fun recoveryKitStatus(): com.fauna.ffi.FfiRecoveryKitStatus =
+        com.fauna.ffi.recoveryKitStatus(nestRpc(), ownerSecretBytes())
+
+    /** `recovery-kit-create-button` (`heldKitInput == null`) and
+     *  `recovery-kit-replace-button` (the kit in hand) — one ceremony, two
+     *  authorization arms. Re-puts the escrow blob in the same ceremony. */
+    suspend fun recoveryCreateKit(heldKitInput: String?): com.fauna.ffi.FfiMintedKit =
+        com.fauna.ffi.recoveryCreateKit(
+            nestRpc(), ownerSecretBytes(), accountStores.accountRegistry, heldKitInput,
+        )
+
+    /** `recovery-kit-lost-button` — opens the seed-alone replacement window;
+     *  the minted kit's `landsAt` says when it takes effect. */
+    suspend fun recoveryRequestSeedAloneReplacement(): com.fauna.ffi.FfiMintedKit =
+        com.fauna.ffi.recoveryRequestSeedAloneReplacement(nestRpc(), ownerSecretBytes())
+
+    /** `recovery-pending-veto-button` — contest a pending replacement with the
+     *  kit in hand, at the bound nest and every linked nest. */
+    suspend fun recoveryVetoPendingReplacement(heldKitInput: String): Boolean =
+        com.fauna.ffi.recoveryVetoPendingReplacement(nestRpc(), ownerSecretBytes(), heldKitInput)
+
+    /** `recovery-kit-escrow-reseal-button` — the no-escrow repair: re-put the
+     *  escrow blob with the kit in hand WITHOUT retiring it. */
+    suspend fun recoveryResealEscrowWithHeldKit(heldKitInput: String): Long =
+        com.fauna.ffi.recoveryResealEscrowWithHeldKit(
+            nestRpc(), ownerSecretBytes(), accountStores.accountRegistry, heldKitInput,
+        )
+
+    /** The `fauna://recovery` URI a minted kit's copy button and QR carry
+     *  (`identity-succession.md` § The RecoveryKey, *Which encoding each
+     *  affordance carries*) — a pure local build, no round trip. */
+    fun recoveryKitDisplayUri(kitSecretHex: String): String =
+        com.fauna.ffi.recoveryKitDisplayUri(
+            kitSecretHex, ownerSecretBytes(), sessionAccount.handle.orEmpty(), nodeUrl,
+        )
 
     // ── Unattested-member review ──
     //

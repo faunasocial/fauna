@@ -4750,6 +4750,74 @@ pub fn report_withdraw_verdict(error: Option<String>) -> Result<JsValue, JsValue
     crate::rpc::to_js(&fauna_client_moderation::report::withdraw_verdict(error))
 }
 
+/// `ReportTarget::post` — a feed post; `gated` is the sealed rule's post arm.
+#[wasm_bindgen(js_name = reportPostTarget)]
+pub fn report_post_target(
+    cid: String,
+    author: String,
+    plaintext: String,
+    gated: bool,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_moderation::report::ReportTarget::post(
+        &cid, &author, &plaintext, gated,
+    ))
+}
+
+/// `ReportTarget::actor` — the OTHER profile.
+#[wasm_bindgen(js_name = reportActorTarget)]
+pub fn report_actor_target(actor_id: String) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_moderation::report::ReportTarget::actor(
+        &actor_id,
+    ))
+}
+
+/// `ReportTarget::message` — a conversation message off its plane ref; `null`
+/// for a mail / bridged message (no verb).
+#[wasm_bindgen(js_name = reportMessageTarget)]
+pub fn report_message_target(
+    plane_scope: String,
+    record_digest: String,
+    sender_actor: Option<String>,
+    plaintext: String,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_moderation::report::ReportTarget::message(
+        &plane_scope,
+        &record_digest,
+        sender_actor,
+        &plaintext,
+    ))
+}
+
+/// `report::message_subject` — the report subject for a conversation message
+/// from its plane ref, or `null` for a mail / bridged message (no verb).
+#[wasm_bindgen(js_name = reportMessageSubject)]
+pub fn report_message_subject(
+    plane_scope: String,
+    record_digest: String,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_moderation::report::message_subject(
+        &plane_scope,
+        &record_digest,
+    ))
+}
+
+/// `report::takedown_prefill` — `{ content_id, conversation }` for a post or
+/// message subject (`subject` the wire's tagged `AbuseReportSubject`), `null`
+/// for an account.
+#[wasm_bindgen(js_name = reportTakedownPrefill)]
+pub fn report_takedown_prefill(subject: JsValue) -> Result<JsValue, JsValue> {
+    use fauna_client_moderation::takedown::TakedownContentType;
+    let subject: fauna_protocol::moderation::AbuseReportSubject = crate::rpc::from_js(subject)?;
+    crate::rpc::to_js(
+        &fauna_client_moderation::report::takedown_prefill(&subject).map(|form| {
+            serde_json::json!({
+                "content_id": form.content_id,
+                "conversation": form.content_type == TakedownContentType::Conversation,
+            })
+        }),
+    )
+}
+
 /// `report::resolve_verdict` — `acted` false is a dismissal.
 #[wasm_bindgen(js_name = reportResolveVerdict)]
 pub fn report_resolve_verdict(acted: bool, error: Option<String>) -> Result<JsValue, JsValue> {

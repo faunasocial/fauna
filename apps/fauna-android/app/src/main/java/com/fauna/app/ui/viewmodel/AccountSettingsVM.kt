@@ -236,6 +236,13 @@ class AccountSettingsVM @Inject constructor(
             switchError.value = e.message
             return
         }
+        // A phrase restore's predecessor seeds, BEFORE the switch builds the
+        // new session and linked to the added identity by name — it is not
+        // active until the switch lands (`identity-succession.md` § Seed
+        // escrow → *Restore path*; linux and FaunaKit: add → persist → switch).
+        com.fauna.app.core.persistRestoredPredecessors(
+            registry, newActorId, onboardingHost.machine.restoredPredecessors(),
+        )
         // A freshly added account is never require-confirm-flagged (the flag
         // defaults off), so the append switch is the unconfirmed path — no re-auth.
         switchAccount(newActorId, confirmed = false, onComplete)

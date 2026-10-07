@@ -380,7 +380,13 @@ async fn mailbox_less_attendee_receives_and_rsvps_over_the_scheduling_rail_same_
     //    (his lazy Personal calendar is auto-provisioned by the apply). ──
     let outcome = bob_caldav
         .apply_inbound_scheduling_from_message(
-            &bob_id.0, &BOB_MSEK, &captured, TS, &origin, &directory,
+            &bob_id.0,
+            &BOB_MSEK,
+            &[],
+            &captured,
+            TS,
+            &origin,
+            &directory,
         )
         .await
         .expect("apply inbound REQUEST ok");
@@ -457,6 +463,7 @@ async fn mailbox_less_attendee_receives_and_rsvps_over_the_scheduling_rail_same_
         .apply_inbound_scheduling_from_message(
             &alice_id.0,
             &ALICE_MSEK,
+            &[],
             &captured_reply,
             TS + 100,
             &reply_origin,
@@ -632,6 +639,7 @@ async fn ephemeral_mls_sender_scheduling_delivery_is_received_and_applied() {
         .apply_inbound_scheduling_from_message(
             &bob_id.0,
             &BOB_MSEK,
+            &[],
             &request.raw_rfc5322,
             TS,
             &origin,
@@ -809,7 +817,13 @@ async fn a_non_organizer_cannot_cancel_or_rewrite_the_victims_event() {
     let created = bob
         .caldav
         .apply_inbound_scheduling_from_message(
-            &bob.id.0, &BOB_MSEK, &request, TS, &origin, &directory,
+            &bob.id.0,
+            &BOB_MSEK,
+            &[],
+            &request,
+            TS,
+            &origin,
+            &directory,
         )
         .await
         .expect("apply REQUEST");
@@ -837,6 +851,7 @@ async fn a_non_organizer_cannot_cancel_or_rewrite_the_victims_event() {
             .apply_inbound_scheduling_from_message(
                 &bob.id.0,
                 &BOB_MSEK,
+                &[],
                 &forged,
                 TS + 10,
                 &origin,
@@ -869,6 +884,7 @@ async fn a_non_organizer_cannot_cancel_or_rewrite_the_victims_event() {
         .apply_inbound_scheduling_from_message(
             &bob.id.0,
             &BOB_MSEK,
+            &[],
             &cancel,
             TS + 20,
             &origin,
@@ -968,7 +984,13 @@ async fn a_succeeded_organizers_cancel_is_honoured_through_the_production_sink()
     let (request, origin) = receive_one(&state, &bob, &mut seen).await;
     bob.caldav
         .apply_inbound_scheduling_from_message(
-            &bob.id.0, &BOB_MSEK, &request, TS, &origin, &directory,
+            &bob.id.0,
+            &BOB_MSEK,
+            &[],
+            &request,
+            TS,
+            &origin,
+            &directory,
         )
         .await
         .expect("apply REQUEST");
@@ -1141,6 +1163,7 @@ async fn an_unbound_event_answers_to_its_organizer_through_discovery_whatever_ur
         .apply_inbound_scheduling_from_message(
             &bob.id.0,
             &BOB_MSEK,
+            &[],
             &request,
             TS,
             &InboundOrigin {
@@ -1178,6 +1201,7 @@ async fn an_unbound_event_answers_to_its_organizer_through_discovery_whatever_ur
         .apply_inbound_scheduling_from_message(
             &bob.id.0,
             &BOB_MSEK,
+            &[],
             &forged,
             TS + 10,
             &origin,
@@ -1209,6 +1233,7 @@ async fn an_unbound_event_answers_to_its_organizer_through_discovery_whatever_ur
         .apply_inbound_scheduling_from_message(
             &bob.id.0,
             &BOB_MSEK,
+            &[],
             &cancel,
             TS + 20,
             &origin,

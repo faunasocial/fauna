@@ -2160,7 +2160,10 @@ pub(crate) async fn record_change_core(
     // custodian-authoritative custody). A `delete` (manifest_hash = None)
     // tombstones the path so its now-orphaned chunks reclaim. The reply `seq` is
     // 0 — a backup destination is write-only custody, never pulled back by a
-    // device, so no monotonic sequence is assigned.
+    // device, so no monotonic sequence is assigned. (A rebuilt nest gets a
+    // destination's copy back through the owner's `fauna.backup.custody.list`
+    // and the open blob routes — the nest-held pull-back,
+    // `fauna_sync_engine::reseed_pull` — never through this feed.)
     //
     // ORDINARY Backup folders stopped routing here at the folders re-model
     // phase 3 head unification (2026-08-17): they record to `sync_changes`

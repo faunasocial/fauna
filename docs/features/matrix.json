@@ -390,10 +390,10 @@
               "state": "full"
             },
             "web": {
-              "date": "2026-09-26",
+              "date": "2026-10-06",
               "dirty": false,
-              "stamp": "0.1.2-dev+45b4b867 standalone",
-              "state": "failing"
+              "stamp": "0.1.2-dev+a8404441 standalone",
+              "state": "full"
             },
             "windows": {
               "date": "2026-09-26",
@@ -542,7 +542,7 @@
             "linux": {
               "date": "2026-10-06",
               "dirty": false,
-              "stamp": "0.1.2-dev+d4125106 standalone",
+              "stamp": "0.1.2-dev+78e73031 standalone",
               "state": "full"
             },
             "macos": {
@@ -1963,7 +1963,7 @@
               "date": "2026-10-06",
               "dirty": false,
               "stamp": "0.1.2-dev+a1f84cc6 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "macos": {
               "date": "2026-10-06",
@@ -1981,7 +1981,7 @@
               "date": "2026-08-30",
               "dirty": false,
               "stamp": "0.1.2-dev+9bf9020c standalone",
-              "state": "partial"
+              "state": "full"
             },
             "windows": {
               "date": "2026-09-11",
@@ -2654,7 +2654,7 @@
             "linux": {
               "date": "2026-10-06",
               "dirty": false,
-              "stamp": "0.1.2-dev+a1f84cc6 standalone",
+              "stamp": "0.1.2-dev+78e73031 standalone",
               "state": "partial"
             },
             "macos": {
@@ -3455,7 +3455,7 @@
             "linux": {
               "date": "2026-10-06",
               "dirty": false,
-              "stamp": "0.1.2-dev+d4125106 standalone",
+              "stamp": "0.1.2-dev+78e73031 standalone",
               "state": "partial"
             },
             "macos": {
@@ -5551,10 +5551,10 @@
               "state": "partial"
             },
             "web": {
-              "date": "",
+              "date": "2026-10-07",
               "dirty": false,
-              "stamp": "",
-              "state": "none"
+              "stamp": "0.1.2-dev+cfad4af4 standalone",
+              "state": "partial"
             },
             "windows": {
               "date": "",
@@ -5764,7 +5764,7 @@
             "linux": {
               "date": "2026-10-06",
               "dirty": false,
-              "stamp": "0.1.2-dev+d4125106 standalone",
+              "stamp": "0.1.2-dev+78e73031 standalone",
               "state": "partial"
             },
             "macos": {
@@ -6212,7 +6212,7 @@
             "linux": {
               "date": "2026-10-06",
               "dirty": false,
-              "stamp": "0.1.2-dev+a1f84cc6 standalone",
+              "stamp": "0.1.2-dev+78e73031 standalone",
               "state": "partial"
             },
             "macos": {
@@ -6380,7 +6380,7 @@
             "linux": {
               "date": "2026-10-06",
               "dirty": false,
-              "stamp": "0.1.2-dev+d4125106 standalone",
+              "stamp": "0.1.2-dev+78e73031 standalone",
               "state": "partial"
             },
             "macos": {

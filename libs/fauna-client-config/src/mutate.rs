@@ -102,17 +102,34 @@ pub fn remove_backup_destination(state: &mut BackupState, destination_id: &str) 
 /// fields must be the enrolled destination's own, never caller-supplied — a
 /// coverage row whose URL or pubkey drifted from its siblings would make one
 /// "destination" dial two nests.
+///
+/// `label` is the folder's display name and sealed label as the owner's
+/// coverage listing carries them ([`FolderCoverageLabel`]) — what the
+/// nest-held pull-back names the restored folder from after a box loss. A
+/// re-attach of an existing row refreshes it (a renamed folder's next attach
+/// records the new name) and returns `true` when that changed the row; a label
+/// field the listing did not carry erases nothing, exactly as the custodian
+/// store keeps its name (`segment-backup-protocol.md` § *Where a restored
+/// folder's name comes from*).
 pub fn attach_backup_destination_folder(
     state: &mut BackupState,
     destination_id: &str,
     folder_set: &str,
+    label: &FolderCoverageLabel,
 ) -> bool {
     let destinations = &mut state.backup.destinations;
-    if destinations
-        .iter()
-        .any(|d| d.destination_id == destination_id && d.folder_name == folder_set)
+    if let Some(row) = destinations
+        .iter_mut()
+        .find(|d| d.destination_id == destination_id && d.folder_name == folder_set)
     {
-        return false;
+        let before = (row.folder_display_name.clone(), row.folder_label.clone());
+        if label.display_name.is_some() {
+            row.folder_display_name = label.display_name.clone();
+        }
+        if label.label.is_some() {
+            row.folder_label = label.label.clone();
+        }
+        return (row.folder_display_name.clone(), row.folder_label.clone()) != before;
     }
     let Some(template) = destinations
         .iter()
@@ -124,9 +141,58 @@ pub fn attach_backup_destination_folder(
     destinations.push(BackupDestination {
         folder_name: folder_set.to_string(),
         added_at: Timestamp::now_secs().max(0) as u64,
+        // The template may be another folder's coverage row: its label is
+        // that folder's, never this one's.
+        folder_display_name: label.display_name.clone(),
+        folder_label: label.label.clone(),
         ..template
     });
     true
+}
+
+/// A covered folder's name as the owner's coverage listing carried it at
+/// attach: the display name (absent once the source's row holds none) and the
+/// set's `name_hash` + `name_sealed` pair. Both optional, and an absent field
+/// never erases a recorded one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FolderCoverageLabel {
+    pub display_name: Option<String>,
+    pub label: Option<fauna_core::data::CoveredFolderLabel>,
+}
+
+impl FolderCoverageLabel {
+    /// The label off one `fauna.backup.destination.list` coverage entry. A
+    /// blank name, a hash that is not 32 bytes or an empty seal is no label,
+    /// and so is one over its row cap (`fauna_core::backup_state`'s
+    /// `MAX_COVERED_FOLDER_*`): the attach still lands, and the folder restores
+    /// reported unnamed rather than the coverage row refusing the list write.
+    pub fn of_listing(covered: &fauna_protocol::backup::CoveredFolder) -> Self {
+        use fauna_core::backup_state::{
+            MAX_COVERED_FOLDER_NAME_BYTES, MAX_COVERED_FOLDER_SEAL_BYTES,
+        };
+        let label = match (&covered.name_hash, &covered.name_sealed) {
+            (Some(hash), Some(sealed))
+                if !sealed.is_empty() && sealed.len() <= MAX_COVERED_FOLDER_SEAL_BYTES =>
+            {
+                <[u8; 32]>::try_from(&hash[..]).ok().map(|name_hash| {
+                    fauna_core::data::CoveredFolderLabel {
+                        name_hash,
+                        name_sealed: sealed.to_vec(),
+                    }
+                })
+            }
+            _ => None,
+        };
+        Self {
+            display_name: covered
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty() && n.len() <= MAX_COVERED_FOLDER_NAME_BYTES)
+                .map(str::to_string),
+            label,
+        }
+    }
 }
 
 /// Detach one folder's coverage row — exactly the `(destination_id,

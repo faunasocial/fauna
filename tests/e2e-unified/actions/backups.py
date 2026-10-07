@@ -196,6 +196,15 @@ class BackupsActions:
         )
 
     def create_snapshot(self) -> None:
+        # The button is disabled while any op holds the machine's single-flight
+        # slot (`ui/backups.md` § Snapshot-list shape, *Create*) — and a pick's
+        # own load holds it. `wait_for_no_snapshots()` cannot stand in for this
+        # wait: a pick clears the outgoing rows the moment it is recorded, so
+        # "zero rows" is true while the pick's load is still in flight, and a
+        # click there is refused (bridge 409, a linux sweep 2026-10-06).
+        self.driver.wait_until_enabled(
+            "snapshot-create-button", timeout=SNAPSHOT_CREATE_WAIT_S
+        )
         initial = self.snapshot_count()
         self.driver.click("snapshot-create-button")
         deadline = time.monotonic() + SNAPSHOT_CREATE_WAIT_S

@@ -82,7 +82,7 @@ pub use fauna_sync_engine::account_runtime::CloudBackupExclusion;
 use fauna_sync_engine::account_runtime::{
     AccountRuntimeParams, AccountStoreHandle, AccountStoreRuntime, DEFAULT_BACKSTOP_INTERVAL,
     LinkedNestConnector, MembershipSource, OwedNestDeliverer, RuntimePrincipal, StoreRoot,
-    production_credential_store, resolve_writer_key_serialized,
+    merge_reconnect_watches, production_credential_store, resolve_writer_key_serialized,
 };
 use fauna_sync_engine::linked_leg::{LinkedConnection, LinkedNestTarget};
 use fauna_sync_engine::peer_leg::PeerTransportFactory;
@@ -401,6 +401,10 @@ pub fn native_linked_nest_connector(keypair: ActorKeypair) -> LinkedNestConnecto
 /// and falls back to the backstop cadence alone. One function for both on
 /// purpose: a seat that attached the reconnect watch and forgot the push
 /// stream would converge only at the backstop, and nothing else would say so.
+///
+/// The session's watch only: when the data path rides the store principal's
+/// own client, [`resolve_and_start`] merges that client's reconnect watch in
+/// itself, so no host passes it.
 pub fn with_session_wakes(
     mut params: AccountRuntimeParams<Arc<NestClient>>,
     reconnects: tokio::sync::watch::Receiver<u64>,
@@ -450,6 +454,14 @@ pub async fn resolve_and_start(
                  client (its first connect waits for the grant — see `spawn_connect_retry`)"
             );
             params.process_rpc = Some(Arc::clone(&device_client));
+            // The data path's own client drops and reconnects apart from the
+            // session's, so its reconnect wakes the pump too — merged here,
+            // so no host wires it (`merge_reconnect_watches`).
+            let data_reconnects = device_client.subscribe_reconnects();
+            params.reconnects = Some(match params.reconnects.take() {
+                Some(session) => merge_reconnect_watches(session, data_reconnects),
+                None => data_reconnects,
+            });
             Some(device_client)
         }
         Err(e) => {

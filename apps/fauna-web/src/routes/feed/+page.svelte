@@ -30,6 +30,8 @@
   import FeedComposeBar from '$lib/components/FeedComposeBar.svelte';
   import MarkdownToolbar from '$lib/components/MarkdownToolbar.svelte';
   import PostCard from '$lib/components/PostCard.svelte';
+  import ReportHost from '$lib/components/ReportHost.svelte';
+  import { reportPostTarget, type ReportTarget } from '$lib/wasm';
   import ProxiedImage from '$lib/components/ProxiedImage.svelte';
   import QuotedPost from '$lib/components/QuotedPost.svelte';
   import TipSurface from '$lib/components/payments/TipSurface.svelte';
@@ -200,6 +202,10 @@
   let selectedFeed = $derived<string | null>(snap?.selected_feed ?? null);
   let trendingSelected = $derived<boolean>(snap?.trending_selected ?? false);
   let posts = $derived(snap?.posts ?? []);
+  // The shared `FeedSnapshot::empty_state` answer the wasm snapshot carries —
+  // 'NoPosts' / 'NoMatches' / null (feed.md § Errors & edge cases): the page
+  // never re-derives it from `status`, `posts` or its own search field.
+  let emptyState = $derived<'NoPosts' | 'NoMatches' | null>(snap?.empty_state ?? null);
   // Guardian Notify (family-safety.md § Guardian Notify): count each rendered post
   // whose guardian floor enforces — a no-op unless the ward's content_notify knob is
   // on. The buffer dedups per post per local day, so re-runs on any posts change are
@@ -215,7 +221,25 @@
   // The manager's own snapshot error wins; `loadError` carries a lifecycle-load
   // failure that has no snapshot to live in, so it is the fallback rather than a
   // competing surface.
-  let pageError = $derived(resolveLocalized(snap?.error) || loadError);
+  // The report sheet's own failure line (a failed send, or a block/hide that
+  // did not land beside a landed report) paints on the same `error-message`.
+  let reportError = $state('');
+  let pageError = $derived(resolveLocalized(snap?.error) || loadError || reportError);
+
+  // The shared report sheet (`report-sheet`), opened by `feed-post-report-button`.
+  let reportTarget = $state<ReportTarget | null>(null);
+  function openReport(postId: string): void {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const post = posts.find((p: any) => p.post_id === postId);
+    if (!post) return;
+    reportError = '';
+    reportTarget = reportPostTarget(
+      post.post_id,
+      post.author,
+      post.body ?? '',
+      !!(post.gated_tier || post.gated_room),
+    );
+  }
   let composeError = $derived(resolveLocalized(snap?.compose?.error));
   // The manager's own `attached_file` — never the local `composeFile` pick
   // alone, so a restored draft's handle (no bytes behind it on this device)
@@ -542,6 +566,10 @@
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function isContentBlocked(post: any): boolean {
     return postRender(post).verdict === 'block';
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function isContentReported(post: any): boolean {
+    return postRender(post).reported === true;
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function isContentCollapsed(post: any): boolean {
@@ -1916,6 +1944,8 @@
   <p class="error-text page-error" data-testid={IDS.ERROR_MESSAGE}>{pageError}</p>
 {/if}
 
+<ReportHost bind:target={reportTarget} onerror={(m) => (reportError = m)} />
+
 <div class="feed-shell" data-testid={IDS.FEED_VIEW}>
   <!-- Left panel: feed sidebar -->
   <aside class="feed-sidebar">
@@ -2151,8 +2181,12 @@
 
     {#if status === 'Loading' && posts.length === 0}
       <p class="muted">{t.common.loading}</p>
+    {:else if emptyState === 'NoMatches'}
+      <p class="muted" data-testid={IDS.FEED_NO_RESULTS}>{t.feed.list.no_matching_posts}</p>
+    {:else if emptyState === 'NoPosts'}
+      <p class="muted" data-testid={IDS.FEED_EMPTY_STATE}>{t.feed.list.no_posts}</p>
     {:else if posts.length === 0}
-      <p class="muted">{searchInput ? t.feed.list.no_matching_posts : t.feed.list.no_posts}</p>
+      <!-- Not yet authoritative (a read in flight or an error): neither empty state. -->
     {:else}
       {#each posts as post}
         <PostCard
@@ -2170,6 +2204,8 @@
           muted={isPostMuted(post.post_id)}
           onrevealmuted={revealMuted}
           contentBlocked={isContentBlocked(post)}
+          contentReported={isContentReported(post)}
+          onreport={openReport}
           contentCollapsed={isContentCollapsed(post)}
           onrevealcontent={revealContent}
           regionPlaceholder={regionPlaceholderFor(post)}

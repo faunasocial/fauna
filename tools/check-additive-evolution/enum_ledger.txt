@@ -213,6 +213,7 @@ local fauna-feed::SourceKind  # view model: crosses only FFI or wasm to the same
 local fauna-feed::personalization::TrainVerb  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-feed::personalization::TrainResult  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-feed::snapshot::FeedStatus  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-feed::snapshot::FeedEmptyState  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-feed::snapshot::ReplyAudience  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-feed::snapshot::PostResolution  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-feed::snapshot::PlaybackSource  # view model: crosses only FFI or wasm to the same build's UI

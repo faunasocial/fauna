@@ -166,10 +166,13 @@ pub struct BackupCustodyRow {
     /// This is the field the covered-folder materialize arm re-homes on: a live
     /// folder set is not one of the plaintext-path classes, so a row that
     /// arrived without its sealed name cannot become a live row at all
-    /// (`fauna.backup.custody_unsealed`; `crate::backup::materialize`). It is
-    /// deliberately **not** on `CustodyItem`'s wire reply — the audit addresses
-    /// by `path_hash` and has no use for the blob, so widening the reply would
-    /// be bytes for nobody.
+    /// (`fauna.backup.custody_unsealed`; `crate::backup::materialize`). It rides
+    /// `CustodyItem::path_sealed` on `fauna.backup.custody.list` (2026-10-06):
+    /// the nest-held pull-back re-records each folder row on the rebuilt nest
+    /// with it, which is the only way that nest's materialize can re-home the
+    /// folder (`segment-backup-protocol.md` § Client-device custodian (pull) →
+    /// *Restore* → *The nest-held pull-back*). The audit addresses by
+    /// `path_hash` and ignores it.
     pub path_sealed: Option<Vec<u8>>,
 }
 
@@ -520,19 +523,34 @@ fn head_signed_under_stored_nonce_in_conn(
     Ok(row.is_some_and(|row| crate::change_signature::stored_row_signed_under(&row, &nonce)))
 }
 
+/// The SQL value of a byte counter `col` moved by the statement's `?1`:
+/// floored at zero on the way down (the generous direction) and SATURATED at
+/// `i64::MAX` on the way up. Every quota-counter move that is not itself
+/// refused by a `checked_add` ceiling goes through it: an overflowing integer
+/// sum is stored by SQLite as REAL, after which every `i64` read of the counter
+/// (the admin user listing, a member's role row, the folder roster) fails,
+/// repairable from no app (`nest/common.md` § Client-state recoverability).
+/// `?1 > 0 AND col > MAX - MAX(?1, 0)` tests for overflow without itself
+/// overflowing; only then is `col + ?1` evaluated.
+fn saturating_counter_move_sql(col: &str) -> String {
+    format!(
+        "MAX(0, CASE
+             WHEN ?1 > 0 AND {col} > 9223372036854775807 - MAX(?1, 0)
+             THEN 9223372036854775807
+             ELSE {col} + ?1 END)"
+    )
+}
+
 /// Move the retained-accounting counters for version rows leaving
 /// (`sign = -1`) or rejoining (`sign = +1`) the charged population
 /// (`file-versions.md` § Retention (4), slice 3): the folder OWNER's
 /// `users.storage_bytes_used` moves by the summed sizes, and each non-owner
 /// recorder's `folder_member_access.bytes_used` moves by their own rows' sum,
 /// keyed by the set's derived channel — the same owner-pays + member-abuse
-/// split `record_sync_change_metered` charges under. Floored at zero on the
-/// way down (the generous direction) and SATURATED at `i64::MAX` on the way
-/// up: undelete re-charges without a quota refusal, so under an
-/// `i64::MAX`-class ceiling its `+` is the one move that can leave SQLite's
-/// integer domain — an overflowing sum is stored as REAL and every `i64` read
-/// of the counter (the admin user listing included) fails, repairable from no
-/// app (`nest/common.md` § Client-state recoverability). A missing folder row
+/// split `record_sync_change_metered` charges under. Both moves go through
+/// [`saturating_counter_move_sql`]: undelete re-charges without a quota
+/// refusal, so under an `i64::MAX`-class ceiling its `+` can leave SQLite's
+/// integer domain, and the counter saturates instead. A missing folder row
 /// moves nothing: that only happens mid-teardown, where the folder-delete
 /// reclaim owns the accounting.
 pub(crate) fn adjust_version_accounting_in_conn(
@@ -558,14 +576,11 @@ pub(crate) fn adjust_version_accounting_in_conn(
     let total = rows
         .iter()
         .fold(0i64, |acc, (_, size)| acc.saturating_add(*size));
-    // `?1 > 0 AND col > MAX - MAX(?1, 0)` tests for overflow without itself
-    // overflowing; only then is `col + ?1` evaluated.
     conn.execute(
-        "UPDATE users SET storage_bytes_used = MAX(0, CASE
-             WHEN ?1 > 0 AND storage_bytes_used > 9223372036854775807 - MAX(?1, 0)
-             THEN 9223372036854775807
-             ELSE storage_bytes_used + ?1 END)
-         WHERE actor_id = ?2",
+        &format!(
+            "UPDATE users SET storage_bytes_used = {} WHERE actor_id = ?2",
+            saturating_counter_move_sql("storage_bytes_used")
+        ),
         rusqlite::params![sign.saturating_mul(total), owner.as_slice()],
     )
     .context("adjust owner storage_bytes_used for version accounting")?;
@@ -582,12 +597,11 @@ pub(crate) fn adjust_version_accounting_in_conn(
         }
         for (actor, member_total) in per_member {
             conn.execute(
-                "UPDATE folder_member_access
-                 SET bytes_used = MAX(0, CASE
-                     WHEN ?1 > 0 AND bytes_used > 9223372036854775807 - MAX(?1, 0)
-                     THEN 9223372036854775807
-                     ELSE bytes_used + ?1 END)
-                 WHERE channel_id = ?2 AND actor_id = ?3",
+                &format!(
+                    "UPDATE folder_member_access SET bytes_used = {}
+                     WHERE channel_id = ?2 AND actor_id = ?3",
+                    saturating_counter_move_sql("bytes_used")
+                ),
                 rusqlite::params![sign.saturating_mul(member_total), channel.as_slice(), actor],
             )
             .context("adjust member bytes_used for version accounting")?;
@@ -2727,8 +2741,17 @@ fn check_net_charge_in_conn(
 /// The charge half of [`settle_row_charge_in_conn`]: moves the OWNER's
 /// `users.storage_bytes_used` by `charge` and, for a member recorder, their
 /// `folder_member_access.bytes_used` (the abuse counter, not attribution) by
-/// the same amount — both floored at 0. The release credits
-/// ([`adjust_version_accounting_in_conn`]) are what move them back down.
+/// the same amount — both through [`saturating_counter_move_sql`]. The release
+/// credits ([`adjust_version_accounting_in_conn`]) are what move them back
+/// down.
+///
+/// The vet's `checked_add` refusals do not bound every move made here: an
+/// uncapped member (`byte_cap` NULL, the default share) is asked about no cap,
+/// and a same-manifest transfer asks the owner only about the NET move while
+/// the member half takes the whole size. Once an undelete has saturated a
+/// member's counter (its re-charge never refuses), a net-zero transfer would
+/// add the full size past `i64::MAX` and turn the member's `bytes_used`, and
+/// with it the folder's roster read, REAL.
 fn apply_charge_in_conn(
     conn: &rusqlite::Connection,
     owner: &[u8; 32],
@@ -2740,16 +2763,20 @@ fn apply_charge_in_conn(
         return Ok(());
     }
     conn.execute(
-        "UPDATE users SET storage_bytes_used = MAX(0, storage_bytes_used + ?1)
-         WHERE actor_id = ?2",
+        &format!(
+            "UPDATE users SET storage_bytes_used = {} WHERE actor_id = ?2",
+            saturating_counter_move_sql("storage_bytes_used")
+        ),
         rusqlite::params![charge, owner.as_slice()],
     )
     .context("update storage_bytes_used")?;
     if let Some(channel) = member_channel {
         conn.execute(
-            "UPDATE folder_member_access
-             SET bytes_used = MAX(0, bytes_used + ?1)
-             WHERE channel_id = ?2 AND actor_id = ?3",
+            &format!(
+                "UPDATE folder_member_access SET bytes_used = {}
+                 WHERE channel_id = ?2 AND actor_id = ?3",
+                saturating_counter_move_sql("bytes_used")
+            ),
             rusqlite::params![charge, channel.as_slice(), recorder.as_slice()],
         )
         .context("update member bytes_used")?;
@@ -9121,6 +9148,134 @@ mod tests {
             member_used().await,
             i64::MAX,
             "the member's re-charge saturates"
+        );
+    }
+
+    /// A record's member half is bounded by no `checked_add` when
+    /// the recorder is an uncapped member (`byte_cap` NULL, the default share)
+    /// and the record is a same-manifest transfer: the owner is asked only
+    /// about the net move (zero) while the member takes the whole size. Once
+    /// an undelete has saturated that member's counter at `i64::MAX` (its
+    /// re-charge never refuses), the transfer's bare `bytes_used + size`
+    /// overflowed SQLite's integer arithmetic, the column turned REAL, and the
+    /// member's role read and the folder's roster read both failed. Every
+    /// counter move in `apply_charge_in_conn` saturates instead; the column's
+    /// `typeof` is read back directly, not only through an `i64` decode.
+    ///
+    /// Red-verifiable: put back the bare `bytes_used + ?1` in
+    /// `apply_charge_in_conn` and the member reads below fail.
+    #[tokio::test]
+    async fn a_transfer_onto_a_saturated_uncapped_member_saturates() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let owner = [0x11u8; 32];
+        let writer = [0x22u8; 32];
+        db.create_user(&owner, "free", "owner").await.unwrap();
+        db.create_user(&writer, "free", "writer").await.unwrap();
+        db.create_folder("shared", &owner).await.unwrap();
+        let raw_group_id = vec![0x7du8; 20];
+        let channel = fauna_mls::types::ChannelId::from_group_id(&raw_group_id).0;
+        assert!(
+            db.set_folder_mls_group("shared", &owner, Some(&raw_group_id))
+                .await
+                .unwrap()
+        );
+        db.set_folder_member_access(&channel, &writer, "writer", None)
+            .await
+            .unwrap();
+        let fs = db.get_folder("shared").await.unwrap().unwrap();
+        let doc: [u8; 32] = *blake3::hash(b"doc.txt").as_bytes();
+        let other: [u8; 32] = *blake3::hash(b"other.txt").as_bytes();
+        let dev = [0xD1u8; 32];
+        let big = i64::MAX - 1_000;
+        let record = |recorder: [u8; 32],
+                      member_channel: Option<[u8; 32]>,
+                      path: [u8; 32],
+                      manifest: [u8; 32],
+                      size: i64| {
+            let db = &db;
+            let fs_id = fs.id;
+            async move {
+                db.record_sync_change_metered(
+                    &recorder,
+                    &owner,
+                    member_channel.as_ref(),
+                    &path,
+                    Some(&manifest),
+                    size,
+                    "modify",
+                    fs_id,
+                    &dev,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    i64::MAX,
+                )
+                .await
+            }
+        };
+        let typeof_counters = || {
+            let db = &db;
+            async move {
+                let conn = db.conn.lock().await;
+                let owner_type: String = conn
+                    .query_row(
+                        "SELECT typeof(storage_bytes_used) FROM users WHERE actor_id = ?1",
+                        rusqlite::params![owner.as_slice()],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                let member_type: String = conn
+                    .query_row(
+                        "SELECT typeof(bytes_used) FROM folder_member_access
+                         WHERE channel_id = ?1 AND actor_id = ?2",
+                        rusqlite::params![channel.as_slice(), writer.as_slice()],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                (owner_type, member_type)
+            }
+        };
+
+        // The owner holds the charge of other.txt @ Y.
+        record(owner, None, other, [0x59u8; 32], 10).await.unwrap();
+        // The member saturates their counter: record A, a newer head, prune A
+        // (the credit), refill, undelete A (the never-refused re-charge).
+        let a = record(writer, Some(channel), doc, [0xA1u8; 32], big)
+            .await
+            .unwrap();
+        record(writer, Some(channel), doc, [0xA2u8; 32], 10)
+            .await
+            .unwrap();
+        assert!(db.soft_prune_version(a).await.unwrap());
+        record(writer, Some(channel), doc, [0xA3u8; 32], big)
+            .await
+            .unwrap();
+        assert!(db.undelete_version(a).await.unwrap());
+
+        // The net-zero transfer: the member re-records the owner's manifest.
+        record(writer, Some(channel), other, [0x59u8; 32], 10)
+            .await
+            .expect("a net-zero transfer is never refused");
+        assert_eq!(
+            typeof_counters().await,
+            ("integer".to_string(), "integer".to_string()),
+            "both counters stay in SQLite's integer domain"
+        );
+        assert_eq!(
+            db.get_folder_member_role(&channel, &writer)
+                .await
+                .expect("the member role row must stay readable")
+                .unwrap()
+                .bytes_used,
+            i64::MAX,
+            "the member's transfer charge saturates"
+        );
+        assert!(
+            db.list_folder_member_access(&channel).await.is_ok(),
+            "the folder roster must stay readable"
         );
     }
 

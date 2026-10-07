@@ -42,6 +42,7 @@ Stamped 2026-10-01 at dc4b94e0f1.
    - `tests/e2e-unified/tests/test_account_index_unreadable_launch.py::test_a_newer_builds_index_tells_the_user_to_update_and_offers_nothing_else`
 7. [app] A list of accounts no version can read is never silently replaced: the app says nothing has been changed, and starting over is offered only behind a confirmation that first says what will be lost — `docs/goal/behavior/onboarding.md` § App-launch routing
    - `tests/e2e-unified/tests/test_account_index_unreadable_launch.py::test_a_malformed_index_reaches_the_floor_only_through_a_confirm_that_states_the_residual`
+   - `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_start_over_refuses_while_another_instance_serves_an_account`
 8. [app] One app keeps working with several nests at once when they run different versions of the same major version — `docs/goal/architecture/version-compatibility.md` § I2 — Full bidirectional compatibility within a major version
    - (none)
 9. [app] A feature your nest is too old for is hidden or switched off in the app, instead of failing with a raw error when you try it — `docs/goal/architecture/version-compatibility.md` § Dimension 3 — Version & capability negotiation
@@ -100,6 +101,7 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | 5 | nest | `tests/e2e-unified/tests/api/test_schema_version_compat.py::test_old_binary_serves_new_db_with_extra_table` | nest (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_account_index_unreadable_launch.py::test_a_newer_builds_index_tells_the_user_to_update_and_offers_nothing_else` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_account_index_unreadable_launch.py::test_a_malformed_index_reaches_the_floor_only_through_a_confirm_that_states_the_residual` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_start_over_refuses_while_another_instance_serves_an_account` | linux (linux): passed, tui (linux): passed |
 | 8 | app | (none) | — |
 | 9 | app | (none) | — |
 | 10 | app | (none) | — |

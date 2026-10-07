@@ -5364,6 +5364,37 @@ pub struct BackupDestination {
     /// other kind.
     #[serde(default)]
     pub capacity_cap_bytes: Option<u64>,
+    /// Covered-folder coverage rows only (`folder_name` a `__folder/<nest>/<id>`
+    /// set): the folder's display name on the source, recorded at attach off
+    /// the owner's own coverage listing (`CoveredFolder::name`). After a box
+    /// loss this row, which survives with the account, is the one place the
+    /// label lives for a folder a **nest** destination holds — destination
+    /// custody never carries it — so the nest-held pull-back names the restored
+    /// folder from it (`segment-backup-protocol.md` § Client-device custodian
+    /// (pull) → *Restore* → *Where a restored folder's name comes from*,
+    /// built 2026-10-06). `None` on every other row, and on a coverage row
+    /// whose listing carried no plaintext name (a set sealed past it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_display_name: Option<String>,
+    /// The same coverage row's address and sealed label
+    /// (`CoveredFolder::{name_hash, name_sealed}`), recorded beside
+    /// [`Self::folder_display_name`]: what a restore names its target by, and
+    /// what it opens for the name when the listing carried none. `None` beside
+    /// a listing that carried no pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_label: Option<CoveredFolderLabel>,
+}
+
+/// A covered folder's address and sealed label as the owner's coverage listing
+/// carried them at attach — the set's `name_hash` and its `name_sealed`,
+/// verbatim. The seal is salted by the name, never by a row id, so it opens
+/// wherever the same owner restores the folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoveredFolderLabel {
+    #[serde(with = "serde_bytes")]
+    pub name_hash: [u8; 32],
+    #[serde(with = "serde_bytes")]
+    pub name_sealed: Vec<u8>,
 }
 
 /// The v1 destination kind, and the serde default for every carrier of a
@@ -5576,6 +5607,8 @@ impl Default for BackupDestination {
             kind: default_destination_kind(),
             custodian_device_id: None,
             capacity_cap_bytes: None,
+            folder_display_name: None,
+            folder_label: None,
         }
     }
 }

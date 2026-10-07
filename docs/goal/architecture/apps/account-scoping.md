@@ -1335,8 +1335,13 @@ carries no payload where a D-Bus method name does.
 **Remove-account refuses the account this instance serves — tui and linux,
 2026-09-23; apple and windows 2026-09-23.** Both switchers key the active row (the
 one with no switch and no `account-remove-button`) on
-`fauna_client_accounts::session_account` — the process holder's actor, the
-registry's active account only before one is admitted — and both
+`fauna_client_accounts::session_account` — the process holder's actor; before
+one is admitted, the process's launch binding, else the registry's active
+account (a bound seat can render before admission: linux builds its Account
+page once, ahead of the session's lock, and keyed on the pointer it offered
+its own account for removal — caught 2026-10-06 by the native two-instance
+erase witness, `tests/e2e-unified/tests/test_erase_refused_other_instance.py`)
+— and both
 `account_scope::remove_account`s refuse through `remove_account_blocked`'s
 served-here arm before the sibling probe, pinned per seat
 (`remove_account_refuses_the_account_this_process_serves_and_touches_nothing`)

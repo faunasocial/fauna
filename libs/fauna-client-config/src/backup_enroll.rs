@@ -102,8 +102,8 @@ use serde::Serialize;
 
 use crate::backup_store::{BackupWriteError, load_backup_state_refiled, mutate_backup};
 use crate::mutate::{
-    add_backup_destination, attach_backup_destination_folder, detach_backup_destination_folder,
-    keep_backup_destination, remove_backup_destination,
+    FolderCoverageLabel, add_backup_destination, attach_backup_destination_folder,
+    detach_backup_destination_folder, keep_backup_destination, remove_backup_destination,
 };
 use crate::store_seam::{BackupStateStore, StoreError};
 
@@ -208,25 +208,6 @@ pub async fn enroll_backup_destination<R: RpcRequester, D: RpcRequester>(
 where
     R::Error: RpcErrorClass,
 {
-    let source = BackupClient::new(nest);
-
-    // (1) Grant the key to the source nest. Idempotent and inert alone, so it
-    //     is safe to precede the atomic decision point — module docs § Ordering.
-    source
-        .nest_key_grant(NestBackupKey::derive(&owner_secret).to_bytes().to_vec())
-        .await
-        .map_err(EnrollError::Grant)?;
-
-    // (2) The `writer_nest_id` step (3) authorizes is the id the source's
-    //     connection proved — never its own `fauna.nest.info` claim, which
-    //     could name a sibling (module docs, step 2).
-    // (3) Authorize the source nest to write this owner's custody at the
-    //     destination. Idempotent and inert alone (module docs § Ordering).
-    BackupClient::new(destination)
-        .writer_grant_register(hex::encode(source_nest_id))
-        .await
-        .map_err(EnrollError::WriterGrant)?;
-
     let display_name = if resolved.requested_name.trim().is_empty() {
         resolved.domain
     } else {
@@ -246,6 +227,79 @@ where
         kind: DESTINATION_KIND_NEST.to_string(),
         ..Default::default()
     };
+    enroll_nest_row(
+        nest,
+        destination,
+        store,
+        owner_secret,
+        dest,
+        source_nest_id,
+        SeatStep::Register,
+    )
+    .await
+}
+
+/// How enroll step (3) takes the destination's writer seat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeatStep {
+    /// A plain registration — an ordinary enroll.
+    Register,
+    /// The restore ceremony's re-enrollment of the destination it pulled the
+    /// corpus back from: read the seat's holder off the destination and, when
+    /// it is not the restored nest, take the seat over from it
+    /// (`segment-backup-protocol.md` § Cross-location backup protocol →
+    /// *The writer seat* → *How the seat moves*, situation (2)).
+    SucceedHolder,
+}
+
+/// Enroll steps (1)–(5) for one peer-nest row (module docs § Ordering).
+async fn enroll_nest_row<R: RpcRequester, D: RpcRequester>(
+    nest: R,
+    destination: D,
+    store: &dyn BackupStateStore,
+    owner_secret: [u8; 32],
+    dest: BackupDestination,
+    source_nest_id: [u8; 32],
+    seat: SeatStep,
+) -> Result<Vec<BackupDestination>, EnrollError<R::Error, D::Error>>
+where
+    R::Error: RpcErrorClass,
+{
+    let source = BackupClient::new(nest);
+
+    // (1) Grant the key to the source nest. Idempotent and inert alone, so it
+    //     is safe to precede the atomic decision point — module docs § Ordering.
+    source
+        .nest_key_grant(NestBackupKey::derive(&owner_secret).to_bytes().to_vec())
+        .await
+        .map_err(EnrollError::Grant)?;
+
+    // (2) The `writer_nest_id` step (3) authorizes is the id the source's
+    //     connection proved — never its own `fauna.nest.info` claim, which
+    //     could name a sibling (module docs, step 2).
+    // (3) Authorize the source nest to write this owner's custody at the
+    //     destination. Idempotent and inert alone (module docs § Ordering).
+    let writer = hex::encode(source_nest_id);
+    let destination = BackupClient::new(destination);
+    let holder = match seat {
+        SeatStep::Register => None,
+        // The holder comes off the seat itself — never a guess, and never
+        // the box the device remembers losing: a seat already carried
+        // elsewhere names that box, which is then refused, not overwritten.
+        SeatStep::SucceedHolder => destination
+            .writer_grant_list()
+            .await
+            .map_err(EnrollError::WriterGrant)?
+            .grants
+            .into_iter()
+            .map(|g| g.writer_nest_id)
+            .find(|holder| !holder.eq_ignore_ascii_case(&writer)),
+    };
+    match holder {
+        Some(holder) => destination.writer_grant_succeed(writer, holder).await,
+        None => destination.writer_grant_register(writer).await,
+    }
+    .map_err(EnrollError::WriterGrant)?;
 
     // (4) Tell the source nest where to back this owner up — its own
     //     coordinator cannot read the `fauna.state.backup` destination list. Idempotent
@@ -596,6 +650,15 @@ impl<E: core::fmt::Display + core::fmt::Debug> std::error::Error for FolderCover
 /// § Ordering): the nest row alone is inert until the sweep finds content, and
 /// idempotent, so a crash between the two steps re-runs cleanly.
 ///
+/// The list row also records the folder's **name** — display name and sealed
+/// label, read off the owner's own coverage listing
+/// (`fauna.backup.destination.list`'s `CoveredFolder`) right after the attach.
+/// After a box loss that row is the one place the label survives for a folder
+/// a nest destination holds, and the nest-held pull-back names the restored
+/// folder from it (`segment-backup-protocol.md` § Client-device custodian
+/// (pull) → *Restore* → *Where a restored folder's name comes from*). A
+/// re-attach refreshes it.
+///
 /// `nest` is the **source** nest transport.
 pub async fn attach_folder_to_destination<R: RpcRequester>(
     nest: R,
@@ -612,9 +675,20 @@ where
         .destination_attach_folder(destination_id.to_string(), folder_id)
         .await
         .map_err(FolderCoverageError::Call)?;
+    let label = source
+        .destination_list()
+        .await
+        .map_err(FolderCoverageError::Call)?
+        .destinations
+        .iter()
+        .filter(|d| d.destination_id == destination_id)
+        .flat_map(|d| d.covered_folders.iter())
+        .find(|c| c.folder_set == reply.folder_set)
+        .map(FolderCoverageLabel::of_listing)
+        .unwrap_or_default();
 
     let (state, _) = mutate_backup(store, source_nest, |st| {
-        attach_backup_destination_folder(st, destination_id, &reply.folder_set)
+        attach_backup_destination_folder(st, destination_id, &reply.folder_set, &label)
     })
     .await
     .map_err(FolderCoverageError::Record)?;
@@ -967,13 +1041,77 @@ where
     Some(enroll_client_custodian(nest, store, source_nest, enrollment).await)
 }
 
+/// The nest-held pull-back's post-ceremony duty (`segment-backup-protocol.md`
+/// § Client-device custodian (pull) → *Restore* → *The nest-held pull-back*):
+/// make the surviving destination the corpus was pulled back from a backup
+/// destination of the **restored** nest, through the ordinary five-step
+/// enroll sequence, **only when the outcome is whole** — a destination whose
+/// copy the restored nest does not yet serve whole would be overwritten by
+/// the restored nest's first pass with the hole in it.
+///
+/// `nest` is the restored nest (the new source); `destination` the owner's own
+/// connection to the destination named by `row`, a peer-nest row of the lost
+/// box's list; `restored_nest_id` the restored nest's identity as its
+/// connection proved it, and the box whose list the row lands in.
+///
+/// **The writer seat moves with the ceremony** (`segment-backup-protocol.md`
+/// § Cross-location backup protocol → *The writer seat* → *How the seat
+/// moves*, situation (2)): a destination keeps one nest-writer per owner, and
+/// after a rebuild onto a fresh identity its seat still names the lost box, so
+/// a plain registration would be refused `writer_seat_held`. Step (3)
+/// therefore reads the seat's holder off the destination and names it as
+/// `succeeds` — for this one destination, inside this one completed ceremony.
+/// A same-identity rebuild finds the seat already its own and refreshes it.
+///
+/// `None` when the outcome is not whole (nothing to do; the owner re-runs the
+/// restore).
+pub async fn reenroll_nest_destination_after_reseed<R: RpcRequester, D: RpcRequester>(
+    nest: R,
+    destination: D,
+    store: &dyn BackupStateStore,
+    owner_secret: [u8; 32],
+    restored_nest_id: [u8; 32],
+    row: &BackupDestination,
+    outcome: &fauna_client_backup::reseed::ReseedOutcome,
+) -> Option<Result<Vec<BackupDestination>, EnrollError<R::Error, D::Error>>>
+where
+    R::Error: RpcErrorClass,
+{
+    if !outcome.is_whole() {
+        return None;
+    }
+    let dest = BackupDestination {
+        destination_id: row.destination_id.clone(),
+        destination_nest_url: row.destination_nest_url.clone(),
+        destination_actor_pubkey: row.destination_actor_pubkey,
+        folder_name: DEFAULT_BACKUP_FOLDER.to_string(),
+        added_at: Timestamp::now_secs().max(0) as u64,
+        display_name: row.display_name.clone(),
+        kind: DESTINATION_KIND_NEST.to_string(),
+        ..Default::default()
+    };
+    Some(
+        enroll_nest_row(
+            nest,
+            destination,
+            store,
+            owner_secret,
+            dest,
+            restored_nest_id,
+            SeatStep::SucceedHolder,
+        )
+        .await,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
     use fauna_client_backup::{
-        KIND_DESTINATION_ATTACH_FOLDER, KIND_DESTINATION_DETACH_FOLDER, KIND_DESTINATION_REGISTER,
-        KIND_DESTINATION_REMOVE, KIND_NEST_KEY_GRANT, KIND_STATUS, KIND_WRITER_GRANT_REGISTER,
+        KIND_DESTINATION_ATTACH_FOLDER, KIND_DESTINATION_DETACH_FOLDER, KIND_DESTINATION_LIST,
+        KIND_DESTINATION_REGISTER, KIND_DESTINATION_REMOVE, KIND_NEST_KEY_GRANT, KIND_STATUS,
+        KIND_WRITER_GRANT_LIST, KIND_WRITER_GRANT_REGISTER,
     };
     use fauna_core::backup_state::{BackupDestinationsRow, BackupState};
     use fauna_core::data::{BackupConfig, DestinationUnattestedMark, UnattestedVerdict};
@@ -1084,6 +1222,10 @@ mod tests {
         attached_folder: Mutex<Option<AttachFolderRequest>>,
         detached_folder: Mutex<Option<DetachFolderRequest>>,
         rotation_chain: Mutex<Option<RotationChainReply>>,
+        /// The display name `fauna.backup.destination.list` reports for the
+        /// attached folder; `None` lists it with no plaintext name (a set
+        /// sealed past it), still carrying its sealed pair.
+        listed_folder_name: Mutex<Option<String>>,
     }
 
     impl Default for FakeSourceNest {
@@ -1111,6 +1253,7 @@ mod tests {
                 attached_folder: Mutex::new(None),
                 detached_folder: Mutex::new(None),
                 rotation_chain: Mutex::new(None),
+                listed_folder_name: Mutex::new(Some("Photos".to_string())),
             }
         }
 
@@ -1201,6 +1344,35 @@ mod tests {
                         extra: Default::default(),
                     })
                 }
+                KIND_DESTINATION_LIST => {
+                    // The attached folder, listed under the destination the
+                    // attach named, with the label the source's row carries.
+                    let attached = self.attached_folder.lock().unwrap().clone();
+                    let destinations = attached
+                        .map(|a| fauna_protocol::backup::DestinationItem {
+                            destination_id: a.destination_id.clone(),
+                            covered_folders: vec![fauna_protocol::backup::CoveredFolder {
+                                folder_id: a.folder_id,
+                                folder_set: format!(
+                                    "__folder/{}/{}",
+                                    self.own_nest_id_hex, a.folder_id
+                                ),
+                                name: self.listed_folder_name.lock().unwrap().clone(),
+                                name_hash: Some(serde_bytes::ByteBuf::from(vec![0x4E; 32])),
+                                name_sealed: Some(serde_bytes::ByteBuf::from(b"sealed".to_vec())),
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        })
+                        .into_iter()
+                        .collect();
+                    fauna_protocol::encode_canonical(
+                        &fauna_protocol::backup::DestinationListReply {
+                            destinations,
+                            ..Default::default()
+                        },
+                    )
+                }
                 KIND_DESTINATION_DETACH_FOLDER => {
                     let req: DetachFolderRequest =
                         fauna_protocol::decode_strict(&bytes).expect("decode detach request");
@@ -1228,6 +1400,11 @@ mod tests {
         kinds: Mutex<Vec<&'static str>>,
         registered_writer_nest_id: Mutex<Option<String>>,
         fail_writer_grant: bool,
+        /// The writer seat's holder, as `fauna.backup.writer_grant.list`
+        /// reports it; a register moves it per the seat's rule.
+        seat: Mutex<Option<String>>,
+        /// The `succeeds` each register named, in order.
+        succeeds: Mutex<Vec<Option<String>>>,
     }
 
     impl RpcRequester for FakeDestinationNest {
@@ -1251,12 +1428,42 @@ mod tests {
                     }
                     let req: WriterGrantRegisterRequest =
                         fauna_protocol::decode_strict(&bytes).expect("decode writer grant request");
+                    self.succeeds.lock().unwrap().push(req.succeeds.clone());
+                    // The seat's rule: a plain register by another box while
+                    // the seat is held is refused, a `succeeds` naming the
+                    // holder moves it, one naming anyone else is refused.
+                    let mut seat = self.seat.lock().unwrap();
+                    let allowed = match (&*seat, &req.succeeds) {
+                        (None, None) => true,
+                        (Some(holder), None) => *holder == req.writer_nest_id,
+                        (Some(holder), Some(named)) => holder == named,
+                        (None, Some(_)) => false,
+                    };
+                    if !allowed {
+                        return Err(FakeError::new("fauna.backup.writer_seat_held"));
+                    }
+                    *seat = Some(req.writer_nest_id.clone());
                     *self.registered_writer_nest_id.lock().unwrap() = Some(req.writer_nest_id);
                     fauna_protocol::encode_canonical(&WriterGrantRegisterReply {
                         ok: true,
                         extra: Default::default(),
                     })
                 }
+                KIND_WRITER_GRANT_LIST => fauna_protocol::encode_canonical(
+                    &fauna_protocol::backup::WriterGrantListReply {
+                        grants: self
+                            .seat
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .map(|holder| fauna_protocol::backup::WriterGrantItem {
+                                writer_nest_id: holder.clone(),
+                                ..Default::default()
+                            })
+                            .collect(),
+                        ..Default::default()
+                    },
+                ),
                 other => panic!("unexpected kind {other}"),
             }
             .expect("encode reply");
@@ -2503,6 +2710,101 @@ mod tests {
         );
     }
 
+    // ---- the nest-held pull-back's post-ceremony re-enrollment ----
+
+    /// The destination the corpus was pulled back from, as the lost box's list
+    /// holds it.
+    fn pulled_from() -> BackupDestination {
+        BackupDestination {
+            display_name: Some("Off-site".into()),
+            ..unenrolled_destination("dest-1")
+        }
+    }
+
+    fn reenroll_nest(
+        nest: &Arc<FakeSourceNest>,
+        destination: &Arc<FakeDestinationNest>,
+        whole: bool,
+    ) -> Option<Result<Vec<BackupDestination>, EnrollError<FakeError, FakeError>>> {
+        block_on(reenroll_nest_destination_after_reseed(
+            nest.clone(),
+            destination.clone(),
+            &nest.store,
+            OWNER_SEED,
+            SOURCE_BOUND_ID,
+            &pulled_from(),
+            &reseed_outcome(whole),
+        ))
+    }
+
+    /// **A restore onto a fresh-identity nest carries the destination's seat
+    /// from the box it replaced** (`segment-backup-protocol.md` § *The writer
+    /// seat*, situation (2)): the seat still names the lost box, so the
+    /// re-enrollment reads that holder off the seat and names it as
+    /// `succeeds` — and the restored nest's list records the destination.
+    #[test]
+    fn a_whole_pull_back_onto_a_fresh_identity_takes_the_seat_from_the_lost_box() {
+        let nest = Arc::new(FakeSourceNest::default());
+        let lost = "ee".repeat(32);
+        let destination = Arc::new(FakeDestinationNest {
+            seat: Mutex::new(Some(lost.clone())),
+            ..Default::default()
+        });
+        let list = reenroll_nest(&nest, &destination, true)
+            .expect("a whole outcome re-enrolls")
+            .expect("the seat moves and the row lands");
+
+        let restored = hex::encode(SOURCE_BOUND_ID);
+        assert_eq!(*destination.succeeds.lock().unwrap(), vec![Some(lost)]);
+        assert_eq!(
+            destination.seat.lock().unwrap().as_deref(),
+            Some(restored.as_str()),
+            "the seat now names the restored nest alone"
+        );
+        assert!(nest.granted_key.lock().unwrap().is_some());
+        assert_eq!(
+            nest.registered_destination
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|r| r.destination_id.as_str()),
+            Some("dest-1")
+        );
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].destination_id, "dest-1");
+        assert_eq!(list[0].folder_name, DEFAULT_BACKUP_FOLDER);
+        assert_eq!(list[0].display_name.as_deref(), Some("Off-site"));
+    }
+
+    /// A rebuild under the lost box's own identity finds the seat already its
+    /// own: a plain refresh, never a `succeeds` naming itself.
+    #[test]
+    fn a_same_identity_rebuild_refreshes_its_own_seat() {
+        let nest = Arc::new(FakeSourceNest::default());
+        let destination = Arc::new(FakeDestinationNest {
+            seat: Mutex::new(Some(hex::encode(SOURCE_BOUND_ID))),
+            ..Default::default()
+        });
+        reenroll_nest(&nest, &destination, true)
+            .expect("re-enrolls")
+            .expect("succeeds");
+        assert_eq!(*destination.succeeds.lock().unwrap(), vec![None]);
+    }
+
+    /// A part-restored nest re-enrolls nothing: its first backup pass would
+    /// overwrite the destination's whole copy with the restore's hole.
+    #[test]
+    fn a_part_restored_pull_back_reenrolls_no_destination() {
+        let nest = Arc::new(FakeSourceNest::default());
+        let destination = Arc::new(FakeDestinationNest {
+            seat: Mutex::new(Some("ee".repeat(32))),
+            ..Default::default()
+        });
+        assert!(reenroll_nest(&nest, &destination, false).is_none());
+        assert!(nest.kinds().is_empty());
+        assert!(destination.kinds.lock().unwrap().is_empty());
+    }
+
     /// Removal is kind-agnostic: the existing shared deregister drops a
     /// custodian row exactly as it drops a nest row, so no shell needs a second
     /// remove path. (What it deliberately does **not** do is delete this
@@ -2578,6 +2880,25 @@ mod tests {
                 .iter()
                 .any(|d| d.folder_name == DEFAULT_BACKUP_FOLDER)
         );
+        // The folder's name, off the owner's coverage listing — what the
+        // nest-held pull-back names the restored folder from after a box loss.
+        assert_eq!(coverage.folder_display_name.as_deref(), Some("Photos"));
+        assert_eq!(
+            coverage.folder_label,
+            Some(fauna_core::data::CoveredFolderLabel {
+                name_hash: [0x4E; 32],
+                name_sealed: b"sealed".to_vec(),
+            })
+        );
+        // The enrollment row is not a folder's and carries no folder name.
+        let enrolled = destinations
+            .iter()
+            .find(|d| d.folder_name == DEFAULT_BACKUP_FOLDER)
+            .unwrap();
+        assert_eq!(
+            (&enrolled.folder_display_name, &enrolled.folder_label),
+            (&None, &None)
+        );
         // A re-run converges rather than duplicating (both halves idempotent).
         let destinations = attach().expect("re-attach");
         assert_eq!(
@@ -2586,6 +2907,44 @@ mod tests {
                 .filter(|d| d.folder_name == expected_set)
                 .count(),
             1
+        );
+    }
+
+    /// **A re-attach refreshes the folder's name, and a listing that carries
+    /// none erases nothing** — the custodian store's rule for the same label
+    /// (`segment-backup-protocol.md` § *Where a restored folder's name comes
+    /// from*): a renamed folder's next attach records the new name, and a set
+    /// sealed past its plaintext name keeps the last name this row learned.
+    #[test]
+    fn a_re_attach_refreshes_the_folders_name_and_an_unnamed_listing_erases_none() {
+        let nest = Arc::new(FakeSourceNest::default());
+        nest.store
+            .seed_list(SOURCE_BOUND_ID, vec![unenrolled_destination("dest-1")]);
+        let attach = || {
+            block_on(attach_folder_to_destination(
+                nest.clone(),
+                &nest.store,
+                SOURCE_BOUND_ID,
+                "dest-1",
+                7,
+            ))
+            .expect("attach")
+        };
+        let name_of = |list: &[BackupDestination]| {
+            list.iter()
+                .find(|d| d.folder_name.ends_with("/7"))
+                .and_then(|d| d.folder_display_name.clone())
+        };
+        assert_eq!(name_of(&attach()).as_deref(), Some("Photos"));
+
+        *nest.listed_folder_name.lock().unwrap() = Some("Pictures".to_string());
+        assert_eq!(name_of(&attach()).as_deref(), Some("Pictures"));
+
+        *nest.listed_folder_name.lock().unwrap() = None;
+        assert_eq!(
+            name_of(&attach()).as_deref(),
+            Some("Pictures"),
+            "a listing with no plaintext name keeps the recorded one"
         );
     }
 
@@ -2624,7 +2983,8 @@ mod tests {
         assert!(attach_backup_destination_folder(
             &mut seeded,
             "dest-1",
-            &folder_set
+            &folder_set,
+            &FolderCoverageLabel::default()
         ));
         nest.store
             .seed_list(SOURCE_BOUND_ID, seeded.backup.destinations);
@@ -2753,12 +3113,14 @@ mod tests {
         assert!(attach_backup_destination_folder(
             &mut seeded,
             "dest-1",
-            &ours
+            &ours,
+            &FolderCoverageLabel::default()
         ));
         assert!(attach_backup_destination_folder(
             &mut seeded,
             "dest-1",
-            &foreign
+            &foreign,
+            &FolderCoverageLabel::default()
         ));
         nest.store
             .seed_list(p.actor_id().0, seeded.backup.destinations);

@@ -120,7 +120,10 @@ async fn handshake(
 ) -> Result<fauna_protocol::auth::HandshakeReply, RpcError> {
     let ts = fauna_core::data::Timestamp::now_millis();
     let nest_id = state.bound_identity();
-    let nonce = [0x42u8; 32];
+    // A fresh nonce per handshake, as every real client folds in: a fixed one
+    // made two same-millisecond sign-ins byte-identical, and the replay guard
+    // refused the second as `signature_failed`.
+    let nonce: [u8; 32] = rand::random();
     let msg = fauna_protocol::auth::handshake_signed_message(&actor, ts, &nest_id, &nonce);
     let sig = seed.sign(&msg);
     common::call(
@@ -2333,9 +2336,13 @@ async fn the_ceremony_keeps_the_predecessors_escrow_wraps_for_the_successor() {
         2,
         "the ceremony burns no predecessor-keyed wrap"
     );
-    // Served to the successor, unfiltered and filtered.
+    // Served to the successor, unfiltered and filtered. The serve orders by
+    // (deposit second, wrap hash), so two same-second deposits come back in
+    // hash order: compare the set, ordered by generation.
+    let mut served = escrow_get(&router, &state, new, None).await;
+    served.sort();
     assert_eq!(
-        escrow_get(&router, &state, new, None).await,
+        served,
         vec![
             (g1, b"old-wrap-of-g1".to_vec()),
             (g2, b"old-wrap-of-g2".to_vec())
