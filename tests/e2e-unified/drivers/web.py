@@ -279,6 +279,12 @@ class WebBridgeDriver(HttpBridgeDriver):
         # locale can set.
         if config.get("locale"):
             session_body["locale"] = config["locale"]
+        # Optional push-service stand-in (`config["push_service_stand_in"]`, the
+        # endpoint URL its subscriptions carry): headless Chromium has no push
+        # service, so a push journey's toggle could never land a row. The
+        # bridge's `_push_stand_in_js` holds the why and the shape.
+        if config.get("push_service_stand_in"):
+            session_body["push_service_stand_in"] = config["push_service_stand_in"]
         self._post("/session", session_body, timeout=HEAVY_BOOT_TIMEOUT_S)
 
         # Inject test agent

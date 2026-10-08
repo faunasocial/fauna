@@ -653,6 +653,43 @@ internal interface INestRpcClient
     Task<string> ModerationLegalTakedownAsync(
         string contentId, bool conversation, string legalReference, bool restore);
 
+    // ── fauna.moderation.abuse_report.* (user-initiated reporting) ──────
+    // moderation.md § User-initiated reporting. The reporter's three calls ride
+    // the shared FfiModerationClient, the admin's two ride FfiAdminClient; every
+    // row arrives already worded (LocalizedText) so no app re-derives a label.
+
+    /// <summary><c>fauna.moderation.abuse_report.submit</c> — send the sheet's
+    /// report. The request is built from the target + draft by the shared
+    /// <c>report_request</c>, so no app assembles a wire shape. The reply is the
+    /// <c>report-status</c> acknowledgement and where the report went.</summary>
+    Task<FfiReportSent> AbuseReportSubmitAsync(FfiReportTarget target, FfiReportForm form);
+
+    /// <summary><c>fauna.moderation.abuse_report.mine</c> — the reporter's own
+    /// ledger, newest first, worded.</summary>
+    Task<IReadOnlyList<FfiReportLedgerRow>> AbuseReportMineAsync();
+
+    /// <summary><c>fauna.moderation.abuse_report.withdraw</c> — take back one of
+    /// the caller's open reports.</summary>
+    Task AbuseReportWithdrawAsync(string reportId);
+
+    /// <summary><c>fauna.moderation.abuse_report.queue</c> — the admin's open
+    /// reports (local and forwarded), oldest first, worded. Admin-class.</summary>
+    Task<IReadOnlyList<FfiReportQueueRow>> AbuseReportQueueAsync();
+
+    /// <summary><c>fauna.moderation.abuse_report.resolve</c> — record the admin's
+    /// outcome on one report: <paramref name="acted"/> true marks it acted on,
+    /// false dismisses it. A record, never an enforcement. Admin-class.</summary>
+    Task AbuseReportResolveAsync(string reportId, bool acted);
+
+    /// <summary>The reporter-side hide (moderation.md § Corollary): add
+    /// <paramref name="id"/> (a post or message id, or an account's actor id) to
+    /// the owner's stored hidden-content list and return the whole list. Local
+    /// state — no nest round trip — but kept on the seam so a VM test fakes it.</summary>
+    Task<string[]> HideReportedAsync(string id);
+
+    /// <summary>The owner's stored hidden-content list (what their reports hid).</summary>
+    Task<string[]> LoadHiddenContentAsync();
+
     /// <summary><c>fauna.bridges.get_spam_threshold_override</c> — the caller's
     /// per-account spam-folder threshold override, in whole points, or
     /// <c>null</c> when the account follows the admin default
@@ -1981,6 +2018,19 @@ internal interface INestRpcClient
         FfiAgentReachabilityObserver? reachabilityObserver);
 
     /// <summary>
+    /// This install's push registration under <paramref name="actorId"/>, built on this
+    /// client's live connection — the shared <c>fauna_client_push::registration</c> machine
+    /// (the install intent bit, the which-actor record, the leave-shape drops) behind
+    /// <c>FfiPushRegistration</c> (<c>common.md</c> § Push Notifications → <i>Registration</i>).
+    /// <paramref name="intentPath"/> is the install-scoped intent file;
+    /// <paramref name="deviceId"/> the install's derived id for the actor
+    /// (<c>FfiAccountRegistry.DeviceIdForActor</c>) — the one id the row is keyed under
+    /// and the connection announces.
+    /// </summary>
+    Task<IFfiPushRegistration> BuildPushRegistrationAsync(
+        string intentPath, string actorId, string deviceId);
+
+    /// <summary>
     /// Restore this session's nest from the copy <paramref name="agent"/> holds —
     /// the confirmed <c>backup-destination-reseed-confirm-button</c> action
     /// (<c>backup-destinations.md</c> § Re-seed → <i>Where the ceremony runs</i>:
@@ -2524,12 +2574,18 @@ internal interface INestRpcClient
     ///
     /// <para><b>Irreversible</b>, and the caller must have gated it behind
     /// <c>identity-stolen-confirm-field</c> reading the literal <c>SUCCEED</c>.
-    /// An <c>Err</c> means the succession did not land; the failure arms that DO
-    /// carry a seed come back as a result whose <c>Persisted</c> tells the truth
-    /// about it — and on <c>Persisted == false</c> the caller must put the secret
-    /// on screen and <b>not</b> tear the session down.</para>
+    /// Every ceremony that RAN comes back as the typed
+    /// <see cref="FfiStolenOutcome"/> — <c>landed</c> / <c>not-landed</c> /
+    /// <c>landed-for-another</c> / <c>undecided</c>, pre-submit refusals included
+    /// (<c>identity-succession.md</c> § Implementation status today, the
+    /// typed-outcome ruling); only a failure before it could start (unparseable
+    /// secret bytes, no connection) throws. On <c>landed</c> with
+    /// <c>persisted == false</c>, and on any arm with
+    /// <c>carriesTheOnlySeed</c>, the caller holds the only copy of the successor
+    /// seed: it must park it on screen and <b>not</b> tear the session
+    /// down.</para>
     /// </summary>
-    Task<FfiLandedSuccession> SuccessionSucceedWithHeldKitAsync(string kitInput);
+    Task<FfiStolenOutcome> SuccessionSucceedWithHeldKitAsync(string kitInput);
 
     /// <summary>
     /// <c>run_succession_aftermath</c> — the post-succession aftermath: legs 1, 2,

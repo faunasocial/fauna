@@ -27,6 +27,12 @@
 //! [`ENUM_LEDGER_PATH`] across every crate [`enum_crates`] finds; the pass
 //! banner counts the ledger's `owed-` lines, and `--no-owed` fails on any —
 //! an `owed-` line is a debt, and none may land on main.
+//!
+//! While the product version (root `Cargo.toml` `[workspace.package]`) is
+//! `0.1.x`, a break against the base is printed as a note and does not fail
+//! the run; the catch-all, enum-ledger and only-grows checks still do. The
+//! window closes at `0.2.0` (version-compatibility.md § Dimension 2, the
+//! fifth ratified exception).
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -38,8 +44,8 @@ use check_additive_evolution::enums::{
 };
 use check_additive_evolution::{
     RatifiedBreaks, StructMap, StructScan, Violation, check_catch_all_violations,
-    check_ratified_breaks_monotonic, diff_struct_maps_allowing, parse_catch_all_baseline,
-    parse_ratified_breaks,
+    check_ratified_breaks_monotonic, diff_struct_maps_allowing, in_compat_free_window,
+    parse_catch_all_baseline, parse_ratified_breaks, product_version,
 };
 
 /// A crate whose serde structs are part of the frozen compatibility surface.
@@ -180,11 +186,19 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // Breaks against the base (removed / renamed / retyped fields and
+    // variants) are collected apart from the forward-compat discipline:
+    // inside the 0.1.x compat-free window they are reported, not refused.
+    let window = std::fs::read_to_string("Cargo.toml")
+        .ok()
+        .and_then(|t| product_version(&t))
+        .filter(|v| in_compat_free_window(v));
+    let mut breaks = Vec::new();
     let crates = enum_crates();
     let head_enums = build_head_enum_map(&crates);
     let base_enums = build_base_enum_map(&base, &crates);
     violations.extend(check_enum_ledger(&head_enums, &ledger));
-    violations.extend(diff_enum_maps(
+    breaks.extend(diff_enum_maps(
         &base_enums,
         &head_enums,
         &base_ledger,
@@ -201,13 +215,29 @@ fn main() -> ExitCode {
         }
         let head = build_head_map(spec.root);
         let base_map = build_base_map(&base, spec.root);
-        violations.extend(diff_struct_maps_allowing(&base_map, &head, &ratified));
+        breaks.extend(diff_struct_maps_allowing(&base_map, &head, &ratified));
         if spec.check_catch_all {
             violations.extend(check_catch_all_violations(
                 &head,
                 &load_catch_all_baseline(),
             ));
         }
+    }
+
+    match &window {
+        Some(version) if !breaks.is_empty() => {
+            println!(
+                "Product version {version} is inside the 0.1.x compat-free window \
+                 (version-compatibility.md § Dimension 2, the fifth ratified exception): \
+                 {} break(s) against the base are reported, not refused:",
+                breaks.len()
+            );
+            for b in &breaks {
+                println!("  note: {}: {}", b.key, b.message);
+            }
+        }
+        Some(_) => {}
+        None => violations.append(&mut breaks),
     }
 
     if violations.is_empty() {

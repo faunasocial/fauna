@@ -157,9 +157,15 @@ where
         if state.is_shredded(&g) || state.a_sibling_reach_lists(&g) {
             continue;
         }
-        if generation_tip::generation_key_for(store, &g, writer_key, fleet.generation_custody())
-            .await?
-            .is_some()
+        if generation_tip::generation_key_for(
+            store,
+            &g,
+            writer_key,
+            fleet.generation_custody(),
+            Some(state.view()),
+        )
+        .await?
+        .is_some()
         {
             continue;
         }

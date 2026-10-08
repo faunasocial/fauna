@@ -14,7 +14,10 @@
 //! - the **want-list block pull** (`fauna.peer.sync.blocks.pull`) — class-1
 //!   record blocks / class-3 blobs fetched by CID from an admitted peer's
 //!   block plane (the nest's analogs are HTTP byte planes, which the peer
-//!   channel deliberately does not carry — bounded frames instead).
+//!   channel deliberately does not carry — bounded frames instead);
+//! - the **ranged chunk pull** (`fauna.peer.sync.chunks.pull`) — a file-sync
+//!   folder's stored chunk bodies from a sibling device that holds the file,
+//!   sliced to the frame (the nest's analog is `GET /api/v1/chunks/{key}`).
 //!
 //! **Kind-family separability (wormability rule 5).** The same-account leg's
 //! kinds live under `fauna.peer.sync.` — a family distinct from the base
@@ -50,6 +53,9 @@ use fauna_core::encoding::EmbedAsBytes;
 pub const KIND_PEER_SYNC_ADMIT: &str = "fauna.peer.sync.admit";
 /// Peer-channel kind: want-list block pull from an admitted peer.
 pub const KIND_PEER_SYNC_BLOCKS_PULL: &str = "fauna.peer.sync.blocks.pull";
+/// Peer-channel kind: ranged want-list pull of a file-sync folder's stored
+/// chunk bodies from an admitted sibling (see [`PeerSyncChunksPullRequest`]).
+pub const KIND_PEER_SYNC_CHUNKS_PULL: &str = "fauna.peer.sync.chunks.pull";
 
 /// The `DeviceAuthorization` witness kind — same-account admission
 /// (`fauna_core::encoding::verify_device_admission_witness`). The seam's
@@ -175,6 +181,75 @@ pub struct PeerSyncBlocksPullRequest {
 pub struct PeerSyncBlocksPullReply {
     pub blocks: Vec<PeerSyncBlock>,
     pub missing: Vec<ByteBuf>,
+    pub deferred: Vec<ByteBuf>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+// ── fauna.peer.sync.chunks.pull ──────────────────────────────────────────────
+//
+// The file-sync plane's class-3 bytes between two devices of one account
+// (`docs/goal/behavior/file-sync.md` § Content residency: seats fetch content
+// seat↔seat over the peer leg, "the same want-list chunk pull"). The twin of
+// `fauna.peer.share.chunks.pull` on the same-account family: same ranged
+// shape, the folder named where the share leg names its set. Admitted by an
+// own-account `DeviceAuthorization` verdict alone.
+
+/// One want: a chunk by store key, and how much of it the requester holds.
+/// Ranged for the reason the share twin is
+/// ([`crate::peer_share::PeerShareChunkWant`]): a chunk body is up to 8 MiB
+/// and a peer-channel frame caps at 1 MiB.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PeerSyncChunkWant {
+    /// The 32-byte store key (`fauna_core::chunk::ChunkManifest::store_keys`).
+    pub store_key: ByteBuf,
+    /// Byte offset into the stored body to resume from; `0` for a fresh want.
+    /// Past the body's end is a protocol error ([`ERR_UNSUPPORTED`]), never an
+    /// empty slice — an empty slice would read as complete to a puller.
+    #[serde(default)]
+    pub offset: u64,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// `fauna.peer.sync.chunks.pull` request.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PeerSyncChunksPullRequest {
+    /// The folder the chunks belong to, as its `FolderRef` wire string — the
+    /// spelling the relay ask carries (`fauna.sync.chunk.wanted`), which is
+    /// how the serving device routes the want to that folder's engine.
+    pub folder: String,
+    /// The wants, most-wanted first.
+    pub wants: Vec<PeerSyncChunkWant>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// One served slice of a stored chunk body, verbatim as the nest would store
+/// it — still sealed. The receiver checks the completed body against its store
+/// key before using it (rule 4).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PeerSyncChunk {
+    pub store_key: ByteBuf,
+    /// Where this slice starts in the body.
+    #[serde(default)]
+    pub offset: u64,
+    pub bytes: ByteBuf,
+    /// The whole body's length (`offset + bytes.len() == total_len` ends it).
+    #[serde(default)]
+    pub total_len: u64,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// `fauna.peer.sync.chunks.pull` reply — served / missing / deferred, the
+/// three disjoint outcomes of [`PeerSyncBlocksPullReply`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PeerSyncChunksPullReply {
+    pub chunks: Vec<PeerSyncChunk>,
+    /// This device holds no body for it — the nest path serves it.
+    pub missing: Vec<ByteBuf>,
+    /// Not looked at within this reply's budget — re-request.
     pub deferred: Vec<ByteBuf>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,

@@ -678,11 +678,22 @@ private fun RotateKeysForm(
             Column(modifier = Modifier.testTag(Ids.MAIL_ROTATE_KEYS_EXCLUDE_LIST)) {
                 Text(stringResource(R.string.settings_mail_rotate_exclude_caption), style = MaterialTheme.typography.bodySmall)
                 credentials.forEach { c ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(
-                            checked = excluded[c.credentialId] == true,
-                            onCheckedChange = { excluded[c.credentialId] = it },
-                        )
+                    // One `mail-rotate-keys-exclude-item` per password: the row is
+                    // the toggle, so its merged node carries the display name as
+                    // its text and a tap on it ticks the box (the journey ticks the
+                    // item whose text matches).
+                    val ticked = excluded[c.credentialId] == true
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .testTag(Ids.MAIL_ROTATE_KEYS_EXCLUDE_ITEM)
+                            .toggleable(
+                                value = ticked,
+                                role = Role.Checkbox,
+                                onValueChange = { excluded[c.credentialId] = it },
+                            ),
+                    ) {
+                        Checkbox(checked = ticked, onCheckedChange = null)
                         Text(c.displayName)
                     }
                 }

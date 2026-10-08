@@ -34,7 +34,9 @@
 //!    the role transferring on the survivor's own backstop tick when the
 //!    holder exits. (Numbered V8, not V6: the case landed 2026-08-14 spelled
 //!    `V6`, colliding with the T1 case above, and the duplicate is corrected
-//!    here rather than left for a cold reader to trip on.)
+//!    here rather than left for a cold reader to trip on.) Its sibling in the
+//!    same shape pins the agent's priority: an app holder hands the role to a
+//!    sync agent that mounts beside it, and takes it back when the agent exits.
 //! 5. **V9 — the W5.3 migration/adoption critical section** (same section):
 //!    two runtimes assembling *concurrently* against one un-migrated store
 //!    dir both come up, on a store neither corrupted. The exactly-once
@@ -80,9 +82,9 @@ use fauna_protocol::{
     Frame, PushEvent, RpcError, RpcErrorClass, RpcRequester, decode_frame, encode_canonical,
 };
 use fauna_sync_engine::account_runtime::{
-    AccountRuntimeParams, AccountStoreHandle, AccountStoreRuntime, CRED_NAMESPACE, EnrollmentPass,
-    PeerLegBinding, PeerLegPass, PeerTransportFactory, RuntimePrincipal, StoreRoot,
-    resolve_writer_key_serialized,
+    AccountRuntimeParams, AccountStoreHandle, AccountStoreRuntime, AgentPresenceLock,
+    AgentPresenceLockOutcome, CRED_NAMESPACE, EnrollmentPass, PeerLegBinding, PeerLegPass,
+    PeerTransportFactory, RuntimePrincipal, StoreRoot, resolve_writer_key_serialized,
 };
 use fauna_sync_engine::device_endpoints_writer::{EndpointFacts, EndpointsPass};
 
@@ -1980,6 +1982,119 @@ async fn v8_two_same_store_runtimes_elect_one_engine_singleton() {
     other.shutdown().await;
 }
 
+/// **V8's shape, the agent's priority** (`account-runtime.md` § Multi-instance
+/// concurrency → *The agent holds the role when present*, parts 1–3): the
+/// first-come election V8 proves is no longer the whole rule — on a machine
+/// whose sync agent hosts the store, the agent holds the role whichever
+/// process started first, and an app holds it only while no agent does.
+///
+/// One store dir, two runtimes, as in V8: a seed-holding app (every app) and
+/// a seedless one (the agent, W5.5a), plus this test standing in for the
+/// agent's mount by taking the presence lock the way `fauna-sync-agent`'s
+/// `account_host` takes it. The seedless runtime never reads that lock, so
+/// starting it a beat before the lock is taken changes nothing about it — and
+/// makes its first refusal a fact rather than a race with the app's yield.
+///
+/// The flow, every role a report or role fact (convention 14): the app starts
+/// first and pumps; the agent's runtime is refused; the agent arrives (the
+/// lock); the app's between-passes re-read — its presence poll, or the tick —
+/// hands the role over with no command driving it; the app then answers
+/// `skipped_non_holder` and makes no try; the agent's `reconcile_now`
+/// acquires. Then the agent exits — its runtime first, its presence after, as
+/// its teardown orders them — and the app takes the role back on its own
+/// backstop tick: V8's takeover assert, a row another device published after
+/// the exit reaching the shared store only by the app's walk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_app_runtime_yields_the_role_to_an_agent_that_mounts_beside_it_and_takes_it_back_when_it_exits()
+ {
+    let (rpc, _state, tmp) = nest().await;
+    let base: PathBuf = tmp.path().to_path_buf();
+    let store_dir = StoreRoot::at(base.join("machine").join("state"))
+        .store_dir(&account().actor_id_hex())
+        .expect("the machine's store dir");
+
+    // The app — its backstop the one cadence of its own here: the takeover
+    // after the agent exits. Its presence poll's floor is the grant latch's.
+    let app = {
+        let mut p = params(&base, "machine", &rpc);
+        p.backstop_interval = Duration::from_secs(2);
+        AccountStoreRuntime::start(p).await.expect("the app")
+    };
+    let report = app.reconcile_now().await.expect("the app's pass");
+    assert!(
+        !report.skipped_non_holder && app.is_engine_holder(),
+        "alone, the app pumps"
+    );
+
+    // The agent's runtime: the same store dir and credential slot, no seed.
+    let agent = AccountStoreRuntime::start(AccountRuntimeParams {
+        principal: RuntimePrincipal::Seedless,
+        ..params(&base, "machine", &rpc)
+    })
+    .await
+    .expect("the agent's runtime");
+    let report = agent
+        .reconcile_now()
+        .await
+        .expect("the agent's role answer");
+    assert!(
+        report.skipped_non_holder && !agent.is_engine_holder(),
+        "the app holds engine.lock, so the agent's runtime is refused: {report:?}"
+    );
+
+    // The agent arrives. Nothing commands the app: its own re-read hands over.
+    let presence = match AgentPresenceLock::acquire(&store_dir) {
+        AgentPresenceLockOutcome::Held(lock) => lock,
+        other => panic!("the agent's presence lock: {other:?}"),
+    };
+    eventually("the app's re-read hands the role to the agent", || {
+        let app = app.clone();
+        async move { !app.is_engine_holder() }
+    })
+    .await;
+    let report = app.reconcile_now().await.expect("the app's role answer");
+    assert!(
+        report.skipped_non_holder && !report.yielded && !app.is_engine_holder(),
+        "beside a present agent the app makes no try — the free role is the agent's: \
+         {report:?}"
+    );
+    let report = agent.reconcile_now().await.expect("the agent's take");
+    assert!(
+        !report.skipped_non_holder && agent.is_engine_holder(),
+        "the agent takes the yielded role: {report:?}"
+    );
+
+    // The agent exits; a second device publishes after it, so only a walk on
+    // the app brings the row into the shared store.
+    agent.shutdown().await;
+    drop(presence);
+    let other = AccountStoreRuntime::start(params(&base, "other", &rpc))
+        .await
+        .expect("a second device");
+    other
+        .put_preference(KIND_MODERATION, moderation_bytes(&["after-the-agent"]))
+        .await
+        .expect("the second device's write after the agent exits");
+    other.settled().await;
+    eventually(
+        "the app takes the role back on its backstop tick and walks the newer row in",
+        || {
+            let app = app.clone();
+            async move {
+                matches!(
+                    app.get_preference(KIND_MODERATION).await,
+                    Ok(Some(entry)) if entry.value == moderation_bytes(&["after-the-agent"])
+                )
+            }
+        },
+    )
+    .await;
+    assert!(app.is_engine_holder(), "the app holds again");
+
+    app.shutdown().await;
+    other.shutdown().await;
+}
+
 // ── V9: the W5.3 migration/adoption section — two COLD assemblies at once ───
 
 /// The W5.3 critical section through the production assembly path (charter
@@ -3549,6 +3664,7 @@ fn mem_factory(
                         listeners,
                     }),
                     bound_addrs: vec!["203.0.113.7:4711".parse().unwrap()],
+                    file_sync: None,
                 })
             })
         },

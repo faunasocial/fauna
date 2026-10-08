@@ -47,11 +47,11 @@ public sealed partial class ProfilePage : Page
     /// <c>Page_Loaded</c>.</summary>
     private Views.Payments.PaymentsAuthorSections? _payments;
 
-    /// <summary>The gated <c>subscription-tier-form-asking-price</c> input, dropped
-    /// into <c>TierAskingPriceHost</c> — same removable-item reasoning as
-    /// <see cref="_payments"/> (dynamic-features.md § A gated plane's user-facing
-    /// INPUTS excise with it). Null until the first <c>Page_Loaded</c>.</summary>
-    private Views.Payments.AskingPriceInput? _tierAskingPriceInput;
+    /// <summary>The tier editor's three money fields, dropped into
+    /// <c>TierMoneyFieldsHost</c> — same removable-item reasoning as
+    /// <see cref="_payments"/> (dynamic-features.md § Platform-family surface excision
+    /// → The price-and-route class). Null until the first <c>Page_Loaded</c>.</summary>
+    private Views.Payments.SubscriptionTierMoneyFields? _tierMoneyFields;
 #endif
 
     // The nav-parameter clients (held so the OTHER-profile start-DM resolves the
@@ -134,12 +134,8 @@ public sealed partial class ProfilePage : Page
         PaymentsSectionsHost.Content = _payments;
         _payments.Attach(_vm);
 
-        _tierAskingPriceInput = new Views.Payments.AskingPriceInput
-        {
-            AutomationId = Ids.SubscriptionTierFormAskingPrice,
-            Header = S.Get("subscriptions/asking_price"),
-        };
-        TierAskingPriceHost.Content = _tierAskingPriceInput;
+        _tierMoneyFields = new Views.Payments.SubscriptionTierMoneyFields();
+        TierMoneyFieldsHost.Content = _tierMoneyFields;
 #endif
 
         Current = this;
@@ -319,6 +315,30 @@ public sealed partial class ProfilePage : Page
         await _vm.ToggleBlockAsync();
     }
 
+    /// <summary>Report the viewed account (OTHER profile; moderation.md §
+    /// User-initiated reporting → App surface) through the shared report sheet. The
+    /// target is the shared <c>report_actor_target</c>: an account is not sealed, so
+    /// the sheet offers no excerpt checkbox. A landed report is acknowledged OUTSIDE
+    /// the closed sheet (<c>report-status</c>) and has already stored the
+    /// reporter-side hide; a ticked block-author re-reads the block toggle so it
+    /// reads Unblock. A failed send keeps the sheet and reports on
+    /// <c>error-message</c>; a failed block/hide lands there BESIDE the
+    /// acknowledgement.</summary>
+    private async void Report_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null || _clients?.Rpc is not { } rpc) return;
+        ReportStatusText.Visibility = Visibility.Collapsed;
+        RenderError(null);
+        var target = uniffi.fauna_ffi.FaunaFfiMethods.ReportActorTarget(_vm.ActorId);
+        var outcome = await Controls.ReportSheetDialog.ShowAsync(
+            this.XamlRoot, rpc, target, msg => RenderError(msg));
+        if (outcome is null) return;
+        ReportStatusText.Text = outcome.Acknowledgement ?? "";
+        ReportStatusText.Visibility = Visibility.Visible;
+        RenderError(outcome.FollowUpError);
+        if (outcome.BlockedAuthor is not null) await _vm.RefreshBlockStateAsync();
+    }
+
     // ── OTHER-profile offers (subscriber browse) ────────────────────────
     private async void SubscribeOffer_Click(object sender, RoutedEventArgs e)
     {
@@ -327,17 +347,61 @@ public sealed partial class ProfilePage : Page
         UpdateDerivedUi();
     }
 
-    /// <summary>Open the tier's external checkout URL in the default browser (the
-    /// per-row <c>subscription-offer-payment-link</c>; linux <c>offers.rs</c>
-    /// UriLauncher) — refused for a non-https scheme via the shared
-    /// <c>uniffi.fauna_core.FaunaCoreMethods.IsSafePaymentUrl</c> guard (F-CL2
-    /// anti-phishing-redirect class — the same check
-    /// <c>UnlockOfferPaymentLink_Click</c> in <c>FeedPage.xaml.cs</c>
-    /// applies).</summary>
-    private void OfferPaymentLink_Click(object sender, RoutedEventArgs e)
+    // ── The price-and-route class's per-row renders (dynamic-features.md § Platform-family
+    //    surface excision → The price-and-route class) ─────────────────────────────────
+    // Each handler is declared unconditionally with only its body under PAYMENTS: a
+    // DataTemplate event handler is resolved against this class at XAML-compile time and
+    // XAML carries no #if, so hiding the whole method would break the store-safe build the
+    // excision exists to produce (FeedPage.TipDisplayHost_Loaded's shape). Loaded fires
+    // once per realized row, and both lists are rebuilt with Clear + Add, so every row
+    // arrives in a fresh container.
+
+    /// <summary>Fill one tier row's price column (<see cref="Views.Payments.SubscriptionTierPriceText"/>).</summary>
+    private void TierPriceHost_Loaded(object sender, RoutedEventArgs e)
     {
-        if (sender is not FrameworkElement { Tag: SubscriptionOfferRow row } || string.IsNullOrEmpty(row.PaymentUrl))
-            return;
+#if PAYMENTS
+        if (sender is not ContentControl { DataContext: SubscriptionTierRow row } host) return;
+        if (host.Content is not Views.Payments.SubscriptionTierPriceText price)
+            host.Content = price = new Views.Payments.SubscriptionTierPriceText();
+        price.Bind(row);
+#endif   // PAYMENTS
+    }
+
+    /// <summary>Fill one offer row's price line (<see cref="Views.Payments.SubscriptionOfferPriceText"/>).</summary>
+    private void OfferPriceHost_Loaded(object sender, RoutedEventArgs e)
+    {
+#if PAYMENTS
+        if (sender is not ContentControl { DataContext: SubscriptionOfferRow row } host) return;
+        if (host.Content is not Views.Payments.SubscriptionOfferPriceText price)
+            host.Content = price = new Views.Payments.SubscriptionOfferPriceText();
+        price.Bind(row);
+#endif   // PAYMENTS
+    }
+
+    /// <summary>Fill one offer row's checkout link (<see cref="Views.Payments.SubscriptionOfferPaymentLink"/>).</summary>
+    private void OfferPaymentLinkHost_Loaded(object sender, RoutedEventArgs e)
+    {
+#if PAYMENTS
+        if (sender is not ContentControl { DataContext: SubscriptionOfferRow row } host) return;
+        if (host.Content is not Views.Payments.SubscriptionOfferPaymentLink link)
+        {
+            link = new Views.Payments.SubscriptionOfferPaymentLink();
+            link.OpenRequested += (_, r) => OpenOfferPaymentLink(r);
+            host.Content = link;
+        }
+        link.Bind(row);
+#endif   // PAYMENTS
+    }
+
+#if PAYMENTS
+    /// <summary>Open the tier's external checkout URL in the default browser (the per-row
+    /// checkout link; linux <c>offers.rs</c> UriLauncher) — refused for a non-https scheme
+    /// via the shared <c>uniffi.fauna_core.FaunaCoreMethods.IsSafePaymentUrl</c> guard
+    /// (F-CL2 anti-phishing-redirect class — the same check
+    /// <c>FeedPage.OpenUnlockOfferPaymentLink</c> applies).</summary>
+    private void OpenOfferPaymentLink(SubscriptionOfferRow row)
+    {
+        if (string.IsNullOrEmpty(row.PaymentUrl)) return;
         if (!uniffi.fauna_core.FaunaCoreMethods.IsSafePaymentUrl(row.PaymentUrl))
         {
             RenderError(S.Get("subscriptions/unsafe_payment_url"));
@@ -345,6 +409,7 @@ public sealed partial class ProfilePage : Page
         }
         FaunaApp.Services.UrlOpener.Open(row.PaymentUrl, "Profile");
     }
+#endif
 
     // ── Profile edit form (display-name / bio / links) ──────────────────
     // The links two-way-bind via EditLinksList.ItemsSource; display-name + bio
@@ -597,27 +662,37 @@ public sealed partial class ProfilePage : Page
         FormNameBox.Text = _vm.FormName;
         FormRankBox.Text = _vm.FormRank;
         FormDescriptionBox.Text = _vm.FormDescription;
-        FormPriceHintBox.Text = _vm.FormPriceHint;
-        FormPaymentUrlBox.Text = _vm.FormPaymentUrl;
         FormAutoApproveToggle.IsOn = _vm.FormAutoApprove;
         FormNameBox.IsReadOnly = _vm.EditingTier is not null;
 #if PAYMENTS
-        if (_tierAskingPriceInput is not null) _tierAskingPriceInput.Text = _vm.FormAskingPriceSats;
+        if (_tierMoneyFields is not null)
+        {
+            _tierMoneyFields.PriceHint = _vm.FormPriceHint;
+            _tierMoneyFields.AskingPriceSats = _vm.FormAskingPriceSats;
+            _tierMoneyFields.PaymentUrl = _vm.FormPaymentUrl;
+        }
 #endif
     }
 
-    /// <summary>Pull the form fields into the VM before <c>SaveFormAsync</c>.</summary>
+    /// <summary>Pull the form fields into the VM before <c>SaveFormAsync</c>. A store-safe
+    /// build has no money fields to pull, so the VM keeps the price hint, payment URL and
+    /// asking price the form was opened with — an edited priced tier keeps its price
+    /// (dynamic-features.md § Platform-family surface excision → The price-and-route class,
+    /// omit-means-keep).</summary>
     private void SyncFormToVm()
     {
         if (_vm is null) return;
         _vm.FormName = FormNameBox.Text;
         _vm.FormRank = FormRankBox.Text;
         _vm.FormDescription = FormDescriptionBox.Text;
-        _vm.FormPriceHint = FormPriceHintBox.Text;
-        _vm.FormPaymentUrl = FormPaymentUrlBox.Text;
         _vm.FormAutoApprove = FormAutoApproveToggle.IsOn;
 #if PAYMENTS
-        if (_tierAskingPriceInput is not null) _vm.FormAskingPriceSats = _tierAskingPriceInput.Text;
+        if (_tierMoneyFields is not null)
+        {
+            _vm.FormPriceHint = _tierMoneyFields.PriceHint;
+            _vm.FormAskingPriceSats = _tierMoneyFields.AskingPriceSats;
+            _vm.FormPaymentUrl = _tierMoneyFields.PaymentUrl;
+        }
 #endif
     }
 
@@ -634,8 +709,8 @@ public sealed partial class ProfilePage : Page
 }
 
 /// <summary>Maps a bool to <see cref="Visibility"/> (Visible when true) — the
-/// per-row <c>subscription-offer-payment-link</c> shows only when the tier carries a
-/// checkout URL.</summary>
+/// per-row <c>subscription-request-paid-badge</c> shows only when the request was
+/// paid through a configured provider.</summary>
 public sealed class BoolToVisibilityConverter : Microsoft.UI.Xaml.Data.IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, string language) =>

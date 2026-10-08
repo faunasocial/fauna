@@ -113,24 +113,24 @@ pub(crate) async fn set_opt_in(
     (reg.intent(), result.err().map(|e| e.to_string()))
 }
 
-/// The inline line the control paints with nothing failing in-flight: the
-/// desktops' two runtime causes (`settings.md` § Push notifications), shown
-/// only while this install is opted in — an opted-out install needs no sink.
-/// `sink` is the agent's `notification_sink` (`None` = cannot tell, which
-/// shows nothing); `agent_running` whether its last status call succeeded.
+/// The inline line the control paints with nothing failing in-flight — the
+/// shared rule (`fauna_client_push::registration::standing_failure`: shown
+/// only while this install is opted in, the unreachable agent first) mapped to
+/// tui's string. `sink` is the agent's `notification_sink`; `agent_running`
+/// whether its last status call succeeded.
 pub(crate) fn standing_failure(
     opted_in: bool,
     agent_running: bool,
     sink: Option<bool>,
 ) -> Option<&'static str> {
+    use fauna_client_push::registration::StandingFailure;
     use fauna_i18n::strings::settings::push_notifications as t;
-    if !opted_in {
-        return None;
-    }
-    if !agent_running {
-        return Some(t::AGENT_UNREACHABLE);
-    }
-    (sink == Some(false)).then_some(t::NO_SINK)
+    fauna_client_push::registration::standing_failure(opted_in, agent_running, sink).map(
+        |failure| match failure {
+            StandingFailure::AgentUnreachable => t::AGENT_UNREACHABLE,
+            StandingFailure::NoSink => t::NO_SINK,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -138,23 +138,15 @@ mod tests {
     use super::*;
     use fauna_i18n::strings::settings::push_notifications as t;
 
+    /// The rule is the shared crate's (and pinned there); this pins tui's
+    /// mapping of each answer to its string.
     #[test]
-    fn an_opted_out_install_shows_no_standing_failure() {
+    fn each_standing_failure_paints_its_own_string() {
         assert_eq!(standing_failure(false, false, Some(false)), None);
-    }
-
-    #[test]
-    fn an_unreachable_agent_is_named_first() {
         assert_eq!(
             standing_failure(true, false, None),
             Some(t::AGENT_UNREACHABLE)
         );
-    }
-
-    #[test]
-    fn a_headless_agent_says_no_sink_and_an_older_one_says_nothing() {
         assert_eq!(standing_failure(true, true, Some(false)), Some(t::NO_SINK));
-        assert_eq!(standing_failure(true, true, None), None);
-        assert_eq!(standing_failure(true, true, Some(true)), None);
     }
 }

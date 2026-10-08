@@ -216,12 +216,26 @@ public final class BackupDestinationsVM {
             auditRows = [:]
             return
         }
+        let ownCustodian = await ownCustodianStore()
         guard
             let rows = try? await api.backupAuditRunPass(
                 statePath: FaunaClient.backupAuditStatePath,
-                syncStateDir: FaunaClient.syncStateDir)
+                syncStateDir: FaunaClient.syncStateDir,
+                ownCustodian: ownCustodian)
         else { return }
         auditRows = Dictionary(uniqueKeysWithValues: rows.map { ($0.destinationId, $0) })
+    }
+
+    /// This device's own custodian store read, handed to the audit pass so the
+    /// shared fold can keep the fifth alert reason (*source regressed*) up until
+    /// recovered. The same `CustodianStoreAccess` read and device id the
+    /// orphaned-store verdict uses; nothing is decided here — the shared pass
+    /// picks the row. A missing seam, a missing device id or a failed read is
+    /// `nil` ("no store was read"), which leaves the row's record standing.
+    func ownCustodianStore() async -> FfiOwnCustodianStore? {
+        guard let custodianStore, let deviceId, !deviceId.isEmpty else { return nil }
+        guard let info = try? await custodianStore.custodianStoreFootprint() else { return nil }
+        return FfiOwnCustodianStore(deviceId: deviceId, sourceRegressions: info.sourceRegressions)
     }
 
     /// Read the LIVE per-destination status and rebuild the `statuses` map, keyed
@@ -757,14 +771,20 @@ public final class BackupDestinationsVM {
         return label
     }
 
-    /// `backup-audit-alert` banner text for a row, or `nil` for a healthy
-    /// destination (the banner renders only then — `ui/backups.md` §
+    /// `backup-audit-alert` banner texts for a row — one per reason the shared
+    /// pass yields (`alertReasons`: the standing verdict AND the fifth reason's
+    /// open recovery window can both hold at once), empty for a healthy
+    /// destination (the banners render only then — `ui/backups.md` §
     /// Audit-alert surface).
-    public func alertText(for dest: FfiBackupDestinationView) -> String? {
-        guard let row = auditRows[dest.destinationId], let reason = row.alertReason else {
-            return nil
+    public func alertTexts(for dest: FfiBackupDestinationView) -> [String] {
+        guard let row = auditRows[dest.destinationId] else { return [] }
+        return Self.alertTexts(row, destinationLabel: label(for: dest))
+    }
+
+    static func alertTexts(_ row: FfiDestinationAuditRow, destinationLabel: String) -> [String] {
+        row.alertReasons.map {
+            renderLocalizedText(backupAuditAlertLabel(reason: $0, destinationLabel: destinationLabel))
         }
-        return renderLocalizedText(backupAuditAlertLabel(reason: reason, destinationLabel: label(for: dest)))
     }
 
     /// `backup-destination-last-audit-time` text for a **client-device

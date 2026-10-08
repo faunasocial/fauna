@@ -1068,8 +1068,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::SelectThread(id) => {
             let thread_id = ThreadId(id);
             manager.select_thread(thread_id.clone());
-            show_detail(&mut app.conversations, thread_id);
-            None
+            show_detail(&mut app.conversations, thread_id.clone());
+            // A thread addressed to one of the account's own mailing lists shows
+            // the list-send warning on its compose (`mail-mass-mailing.md`
+            // § Composing a list message); the manager answers None for the rest.
+            Some(Op::RefreshListSend {
+                manager,
+                thread_id: Some(thread_id),
+            })
         }
         Action::SelectThreadAndMessage {
             thread_id,
@@ -1634,6 +1640,13 @@ pub enum Op {
     AcceptRecipientChip {
         manager: Arc<ConversationsManager>,
     },
+    /// Re-derive a compose's list-send view (`refresh_list_send`) — the opened
+    /// thread's, or the new-thread compose's for `None`. The snapshot notify
+    /// repaints; nothing to surface.
+    RefreshListSend {
+        manager: Arc<ConversationsManager>,
+        thread_id: Option<ThreadId>,
+    },
     /// `add-participant-confirm` — apply the membership change (`confirm_add_participant`).
     ConfirmAddParticipant {
         manager: Arc<ConversationsManager>,
@@ -1814,6 +1827,11 @@ impl Op {
             Op::AcceptRecipientChip { manager } => {
                 manager.resolve_recipient().await;
                 manager.accept_current_recipient_chip();
+                manager.refresh_list_send(None).await;
+                Outcome::Done
+            }
+            Op::RefreshListSend { manager, thread_id } => {
+                manager.refresh_list_send(thread_id).await;
                 Outcome::Done
             }
             // The overlay closes and the roster updates via the manager's own
@@ -2666,6 +2684,9 @@ fn compose_elements(snapshot: &ConversationsSnapshot) -> Vec<Element> {
         conversations::unified::TOPIC_TOGGLE_ADD,
         true,
         Gesture::Conversations(Action::ToggleTopic),
+    ));
+    out.extend(list_send_elements(
+        compose.and_then(|c| c.list_send.as_ref()),
     ));
     let sending = matches!(compose.map(|c| &c.send_state), Some(SendState::Sending));
     // The rail the first committed chip resolves to — the offline gate's
@@ -3838,6 +3859,7 @@ fn reply_compose_bar(
             .labelled(conversations::unified::TOPIC_INPUT_PLACEHOLDER),
         );
     }
+    out.extend(list_send_elements(compose.list_send.as_ref()));
     let sending = matches!(compose.send_state, SendState::Sending);
     out.push(Element::gesture_button(
         ids::DM_SEND_BUTTON,
@@ -3845,6 +3867,34 @@ fn reply_compose_bar(
         !sending,
         Gesture::Conversations(Action::SendThread { rail }),
     ));
+    out
+}
+
+/// The compose form's list-send elements, present only while the compose's one
+/// mail recipient is one of the account's own mailing lists
+/// (`mail-mass-mailing.md` § Composing a list message; ui.yaml `dm-compose-form`
+/// `optional_elements`). Shared Rust derives every text
+/// (`fauna_conversations::list_send`); this only paints them, beside Send.
+fn list_send_elements(view: Option<&fauna_conversations::ListSendView>) -> Vec<Element> {
+    let Some(view) = view else {
+        return Vec::new();
+    };
+    let mut out = vec![Element::label(
+        ids::DM_COMPOSE_LIST_SEND_WARNING,
+        crate::wizard::localized(&view.send_warning),
+    )];
+    if let Some(warning) = &view.quota_warning {
+        out.push(Element::label(
+            ids::DM_COMPOSE_LIST_QUOTA_WARNING,
+            crate::wizard::localized(warning),
+        ));
+    }
+    if let Some(progress) = &view.progress {
+        out.push(Element::label(
+            ids::DM_COMPOSE_LIST_SEND_PROGRESS,
+            crate::wizard::localized(progress),
+        ));
+    }
     out
 }
 
@@ -4427,6 +4477,8 @@ pub async fn accept_recipient(state: &ConversationsState) -> Result<(), String> 
     if !manager.accept_current_recipient_chip() {
         return Err(fauna_conversations::manager::ACCEPT_RECIPIENT_NO_CHIP_REASON.to_string());
     }
+    // The same follow-up the keyboard accept runs (`Op::AcceptRecipientChip`).
+    manager.refresh_list_send(None).await;
     Ok(())
 }
 

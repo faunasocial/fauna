@@ -156,7 +156,7 @@ async fn handshake_mints_token_for_registered_actor() {
     assert_eq!(resolved.expect("token valid").0, kp.actor_id().0);
 }
 
-/// auth-handshake finding #1: two concurrent handshakes for the **same actor** at
+/// The auth-handshake fix: two concurrent handshakes for the **same actor** at
 /// the **same timestamp** must both mint a token when each carries a distinct
 /// `client_nonce`. The nonce is folded into the signed message, so the two
 /// (otherwise byte-identical, deterministic-Ed25519) signatures differ and the

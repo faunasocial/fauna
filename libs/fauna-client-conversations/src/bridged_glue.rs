@@ -82,19 +82,28 @@ pub fn seal_bridged_for_self(own_public: &XWingPublicKey, body: &str) -> Result<
         .map_err(|e| e.to_string())
 }
 
-/// [`BridgedKeys::open_bridged`] over a standing key set and its mail-epoch
-/// roots — the one open both targets' key sets apply. The seal instant is the
-/// nest's `received_at`, never the far side's claim.
+/// [`BridgedKeys::open_bridged`] over a standing key set, its mail-epoch
+/// roots and its prior generations' retirement instants (aligned with
+/// `standing[1..]`; empty walks the whole set) — the one open both targets'
+/// key sets apply. The seal instant is the nest's `received_at`, never the
+/// far side's claim.
 pub fn open_bridged_row(
     standing: &[StandingMailKeypair],
     epoch_roots: &[[u8; 32]],
+    retired_at_unix: &[u64],
     sealed: &[u8],
     received_at_ms: i64,
 ) -> Option<String> {
     let roots: Vec<&[u8; 32]> = epoch_roots.iter().collect();
     let secs = u64::try_from(received_at_ms / 1000).unwrap_or(0);
-    let plain =
-        fauna_mail::open_sealed_inner_record_with_keys(sealed, &roots, secs, standing).ok()?;
+    let plain = fauna_mail::open_sealed_inner_record_with_keys(
+        sealed,
+        &roots,
+        secs,
+        standing,
+        retired_at_unix,
+    )
+    .ok()?;
     String::from_utf8(plain).ok()
 }
 
@@ -416,7 +425,13 @@ impl BridgedKeys for MailKeys {
     }
 
     fn open_bridged(&self, sealed: &[u8], received_at_ms: i64) -> Option<String> {
-        open_bridged_row(&self.standing, &self.epoch_roots, sealed, received_at_ms)
+        open_bridged_row(
+            &self.standing,
+            &self.epoch_roots,
+            &self.retired_at_unix,
+            sealed,
+            received_at_ms,
+        )
     }
 }
 
@@ -493,7 +508,7 @@ mod tests {
     };
 
     fn keys(msek: [u8; 32]) -> MailKeys {
-        MailKeys::from_custody([0; 32], &msek, &[])
+        MailKeys::from_custody([0; 32], &msek, &[], &[])
     }
 
     fn info() -> BridgedRoomInfo {

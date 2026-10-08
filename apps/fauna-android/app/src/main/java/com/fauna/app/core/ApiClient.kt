@@ -2968,6 +2968,42 @@ class ApiClient @Inject constructor(
     suspend fun moderationActions(): List<FfiObligationAction> =
         moderationRpc().actions()
 
+    // ── User-initiated reporting (moderation.md § User-initiated reporting) ──
+    // Thin seams over the shared-Rust faces (`libs/fauna-ffi/src/abuse_report.rs`)
+    // — the request is built by the shared `report_request`, the rows arrive
+    // already worded; the app only paints them.
+
+    /** `fauna.moderation.abuse_report.submit`, built from the sheet by shared Rust. */
+    suspend fun abuseReportSubmit(
+        target: com.fauna.ffi.FfiReportTarget,
+        form: com.fauna.ffi.FfiReportForm,
+    ): com.fauna.ffi.FfiReportSent {
+        ensureAuthenticated()
+        return moderationRpc().abuseReportSubmit(target, form)
+    }
+
+    /** `fauna.moderation.abuse_report.mine` — the reporter's ledger, newest first, worded. */
+    suspend fun abuseReportMine(): List<com.fauna.ffi.FfiReportLedgerRow> =
+        moderationRpc().abuseReportMine()
+
+    /** `fauna.moderation.abuse_report.withdraw`. */
+    suspend fun abuseReportWithdraw(reportId: String) =
+        moderationRpc().abuseReportWithdraw(reportId)
+
+    /** `fauna.moderation.abuse_report.queue` — the open reports (admin-class), oldest first, worded. */
+    suspend fun abuseReportQueue(): List<com.fauna.ffi.FfiReportQueueRow> =
+        adminRpc().abuseReportQueue()
+
+    /** `fauna.moderation.abuse_report.resolve` — a record, not an action; [acted] false dismisses. */
+    suspend fun abuseReportResolve(reportId: String, acted: Boolean) =
+        adminRpc().abuseReportResolve(reportId, acted)
+
+    /** The ids the owner hid by reporting them (`fauna.state.moderation`'s hidden-content list). */
+    suspend fun loadHiddenContent(): List<String> = com.fauna.ffi.loadHiddenContent()
+
+    /** Hide a reported subject for the owner; returns the stored list. */
+    suspend fun hideReported(id: String): List<String> = com.fauna.ffi.hideReported(id)
+
     /**
      * `fauna.moderation.train` — submit a spam/ham training correction for one
      * queue item (the Moderation page's `train-correction-button` sends `"ham"` —
@@ -3140,6 +3176,55 @@ class ApiClient @Inject constructor(
     fun recoveryKitDisplayUri(kitSecretHex: String): String =
         com.fauna.ffi.recoveryKitDisplayUri(
             kitSecretHex, ownerSecretBytes(), sessionAccount.handle.orEmpty(), nodeUrl,
+        )
+
+    /**
+     * The actor this client's seat signs as — derived from the secret it
+     * authenticated with, or `null` with none. The succession discharges
+     * compare it to the owed successor before claiming: a view model still
+     * holding the PREDECESSOR's seat would spend the one-shot claim on a socket
+     * the ceremony revoked (apple's `APIClient.boundActorIdHex`).
+     */
+    val boundActorIdHex: String?
+        get() = secret?.let { hex ->
+            runCatching { HexUtil.bytesToHex(com.fauna.ffi.actorIdFromSecret(HexUtil.hexToBytes(hex))) }
+                .getOrNull()
+        }
+
+    /**
+     * `identity-stolen-button` — the whole "my identity was stolen" ceremony
+     * with the kit in hand (`settings.md` § Recovery kit). Rides THIS connected
+     * client deliberately, never a throwaway: the ceremony reads the old
+     * identity's live MLS engine off this client's own stashed conversations
+     * session, and a fresh client would answer "no engine", silently skipping a
+     * sweep it could have run. The resolver is invoked only after the
+     * successor's connect (see [SuccessorStorePath]).
+     */
+    suspend fun successionSucceedWithHeldKit(heldKitInput: String): com.fauna.ffi.FfiStolenOutcome =
+        com.fauna.ffi.successionSucceedWithHeldKit(
+            nestRpc(), nodeUrl, ownerSecretBytes(), heldKitInput,
+            accountStores.accountRegistry, SuccessorStorePath(accountStores),
+        )
+
+    /**
+     * `recovery-kit-sweep-retry-button` — finish a sweep the ceremony left
+     * unfinished. Never fails outright: every arm, a transport failure
+     * included, is an answer carrying its own sentence; only reaching the nest
+     * at all can throw here. The old store's resolver is the PURE one
+     * ([RetiredIdentityStorePath]).
+     */
+    suspend fun successionRetryGroupSweep(): com.fauna.ffi.FfiSweepRetryAnswer =
+        com.fauna.ffi.successionRetryGroupSweep(
+            nestRpc(), ownerSecretBytes(), accountStores.accountRegistry,
+            RetiredIdentityStorePath(accountStores), SuccessorStorePath(accountStores),
+        )
+
+    /** The unbidden press a relaunch adoption owes — the same ceremony as
+     *  [successionRetryGroupSweep], answering with the report to park as well. */
+    suspend fun successionDischargeOwedSweep(): com.fauna.ffi.FfiOwedSweepAnswer =
+        com.fauna.ffi.successionDischargeOwedSweep(
+            nestRpc(), ownerSecretBytes(), accountStores.accountRegistry,
+            RetiredIdentityStorePath(accountStores), SuccessorStorePath(accountStores),
         )
 
     // ── Unattested-member review ──

@@ -52,7 +52,7 @@ fn conflict() -> RpcError {
 /// over-size blob is a clean domain error, not a raw WS-frame drop (the shared
 /// client wrapper checks this before the put; a non-conforming client can still
 /// over-send). A `history/<hex>` slice hitting this needs the deferred chunked
-/// history path (finding 1 / design § 2).
+/// history path (design § 2).
 fn too_large(size: usize) -> RpcError {
     let mut e = RpcError::new(CODE_TOO_LARGE, "error.mls.too_large");
     e.details = Some(Box::new(Value::String(format!(
@@ -575,7 +575,7 @@ mod tests {
         assert_eq!(err.code, "fauna.protocol.malformed");
     }
 
-    /// Finding 1: a blob over `MAX_MLS_REPLICA_BYTES` is rejected with the clean
+    /// A blob over `MAX_MLS_REPLICA_BYTES` is rejected with the clean
     /// `fauna.mls.too_large` domain error (defense-in-depth vs. a raw frame drop);
     /// a blob exactly at the cap is accepted.
     #[tokio::test]

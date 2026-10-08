@@ -15,11 +15,13 @@
 //! [`resolve_tip`] (trust-consulting, [`GenerationTrust`]) answers the writer
 //! door's question: *which tip do I seal under, if any*. [`generation_key_for`]
 //! (integrity-only) answers the reader's: *can I key this row's named
-//! generation*. The reader deliberately consults no [`FleetView`] and no
-//! receipts — historical generations legitimately name devices that are
-//! removed **now**, and a fresh device bootstrapping from the feed must read
-//! rows sealed under every retained generation ("readers walk every retained
-//! generation, so nothing written in the window is lost"). What reading *does*
+//! generation*. The reader deliberately consults no receipts, and its
+//! [`FleetView`] gates one thing only — whether a `Shredded` mint is authored
+//! and so drops the key (below): historical generations legitimately name
+//! devices that are removed **now**, and a fresh device bootstrapping from the
+//! feed must read rows sealed under every retained generation ("readers walk
+//! every retained generation, so nothing written in the window is lost"). What
+//! reading *does*
 //! verify is integrity: the mint row's logical key must be the content-derived
 //! id of its own core (a squatted or forged row keys nothing), and every
 //! unwrap re-computes the key commitment against that core
@@ -66,9 +68,15 @@ use fauna_protocol::merge_policy::{
 ///   generation-axis ruling) — real crypto-shredding at generation
 ///   granularity. A retained key that survived its generation's shred would
 ///   quietly defeat that deletion on every machine whose slot carries it, so
-///   any observation of a `Shredded` mint drops the entry. (The shred
-///   *calling surface* — user-gated, not yet built — owes the same drop on
-///   the device that originates the shred.)
+///   any observation of an **authored** `Shredded` mint drops the entry —
+///   one a reader's [`FleetView`] admits
+///   ([`GenerationMintRecord::shred_is_authored`]); an unauthored one drops
+///   nothing, since any `BackupKey` holder can write it (`account-data-taxonomy.md`
+///   § *Fleet-scope reclamation* → *the authored shred*). The drop is eventual
+///   and idempotent across the read below, the walk's hook and the
+///   reclamation pass, since the shredder's own enrollment can merge after its
+///   shred. (The shred *calling surface* — user-gated, not yet built — owes
+///   the same drop on the device that originates the shred.)
 pub trait RetainedKeyCustody: Send + Sync {
     /// The retained key for `generation`, when one rode the bundle.
     fn retained_generation_key(&self, generation: &[u8; 32]) -> Option<GenerationKey>;
@@ -408,16 +416,27 @@ pub async fn key_for_tip<B: StoreBackend>(
 
 /// This device's key for an **arbitrary named generation** — the read half:
 /// integrity-only, deliberately no admissibility (module docs). `Ok(None)`
-/// means "this generation keys nothing here": no mint row, a shredded or
-/// forged one, no wrap reaching this device, or a wrap that refuses to open —
-/// every one of those is attacker-suppliable row content, so the caller skips
-/// the row (a warn line is the witness for the refusal cases) and a later
-/// reconcile re-presents it; `Err` is a store failure only.
+/// means "this generation keys nothing here": no mint row, an authored shred
+/// or a forged mint, no wrap reaching this device, or a wrap that refuses to
+/// open — every one of those is attacker-suppliable row content, so the
+/// caller skips the row (a warn line is the witness for the refusal cases) and
+/// a later reconcile re-presents it; `Err` is a store failure only.
+///
+/// `view` is this replica's [`FleetView`], built ONCE per pass by the caller
+/// (this sits on the per-row open path, so it never reads the device set
+/// itself), and is consulted for one question only: is a `Shredded` mint
+/// row authored ([`GenerationMintRecord::shred_is_authored`])? Authored →
+/// the retained key is dropped and nothing keys the generation; unauthored —
+/// or `None`, which never reads authored — → the retained bundle answers as if
+/// the mint row were absent, because the plane's wraps are gone either way
+/// and custody is then the only source (`account-data-taxonomy.md`
+/// § *Fleet-scope reclamation* → *the authored shred*).
 pub async fn generation_key_for<B: StoreBackend>(
     store: &AccountStore<B>,
     generation_id: &[u8; 32],
     writer_key: &SigningKey,
     custody: Option<&dyn RetainedKeyCustody>,
+    view: Option<&FleetView>,
 ) -> Result<Option<GenerationKey>> {
     // The retained bundle (T10 carriage) answers wherever the *plane* cannot
     // — deliberately consulted only after the mint row has been looked at,
@@ -448,20 +467,30 @@ pub async fn generation_key_for<B: StoreBackend>(
     // `minter_sig` deliberately unverified here: reading is integrity-only
     // (key↔id + commitment at the unwrap) — authorship gates *candidacy*, and
     // refusing to read rows the fleet historically sealed would lose data.
-    let GenerationMintRecord::Minted {
-        core,
-        minter_sig: _,
-        wraps,
-    } = record
-    else {
-        // Shredded: the crypto-shred contract — the wraps are gone from the
-        // plane by design, AND the device-side half is to drop the retained
-        // key, or every slot that carried it would quietly defeat the
-        // deletion ([`RetainedKeyCustody`], duty three).
-        if let Some(custody) = custody {
-            custody.drop_generation_key(generation_id);
+    let (core, wraps) = match record {
+        GenerationMintRecord::Minted {
+            core,
+            minter_sig: _,
+            wraps,
+        } => (core, wraps),
+        shred @ GenerationMintRecord::Shredded { .. } => {
+            // Authored (by a verified member of this replica's current view,
+            // over THIS row's id): the crypto-shred contract — the wraps are
+            // gone from the plane by design, AND the device-side half is to
+            // drop the retained key, or every slot that carried it would
+            // quietly defeat the deletion ([`RetainedKeyCustody`], duty
+            // three).
+            if view.is_some_and(|v| shred.shred_is_authored(v) == Ok(*generation_id)) {
+                if let Some(custody) = custody {
+                    custody.drop_generation_key(generation_id);
+                }
+                return Ok(None);
+            }
+            // Unauthored — any `BackupKey` holder can write one: the
+            // generation is out of candidacy (the resolver's act), but no key
+            // drops on it, so the bundle answers as if the row were absent.
+            return Ok(consult());
         }
-        return Ok(None);
     };
     // The Key↔id binding, read back exactly as the resolver reads it: a row
     // squatting a foreign key (or a forged id over someone's core) keys
@@ -590,7 +619,8 @@ async fn topup_wraps<B: StoreBackend>(
 mod tests {
     use super::*;
     use crate::generation_fixture_test_support::{
-        Bundle, ESCROW_SEED, THEM, US, device_id_of, device_key, fixture, machinery_row, member_of,
+        Bundle, ESCROW_SEED, THEM, US, device_id_of, device_key, enrollment_row, fixture,
+        machinery_row, member_of,
     };
     use fauna_core::generation::{EscrowTargetRecord, derive_escrow_xwing_keypair};
     use fauna_mls::wrapped_blob::generation_wraps::build_mint;
@@ -634,7 +664,7 @@ mod tests {
 
         let good = Bundle::default();
         good.record_generation_key(&g, &key);
-        let served = generation_key_for(&f.store, &g, &f.writer_key, Some(&good))
+        let served = generation_key_for(&f.store, &g, &f.writer_key, Some(&good), None)
             .await
             .unwrap();
         assert_eq!(served.map(|k| *k.as_bytes()), Some(*key.as_bytes()));
@@ -642,7 +672,7 @@ mod tests {
         let bad = Bundle::default();
         bad.record_generation_key(&g, &foreign_key());
         assert!(
-            generation_key_for(&f.store, &g, &f.writer_key, Some(&bad))
+            generation_key_for(&f.store, &g, &f.writer_key, Some(&bad), None)
                 .await
                 .unwrap()
                 .is_none()
@@ -697,10 +727,108 @@ mod tests {
         let bad = Bundle::default();
         bad.record_generation_key(&g, &foreign_key());
         assert!(
-            generation_key_for(&f.store, &g, &f.writer_key, Some(&bad))
+            generation_key_for(&f.store, &g, &f.writer_key, Some(&bad), None)
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+    // ── The authored shred ─────────────────────────────────────
+
+    /// Absorb `g`'s mint row to `record` (a `Shredded` one), as a merge would.
+    async fn shred_to(
+        f: &crate::generation_fixture_test_support::Fixture,
+        g: &[u8; 32],
+        record: &GenerationMintRecord,
+    ) {
+        f.put(machinery_row(
+            KIND_GENERATION_MINT,
+            fauna_core::hex32::encode(g),
+            record,
+        ))
+        .await;
+    }
+
+    /// This fixture's verified view (US enrolled), built once as a pass would.
+    async fn view_of(f: &crate::generation_fixture_test_support::Fixture) -> FleetView {
+        crate::fleet_removal::fleet_view(&f.store, &f.trust)
+            .await
+            .unwrap()
+    }
+
+    /// **An unauthored shred drops no key** (`account-data-taxonomy.md`
+    /// § *Fleet-scope reclamation* → *the authored shred*): a sig-less
+    /// `Shredded` for a generation this device keys — what any `BackupKey`
+    /// holder can write — leaves the retained key in custody and served, as
+    /// if the mint row were absent; so does one signed by a device that is
+    /// no member. Red-verified: with the `Shredded` arm gated on
+    /// `matches!(.., Shredded { .. })` again, the key is dropped and `None`
+    /// returned.
+    #[tokio::test]
+    async fn an_unauthored_shred_leaves_the_retained_key_served_and_in_custody() {
+        let f = fixture().await;
+        f.put(enrollment_row(US)).await;
+        let (g, key, core) = f.mint_over(&[member_of(US)]).await;
+        let bundle = Bundle::default();
+        bundle.record_generation_key(&g, &key);
+        let view = view_of(&f).await;
+
+        for forged in [
+            GenerationMintRecord::Shredded {
+                core: core.clone(),
+                shredded_at_ms: 9_000,
+                shredded_by: device_id_of(US),
+                shredder_sig: vec![],
+            },
+            fauna_core::generation::sign_shred(&device_key(THEM), core.clone(), 9_000).unwrap(),
+        ] {
+            shred_to(&f, &g, &forged).await;
+            let served =
+                generation_key_for(&f.store, &g, &f.writer_key, Some(&bundle), Some(&view))
+                    .await
+                    .unwrap();
+            assert_eq!(
+                served.map(|k| *k.as_bytes()),
+                Some(*key.as_bytes()),
+                "an unauthored shred is read as an absent mint row: the bundle answers"
+            );
+            assert!(
+                bundle.retained_generation_key(&g).is_some(),
+                "an unauthored shred drops no retained key"
+            );
+        }
+    }
+
+    /// **An authored shred drops the key — and only under a view.** Signed by
+    /// a verified member, the shred drops the retained key and keys nothing;
+    /// with no view in hand the same row reads unauthored, never authored.
+    #[tokio::test]
+    async fn an_authored_shred_drops_the_retained_key_and_a_viewless_read_never_does() {
+        let f = fixture().await;
+        f.put(enrollment_row(US)).await;
+        let (g, key, core) = f.mint_over(&[member_of(US)]).await;
+        let bundle = Bundle::default();
+        bundle.record_generation_key(&g, &key);
+        let authored = fauna_core::generation::sign_shred(&device_key(US), core, 9_000).unwrap();
+        shred_to(&f, &g, &authored).await;
+
+        let viewless = generation_key_for(&f.store, &g, &f.writer_key, Some(&bundle), None)
+            .await
+            .unwrap();
+        assert!(
+            viewless.is_some(),
+            "no view: unauthored, the bundle answers"
+        );
+        assert!(bundle.retained_generation_key(&g).is_some());
+
+        let view = view_of(&f).await;
+        let opened = generation_key_for(&f.store, &g, &f.writer_key, Some(&bundle), Some(&view))
+            .await
+            .unwrap();
+        assert!(opened.is_none(), "an authored shred keys nothing");
+        assert!(
+            bundle.retained_generation_key(&g).is_none(),
+            "an authored shred drops the retained key"
         );
     }
 }

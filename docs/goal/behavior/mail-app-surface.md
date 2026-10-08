@@ -152,7 +152,7 @@ a message-kind since a cursor" pattern that `fauna.conversations.channel
   of the snapshot — the current MSEK's plus one per prior grace generation
   in `MailConfig.prior_mseks` — from the one shared derivation both are built
   from (`fauna_mls::wrapped_blob::derive_standing_mail_keypairs`; the set,
-  the grace window and its cap are owned by
+  every generation ever retired, are owned by
   `../architecture/owner-key-material.md` § Path B-sibling-2), and trials
   them through the same shared chain (`open_mail_record_standing`, the
   standing arm of `open_mail_epoch_chain`). So after a rotate-mail-keys the

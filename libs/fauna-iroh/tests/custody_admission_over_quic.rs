@@ -168,6 +168,7 @@ async fn the_custody_grant_admits_and_refuses_over_real_quic() {
                     Ok(PeerLegBinding {
                         transport: Arc::new(transport),
                         bound_addrs,
+                        file_sync: None,
                     })
                 })
             },

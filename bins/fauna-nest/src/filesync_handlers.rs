@@ -4178,6 +4178,7 @@ mod tests {
                 uid_next: 2,
                 highestmodseq: 1,
                 attrs: vec![],
+                pruned_modseq: 0,
             });
         let placement_blob = fauna_core::encoding::canonical_encode(&placement)
             .expect("serialize MailPlacementManifest");

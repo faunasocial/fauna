@@ -27,6 +27,7 @@ mod engine_driver;
 #[cfg(target_os = "linux")]
 mod fuse_host;
 mod path_map;
+mod peer_files;
 mod pin_reaction;
 mod pipe_server;
 mod push_arm;

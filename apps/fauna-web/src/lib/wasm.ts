@@ -267,6 +267,11 @@ export interface StaleSurfaces {
    *  content floor, `content_notify`, screen time — through the reply's
    *  `supervision` fold. */
   family: boolean;
+  /** The Spam page's training history — set by
+   *  `fauna.bridges.push.spam_model_updated` / `…_reset` (an undo or a reset on
+   *  another device). Page-gated like `address_book` (one push per lesson).
+   *  Web's Spam page does not consume it yet. */
+  mail_spam: boolean;
 }
 
 /** Which client surfaces a push `kind` has made stale
@@ -403,6 +408,12 @@ export function paintedErrorsForTest(): unknown {
 
 export function actorIdFromSecret(secretHex: string): string {
   return wasm().actor_id_from_secret(secretHex);
+}
+
+/** Has this browser opted in to push? The install-scoped bit the shared
+ *  registration machine keeps (`fauna_wasm::push_registration`). */
+export function pushOptedIn(): boolean {
+  return wasm().pushOptedIn();
 }
 
 /**
@@ -838,6 +849,35 @@ export async function claimOwedSuccessionKit(actorIdHex: string): Promise<boolea
 export async function rearmOwedSuccessionKit(actorIdHex: string): Promise<void> {
   await ensureWasm();
   wasm().rearmOwedSuccessionKit(actorIdHex);
+}
+
+/** Adopt a **chain-verified** successor this browser already holds — the state a
+ *  lost succession reply leaves behind, whose message promised that reopening
+ *  the app signs in as it (`identity-succession.md` § Implementation status
+ *  today). `true` → the caller switches to `verifiedSuccessor` now; the owed kit
+ *  and the owed group sweep are parked for the successor's session. The decision
+ *  is the shared `AccountRegistry::adopt_held_successor`.
+ *
+ *  ⚠ `verifiedSuccessor` must be `resolveVerifiedSuccessor`'s answer, never the
+ *  successor the nest's refusal claimed. */
+export async function adoptHeldSuccessor(
+  predecessorActorIdHex: string,
+  verifiedSuccessor: string,
+): Promise<boolean> {
+  await ensureWasm();
+  return wasm().adoptHeldSuccessor(predecessorActorIdHex, verifiedSuccessor) as boolean;
+}
+
+/** Discharge the group sweep a relaunch adoption owes — the unbidden press of
+ *  `recovery-kit-sweep-retry-button` (`succession-propagation.md` § Propagation
+ *  → *Own device fleet*, the relaunch-adoption clause). Claims once; `null` when
+ *  nothing was owed, else the press's answer for `error-message`. The report it
+ *  parks is the one `successionSweepCopy` then reads. */
+export async function dischargeOwedSuccessionSweep(
+  actorIdHex: string,
+): Promise<LocalizedText | null> {
+  await ensureWasm();
+  return wasm().dischargeOwedSuccessionSweep(actorIdHex) as LocalizedText | null;
 }
 
 /** Walk the registration chain anonymously and return the **verified** successor
@@ -2806,8 +2846,19 @@ export function approvalDisplayTextRaw(
   peerAddress: string,
   peerHandle: string,
   summary: string,
+  bridgeId: string,
+  operation: string,
+  target: string,
 ): string | null {
-  return wasm().approvalDisplayText(kind, peerAddress, peerHandle, summary) as string | null;
+  return wasm().approvalDisplayText(
+    kind,
+    peerAddress,
+    peerHandle,
+    summary,
+    bridgeId,
+    operation,
+    target,
+  ) as string | null;
 }
 
 // Shared admin-nest host-OS-maintenance status label.

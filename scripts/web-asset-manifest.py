@@ -141,9 +141,11 @@ def toolchains(repo: Path) -> dict:
     pins = repo_pins(repo)
     # wasm-pack picks the binaryen (wasm-opt) release, and deno the bundler —
     # neither is pinned by a repo file, so the build records what it ran.
-    # The wasm32 C compiler too: the C dependencies of the chunks (ring,
-    # secp256k1-sys) are compiled by it, and its version string lands in every
-    # chunk's `producers` section (`scripts/wasm-sections.py` prints it).
+    # The wasm32 C compiler too: the chunks' one C dependency (zstd-sys, via
+    # fauna-core's chunk compression and fauna-mail's export wrapper) is compiled
+    # by it, and its version string lands in every chunk's `producers` section
+    # (`scripts/wasm-sections.py` prints it). release-integrity.md piece 1 rules
+    # that every builder selects ONE pinned LLVM release through this variable.
     cc = os.environ.get("CC_wasm32_unknown_unknown") or "clang"
     for name, argv in (
         ("wasm-pack", ["wasm-pack", "--version"]),

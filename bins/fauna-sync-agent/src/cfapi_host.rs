@@ -698,6 +698,7 @@ unsafe extern "system" fn fetch_data_callback(
                 rel,
                 offset,
                 length,
+                file_size: info.FileSize,
                 sink: Box::new(sink),
             });
         }

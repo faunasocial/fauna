@@ -48,6 +48,7 @@ Stamped 2026-10-01 at 308c995169.
    - `tests/e2e-unified/tests/test_mail_client_send_refusals.py::test_send_at_the_sending_limit_is_refused_with_a_message_saying_so`
 11. [app] Mail you received before rotating your mail keys stays readable afterwards — `docs/goal/behavior/mail-app-surface.md` § Inbound client receive
    - `tests/e2e-unified/tests/test_mail_client_receive_after_rotation.py::test_mail_received_before_a_key_rotation_stays_readable_after_it`
+   - `tests/e2e-unified/tests/test_mail_survives_four_key_rotations.py::test_mail_received_before_four_key_rotations_stays_readable_in_the_app_and_over_imap`
 12. [app] Before your account has an address of its own, a send is refused on the spot with a message saying why — `docs/goal/behavior/mail-app-surface.md` § First-party client send
    - `tests/e2e-unified/tests/test_mail_client_send_refusals.py::test_send_before_the_account_has_an_address_is_refused_on_the_spot`
 13. [app] Mail filed as spam never shows in Conversations — `docs/goal/behavior/mail-app-surface.md` § Inbound client receive
@@ -96,6 +97,7 @@ Stamped 2026-10-01 at 308c995169.
 | 9 | app | `tests/e2e-unified/tests/test_mail_client_receive_after_reenable.py::test_mailbox_keeps_receiving_past_a_record_the_reenabled_keys_cannot_open` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_mail_client_send_refusals.py::test_send_at_the_sending_limit_is_refused_with_a_message_saying_so` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_mail_client_receive_after_rotation.py::test_mail_received_before_a_key_rotation_stays_readable_after_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_mail_survives_four_key_rotations.py::test_mail_received_before_four_key_rotations_stays_readable_in_the_app_and_over_imap` | tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_mail_client_send_refusals.py::test_send_before_the_account_has_an_address_is_refused_on_the_spot` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_mail_client_spam_receive.py::test_client_scores_inbound_spam_to_junk` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_mail_junk_absent_from_conversations.py::test_mail_filed_as_junk_on_arrival_never_shows_in_conversations` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |

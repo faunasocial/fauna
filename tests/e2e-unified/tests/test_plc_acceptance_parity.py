@@ -13,7 +13,7 @@ The three op literals below were minted by the Rust signer
 (``plc_chain::tests::a_signed_chain_matches_the_python_fakes_acceptance_vector``
 pins the same CIDs and signatures at the source). RFC6979 makes them
 deterministic, so they are true cross-implementation vectors, not this file's
-own fixture literals — finding 48/49's trap. The genesis and rename are
+own fixture literals. The genesis and rename are
 box-signed (K-256); the contest fork is user-signed (P-256), the exact shape
 ``recovery_fork::sign_fork_op`` submits, so both production curves are covered.
 

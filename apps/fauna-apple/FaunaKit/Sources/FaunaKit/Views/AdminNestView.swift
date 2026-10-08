@@ -125,6 +125,11 @@ public struct AdminNestView: View {
                 //    element order declares it ──
                 takedownSection
 
+                // ── Reports queue (moderation.md § User-initiated reporting →
+                //    *Where it lands*) — directly after the takedown console it
+                //    pre-fills, as ui.yaml's admin-nest element order declares ──
+                reportsSection
+
                 // ── Factory Reset danger zone (moved off Settings) ──
                 factoryResetSection
             }
@@ -795,6 +800,76 @@ public struct AdminNestView: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.adminNestTakedownSection)
         .automationValue(Ids.adminNestTakedownSection, text: { L.admin.nestPage.takedownLabel })
+    }
+
+    /// The open abuse reports (`admin-nest-reports-section`): one flat
+    /// `admin-nest-report-item` per row with its three levers. *Open takedown*
+    /// (posts and messages only — the shared `can_open_takedown`) pre-fills the
+    /// console above with NO citation; *acted* / *dismiss* only RECORD the
+    /// outcome (the reporter is told nothing more), over
+    /// `fauna.moderation.abuse_report.resolve` — OnlineOnly, so each declares it.
+    private var reportsSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(L.admin.nestPage.reportsLabel).font(.headline)
+                Text(L.admin.nestPage.reportsDesc)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if !vm.reportsLoaded {
+                    Text(L.admin.nestPage.reportsLoading).font(.caption).foregroundStyle(.secondary)
+                } else if vm.reports.isEmpty {
+                    Text(L.admin.nestPage.reportsEmpty).font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(vm.reports, id: \.reportId) { row in
+                    reportRow(row)
+                }
+                if let status = vm.reportsStatus {
+                    Text(status).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(Ids.adminNestReportsSection)
+        .automationValue(Ids.adminNestReportsSection, text: { L.admin.nestPage.reportsLabel })
+    }
+
+    private func reportRow(_ row: FfiReportQueueRow) -> some View {
+        let line = AdminNestVM.reportLine(row)
+        return VStack(alignment: .leading, spacing: 4) {
+            Text(line)
+                .font(.caption)
+                .accessibilityIdentifier(Ids.adminNestReportItem)
+                .automationValue(Ids.adminNestReportItem, text: { line })
+            HStack(spacing: 8) {
+                if row.canOpenTakedown {
+                    Button(L.admin.nestPage.reportsOpenTakedown) { vm.openTakedown(for: row) }
+                        .controlSize(.small)
+                        .accessibilityIdentifier(Ids.adminNestReportOpenTakedownButton)
+                        .automationActivate(Ids.adminNestReportOpenTakedownButton) {
+                            vm.openTakedown(for: row)
+                        }
+                }
+                Button(L.admin.nestPage.reportsActed) {
+                    Task { await vm.resolveReport(row, acted: true) }
+                }
+                .controlSize(.small)
+                .accessibilityIdentifier(Ids.adminNestReportActedButton)
+                .automationActivate(Ids.adminNestReportActedButton) {
+                    Task { await vm.resolveReport(row, acted: true) }
+                }
+                .faunaGate("fauna.moderation.abuse_report.resolve")
+                Button(L.admin.nestPage.reportsDismiss) {
+                    Task { await vm.resolveReport(row, acted: false) }
+                }
+                .controlSize(.small)
+                .accessibilityIdentifier(Ids.adminNestReportDismissButton)
+                .automationActivate(Ids.adminNestReportDismissButton) {
+                    Task { await vm.resolveReport(row, acted: false) }
+                }
+                .faunaGate("fauna.moderation.abuse_report.resolve")
+            }
+        }
     }
 
     /// One content-kind radio. `post` is the default (the serve-withhold half);

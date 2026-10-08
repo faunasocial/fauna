@@ -232,6 +232,9 @@ where
         return Ok(EscrowRecoveryPass::Current);
     };
     let receipt_rows = live_rows(store, KIND_ESCROW_RECEIPT).await?;
+    // Built once for the pass: the reader consults it for a shred's
+    // authorship alone (`generation_tip::generation_key_for`).
+    let view = crate::fleet_removal::fleet_view(store, trust).await?;
     // This identity's target key: the wraps worth asking for are the ones
     // acked under it, and the ones that open are the ones sealed to it.
     let opener = EscrowOpener::new(identity_seed, &trust.root);
@@ -268,9 +271,15 @@ where
         if !acked.contains(&generation_id) || memo.answered(&generation_id) {
             continue;
         }
-        if generation_tip::generation_key_for(store, &generation_id, writer_key, Some(custody))
-            .await?
-            .is_some()
+        if generation_tip::generation_key_for(
+            store,
+            &generation_id,
+            writer_key,
+            Some(custody),
+            Some(&view),
+        )
+        .await?
+        .is_some()
         {
             continue;
         }
@@ -340,9 +349,15 @@ where
         if memo.answered(&generation_id) {
             continue;
         }
-        if generation_tip::generation_key_for(store, &generation_id, writer_key, Some(custody))
-            .await?
-            .is_some()
+        if generation_tip::generation_key_for(
+            store,
+            &generation_id,
+            writer_key,
+            Some(custody),
+            Some(&view),
+        )
+        .await?
+        .is_some()
         {
             continue;
         }
@@ -717,7 +732,7 @@ mod tests {
         assert_eq!(p, EscrowRecoveryPass::Current);
         assert!(bundle.retained_generation_key(&g).is_none());
         assert!(
-            generation_tip::generation_key_for(&f.store, &g, &f.writer_key, Some(&bundle))
+            generation_tip::generation_key_for(&f.store, &g, &f.writer_key, Some(&bundle), None)
                 .await
                 .unwrap()
                 .is_none()

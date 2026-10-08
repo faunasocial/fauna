@@ -35,15 +35,15 @@ Stamped 2026-09-26 at dc54d3d61e.
 |---|---|---|
 | web |  no run recorded | |
 | linux | ✅ full | 0.1.2-dev+78e73031 standalone |
-| windows |  no run recorded | |
-| macos |  no run recorded | |
+| windows | ✅ full | 0.1.3-dev+74556739 standalone |
+| macos | ✅ full | 0.1.3-dev+1cf3db28 standalone |
 | ios |  no run recorded | |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.2-dev+ef35c9ce.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_app_version_and_updates.py::test_settings_shows_the_version_you_are_running` | linux (linux): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_app_version_and_updates.py::test_asking_for_a_newer_version_says_so_and_where_to_get_it` | linux (linux): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_app_version_and_updates.py::test_settings_shows_the_version_you_are_running` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_app_version_and_updates.py::test_asking_for_a_newer_version_says_so_and_where_to_get_it` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
 | 2 | app | absent by design on web, ios, android | — |
 <!-- features-render:end -->

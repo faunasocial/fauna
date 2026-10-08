@@ -10,7 +10,7 @@ import (
 // recordValue puts a record through the PRODUCTION encode path — the same
 // JSONRecordToDagCBOR the write path and the projection loop both call — and
 // hands back the decoded data-model value. Tests validate what we would
-// COMMIT, never a hand-built map, which is finding 48/49's rule: a fixture
+// COMMIT, never a hand-built map, which is the cross-side pinning rule: a fixture
 // each side builds for itself can agree with nothing real.
 func recordValue(t *testing.T, recordJSON string) any {
 	t.Helper()

@@ -6,10 +6,12 @@ namespace FaunaApp.Tests;
 /// Cross-language conformance for the update-checker's semver compare. Calls the
 /// REAL shared <c>fauna_core::version::is_newer</c> via
 /// <c>FaunaFfiMethods.IsNewer</c> — the native dll loads in the test host
-/// (memory <c>reference_windows_dotnet_test_loads_native_ffi</c>), so this proves
-/// the windows <c>UpdateService</c> consumes the spec-correct shared compare
-/// rather than the retired hand-rolled int-tuple parse. The pre-release and
-/// build-metadata cases below are exactly the ones that old parser got wrong.
+/// (memory <c>reference_windows_dotnet_test_loads_native_ffi</c>), so this pins the
+/// export's conformance to the spec-correct shared compare that replaced the
+/// retired hand-rolled int-tuple parse. The pre-release and build-metadata cases
+/// below are exactly the ones that old parser got wrong. Windows' own check no
+/// longer calls it: the compare runs inside the shared update look
+/// (<c>UpdateCheckFfiTests</c>).
 /// </summary>
 public class VersionCompareFfiTests
 {

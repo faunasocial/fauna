@@ -513,6 +513,7 @@ pub fn install(fauna_client: &Rc<FaunaClient>) {
         .iter()
         .map(|id| id.0.to_vec())
         .collect();
+    hold_app_attachment();
     let nest = std::sync::Arc::clone(fauna_client.nest_rpc());
     let nest_url = nest.nest_url();
     let bearer_source = Arc::new(AgentBearerSource(fauna_client.build_sync_auth().bearer()));
@@ -580,6 +581,30 @@ pub fn install(fauna_client: &Rc<FaunaClient>) {
             rt,
             event_listener_stop,
         })
+    });
+}
+
+/// This process is an open app: hold the agent's attachment lease for the
+/// process's life, so the agent's `ws-device` push arm leaves banners to the
+/// app while it runs (`fauna_client_sync::attachment`; tui's post-auth hook is
+/// the prior art). Once per process — an account switch re-installs this
+/// surface, the app stays open — against the endpoint the provisioner resolves.
+fn hold_app_attachment() {
+    static ATTACHMENT: std::sync::OnceLock<Option<fauna_client_sync::attachment::AppAttachment>> =
+        std::sync::OnceLock::new();
+    ATTACHMENT.get_or_init(|| {
+        fauna_ipc::endpoint::AgentEndpoint::default_for_user()
+            .inspect_err(|e| tracing::warn!("agent attachment: no endpoint: {e}"))
+            .ok()
+            .map(|endpoint| {
+                fauna_client_sync::attachment::attach_app(
+                    endpoint,
+                    fauna_client_sync::attachment::AttachingApp {
+                        app: "linux".into(),
+                        notification_identity: None,
+                    },
+                )
+            })
     });
 }
 

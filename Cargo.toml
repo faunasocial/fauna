@@ -173,7 +173,7 @@ resolver = "2"
 [workspace.package]
 # The product version — the fleet-wide source of truth every other surface
 # copies (docs/goal/architecture/product-version.md; version-lockstep gate).
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/faunasocial/fauna"

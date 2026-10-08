@@ -42,7 +42,7 @@ use fauna_sync_engine::generation_tip::GenerationTrust;
 use fauna_transport::testing::{Listeners, await_listening, listeners};
 
 mod common;
-use common::mem_factory;
+use common::{mem_factory, mem_factory_with};
 
 fn root() -> ActorKeypair {
     ActorKeypair::from_secret([0x5A; 32])
@@ -342,6 +342,13 @@ async fn a_preference_write_converges_over_the_dialed_leg_with_no_nest() {
 /// dialing device's T10 slot, exactly as one merged over the nest leg does.
 /// Removing `with_generation_custody` from the dial plane construction reds
 /// this test and nothing else — the mutation run at the landing.
+///
+/// **Only an authored shred drops** (`account-data-taxonomy.md`
+/// § *Fleet-scope reclamation* → *the authored shred*): G1's
+/// shred is sig-less — what any `BackupKey` holder can write — and staged
+/// first, G2's is signed by A, a verified member, and staged after it, so
+/// the walk merges G1's before G2's. B ends holding exactly G1's key: an
+/// unauthored drop would leave none, a detached custody both.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_shredded_mint_over_the_dialed_leg_drops_the_retained_key() {
     use fauna_core::generation::{
@@ -374,17 +381,37 @@ async fn a_shredded_mint_over_the_dialed_leg_drops_the_retained_key() {
             .to_vec(),
         enrolled_at_ms: 5_000,
     };
-    let built =
-        build_mint(&[member], &escrow, "identity", Vec::new(), &a_key, 7_000).expect("mint");
-    let core = match &built.record {
+    let core_of = |record: &GenerationMintRecord| match record {
         GenerationMintRecord::Minted { core, .. } => core.clone(),
         GenerationMintRecord::Shredded { core, .. } => core.clone(),
     };
-    let shredded = GenerationMintRecord::Shredded {
-        core,
-        shredded_at_ms: 9_000,
-        shredded_by: a_pub,
-    };
+    let unauthored = build_mint(
+        std::slice::from_ref(&member),
+        &escrow,
+        "identity",
+        Vec::new(),
+        &a_key,
+        7_000,
+    )
+    .expect("mint G1");
+    let authored =
+        build_mint(&[member], &escrow, "identity", Vec::new(), &a_key, 7_500).expect("mint G2");
+    let shreds = [
+        (
+            unauthored.generation_id,
+            GenerationMintRecord::Shredded {
+                core: core_of(&unauthored.record),
+                shredded_at_ms: 9_000,
+                shredded_by: a_pub,
+                shredder_sig: vec![],
+            },
+        ),
+        (
+            authored.generation_id,
+            fauna_core::generation::sign_shred(&a_key, core_of(&authored.record), 9_000)
+                .expect("sign"),
+        ),
+    ];
 
     // Stage the shredded row on A through a pull-only plane put — journal +
     // relay plane both fed, so A can SERVE it (door-less put_state feeds
@@ -409,17 +436,20 @@ async fn a_shredded_mint_over_the_dialed_leg_drops_the_retained_key() {
             ACCOUNT_STATE_FLEET_SCOPE,
         )
         .unwrap();
-        plane
-            .put(
-                &fauna_sync_engine::account_state_plane::ItemId {
-                    kind: KIND_GENERATION_MINT.into(),
-                    key: fauna_core::hex32::encode(&built.generation_id),
-                },
-                canonical_encode(&shredded).unwrap().to_vec(),
-                None,
-            )
-            .await
-            .expect("stage the shredded mint on A");
+        // In order: G1's unauthored shred journals before G2's authored one.
+        for (generation_id, shredded) in &shreds {
+            plane
+                .put(
+                    &fauna_sync_engine::account_state_plane::ItemId {
+                        kind: KIND_GENERATION_MINT.into(),
+                        key: fauna_core::hex32::encode(generation_id),
+                    },
+                    canonical_encode(shredded).unwrap().to_vec(),
+                    None,
+                )
+                .await
+                .expect("stage the shredded mint on A");
+        }
     }
 
     // B holds G's key in its retained bundle (the W5 (account-data-plane.md § Workstreams).4a carriage) and knows
@@ -439,11 +469,12 @@ async fn a_shredded_mint_over_the_dialed_leg_drops_the_retained_key() {
             &b_pub,
             None,
         );
-        slot.record_generation_key(&built.generation_id, &built.gen_key);
+        slot.record_generation_key(&unauthored.generation_id, &unauthored.gen_key);
+        slot.record_generation_key(&authored.generation_id, &authored.gen_key);
         assert_eq!(
             slot.status().retained_generations,
-            1,
-            "B retains G before the dial"
+            2,
+            "B retains G1 and G2 before the dial"
         );
         let store = AccountStore::open(
             SqliteBackend::open(&dir).unwrap(),
@@ -465,18 +496,156 @@ async fn a_shredded_mint_over_the_dialed_leg_drops_the_retained_key() {
         .await
         .expect("start B");
 
-    eventually("the shred observation drops B's retained key", || {
+    eventually(
+        "the authored shred drops B's retained G2 key and the unauthored one keeps G1's",
+        || {
+            let b = b.clone();
+            async move {
+                let _ = b.reconcile_now().await.expect("B pass");
+                b.principal_bundle_status()
+                    .await
+                    .expect("status")
+                    .retained_generations
+                    == 1
+            }
+        },
+    )
+    .await;
+
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+// ── The same-account peer data plane: file bodies over the dialed leg ───────
+
+/// A host's file-sync hooks for the leg: `serves` is the one body this host's
+/// "engines" hold (folder `"7"`), and the registry is what its dial pass
+/// fills.
+fn file_sync_serving(
+    serves: Option<(fauna_core::data::ContentHash, Vec<u8>)>,
+) -> (
+    fauna_sync_engine::account_runtime::PeerFileSync,
+    std::sync::Arc<fauna_sync_engine::sibling_chunks::SiblingChannels>,
+) {
+    let siblings = fauna_sync_engine::sibling_chunks::SiblingChannels::new();
+    let file_chunks: fauna_peer_sync::FileChunkFn =
+        std::sync::Arc::new(move |folder: String, key: [u8; 32]| {
+            let hit = serves
+                .as_ref()
+                .filter(|(k, _)| folder == "7" && k.digest() == key)
+                .map(|(_, body)| body.clone());
+            Box::pin(async move { hit })
+        });
+    (
+        fauna_sync_engine::account_runtime::PeerFileSync {
+            file_chunks,
+            siblings: std::sync::Arc::clone(&siblings),
+        },
+        siblings,
+    )
+}
+
+fn params_with_files(
+    base: &Path,
+    device: &str,
+    listeners: &Listeners,
+    file_sync: fauna_sync_engine::account_runtime::PeerFileSync,
+) -> AccountRuntimeParams<NestInfoOnly> {
+    AccountRuntimeParams {
+        peer_transport: Some(mem_factory_with(listeners, Some(file_sync))),
+        ..params(base, device, listeners)
+    }
+}
+
+/// Start A serving `body` (under `key`) and B dialing it; return once B's
+/// dial pass has admitted A into B's sibling registry.
+async fn two_seats_one_body(
+    base: &Path,
+    net: &Listeners,
+    key: fauna_core::data::ContentHash,
+    body: Vec<u8>,
+) -> (
+    AccountStoreHandle,
+    AccountStoreHandle,
+    std::sync::Arc<fauna_sync_engine::sibling_chunks::SiblingChannels>,
+) {
+    let a_pub = premint_and_stage(base, "a", &[]).await;
+    let _b_pub = premint_and_stage(base, "b", &member_rows(base, "a")).await;
+    let (a_files, _a_siblings) = file_sync_serving(Some((key, body)));
+    let (b_files, b_siblings) = file_sync_serving(None);
+    let a = AccountStoreRuntime::start(params_with_files(base, "a", net, a_files))
+        .await
+        .expect("start A");
+    await_listening(net, &a_pub).await;
+    let b = AccountStoreRuntime::start(params_with_files(base, "b", net, b_files))
+        .await
+        .expect("start B");
+    eventually("B's dial pass admits A into its sibling registry", || {
         let b = b.clone();
+        let reg = std::sync::Arc::clone(&b_siblings);
         async move {
             let _ = b.reconcile_now().await.expect("B pass");
-            b.principal_bundle_status()
-                .await
-                .expect("status")
-                .retained_generations
-                == 0
+            reg.len() == 1
         }
     })
     .await;
+    (a, b, b_siblings)
+}
+
+/// **Slice 1's success sentence, one tier down** (`p2p.md` § Goal, promises 1
+/// and 3): with no nest anywhere, a file body one device holds reaches the
+/// other device over the dialed, mutually admitted leg — through the
+/// production bind (A's serve door) and the production dial pass (B's
+/// registry) — and a chunk the sibling does not hold is handed back for the
+/// nest, never failed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_body_crosses_the_dialed_leg_and_the_rest_is_left_to_the_nest() {
+    use fauna_sync_engine::sibling_source::SiblingChunkSource;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let net = listeners();
+    // Bigger than one reply, so the ranged pull runs more than one round.
+    let body: Vec<u8> = (0..1_500_000u32).map(|i| (i % 251) as u8).collect();
+    let key = fauna_core::data::ContentHash::of_raw(&body);
+    let gone = fauna_core::data::ContentHash::of_raw(b"a chunk only the nest holds");
+    let (a, b, siblings) = two_seats_one_body(tmp.path(), &net, key, body.clone()).await;
+
+    let got = siblings
+        .fetch("7", &[key, gone, key], "holiday/video")
+        .await;
+    assert_eq!(got.len(), 1, "only the held chunk arrives");
+    assert_eq!(got[&key], body);
+    let tally = siblings.tally();
+    assert_eq!((tally.chunks, tally.to_nest), (1, 1), "{tally:?}");
+    assert_eq!(tally.bytes, body.len() as u64);
+
+    // Another folder's want is not served from this one, however the key reads.
+    assert!(siblings.fetch("8", &[key], "elsewhere").await.is_empty());
+
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// Rule 4 on the file plane: a sibling serving bytes that do not hash to the
+/// key it was asked for has nothing kept, and is dropped from the registry —
+/// the nest serves the chunk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forged_body_is_refused_and_its_sibling_dropped() {
+    use fauna_sync_engine::sibling_source::SiblingChunkSource;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let net = listeners();
+    let key = fauna_core::data::ContentHash::of_raw(b"the real chunk");
+    let (a, b, siblings) =
+        two_seats_one_body(tmp.path(), &net, key, b"something else entirely".to_vec()).await;
+
+    assert!(siblings.fetch("7", &[key], "f").await.is_empty());
+    assert_eq!(
+        siblings.len(),
+        0,
+        "a sibling that served a forgery is dropped"
+    );
+    assert_eq!(siblings.tally().to_nest, 1);
 
     a.shutdown().await;
     b.shutdown().await;

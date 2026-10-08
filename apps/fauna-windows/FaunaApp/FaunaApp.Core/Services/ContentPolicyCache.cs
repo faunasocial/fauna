@@ -29,8 +29,38 @@ namespace FaunaApp.Core.Services;
 internal sealed record ContentPolicyInputs(
     FfiContentPolicy? ContentPolicy = null,
     ushort? OwnSpamPermille = null,
-    ushort? OwnPhishingPermille = null)
+    ushort? OwnPhishingPermille = null,
+    string[]? HiddenContent = null)
 {
+    /// <summary>
+    /// The item verdict (moderation.md § Corollary — block also hides): the label
+    /// verdict of <see cref="VerdictFor"/> with the viewer's OWN reports as a third
+    /// input. <paramref name="itemId"/> is the item's REPORT KEY — a post's cid, a
+    /// message's plane record digest, never a message id — and
+    /// <paramref name="authorId"/> its author's actor id, so a reported item and
+    /// every item of a reported account both come back <c>block</c> with
+    /// <see cref="ItemVerdict.Reported"/> set. All in shared Rust
+    /// (<c>FaunaFfiMethods.ContentRenderForItem</c>); no region rules here — the
+    /// region plane composes those, <see cref="RegionPlaneHost.Render"/>.
+    ///
+    /// <para>The "no policy inputs → show" short-circuit of <see cref="VerdictFor"/>
+    /// holds only while the hidden list is ALSO empty: with a report on file the
+    /// verdict can no longer be decided without asking, or a reported item with no
+    /// guardian floor and no own threshold would paint in full.</para>
+    /// </summary>
+    public ItemVerdict ItemVerdictFor(
+        ContentLabelEntry[] labels, string? itemId, string? authorId)
+    {
+        var hidden = HiddenContent ?? System.Array.Empty<string>();
+        if (hidden.Length == 0)
+            return new ItemVerdict(VerdictFor(labels), false);
+        var v = FaunaFfiMethods.ContentRenderForItem(
+            hidden, itemId ?? "", authorId, labels, ContentPolicy,
+            OwnSpamPermille, OwnPhishingPermille,
+            System.Array.Empty<FfiRegionRuleSet>());
+        return new ItemVerdict(v.@verdict, v.@reported);
+    }
+
     /// <summary>
     /// The client render verdict for one item's <paramref name="labels"/> — one
     /// of <c>"show" | "badge" | "collapse" | "block"</c>, resolved by the shared
@@ -51,6 +81,11 @@ internal sealed record ContentPolicyInputs(
             : FaunaFfiMethods.ContentRenderVerdict(
                 labels, ContentPolicy, OwnSpamPermille, OwnPhishingPermille);
 }
+
+/// <summary>One item's render verdict under the viewer's own reports: the composed
+/// <c>show | badge | collapse | block</c> and whether the viewer's report is what
+/// hid it (paint "You reported this", not the family-policy notice).</summary>
+internal readonly record struct ItemVerdict(string Verdict, bool Reported);
 
 /// <summary>
 /// Process-lifetime holder for the current <see cref="ContentPolicyInputs"/> +
@@ -152,6 +187,27 @@ public static class ContentPolicyCache
             };
         }
     }
+
+    /// <summary>
+    /// Set the owner's hidden-content list (what their own reports hid, loaded by
+    /// <c>load_hidden_content</c> and returned whole by every <c>hide_reported</c>).
+    /// Merges: leaves the guardian and own-threshold halves exactly as they were.
+    /// An item's verdict is read once at construction, so the surface that changed
+    /// the list re-syncs its rows (an equal-by-content row is kept in place).
+    /// </summary>
+    internal static void SetHiddenContent(string[]? hidden)
+    {
+        lock (_gate)
+        {
+            _inputs = _inputs with { HiddenContent = hidden is { Length: > 0 } ? hidden : null };
+        }
+    }
+
+    /// <summary>The item verdict under the current snapshot — see
+    /// <see cref="ContentPolicyInputs.ItemVerdictFor"/>.</summary>
+    internal static ItemVerdict ItemVerdictFor(
+        ContentLabelEntry[] labels, string? itemId, string? authorId) =>
+        _inputs.ItemVerdictFor(labels, itemId, authorId);
 
     /// <summary>The verdict for one item's labels under the current snapshot —
     /// the one call both render surfaces make. See

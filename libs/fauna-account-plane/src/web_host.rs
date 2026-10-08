@@ -31,7 +31,8 @@
 //! 5. the store open;
 //! 6. the election over Web Locks ([`WebElection`] —
 //!    `EngineLock::try_acquire(store_name)`, degrade-open when the API is
-//!    missing: the driver's [`elect_at_start`] owns what that means);
+//!    missing: the driver's [`elect_at_start`] owns what that means; web has
+//!    no sync agent, so its presence probe answers absent without asking);
 //! 7. [`AccountDriver::serve`] with [`NoLegs`] — web has no iroh and hosts no
 //!    custody — looping on [`ServeEnd`] as the native worker does.
 //!
@@ -59,7 +60,7 @@ use tokio::sync::{broadcast, oneshot, watch};
 
 use crate::account_driver::{
     AccountDriver, AccountStoreHandle, Assembly, DriverConfig, ElectionOutcome, EngineElection,
-    MembershipSource, NoLegs, RuntimePrincipal, ServeEnd, elect_at_start,
+    MembershipSource, NoLegs, Presence, RuntimePrincipal, ServeEnd, elect_at_start,
 };
 use crate::principal_bundle::{
     self, PrincipalBundle, SecretStore, SlotSection, WriterKeyProvenance,
@@ -91,7 +92,10 @@ pub type WebSlot<S> = PrincipalBundle<S, TabSection>;
 /// request `EngineLock::try_acquire` makes for the store's name, answered at
 /// once (`ifAvailable`) — another tab, or another runtime in this one, holds
 /// it or it does not. The seed-leg role is the same request under its own
-/// name (`SeedLegLock`).
+/// name (`SeedLegLock`). There is no sync agent on web, so the presence
+/// question is answered `Absent` without asking (`account-runtime.md`
+/// § Multi-instance concurrency → *The agent holds the role when present*,
+/// part 1) and the first-come election among tabs stands.
 pub struct WebElection {
     store_name: String,
 }
@@ -115,6 +119,10 @@ impl EngineElection for WebElection {
             SeedLegLockOutcome::Refused => ElectionOutcome::Refused,
             SeedLegLockOutcome::Degraded(e) => ElectionOutcome::Degraded(e.to_string()),
         }
+    }
+
+    async fn agent_present(&self) -> Presence {
+        Presence::Absent
     }
 }
 
@@ -462,7 +470,7 @@ async fn worker<S, R>(
         };
         // Inside the readiness barrier, after the store proved openable: a
         // runtime that cannot open the store must not squat on the role.
-        let role = elect_at_start(&parts.election).await;
+        let role = elect_at_start(&parts.election, &principal).await;
         let end = driver
             .serve(
                 Assembly {

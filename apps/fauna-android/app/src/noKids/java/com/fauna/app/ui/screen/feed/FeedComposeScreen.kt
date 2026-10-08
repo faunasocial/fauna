@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
+import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import com.fauna.app.core.ExifStripper
 import com.fauna.app.ui.util.ValueFormat
@@ -277,7 +278,7 @@ fun FeedComposeScreen(navController: NavController, vm: FeedVM = hiltViewModel()
                     )
                 },
             )
-            if (sellMode) {
+            if (BuildConfig.PAYMENTS && sellMode) {
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = sellPrice,
@@ -441,10 +442,14 @@ internal fun GateTierSelect(
                     onClick = { onSelectRoom(room.room); expanded = false },
                 )
             }
-            DropdownMenuItem(
-                text = { Text(sellLabel) },
-                onClick = { onSelectSell(); expanded = false },
-            )
+            // The Sell answer states a price and routes money: inside the
+            // price-and-route class, so the storeSafe build offers no such option.
+            if (BuildConfig.PAYMENTS) {
+                DropdownMenuItem(
+                    text = { Text(sellLabel) },
+                    onClick = { onSelectSell(); expanded = false },
+                )
+            }
         }
     }
 }

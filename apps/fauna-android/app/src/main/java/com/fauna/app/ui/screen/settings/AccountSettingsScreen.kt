@@ -98,9 +98,15 @@ fun AccountSettingsScreen(
     val secretHex = remember { vm.secretHex() }
     val handle = remember { vm.handle() }
 
-    // Route all errors and success messages through the global MessageBanner
+    // Route all errors and success messages through the global MessageBanner.
+    // Every error write asks the stolen ceremony's hold first: while its parked
+    // persist-failure message — the only copy of the account's new key — sits
+    // on this page's `error-message`, no other writer may replace it
+    // (`settings.md` § Recovery kit → *The persist-failure message survives the
+    // page*). Leaving the page is its one acknowledgment.
+    val showPageError: (String) -> Unit = { msg -> if (vm.ceremonyHold.admits(msg)) appMessages.showError(msg) }
     LaunchedEffect(changeHandleError) {
-        changeHandleError?.let { appMessages.showError(it) }
+        changeHandleError?.let { showPageError(it) }
     }
     LaunchedEffect(changeHandleSuccess) {
         if (changeHandleSuccess) appMessages.showInfo(context.getString(R.string.settings_account_page_handle_changed))
@@ -111,16 +117,16 @@ fun AccountSettingsScreen(
         if (deleteAccountSuccess) appMessages.showInfo(context.getString(R.string.settings_account_page_delete_requested))
     }
     LaunchedEffect(exportError) {
-        exportError?.let { appMessages.showError(it) }
+        exportError?.let { showPageError(it) }
     }
     LaunchedEffect(errorMessage) {
-        errorMessage?.let { appMessages.showError(it) }
+        errorMessage?.let { showPageError(it) }
     }
     LaunchedEffect(switchError) {
-        switchError?.let { appMessages.showError(it) }
+        switchError?.let { showPageError(it) }
     }
     LaunchedEffect(pendingActionsError) {
-        pendingActionsError?.let { appMessages.showError(it) }
+        pendingActionsError?.let { showPageError(it) }
     }
 
     AccountSettingsContent(
@@ -210,7 +216,15 @@ fun AccountSettingsScreen(
             // FaunaNavHost, before this button lived here).
             vm.signOut(onSignOut)
         },
-        recoveryKitSection = { RecoveryKitSection(sessionActorIdHex = actorId) },
+        recoveryKitSection = {
+            RecoveryKitSection(
+                sessionActorIdHex = actorId,
+                // The ceremony's persisted landed arm: the account moved, so
+                // this is an account SWITCH to the successor (never the
+                // sign-out reset) — the same seam the switcher drives.
+                onSucceeded = { successor -> vm.switchAccount(successor, confirmed = false, onAccountSwitched) },
+            )
+        },
     )
 }
 

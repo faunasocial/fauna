@@ -98,7 +98,7 @@ Stamped 2026-10-01 at 308c995169.
 | 7 | nest | `tests/e2e-unified/tests/api/test_onboarding.py::test_alice_self_service_onboarding` | nest (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_reach_hint_dial_journey.py::test_the_hint_opens_a_connected_app_and_the_domains_first_answer_drops_it` | web (linux): failed, linux (linux): skipped, windows (windows): failed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_l_wrong_clock_still_signs_in` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_m_wrong_clock_ahead_stays_signed_in` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_m_wrong_clock_ahead_stays_signed_in` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_n_suspended_user_fallthrough_invite_submit_is_terminal` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 12 | app | (none) | — |
 | 13 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_e2_suspended_while_signed_in_lands_refused_surface_without_relaunch` | web (linux): passed, linux (linux): passed, windows (windows): skipped |

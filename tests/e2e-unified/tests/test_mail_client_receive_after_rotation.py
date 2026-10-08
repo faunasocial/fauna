@@ -5,9 +5,10 @@ The witness for ``docs/features/email-in-conversations.md`` outcome 11, and
 the rule ``docs/goal/behavior/mail-app-surface.md`` § Inbound client receive
 ratifies (built 2026-09-15): the client opens mail with *the complete standing
 set, never the current generation alone* — the current MSEK's keypair plus one
-per prior grace generation in ``MailConfig.prior_mseks`` — *"so after a
+per prior generation in ``MailConfig.prior_mseks`` — *"so after a
 rotate-mail-keys the user's pre-rotation standing mail stays readable in the
-conversations view for as long as the grace window holds it, on every app."*
+conversations view for ever"* (every generation is carried since 2026-10-06;
+``test_mail_survives_four_key_rotations.py`` is the four-rotation witness).
 Before that, a rotation blinded the app to every record sealed before it. The
 shared derivation is pinned in Rust; this is the journey through the app.
 
@@ -34,7 +35,7 @@ nest seals inbound mail to (``actor_mls_pubkeys``, republished by the rotation)
 changed. B, delivered after that, is sealed to the new generation, and it
 showing after the restart proves the restarted app holds the new key as
 current — the finished rotation, not an interrupted one. A showing beside it
-is the standing set at work: its key survives only as a grace generation.
+is the standing set at work: its key survives only as a prior generation.
 
 **The finish is observed, not slept for.** The rotate form holds open with its
 progress line while the rotation runs and closes when it returns
@@ -42,9 +43,8 @@ progress line while the rotation runs and closes when it returns
 rotation short (convention 14).
 
 **A dedicated account.** A rotation ages the account's key history by one
-generation, and the grace window keeps two; the session's shared user is
-rotated by other modules, so this journey runs on a fresh account whose
-history it alone decides.
+generation; the session's shared user is rotated by other modules, so this
+journey runs on a fresh account whose history it alone decides.
 
 tier_3: every binary real, the real SMTP wire, a real process restart
 (``hard_reload()``, replaying the login).

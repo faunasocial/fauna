@@ -70,6 +70,7 @@ import {
   SignInRefusedError,
   classifyChallengeError,
 } from './auth-errors';
+import { ownSupersessionHold } from './own-supersession-hold';
 
 /**
  * True once an escalation has been started on this document.
@@ -86,6 +87,7 @@ let escalating = false;
  *  agent's per-test reset clears it. Never called from a product path. */
 export function resetPostAuthEscalation(): void {
   escalating = false;
+  ownSupersessionHold.reset();
 }
 
 /**
@@ -172,10 +174,34 @@ export function escalateNestIdentityChanged(e: NestIdentityChangedError): boolea
  * device fleet* — the nest is enforcer and distributor, never authorizer).
  */
 export function escalateIdentitySuperseded(e: IdentitySupersededError): boolean {
+  // This device's OWN stolen-identity ceremony superseded the identity: hold
+  // the escalation back while the ceremony runs or its persist-failure message
+  // is parked — navigating now would unload the ceremony's result and the only
+  // copy of the successor's key (`settings.md` § Recovery kit → *The
+  // persist-failure message survives the page*). Bearers stay cached too: the
+  // ceremony is still talking to the nest. Owed, not dropped —
+  // `performHeldBackSupersession` runs it on the nav edge away from Account.
+  if (ownSupersessionHold.defer()) {
+    console.warn("[identity] this identity was succeeded by this device's own ceremony — escalation held back");
+    return true;
+  }
   return escalateToLaunchSurface(
     '[identity] this identity was succeeded ' +
       `(claimed successor ${e.claimedSuccessor || 'unnamed'}) — ` +
       'blocking the session and re-entering the launch flow',
+  );
+}
+
+/**
+ * Perform a supersession escalation `ownSupersessionHold` held back, once the
+ * flow that owned the screen is done — the Settings page calls it when the hold
+ * says one is owed (the nav edge away from Account, or a ceremony ending off
+ * it with nothing parked). The verdict was already met and logged; this is
+ * only the deferred navigation.
+ */
+export function performHeldBackSupersession(): boolean {
+  return escalateToLaunchSurface(
+    "[identity] performing the supersession escalation held back for this device's own ceremony",
   );
 }
 

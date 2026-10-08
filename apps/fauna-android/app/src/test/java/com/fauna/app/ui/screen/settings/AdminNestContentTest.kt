@@ -2,6 +2,7 @@ package com.fauna.app.ui.screen.settings
 
 import android.content.Context
 import androidx.compose.ui.test.*
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
@@ -135,6 +136,11 @@ class AdminNestContentTest {
             )
         },
         onFactoryReset: () -> Unit = {},
+        reports: AdminNestVM.ReportsState = AdminNestVM.ReportsState(),
+        takedownPrefill: com.fauna.ffi.FfiTakedownPrefill? = null,
+        onResolveReport: (com.fauna.ffi.FfiReportQueueRow, Boolean) -> Unit = { _, _ -> },
+        onOpenReportTakedown: (com.fauna.ffi.FfiReportQueueRow) -> Unit = {},
+        onConsumeTakedownPrefill: () -> Unit = {},
     ) {
         composeTestRule.setContent {
             AdminNestContent(
@@ -195,6 +201,11 @@ class AdminNestContentTest {
                 takedownFormView = takedownFormView,
                 issuerKeyRowLabel = issuerKeyRowLabel,
                 issuerKeyRotateCost = issuerKeyRotateCost,
+                reports = reports,
+                takedownPrefill = takedownPrefill,
+                onResolveReport = onResolveReport,
+                onOpenReportTakedown = onOpenReportTakedown,
+                onConsumeTakedownPrefill = onConsumeTakedownPrefill,
             )
         }
     }
@@ -1094,5 +1105,107 @@ class AdminNestContentTest {
         composeTestRule.onNodeWithTag("admin-nest-oauth-status").performScrollTo()
             .assertTextEquals(verdict)
         composeTestRule.onNodeWithTag("error-message").assertDoesNotExist()
+    }
+
+    // ── Reports queue (moderation.md § User-initiated reporting → Where it lands) ──
+
+    private fun queueRow(
+        id: String,
+        subject: com.fauna.ffi.FfiReportSubject,
+        canOpenTakedown: Boolean,
+        note: String? = null,
+        excerpt: String? = null,
+    ) = com.fauna.ffi.FfiReportQueueRow(
+        reportId = id,
+        subject = subject,
+        subjectActor = null,
+        reason = LocalizedText("moderation.report.reason_spam", emptyMap()),
+        note = note,
+        excerpt = excerpt,
+        origin = LocalizedText("admin.nest_page.reports_origin_local", mapOf("handle" to "alice")),
+        createdAt = 0L,
+        canOpenTakedown = canOpenTakedown,
+    )
+
+    @Test
+    fun reportsSectionSaysLoadingUntilTheQueueIsRead() {
+        render(reports = AdminNestVM.ReportsState(rows = emptyList(), loaded = false))
+        composeTestRule.onNodeWithTag("admin-nest-reports-section").performScrollTo()
+        composeTestRule.onNodeWithText("Loading reports…").assertExists()
+        composeTestRule.onNodeWithText("No open reports.").assertDoesNotExist()
+    }
+
+    @Test
+    fun reportsSectionSaysEmptyOnlyOffTheLoadedBit() {
+        render(reports = AdminNestVM.ReportsState(rows = emptyList(), loaded = true))
+        composeTestRule.onNodeWithTag("admin-nest-reports-section").performScrollTo()
+        composeTestRule.onNodeWithText("No open reports.").assertExists()
+        composeTestRule.onNodeWithText("Loading reports…").assertDoesNotExist()
+    }
+
+    @Test
+    fun eachReportIsOneFlatItemWithTheSharedLine() {
+        val post = queueRow(
+            "r1", com.fauna.ffi.FfiReportSubject.Post("cid1"), canOpenTakedown = true,
+            note = "rude", excerpt = "the words",
+        )
+        val line = AdminNestVM.reportLine(post) { it.key }
+        render(reports = AdminNestVM.ReportsState(rows = listOf(post), loaded = true))
+
+        composeTestRule.onNodeWithTag("admin-nest-reports-section").performScrollTo()
+        composeTestRule.onAllNodesWithTag("admin-nest-report-item").assertCountEquals(1)
+        // `reason · kind id · origin · when — note — “excerpt”`
+        assertTrue(line.startsWith("moderation.report.reason_spam · post cid1 · admin.nest_page.reports_origin_local · "))
+        assertTrue(line.endsWith(" — rude — “the words”"))
+    }
+
+    @Test
+    fun openTakedownPaintsOnPostAndMessageRowsOnlyAndForwardsTheRow() {
+        val post = queueRow("r1", com.fauna.ffi.FfiReportSubject.Post("cid1"), canOpenTakedown = true)
+        val account = queueRow("r2", com.fauna.ffi.FfiReportSubject.Actor("ab"), canOpenTakedown = false)
+        val opened = mutableListOf<String>()
+        render(
+            reports = AdminNestVM.ReportsState(rows = listOf(post, account), loaded = true),
+            onOpenReportTakedown = { opened += it.reportId },
+        )
+
+        composeTestRule.onNodeWithTag("admin-nest-reports-section").performScrollTo()
+        composeTestRule.onAllNodesWithTag("admin-nest-report-open-takedown-button").assertCountEquals(1)
+        composeTestRule.onNodeWithTag("admin-nest-report-open-takedown-button").performClick()
+        assertEquals(listOf("r1"), opened)
+    }
+
+    @Test
+    fun actedAndDismissForwardTheRowAndTheOutcome() {
+        val post = queueRow("r1", com.fauna.ffi.FfiReportSubject.Post("cid1"), canOpenTakedown = true)
+        val resolved = mutableListOf<Pair<String, Boolean>>()
+        render(
+            reports = AdminNestVM.ReportsState(rows = listOf(post), loaded = true),
+            onResolveReport = { row, acted -> resolved += row.reportId to acted },
+        )
+
+        composeTestRule.onNodeWithTag("admin-nest-report-acted-button").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("admin-nest-report-dismiss-button").performScrollTo().performClick()
+
+        assertEquals(listOf("r1" to true, "r1" to false), resolved)
+    }
+
+    @Test
+    fun aTakedownPrefillFillsTheConsoleOnceAndIsConsumed() {
+        var consumed = 0
+        render(
+            takedownPrefill = com.fauna.ffi.FfiTakedownPrefill(contentId = "cid-from-report", conversation = false),
+            onConsumeTakedownPrefill = { consumed++ },
+        )
+
+        composeTestRule.onNodeWithTag("admin-nest-takedown-content-id-input").performScrollTo()
+            .assertTextContains("cid-from-report")
+        // No citation rides along — the console's own guard still stands. The
+        // field's `Text` carries its label, so read the typed value alone.
+        val typed = composeTestRule.onNodeWithTag("admin-nest-takedown-reference-input").performScrollTo()
+            .fetchSemanticsNode().config
+            .getOrNull(androidx.compose.ui.semantics.SemanticsProperties.EditableText)?.text.orEmpty()
+        assertEquals("", typed)
+        assertEquals(1, consumed)
     }
 }

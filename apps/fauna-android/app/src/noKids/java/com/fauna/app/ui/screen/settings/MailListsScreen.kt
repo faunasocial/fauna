@@ -18,6 +18,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.components.rememberTwoClickArm
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.viewmodel.MailListsVM
@@ -360,12 +361,22 @@ private fun ListRow(
                     onClick = onViewMembers,
                     modifier = Modifier.testTag(Ids.MAIL_LISTS_LIST_ITEM_MEMBERS_BUTTON),
                 ) { Text(stringResource(R.string.mail_lists_members)) }
+                // Two-click confirm (`common.md`): the armed label says the
+                // members go with the list.
+                val deleteArm = rememberTwoClickArm()
                 OutlinedButton(
-                    onClick = onDelete,
+                    onClick = { deleteArm.press(onDelete) },
                     enabled = deleteGate.enabled,
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
                     modifier = Modifier.testTag(Ids.MAIL_LISTS_LIST_ITEM_DELETE_BUTTON),
-                ) { Text(stringResource(R.string.mail_lists_delete)) }
+                ) {
+                    Text(
+                        stringResource(
+                            if (deleteArm.armed) R.string.mail_lists_delete_confirm
+                            else R.string.mail_lists_delete,
+                        ),
+                    )
+                }
             }
             DisabledControlReasonText(deleteGate.reason)
         }

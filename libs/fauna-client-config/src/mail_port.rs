@@ -99,6 +99,13 @@ impl<T: PortTransport> MailStore for PortMailStore<T> {
     async fn revoke(&self, _credential_id: String) -> Result<bool, StoreError> {
         Err(StoreError::Save(not_crossing("revoke")))
     }
+
+    async fn retire_generation(
+        &self,
+        _generation: fauna_core::data::PriorMsekRetirement,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Save(not_crossing("retire_generation")))
+    }
 }
 
 /// Answer one door of the mail seam from `seam` — the core chunk's half.
@@ -170,6 +177,12 @@ mod tests {
             Err(StoreError::Save(self.0.into()))
         }
         async fn revoke(&self, _: String) -> Result<bool, StoreError> {
+            Err(StoreError::Save(self.0.into()))
+        }
+        async fn retire_generation(
+            &self,
+            _: fauna_core::data::PriorMsekRetirement,
+        ) -> Result<bool, StoreError> {
             Err(StoreError::Save(self.0.into()))
         }
     }

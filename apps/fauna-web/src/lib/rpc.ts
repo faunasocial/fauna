@@ -2570,7 +2570,7 @@ export function mailImportMachine(secretHex: string): Promise<WasmMailImportMach
 //
 // `deviceIdHex` is this browser's device identity for the account
 // (`$lib/device-id`'s `getDeviceId(actorId)`), passed in by the caller — the same
-// shape as `pushUnsubscribe`'s `deviceId` param.
+// id the push registration keys this browser's row under.
 export function taskDelegationView(
   secretHex: string,
   deviceIdHex: string,
@@ -3226,11 +3226,11 @@ export function moderationActions(secretHex: string): Promise<ObligationAction[]
   });
 }
 
-// Push-subscription management — the WS-RPC seam over the shared
-// `fauna_client_push::PushClient` (`fauna.push.{vapid_key,subscribe,
-// unsubscribe}`), retiring the three `/api/v1/push/*` HTTP routes. The browser
-// `serviceWorker`/`PushManager` work stays in `$lib/push.ts`; only these three
-// nest hops migrate.
+// Push registration — the WS-RPC seam over the shared
+// `fauna_client_push::registration` machine (the install opt-in bit, the
+// which-actor record, the leave-shape drops), keyed under this browser's device
+// id for the session's actor wasm-side. The browser `serviceWorker`/
+// `PushManager` work that produces a subscription stays in `$lib/push.ts`.
 export function pushVapidKey(secretHex: string): Promise<string> {
   return call(secretHex, async (c) => {
     const reply = (await c.pushVapidKey()) as { public_key: string };
@@ -3238,24 +3238,27 @@ export function pushVapidKey(secretHex: string): Promise<string> {
   });
 }
 
-export interface PushSubscribeInput {
-  device_id: string;
+/** A browser push subscription, as `PushManager` hands it back. */
+export interface BrowserPushSubscription {
   endpoint: string;
-  key_p256dh?: string;
-  key_auth?: string;
-  transport?: string;
+  key_p256dh: string;
+  key_auth: string;
 }
 
-export function pushSubscribe(secretHex: string, req: PushSubscribeInput): Promise<void> {
-  return call(secretHex, async (c) => {
-    await c.pushSubscribe(req);
-  });
+export function pushEnable(secretHex: string, sub: BrowserPushSubscription): Promise<void> {
+  return call(secretHex, (c) => c.pushEnable(sub.endpoint, sub.key_p256dh, sub.key_auth));
 }
 
-export function pushUnsubscribe(secretHex: string, deviceId: string): Promise<void> {
-  return call(secretHex, async (c) => {
-    await c.pushUnsubscribe(deviceId);
-  });
+export function pushDisable(secretHex: string): Promise<void> {
+  return call(secretHex, (c) => c.pushDisable());
+}
+
+export function pushRearm(secretHex: string, sub: BrowserPushSubscription): Promise<boolean> {
+  return call(secretHex, (c) => c.pushRearm(sub.endpoint, sub.key_p256dh, sub.key_auth));
+}
+
+export function pushDropActorRow(secretHex: string): Promise<void> {
+  return call(secretHex, (c) => c.pushDropActorRow());
 }
 
 // User-settings `linked-nests` page — per-user nest pairing (list/link/unlink),

@@ -176,7 +176,7 @@ Stamped 2026-10-01 at 065ed2e2c2.
 | 9 | nest | `tests/e2e-unified/tests/platform/docker/test_atproto_pds_sni_router.py::test_sni_router_routes_pds_to_the_atproto_bridge` | — |
 | 9 | nest | `tests/e2e-unified/tests/platform/docker/test_atproto_pds_sni_router.py::test_createsession_rate_limit_carries_real_client_ip` | — |
 | 10 | app | `tests/e2e-unified/tests/test_bluesky_notifications_bridged.py::test_a_bridged_bluesky_notification_reaches_the_unified_list` | linux (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_bluesky_feed_ingest.py::test_a_followed_bluesky_post_arrives_in_the_feed_and_a_reply_threads_under_it` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_bluesky_feed_ingest.py::test_a_followed_bluesky_post_arrives_in_the_feed_and_a_reply_threads_under_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 12 | nest | `tests/e2e-unified/tests/test_atproto_firehose_post.py::test_public_post_reaches_the_firehose` | nest (linux): passed |
 | 13 | app | (none) | — |
 | 14 | nest | `tests/e2e-unified/tests/test_atproto_firehose_post.py::test_public_post_reaches_the_firehose` | nest (linux): passed |

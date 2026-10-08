@@ -6,16 +6,21 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import com.fauna.app.ui.viewmodel.RecoveryKitUiState
 import com.fauna.ffi.FfiRecoveryKitStatus
+import com.fauna.ffi.FfiSweepCopy
+import com.fauna.ffi.FfiSweepView
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 import social.fauna.generated.Ids
+import uniffi.fauna_core.LocalizedText
 import uniffi.fauna_core.QrMatrix
 
 /**
@@ -211,5 +216,116 @@ class RecoveryKitSectionContentTest {
         assertAbsent(Ids.RECOVERY_KIT_SECRET_DISPLAY)
         assertAbsent(Ids.RECOVERY_KIT_SECRET_COPY_BTN)
         assertAbsent(Ids.RECOVERY_KIT_QR)
+    }
+
+    // ── The stolen-identity leg ─────────────────────────────────────────────
+
+    private fun renderLeg(
+        state: RecoveryKitUiState,
+        copy: FfiSweepCopy = FfiSweepCopy(outcome = null, unattested = null),
+    ) {
+        composeTestRule.setContent {
+            RecoveryKitSectionContent(
+                state = state,
+                onPhraseChange = {},
+                onCreate = {},
+                onReplace = {},
+                onLost = {},
+                onEscrowReseal = {},
+                onVeto = {},
+                onStolenConfirmChange = {},
+                onStolen = { clicks += "stolen" },
+                onSweepRetry = { clicks += "retry" },
+                pendingDays = { 12 },
+                qrMatrixOf = { null },
+                sweepCopyOf = { copy },
+            )
+        }
+    }
+
+    private fun sweep(owesWork: Boolean) = FfiSweepView(
+        kind = if (owesWork) "failed" else "ran", detail = null, groups = 3u,
+        groupsOldLeafRemoved = if (owesWork) 0u else 3u, unattestedMembers = 0u, owesWork = owesWork,
+    )
+
+    @Test
+    fun theStolenTriggerRendersOnAnUnreadStatusButStaysDisarmedUntilTheConfirmWord() {
+        renderLeg(RecoveryKitUiState(status = null, stolenConfirmInput = "succeed"))
+
+        // The ceremony's authorization is the kit, so an unread chain — what a
+        // locked-out owner cannot read — must not take the trigger away.
+        node(Ids.IDENTITY_STOLEN_CONFIRM_FIELD).assertExists()
+        node(Ids.IDENTITY_STOLEN_BUTTON).assertIsNotEnabled()
+    }
+
+    @Test
+    fun theConfirmWordArmsTheStolenTrigger() {
+        renderLeg(RecoveryKitUiState(status = status("registered", allowsReplace = true), stolenConfirmInput = "SUCCEED"))
+
+        node(Ids.IDENTITY_STOLEN_BUTTON).assertIsEnabled()
+        // The trigger sits below the fold of the unscrolled test window, where an
+        // injected touch misses it; invoke the node's own click action instead.
+        node(Ids.IDENTITY_STOLEN_BUTTON).performSemanticsAction(SemanticsActions.OnClick)
+        assertEquals(listOf("stolen"), clicks)
+    }
+
+    @Test
+    fun aStatusThatPositivelyDisallowsStolenHidesTheTrigger() {
+        renderLeg(RecoveryKitUiState(status = status("registered").copy(allowsStolen = false)))
+
+        assertAbsent(Ids.IDENTITY_STOLEN_CONFIRM_FIELD)
+        assertAbsent(Ids.IDENTITY_STOLEN_BUTTON)
+    }
+
+    @Test
+    fun noSuccessionRendersNoSweepLines() {
+        renderLeg(RecoveryKitUiState(status = status("registered")))
+
+        assertAbsent(Ids.RECOVERY_KIT_SWEEP_STATUS)
+        assertAbsent(Ids.RECOVERY_KIT_SWEEP_UNVOUCHED_STATUS)
+        assertAbsent(Ids.RECOVERY_KIT_SWEEP_RETRY_BUTTON)
+    }
+
+    @Test
+    fun theSweepLinesAreTheProjectionsTwoSeparateElements() {
+        renderLeg(
+            RecoveryKitUiState(status = status("registered"), sweepView = sweep(owesWork = false)),
+            copy = FfiSweepCopy(
+                outcome = LocalizedText("settings.recovery_kit.sweep_all_removed", mapOf("groups" to "3")),
+                unattested = LocalizedText("settings.recovery_kit.sweep_unattested", mapOf("count" to "2")),
+            ),
+        )
+
+        node(Ids.RECOVERY_KIT_SWEEP_STATUS).assertExists()
+        node(Ids.RECOVERY_KIT_SWEEP_UNVOUCHED_STATUS).assertExists()
+        // A finished sweep owes nothing, so there is nothing to retry.
+        assertAbsent(Ids.RECOVERY_KIT_SWEEP_RETRY_BUTTON)
+    }
+
+    @Test
+    fun aLineTheProjectionWithholdsIsAbsentNotEmpty() {
+        renderLeg(
+            RecoveryKitUiState(status = status("registered"), sweepView = sweep(owesWork = false)),
+            copy = FfiSweepCopy(outcome = null, unattested = null),
+        )
+
+        assertAbsent(Ids.RECOVERY_KIT_SWEEP_STATUS)
+        assertAbsent(Ids.RECOVERY_KIT_SWEEP_UNVOUCHED_STATUS)
+    }
+
+    @Test
+    fun unfinishedWorkRendersTheRetryWhateverThisDeviceCanDo() {
+        renderLeg(
+            RecoveryKitUiState(status = status("registered"), sweepView = sweep(owesWork = true)),
+            copy = FfiSweepCopy(
+                outcome = LocalizedText("settings.recovery_kit.sweep_failed", mapOf("reason" to "offline")),
+                unattested = null,
+            ),
+        )
+
+        node(Ids.RECOVERY_KIT_SWEEP_STATUS).assertExists()
+        node(Ids.RECOVERY_KIT_SWEEP_RETRY_BUTTON).assertIsEnabled()
+        node(Ids.RECOVERY_KIT_SWEEP_RETRY_BUTTON).performClick()
+        assertEquals(listOf("retry"), clicks)
     }
 }

@@ -3,7 +3,7 @@
 ## Requirements
 
 - **JDK 17** — `sudo apt install -y openjdk-17-jdk-headless`
-- **Android SDK** — platform-tools, build-tools 35.0.0, platform android-35
+- **Android SDK** — platform-tools, build-tools 35.0.0, platform android-36
 
 ## ARM64 (aarch64) Host Setup
 
@@ -39,7 +39,7 @@ export ANDROID_HOME=/work/android-sdk
 export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH
 
 yes | sdkmanager --licenses
-sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+sdkmanager "platform-tools" "platforms;android-36" "build-tools;35.0.0"
 ```
 
 ## Environment Variables

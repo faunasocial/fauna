@@ -535,6 +535,11 @@ internal fun PostActionsMenu(
     onUnpublishWeb: () -> Unit = {},
     onCopyWebLink: () -> Unit = {},
     onCopyPaywallLink: () -> Unit = {},
+    // The report verb (moderation.md § User-initiated reporting → *App surface*):
+    // `feed-post-report-button` paints only on ANOTHER author's post, and only
+    // when the caller built a report target for it; it opens the shared sheet
+    // the shell's ReportHost paints. `null` paints nothing.
+    onReport: (() -> Unit)? = null,
 ) {
     var expanded by remember { mutableStateOf(false) }
     // The destructive delete is a two-step inside the same flyout: tapping
@@ -690,6 +695,17 @@ internal fun PostActionsMenu(
                     )
                 }
             }
+
+            if (!isOwn && onReport != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.feed_report_post)) },
+                    onClick = {
+                        expanded = false
+                        onReport()
+                    },
+                    modifier = Modifier.testTag(Ids.FEED_POST_REPORT_BUTTON),
+                )
+            }
         }
     }
 }
@@ -804,9 +820,19 @@ private fun PostCard(
     // policy) — the strictest-wins compose of the guardian floor + the viewer's
     // own thresholds, resolved entirely in shared Rust. Memoized on labels +
     // inputs so it re-resolves only when either changes.
-    val contentVerdict = remember(post.labels, contentPolicyInputs) {
+    //
+    // The viewer's OWN report is the arm ahead of all of them (moderation.md
+    // § Corollary — block also hides): a post they reported, or one whose author
+    // they reported, comes back `block` with `reported` set, so the card paints
+    // "You reported this" and no body. Keyed by the report subject — the post's
+    // cid and author.
+    val reported = remember(post.postId, post.author, contentPolicyInputs) {
+        contentPolicyInputs.isReported(post.postId, post.author)
+    }
+    val policyVerdict = remember(post.labels, contentPolicyInputs) {
         contentPolicyInputs.verdictFor(post.labels)
     }
+    val contentVerdict = if (reported) "block" else policyVerdict
     // A `collapse` floor hides the body behind a one-tap reveal, session-local
     // (the floor persists) — mirrors linux `build_content_collapse`. A `block`
     // is never revealable.
@@ -834,7 +860,7 @@ private fun PostCard(
         // with a notice, checked FIRST so a block is never revealable — not even
         // past a muted reveal.
         if (contentVerdict == "block") {
-            ContentPolicyBlockedBody()
+            ContentPolicyBlockedBody(reported = reported)
         } else if (!muteRevealed && vm.isMuted(post.postId)) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
@@ -976,6 +1002,21 @@ private fun PostCard(
                             onUnpublishWeb = { vm.unpublishPostFromWeb(post.postId) },
                             onCopyWebLink = { post.webSlug?.let { vm.copyPostWebLink(post.postId, it) } },
                             onCopyPaywallLink = { post.webSlug?.let { vm.copyPostPaywallLink(post.postId, it) } },
+                            // Another author's post only (`!isOwn` inside the menu).
+                            // The shared constructor carries the sealed rule once, so a
+                            // gated post offers the include-text checkbox.
+                            onReport = if (isOwnPost) null else {
+                                {
+                                    vm.openReport(
+                                        com.fauna.ffi.reportPostTarget(
+                                            cid = post.postId,
+                                            author = post.author,
+                                            plaintext = post.body,
+                                            gated = post.gatedTier != null || post.gatedRoom != null,
+                                        ),
+                                    )
+                                }
+                            },
                         )
                     }
                 }
@@ -1141,9 +1182,15 @@ private fun PostCard(
  * (indexed, per post-card).
  */
 @Composable
-private fun ContentPolicyBlockedBody() {
+private fun ContentPolicyBlockedBody(reported: Boolean = false) {
+    // `reported` is the same notice for the viewer's OWN report (moderation.md
+    // § Corollary): "You reported this" in place of the family words, no body, no
+    // reveal — a personal filter, so it names the viewer's own act, not a policy.
     Text(
-        stringResource(R.string.family_content_blocked_notice),
+        stringResource(
+            if (reported) R.string.moderation_report_hidden_placeholder
+            else R.string.family_content_blocked_notice,
+        ),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(16.dp).testTag(Ids.CONTENT_POLICY_BLOCKED_NOTICE),
@@ -1549,17 +1596,21 @@ fun FeedLinkPreviewCards(document: RenderDocument, vm: FeedVM) {
  * anti-phishing-redirect) fires on CLICK, not on visibility — a non-https
  * url still shows the button, matching every reference app; a refusal shows
  * `subscriptions_unsafe_payment_url` on the same banner [buyUnlockOffer]
- * failures use. Not gated on [BuildConfig.PAYMENTS] (unlike [TipSurface]):
- * `resolve_post_unlock_offer`/`buy_unlock_offer` are not
- * `#[cfg(feature = "payments")]` members of `FfiFeedManager` and ship in the
- * storeSafe build's bindings too.
+ * failures use. The RENDER is gated on [BuildConfig.PAYMENTS] (the price-and-route
+ * class, dynamic-features.md § Platform-family surface excision): the price,
+ * the payment link and the buy button state a price or route money, so the
+ * storeSafe build paints none of them. The glue
+ * (`resolve_post_unlock_offer`/`buy_unlock_offer` are not
+ * `#[cfg(feature = "payments")]` members of `FfiFeedManager`) stays shared, and
+ * the early return sits after the resolve effect so both builds keep the same
+ * state machine.
  */
 @Composable
 fun PostUnlockOfferTeaser(offer: UnlockOfferView?, gatedTier: String?, postId: String, vm: FeedVM) {
     LaunchedEffect(postId) {
         if (gatedTier != null && offer == null) vm.resolvePostUnlockOffer(postId)
     }
-    if (offer == null) return
+    if (offer == null || !BuildConfig.PAYMENTS) return
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val appMessages = LocalAppMessages.current

@@ -114,6 +114,29 @@ pub struct PeerLegBinding {
     /// welcome — the facts composition crosses their ports with this
     /// device's interface addresses.
     pub bound_addrs: Vec<SocketAddr>,
+    /// The host's file-sync engines on the peer leg ([`PeerFileSync`]) —
+    /// `None` on a host that runs no file-sync engine beside this runtime: the
+    /// leg then serves no file body and fills no sibling registry.
+    pub file_sync: Option<PeerFileSync>,
+}
+
+/// What a host running file-sync engines beside the runtime hands the peer
+/// leg: the same-account peer data plane's two halves (`p2p.md` § Goal;
+/// `file-sync.md` § Content residency — the seat↔seat chunk pull).
+///
+/// Carried on the factory's [`PeerLegBinding`] rather than as a runtime
+/// parameter because it is the factory's own statement about this host — the
+/// process that builds the endpoint is the process whose engines it serves.
+#[derive(Clone)]
+pub struct PeerFileSync {
+    /// The serve half: one stored chunk of a folder this host runs an engine
+    /// for, through the one serve core (the agent passes its relay seat's
+    /// `RelaySeat::serve_peer`).
+    pub file_chunks: fauna_peer_sync::FileChunkFn,
+    /// The pull half: the registry the dial pass fills with the siblings it
+    /// admitted, which the host's engines ask before the nest
+    /// (`SyncEngine::with_sibling_chunks`).
+    pub siblings: Arc<crate::sibling_chunks::SiblingChannels>,
 }
 
 /// What the runtime hands the factory: the assembly's own resolved writer
@@ -167,6 +190,9 @@ pub(crate) struct PeerLegState {
     /// Where the listener bound — kept so the per-pass facts refresh can
     /// recompose LAN candidates when this device's interfaces change.
     bound_addrs: Vec<SocketAddr>,
+    /// The host's file-sync hooks from the bind ([`PeerFileSync`]) — the dial
+    /// pass fills its sibling registry.
+    pub(crate) file_sync: Option<PeerFileSync>,
     /// The last nest facts (live fetch preferred, cache as fallback) — the
     /// relay half of the composed facts, refreshed opportunistically while
     /// bound.
@@ -218,6 +244,7 @@ impl PeerLegState {
             node: None,
             transport: None,
             bound_addrs: Vec::new(),
+            file_sync: None,
             nest_facts: None,
             facts: None,
             server: None,
@@ -517,6 +544,10 @@ where
                     .removed_devices
                     .device_removed_view(account, &state.custodied_exclusions),
             )),
+            // The host's engines, through the one serve core — a sibling's
+            // chunk pull is that core's further consumer (`file-sync.md`
+            // § Relay serving).
+            file_chunks: binding.file_sync.as_ref().map(|f| f.file_chunks.clone()),
             quotas: QuotaConfig::default(),
             now,
         },
@@ -537,6 +568,7 @@ where
         nest_facts.iroh_relay_url.clone(),
     ));
     state.bound_addrs = binding.bound_addrs;
+    state.file_sync = binding.file_sync;
     state.nest_facts = Some(nest_facts);
     tracing::info!("peer leg: listener up (engine-singleton, enrolled, brake off)");
     Ok(PeerLegPass::Bound)
@@ -608,6 +640,14 @@ where
         lan_ips,
     )
     .await?;
+    // The fleet members among the targets — the only ones whose channels the
+    // file-sync engines may ask for chunk bodies (a custodian holds account
+    // planes, not file bodies, and its serve side refuses the kind).
+    let siblings: Vec<[u8; 32]> = targets.iter().map(|t| t.node_id).collect();
+    let file_siblings = state.file_sync.as_ref().map(|f| Arc::clone(&f.siblings));
+    if let Some(registry) = &file_siblings {
+        registry.set_nest(nest);
+    }
     // The owner-side custodian dials (W8.5 P5): custodians this account
     // granted custody to, from the fleet-only `custodian-endpoints` rows the
     // ceremony wrote — same witness, same pull-only walks (a custodied store
@@ -662,7 +702,7 @@ where
         )
         .await;
         match attempt {
-            Ok(Ok((applied, pulled, peer_endpoints))) => {
+            Ok(Ok((applied, pulled, peer_endpoints, channel))) => {
                 report.admitted += 1;
                 report.applied += applied;
                 report.blocks_fetched += pulled.fetched;
@@ -670,9 +710,19 @@ where
                 if let Some(fresh) = peer_endpoints {
                     report.observed.insert(fresh.node_id, fresh);
                 }
+                // Mutually admitted this pass: the host's engines may ask it
+                // for chunk bodies until the next pass replaces the channel.
+                if let Some(registry) = &file_siblings
+                    && siblings.contains(&target.node_id)
+                {
+                    registry.admitted(target.node_id, channel);
+                }
             }
             Ok(Err(e)) => {
                 report.failed += 1;
+                if let Some(registry) = &file_siblings {
+                    registry.dropped(&target.node_id);
+                }
                 tracing::debug!(
                     node = %fauna_core::hex32::encode(&target.node_id),
                     "peer dial: sibling unreachable or refused this pass: {e:#}"
@@ -680,6 +730,9 @@ where
             }
             Err(_) => {
                 report.failed += 1;
+                if let Some(registry) = &file_siblings {
+                    registry.dropped(&target.node_id);
+                }
                 tracing::debug!(
                     node = %fauna_core::hex32::encode(&target.node_id),
                     "peer dial: sibling interaction blew its budget — abandoned this pass"
@@ -760,7 +813,12 @@ async fn dial_one<B>(
     custodied_exclusions: &fauna_peer_sync::admission::CustodiedExclusions,
     own_endpoints: Option<&DeviceEndpoints>,
     nest: fauna_transport::NestPath,
-) -> Result<(usize, fauna_peer_sync::PullReport, Option<DeviceEndpoints>)>
+) -> Result<(
+    usize,
+    fauna_peer_sync::PullReport,
+    Option<DeviceEndpoints>,
+    Arc<fauna_peer_channel::PeerChannel>,
+)>
 where
     B: StoreBackend,
 {
@@ -801,8 +859,9 @@ where
     let mut pulled = fauna_peer_sync::PullReport::default();
     // The two class-2 planes, custody attached to both — the production
     // shape (`account_runtime`'s own planes), and the seam the crypto-shred
-    // contract binds: a `Shredded` mint merged over THIS leg must drop the
-    // retained key exactly as one merged over the nest leg does.
+    // contract binds: an authored `Shredded` mint merged over THIS leg must
+    // drop the retained key exactly as one merged over the nest leg does, and
+    // an unauthored one drops it on neither (the plane's walk hook judges it).
     //
     // Neither is handed a predecessor schedule, by rule
     // (`succession-aftermath.md` § Re-key scope → *Which walks carry*): the
@@ -838,7 +897,7 @@ where
         pulled.missing += pull.missing;
         pulled.relay_deferred += pull.relay_deferred;
     }
-    Ok((applied, pulled, outcome.peer_endpoints))
+    Ok((applied, pulled, outcome.peer_endpoints, channel))
 }
 
 /// Take the listener down: the node (its accept loop and every inbound
@@ -852,6 +911,26 @@ fn drop_listener(state: &mut PeerLegState) {
     state.transport = None;
     state.facts = None;
     state.bound_addrs.clear();
+    // The held sibling channels ride the endpoint going down: no engine may
+    // ask through them, and none may keep it alive.
+    if let Some(file_sync) = state.file_sync.take() {
+        file_sync.siblings.clear();
+    }
+}
+
+/// The yield's half of the peer leg (`account-runtime.md` § Multi-instance
+/// concurrency → *The agent holds the role when present*, part 3): the node is
+/// shut down and AWAITED — its accept loop ended, its listener gone — before
+/// everything [`drop_listener`] drops goes too. The caller releases
+/// `engine.lock` after this returns, and the sync agent binds the same NodeId
+/// only once it holds that lock, so the machine's one identity is never an
+/// endpoint in two processes. The next bind, if this runtime ever holds the
+/// role again, starts from the factory as a first bind does.
+pub(crate) async fn stand_down(state: &mut PeerLegState) {
+    if let Some(node) = state.node.take() {
+        node.shutdown().await;
+    }
+    drop_listener(state);
 }
 
 /// The participation half of the ensure step (`p2p.md` § Per-device
@@ -1893,6 +1972,7 @@ mod tests {
                     Ok(PeerLegBinding {
                         transport,
                         bound_addrs: Vec::new(),
+                        file_sync: None,
                     })
                 })
             })

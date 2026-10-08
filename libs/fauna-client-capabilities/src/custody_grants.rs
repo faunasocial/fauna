@@ -256,7 +256,8 @@ pub fn custody_remint_blob_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grant_log::RecordedGrants;
+    use crate::grant_log::PublishedGrants;
+    use fauna_client_config::PublishedLedger;
     use fauna_core::grant_event::GrantEventKind;
     use fauna_core::identity::ActorId;
     use fauna_core::succession_ledger::SuccessionLedger;
@@ -406,8 +407,10 @@ mod tests {
             )
             .expect("record");
             let bytes = undeposited
-                .release(&RecordedGrants::from_stored(&recorded_cfg))
-                .expect("released against the recorded mint");
+                .release(&PublishedGrants::from_published(
+                    &PublishedLedger::acknowledged_for_test(recorded_cfg),
+                ))
+                .expect("released against the published mint");
             let blob = fauna_mls::wrapped_blob::GrantBlob::from_canonical_bytes(&bytes)
                 .expect("blob decodes");
             assert!(blob.wrapped_keys.is_empty(), "keyless always");
@@ -423,7 +426,9 @@ mod tests {
                 &set,
             )
             .unwrap();
-            let empty = RecordedGrants::from_stored(&SuccessionLedger::empty(ActorId([9u8; 32])));
+            let empty = PublishedGrants::from_published(&PublishedLedger::acknowledged_for_test(
+                SuccessionLedger::empty(ActorId([9u8; 32])),
+            ));
             assert!(again.release(&empty).is_err(), "no Mint event, no deposit");
         }
         // The recorded events themselves are custody-shaped for the lenses.

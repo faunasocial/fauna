@@ -2134,6 +2134,11 @@ public partial class App : Application
             // below, for the same reason the switch arm counts where it does
             // (`Core.Services.E2eSessionCounters.RecordSessionTeardown`).
             Core.Services.E2eSessionCounters.RecordSessionTeardown();
+            // The leaving identity, read before anything below rebinds it: its push
+            // row is dropped on its own still-live client before the erase.
+            var leavingRpc = _rpcClient;
+            var leavingActor = _cryptoService is { HasKey: true } leavingCrypto ? leavingCrypto.ActorIdHex : null;
+            var leavingDevice = account.DeviceId;
             // Sign-out is local-only (credentials wiped below), but nothing the
             // outgoing account converged on may survive into whatever account signs
             // in next. ONE call, no list — DropActorScopedState.
@@ -2172,6 +2177,14 @@ public partial class App : Application
                 // (install-scoped, so it outlives this process) and handed to
                 // identity_choice's sign-out-residue view — account-scoping.md
                 // § Erasure follows scope → the residue surface.
+                // Push: the leaving identity drops its own row before the
+                // credential erase — the last point its authority is in hand
+                // (common.md § Push Notifications → *Registration*, the sign-out
+                // leave-shape). Bounded and best-effort: a sign-out completes
+                // offline. The install's opt-in bit survives, so the next sign-in
+                // here re-arms.
+                await Core.Services.PushSession.DropActorRowAsync(leavingRpc, leavingActor, leavingDevice);
+
                 Core.Services.ISignOutResidueSurface? residue = null;
                 await ErasePrecondition.AwaitUnprovisionThenErase(
                     HydrationSessionEnabled,
@@ -2192,8 +2205,12 @@ public partial class App : Application
         // LaunchMachine over the registry's active account. The escalation passes
         // the SAME account's material — the teardown is identical, the fresh
         // machine's challenge is what differs. Callers hold _switchPending.
+        // `leaving` is a leave gesture's own last act on the outgoing session (the
+        // switch's push-row drop), run past the teardown count and before anything is
+        // torn down; the escalation, which keeps the same identity, passes none.
         async Task TearDownAndRelaunchAsync(
-            uniffi.fauna_ffi.FfiAccountRegistry registry, string? newSecretHex, string? newNestUrl, string tag)
+            uniffi.fauna_ffi.FfiAccountRegistry registry, string? newSecretHex, string? newNestUrl, string tag,
+            Func<Task>? leaving = null)
         {
             // 3b. COUNT the teardown — here, and not one line lower.
             //     `fauna_e2e_agent::SESSION_GENERATION_KEY` asks for the
@@ -2217,6 +2234,14 @@ public partial class App : Application
             //     and a caller's barrier on it passed mid-switch. The rebuild's
             //     own navigation to MainPage sets it again.
             _mainAppMounted = false;
+
+            // 3d. The leave gesture's last act on the outgoing session, while its
+            //     client is still live and its crypto still loaded. Bounded and
+            //     best-effort by its own contract — never a gate on the teardown.
+            if (leaving is not null)
+            {
+                await leaving();
+            }
 
             // 4. TEAR DOWN the outgoing identity's session. DisposeNestClients
             //    alone is NOT enough — it drops the nest/RPC clients and the
@@ -2429,8 +2454,22 @@ public partial class App : Application
                 _deviceId = incoming?.@deviceId;
                 _handle = incoming?.@handle;
 
-                // 3b–5: shared with EscalateToLaunchSurfaceHandler below.
-                await TearDownAndRelaunchAsync(switchRegistry, newSecretHex, newNestUrl, "switch");
+                // The outgoing identity, read while it is still the one in session.
+                var outgoingRpc = _rpcClient;
+                var outgoingActor = _cryptoService is { HasKey: true } outgoingCrypto ? outgoingCrypto.ActorIdHex : null;
+                var outgoingDevice = outgoingActor is null
+                    ? null
+                    : SessionDeviceId.Resolve(switchRegistry, CredentialStore.Logical, outgoingActor);
+
+                // 3b–5: shared with EscalateToLaunchSurfaceHandler below. The switch
+                // is committed (SetActive above), so the outgoing identity drops its
+                // own push row on its still-live client before the teardown (common.md
+                // § Push Notifications → *Registration*, the switch leave-shape); the
+                // incoming identity re-arms at its session start.
+                await TearDownAndRelaunchAsync(
+                    switchRegistry, newSecretHex, newNestUrl, "switch",
+                    leaving: () => Core.Services.PushSession.DropActorRowAsync(
+                        outgoingRpc, outgoingActor, outgoingDevice));
             }
             finally
             {
@@ -3350,12 +3389,26 @@ public partial class App : Application
         // by shared Rust and drained by the pass itself; no app carries it.
         _ = Core.Helpers.SuccessionAftermath.RunAsync(_rpcClient);
 
+        // installers/README.md § Knowing a newer version is out: the ONE unasked,
+        // notify-only look per sign-in, through the shared update look's FFI face —
+        // a newer release paints the same notice the asked check paints (Settings →
+        // General), a failed look paints nothing. Fire-and-forget; it never holds
+        // sign-in up.
+        _ = Core.Services.UpdateCheck.Shared.LookOnceAtSignInAsync();
+
         // The onboarding wizard's sign-in follow-ups (the captured DNS credential,
         // the one-tap trust mint, the confirmed recovery kit), queued for THIS
         // actor at the wizard's LoggedIn terminal and run here on the session's
         // own client (PostSignInHandoff's header). Empty on every sign-in that did
         // not come through the wizard. Best-effort, fire-and-forget.
         _ = Core.Services.PostSignInHandoff.RunForAsync(ActiveActorHex, _rpcClient);
+
+        // Push (common.md § Push Notifications → *Registration*): announce this
+        // device on the session's own connection — the announce is opt-in per
+        // caller — and re-arm this install's ws-device row when it opted in, never
+        // opting it in. Every login and switch-in funnels through here, so the
+        // incoming identity re-arms with no Settings visit. Best-effort.
+        _ = Core.Services.PushSession.OnSessionStartAsync(_rpcClient, ActiveActorHex, account.DeviceId);
 
         // NO in-app backup upload driver: the SOURCE NEST is the segment-backup writer
         // (message-segment-store.md § Cross-location backup protocol — nest-side writer
@@ -3405,6 +3458,7 @@ public partial class App : Application
         }
 
         NotificationService.Initialize();
+        EnsureAgentAttachment();
         // OS notifications re-homed onto WS-RPC push (was the dead WebSocketService):
         //  • DM toasts    → MessageToastObserver over the ConversationsManager (below).
         //  • Knock toasts  → the knock pump raises KnockReceived on each fauna.knock.
@@ -3676,6 +3730,43 @@ public partial class App : Application
         string.IsNullOrEmpty(E2eEnv.Bridge)
         || (!string.IsNullOrEmpty(E2eEnv.SyncPipe) && !string.IsNullOrEmpty(E2eEnv.SyncAgentBin))
         || !string.IsNullOrEmpty(E2eEnv.RealSyncAgent);
+
+    /// <summary>The agent attachment lease, held for this process's life once the first
+    /// session starts (<see cref="EnsureAgentAttachment"/>).</summary>
+    private static uniffi.fauna_ffi.FfiAgentAttachment? _agentAttachment;
+    private static readonly object AgentAttachmentGate = new();
+
+    /// <summary>
+    /// Hold the sync agent's attachment lease for the rest of this process's life — "this
+    /// app is open on this machine" — so the agent's <c>ws-device</c> push arm leaves the
+    /// banners to this app's own toasts while it runs (<c>common.md</c> § Push
+    /// Notifications → <i>Transports</i>; <c>windows.md</c> § Notifications). The attach
+    /// names this app's toast identity (<see cref="NotificationService.Identity"/>), the
+    /// AUMID the agent posts its toast under while the app is closed. Shared Rust owns the
+    /// connection and the re-attach across agent restarts
+    /// (<c>fauna_client_sync::attachment</c>, the one tui links); the lease ends with the
+    /// process, a crash included. Gated like the provision path, so an e2e launch with no
+    /// harness-pinned agent never attaches to the box's real one. Once per process: an
+    /// account switch keeps the app open.
+    /// </summary>
+    private static void EnsureAgentAttachment()
+    {
+        if (!HydrationSessionEnabled) return;
+        lock (AgentAttachmentGate)
+        {
+            if (_agentAttachment is not null) return;
+            NotificationService.Initialize();
+            try
+            {
+                _agentAttachment = uniffi.fauna_ffi.FaunaFfiMethods.AttachToSyncAgent(
+                    "windows", NotificationService.Identity);
+            }
+            catch (Exception ex)
+            {
+                ShellLog.Warn("App", $"[agent-attach] not attached: {ex.Message}");
+            }
+        }
+    }
 
     /// <summary>
     /// Start (or restart) the session-scoped <see cref="FaunaApp.Core.Services.HydrationSessionService"/>:
@@ -6135,6 +6226,24 @@ public partial class App : Application
                             Core.Logs.E2eTrace.Write("[cmd-session] dispatching succession aftermath");
                             _ = Core.Helpers.SuccessionAftermath.RunAsync(rpc);
                         }
+
+                        // The once-per-sign-in newer-version look rides the SAME
+                        // universal post-auth hook in production (StartMainAppAsync),
+                        // which this login never reaches — so without this call no e2e
+                        // sign-in would ever look. One look per login, against the
+                        // harness's stub feed (UpdateCheck's compile-gated origin seam).
+                        _ = Core.Services.UpdateCheck.Shared.LookOnceAtSignInAsync();
+
+                        // Push session start — the announce and the opt-in-gated
+                        // re-arm production runs in StartMainAppAsync, which this
+                        // login never reaches. Best-effort, a no-op re-arm for every
+                        // install that never opted in.
+                        if (rpc is not null && crypto.HasKey)
+                        {
+                            _ = Core.Services.PushSession.OnSessionStartAsync(
+                                rpc, crypto.ActorIdHex, account.DeviceId);
+                        }
+                        EnsureAgentAttachment();
 
                         // Session-scoped hydration provisioning, e2e seam: the SAME
                         // HydrationSessionService production starts in

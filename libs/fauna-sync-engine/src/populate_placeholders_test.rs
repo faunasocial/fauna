@@ -217,6 +217,69 @@ fn the_fold_names_its_newly_created_rows_and_only_those() {
     );
 }
 
+/// The fold names the `Placeholder` rows it RE-POINTED at a moved head, each with the new
+/// version's size and mtime, and only those: the row is all the fold writes, so a placeholder
+/// already on the disk still describes the old version until its host re-describes it — on
+/// cfapi, the size the next open asks for (`on-demand-files.md` § On-Demand Files). An
+/// unchanged head, a create, and a 0-byte row merely stamped with the empty-content identity
+/// are not re-points.
+#[test]
+fn the_fold_names_its_repointed_rows_with_the_new_version() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_engine(watch.path().to_path_buf());
+
+    let (a, b, b2, e) = (
+        manifest_hex(0xA1),
+        manifest_hex(0xB1),
+        manifest_hex(0xB2),
+        manifest_hex(0x0E),
+    );
+    let first = engine
+        .record_placeholders_from_changes(&[
+            change(1, "a.txt", Some(&a), 5, 1_700_000_000_000),
+            change(2, "sub/b.txt", Some(&b), 7, 1_700_000_000_000),
+        ])
+        .unwrap();
+    assert!(first.repointed.is_empty(), "a create is not a re-point");
+    // A 0-byte placeholder still missing its empty-content identity: the next fold stamps it.
+    engine
+        .db()
+        .upsert_entry(
+            "empty.txt",
+            None,
+            None,
+            Some(ContentHash::from_digest_raw([0x0E; 32])),
+            SyncState::Placeholder,
+            0,
+            1_700_000_000,
+            0,
+            1,
+            None,
+        )
+        .unwrap();
+
+    let second = engine
+        .record_placeholders_from_changes(&[
+            change(1, "a.txt", Some(&a), 5, 1_700_000_000_000),
+            change(3, "sub/b.txt", Some(&b2), 248, 1_700_000_100_000),
+            change(4, "empty.txt", Some(&e), 0, 1_700_000_000_000),
+        ])
+        .unwrap();
+    assert_eq!(
+        second.recorded, 2,
+        "the re-point and the stamp are both written"
+    );
+    assert_eq!(
+        second.repointed,
+        vec![crate::enumerate::PlaceholderRow {
+            rel: "sub/b.txt".into(),
+            size: 248,
+            mtime: 1_700_000_100
+        }],
+        "only the moved head is a re-point, carrying the new version's size and mtime"
+    );
+}
+
 /// A 0-byte file has no bytes to fetch, so on an on-demand root cfapi fires **no**
 /// FETCH_DATA when it is opened (measured on a live cfapi root, 2026-07-15:
 /// `cfapi_live_integration::opening_a_zero_byte_placeholder_...` — opening a 0-byte

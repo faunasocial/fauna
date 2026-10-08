@@ -229,6 +229,7 @@ def _staging_home(tmp_path, monkeypatch):
     """A machine holding only a staging-box file for the box, and every
     non-seed input set — so the seed is the one thing a gate could miss."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() under Windows
     monkeypatch.delenv(_SEED_VAR, raising=False)
     for key, value in _OTHER_INPUTS.items():
         monkeypatch.setenv(key, value)

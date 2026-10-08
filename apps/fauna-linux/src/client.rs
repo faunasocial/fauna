@@ -3554,6 +3554,26 @@ impl FaunaClient {
         });
     }
 
+    /// Discharge the group sweep a relaunch adoption owes — the unbidden press
+    /// of `recovery-kit-sweep-retry-button` the post-auth hook makes for the
+    /// successor (`recovery_kit::SUCCESSION_SWEEP_OWED`). Same engine choice as
+    /// [`Self::retry_group_sweep`]; the fold parks whatever the answer says to.
+    pub fn discharge_owed_sweep(&self) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let secret_hex = self.secret_hex.clone();
+        let tx = self.tx.clone();
+        let successor_engine =
+            crate::conversations::conv_backend::active_session().map(|session| session.engine());
+        self.spawn_bg(async move {
+            let result =
+                do_discharge_owed_sweep(nest_rpc, &secret_hex, successor_engine, tx.clone()).await;
+            tx.send(UiMessage::Data(DataMessage::OwedSweepDischarged {
+                result,
+                successor: actor_id_from_secret_hex(&secret_hex).unwrap_or_default(),
+            }));
+        });
+    }
+
     // -----------------------------------------------------------------------
     // Settings — Privacy API
     // -----------------------------------------------------------------------
@@ -6228,15 +6248,18 @@ impl FaunaClient {
             // already is on linux — `DataMessage::NestIdentityChanged` →
             // `settings::trigger_nest_identity_changed` — never a second,
             // softer per-page shape (`security.md` § Post-auth surfacing).
-            // The mid-session sign-in refusal likewise: the page reports it,
-            // and the launch surface is reached through the supervisor stop /
-            // silent sign-in → `DataMessage::SignInRefused`.
-            Err(e @ (ApiError::NestIdentityChanged { .. } | ApiError::SignInRefused)) => {
-                UiMessage::Action(ActionResult::Failed {
-                    context: url,
-                    error: e.to_string(),
-                })
-            }
+            // The mid-session sign-in and succession refusals likewise: the
+            // page reports them, and the launch surface is reached through the
+            // supervisor stop / silent sign-in → `DataMessage::SignInRefused` /
+            // `DataMessage::IdentitySuperseded`.
+            Err(
+                e @ (ApiError::NestIdentityChanged { .. }
+                | ApiError::SignInRefused
+                | ApiError::Superseded { .. }),
+            ) => UiMessage::Action(ActionResult::Failed {
+                context: url,
+                error: e.to_string(),
+            }),
         }
     }
 
@@ -9123,7 +9146,7 @@ pub async fn run_deployment_seed_custody_leg(
 /// secret isn't 64 hex chars / 32 bytes. Used by the WS loop and the
 /// FaunaClient::actor_id() accessor; replaces the previous AuthState
 /// cache lookup since LaunchMachine doesn't expose actor_id.
-fn actor_id_from_secret_hex(secret_hex: &str) -> Option<String> {
+pub(crate) fn actor_id_from_secret_hex(secret_hex: &str) -> Option<String> {
     ActorKeypair::from_secret_hex(secret_hex)
         .ok()
         .map(|kp| kp.actor_id_hex())
@@ -9434,8 +9457,62 @@ async fn do_retry_group_sweep(
     successor_engine: Option<Arc<fauna_mls::engine::MlsEngine>>,
     tx_for_ledger: UiSender,
 ) -> Result<Box<fauna_client_recovery::ceremony::SweepStatus>, String> {
-    let nest_for_ledger = Arc::clone(&nest);
     use fauna_client_recovery::ceremony::{SweepRetryAnswer, SweepStatus};
+    match run_group_sweep_retry(nest, secret_hex, successor_engine, tx_for_ledger).await? {
+        SweepRetryAnswer::Swept(report) => Ok(Box::new(SweepStatus::Ran(report))),
+        // The three terminal answers and the transport arm, each already a
+        // sentence the shared projection chose — linux only resolves the key,
+        // exactly as it does for the sweep's own lines.
+        answered => Err(sweep_answer_sentence(&answered).unwrap_or_default()),
+    }
+}
+
+/// The shared projection's sentence for a sweep-retry answer, resolved — `None`
+/// for `Swept`, whose outcome renders through the sweep's own lines.
+fn sweep_answer_sentence(
+    answer: &fauna_client_recovery::ceremony::SweepRetryAnswer,
+) -> Option<String> {
+    answer
+        .message()
+        .map(|line| line.resolve(crate::i18n::strings::lookup))
+}
+
+/// The owed sweep's background half — the relaunch adoption's unbidden press
+/// (`succession-propagation.md` § Propagation → *Own device fleet*, the
+/// relaunch-adoption clause). The same ceremony as a press; what differs is
+/// what it parks: an adoption carries **no** report, so every answer parks
+/// one, and which one is shared Rust's call (`SweepRetryAnswer::into_owed_status`
+/// — never an empty `Ran`). `Err` is the one case where nothing ran at all (a
+/// session whose secret does not parse); the caller re-arms on it.
+async fn do_discharge_owed_sweep(
+    nest: Arc<NestClient>,
+    secret_hex: &str,
+    successor_engine: Option<Arc<fauna_mls::engine::MlsEngine>>,
+    tx_for_ledger: UiSender,
+) -> Result<
+    (
+        Box<fauna_client_recovery::ceremony::SweepStatus>,
+        Option<String>,
+    ),
+    String,
+> {
+    let answer = run_group_sweep_retry(nest, secret_hex, successor_engine, tx_for_ledger).await?;
+    tracing::info!("[succession-sweep] owed sweep answered {}", answer.kind());
+    let sentence = sweep_answer_sentence(&answer);
+    Ok((Box::new(answer.into_owed_status()), sentence))
+}
+
+/// The one body behind the press and the owed discharge: run the shared retry
+/// ceremony and, when it swept, re-park its roster for the aftermath ledger.
+/// `Err` only when nothing could run (the session's secret does not parse).
+async fn run_group_sweep_retry(
+    nest: Arc<NestClient>,
+    secret_hex: &str,
+    successor_engine: Option<Arc<fauna_mls::engine::MlsEngine>>,
+    tx_for_ledger: UiSender,
+) -> Result<fauna_client_recovery::ceremony::SweepRetryAnswer, String> {
+    let nest_for_ledger = Arc::clone(&nest);
+    use fauna_client_recovery::ceremony::SweepRetryAnswer;
 
     // The retired identity this account came from, off the shared resolution —
     // the DIRECT hop only, for the reason its own doc gives.
@@ -9461,39 +9538,30 @@ async fn do_retry_group_sweep(
         successor_engine.as_deref(),
     )
     .await;
-    match answer {
-        SweepRetryAnswer::Swept(report) => {
-            // The retry's roster joins the registry's parked ceremony (union by
-            // person) and the post-store-ready pass drains it now — the one
-            // path for the ceremony's roster and a retry's.
-            if let Some(old) = old_hex
-                .as_deref()
-                .and_then(|hex| fauna_core::hex32::decode(hex).ok())
-            {
-                fauna_client_recovery::aftermath::PendingCeremony::repark_retried_roster(
-                    &crate::account_registry(),
-                    &successor_hex,
-                    &fauna_core::identity::ActorId(old),
-                    &report.unattested_members(),
-                );
-                if let Some(handle) = crate::account_runtime::handle() {
-                    tokio::spawn(crate::succession_aftermath::run_ledger(
-                        Arc::clone(&nest_for_ledger),
-                        handle,
-                        tx_for_ledger,
-                    ));
-                }
+    if let SweepRetryAnswer::Swept(report) = &answer {
+        // The retry's roster joins the registry's parked ceremony (union by
+        // person) and the post-store-ready pass drains it now — the one
+        // path for the ceremony's roster and a retry's.
+        if let Some(old) = old_hex
+            .as_deref()
+            .and_then(|hex| fauna_core::hex32::decode(hex).ok())
+        {
+            fauna_client_recovery::aftermath::PendingCeremony::repark_retried_roster(
+                &crate::account_registry(),
+                &successor_hex,
+                &fauna_core::identity::ActorId(old),
+                &report.unattested_members(),
+            );
+            if let Some(handle) = crate::account_runtime::handle() {
+                tokio::spawn(crate::succession_aftermath::run_ledger(
+                    Arc::clone(&nest_for_ledger),
+                    handle,
+                    tx_for_ledger,
+                ));
             }
-            Ok(Box::new(SweepStatus::Ran(report)))
         }
-        // The three terminal answers and the transport arm, each already a
-        // sentence the shared projection chose — linux only resolves the key,
-        // exactly as it does for the sweep's own lines.
-        answered => Err(answered
-            .message()
-            .map(|line| line.resolve(crate::i18n::strings::lookup))
-            .unwrap_or_default()),
     }
+    Ok(answer)
 }
 
 /// Pair a ceremony's returned secret with a fresh status read — the shared

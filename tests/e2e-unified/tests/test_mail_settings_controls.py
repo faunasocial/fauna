@@ -220,7 +220,7 @@ def test_an_interrupted_rotation_is_shown_and_one_tap_finishes_it(
 
 # The apps whose rotate-keys form renders the per-password
 # `mail-rotate-keys-exclude-item` checkboxes (and dispatches what is ticked).
-_EXCLUDE_BUILT_APPS = frozenset({"tui"})
+_EXCLUDE_BUILT_APPS = frozenset({"tui", "macos", "ios"})
 
 
 @pytest.mark.feature("turn-on-mail")

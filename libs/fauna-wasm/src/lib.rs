@@ -148,6 +148,12 @@ pub mod rpc;
 #[cfg(target_arch = "wasm32")]
 pub use rpc::*;
 
+// Web's half of the shared push-registration machine
+// (`fauna_client_push::registration`) — the `localStorage` intent store and the
+// toggle's read; the verbs ride `rpc::WsRpcClient`.
+#[cfg(target_arch = "wasm32")]
+pub mod push_registration;
+
 // The region content plane's app side (`region-blocking.md` § The content
 // plane) — `WasmRegionPlane`, the web twin of the UniFFI `FfiRegionPlane`.
 // Wasm-only, same reason as `rpc` (its refresh rides `WsRpcClient`).
@@ -1952,12 +1958,18 @@ pub fn approval_display_text(
     peer_address: &str,
     peer_handle: &str,
     summary: &str,
+    bridge_id: &str,
+    operation: &str,
+    target: &str,
 ) -> Result<JsValue, JsValue> {
     crate::rpc::to_js(&fauna_core::format::approval_display_text(
         kind,
         peer_address,
         peer_handle,
         summary,
+        bridge_id,
+        operation,
+        target,
     ))
 }
 
@@ -3610,7 +3622,7 @@ pub(crate) async fn bound_login_identity(
 /// (`login.md` § When to use which). Reads and pin-checks the identity the
 /// signature binds ([`bound_login_identity`]) and folds a fresh per-request
 /// nonce into the signature for the nest's replay-guard uniqueness
-/// (auth-handshake finding #1); `getrandom::fill` uses the `wasm_js` backend.
+/// (the auth-handshake fix); `getrandom::fill` uses the `wasm_js` backend.
 #[cfg(target_arch = "wasm32")]
 pub(crate) async fn build_handshake_request(
     client: &fauna_rpc_wasm::AnonymousWsRpcClient,
@@ -4085,6 +4097,29 @@ pub fn claim_owed_succession_kit(actor_id_hex: String) -> bool {
 #[wasm_bindgen(js_name = rearmOwedSuccessionKit)]
 pub fn rearm_owed_succession_kit(actor_id_hex: String) {
     crate::succession::rearm_owed_succession_kit(&actor_id_hex)
+}
+
+/// Adopt a chain-verified successor this browser already holds — the relaunch
+/// half of a lost succession reply. `true` → the caller switches to it now; the
+/// owed kit and owed sweep are parked for the successor's session. Full argument
+/// at `succession::adopt_held_successor`.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = adoptHeldSuccessor)]
+pub fn adopt_held_successor(predecessor_actor_id_hex: String, verified_successor: String) -> bool {
+    crate::succession::adopt_held_successor(&predecessor_actor_id_hex, &verified_successor)
+}
+
+/// Discharge a relaunch adoption's owed group sweep — `null` when nothing was
+/// owed, else the unbidden press's answer as a `LocalizedText` for
+/// `error-message`. Claims once; see `succession::discharge_owed_sweep`.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = dischargeOwedSuccessionSweep)]
+pub fn discharge_owed_succession_sweep(actor_id_hex: String) -> Result<JsValue, JsValue> {
+    match crate::succession::discharge_owed_sweep(&actor_id_hex) {
+        // `to_js` for `successionSweepCopy`'s reason: `args` is a map.
+        Some(sentence) => crate::rpc::to_js(&sentence),
+        None => Ok(JsValue::NULL),
+    }
 }
 
 /// Classify a user-entered link-form value (shared `fauna_client_pair::

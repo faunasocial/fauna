@@ -1306,6 +1306,9 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         .allow_headers([
             axum::http::header::CONTENT_TYPE,
             axum::http::header::AUTHORIZATION,
+            // A content-keyed chunk upload's store key (`chunk_routes`), sent
+            // cross-origin by a web app on the central origin.
+            axum::http::HeaderName::from_static("x-content-hash"),
         ])
         .expose_headers([axum::http::HeaderName::from_static("x-c2pa")])
         .allow_credentials(true);

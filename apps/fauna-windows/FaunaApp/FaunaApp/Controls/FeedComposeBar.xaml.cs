@@ -17,8 +17,8 @@ namespace FaunaApp.Controls;
 /// <paramref name="GateTier"/> / <paramref name="GateRoom"/> / <paramref name="Sell"/> is set
 /// (all three resolve off the one selected index), none = Public.
 /// <paramref name="GatePreview"/> is the teaser every restricted answer shares.
-/// <c>Sell.AskingPrice</c> is the raw draft text (whole sats), always empty in a store-safe
-/// build.</summary>
+/// <c>Sell.AskingPrice</c> is the raw draft text (whole sats). <paramref name="Sell"/> is
+/// always null in a store-safe build, which offers no "Sell this post…" answer.</summary>
 public readonly record struct ComposeAudience(
     string? GateTier,
     string? GateRoom,
@@ -37,15 +37,24 @@ public sealed partial class FeedComposeBar : UserControl
     /// tiers and "Sell this post…" — <see cref="RebuildGateItems"/>'s room segment.</summary>
     private IReadOnlyList<GateRoomOption> _ownRooms = Array.Empty<GateRoomOption>();
 
-    /// <summary>Which of the four <c>compose-gate-tier-select</c> answers is staged.</summary>
-    private enum GateKind { Public, Tier, Room, Sell }
+    /// <summary>Which of the four <c>compose-gate-tier-select</c> answers is staged. The
+    /// fourth, the sale, is the paywall-designation gesture and exists only where the
+    /// payments plane does (dynamic-features.md § Platform-family surface excision → The
+    /// price-and-route class): a store-safe build offers three.</summary>
+    private enum GateKind
+    {
+        Public,
+        Tier,
+        Room,
+#if PAYMENTS
+        Sell,
+#endif
+    }
 
 #if PAYMENTS
-    /// <summary>The gated <c>compose-sell-asking-price</c> input, dropped into
-    /// <c>SellAskingPriceHost</c> — same removable-item reasoning as
-    /// <c>ProfilePage._tierAskingPriceInput</c> (dynamic-features.md § A gated
-    /// plane's user-facing INPUTS excise with it).</summary>
-    private readonly Views.Payments.AskingPriceInput _sellAskingPriceInput;
+    /// <summary>The sell composer's fields, dropped into <c>SellFieldsHost</c> — same
+    /// removable-item reasoning as <c>ProfilePage._tierMoneyFields</c>.</summary>
+    private readonly Views.Payments.SellComposeFields _sellFields;
 #endif
 
     /// <summary>
@@ -170,24 +179,15 @@ public sealed partial class FeedComposeBar : UserControl
         // (SetGateTiers, called from FeedPage.Refresh on every observer tick).
         GatePreviewBox.PlaceholderText = S.Get("feed/post/gate_preview_placeholder");
         ToolTipService.SetToolTip(GateTierSelect, S.Get("feed/post/gate_audience"));
-        SellPriceBox.PlaceholderText = S.Get("feed/post/sell_price_placeholder");
-        SellSubscribersFreeCheck.Content = S.Get("feed/post/sell_subscribers_free");
 #if PAYMENTS
-        _sellAskingPriceInput = new Views.Payments.AskingPriceInput
-        {
-            AutomationId = Ids.ComposeSellAskingPrice,
-            PlaceholderText = S.Get("feed/post/sell_asking_price_placeholder"),
-        };
-        SellAskingPriceHost.Content = _sellAskingPriceInput;
-        _sellAskingPriceInput.TextChanged += (_, _) => ForwardSaleField();
+        _sellFields = new Views.Payments.SellComposeFields();
+        SellFieldsHost.Content = _sellFields;
+        _sellFields.Changed += ForwardSaleField;
 #endif
         GatePreviewBox.TextChanged += (_, _) =>
         {
             if (!_suppressAudienceForward) GatePreviewChanged?.Invoke(GatePreviewBox.Text);
         };
-        SellPriceBox.TextChanged += (_, _) => ForwardSaleField();
-        SellSubscribersFreeCheck.Checked += (_, _) => ForwardSaleField();
-        SellSubscribersFreeCheck.Unchecked += (_, _) => ForwardSaleField();
         SetGateTiers(Array.Empty<string>());
     }
 
@@ -197,10 +197,20 @@ public sealed partial class FeedComposeBar : UserControl
         SelectedGateTier(),
         SelectedGateRoom(),
         GatePreviewBox.Text,
-        IsSellSelected()
-            ? (SellPriceBox.Text, SellAskingPriceText, SellSubscribersFreeCheck.IsChecked ?? true)
-            : null);
+        StagedSale());
 
+    /// <summary>The sale the fields show while "Sell this post…" is the answer, else null —
+    /// always null in a store-safe build, which offers no such answer.</summary>
+    private (string Price, string AskingPrice, bool SubscribersGetItFree)? StagedSale()
+    {
+#if PAYMENTS
+        if (IsSellSelected())
+            return (_sellFields.Price, _sellFields.AskingPrice, _sellFields.SubscribersGetItFree);
+#endif
+        return null;
+    }
+
+#if PAYMENTS
     /// <summary>A sale field edit is part of the answer only while the sale is the answer;
     /// with another answer picked the fields are hidden page-local text the manager does not
     /// hold (it keeps one answer, never "a tier plus a price").</summary>
@@ -209,13 +219,19 @@ public sealed partial class FeedComposeBar : UserControl
         if (_suppressAudienceForward || !IsSellSelected()) return;
         AudienceChanged?.Invoke(CurrentAudience());
     }
+#endif
 
     /// <summary>The kind + key the snapshot's audience names — the snapshot twin of
     /// <see cref="CurrentGateSelection"/>. The shared setters clear each other, so at most
     /// one of <c>sell</c> / <c>gate_room</c> / <c>gate_tier</c> is ever set.</summary>
     private static (GateKind Kind, string? Key) AnswerOf(FeedComposeState compose)
     {
+        // A sale staged on a full client and synced in is not a store-safe build's to show
+        // (it offers no Sell answer): its select reads as the gated answer the shared state
+        // otherwise carries — apple's FeedVM.composeGateSelection, the same ruling.
+#if PAYMENTS
         if (compose.@sell is not null) return (GateKind.Sell, null);
+#endif
         if (compose.@gateRoom is { } room) return (GateKind.Room, room);
         if (compose.@gateTier is { } tier) return (GateKind.Tier, tier);
         return (GateKind.Public, null);
@@ -261,17 +277,14 @@ public sealed partial class FeedComposeBar : UserControl
         try
         {
             if (string.IsNullOrEmpty(GatePreviewBox.Text)) GatePreviewBox.Text = compose.@gatePreview;
-            if (compose.@sell is { } sell
-                && string.IsNullOrEmpty(SellPriceBox.Text)
-                && string.IsNullOrEmpty(SellAskingPriceText)
-                && (SellSubscribersFreeCheck.IsChecked ?? true))
-            {
-                SellPriceBox.Text = sell.@price;
 #if PAYMENTS
-                _sellAskingPriceInput.Text = sell.@askingPrice;
-#endif
-                SellSubscribersFreeCheck.IsChecked = sell.@subscribersGetItFree;
+            if (compose.@sell is { } sell && _sellFields.IsAtDefaults)
+            {
+                _sellFields.Price = sell.@price;
+                _sellFields.AskingPrice = sell.@askingPrice;
+                _sellFields.SubscribersGetItFree = sell.@subscribersGetItFree;
             }
+#endif
         }
         finally
         {
@@ -380,7 +393,9 @@ public sealed partial class FeedComposeBar : UserControl
     // ── Gate-to-tier (feed.md § Encryption at rest; monetization.md § Pillars 2+3) ──
     // Fixed layout: Public (index 0) → the author's own tiers → the author's own rooms
     // (`ui/feed.md` § Encryption at rest → Room-restricted — the app half, *The composer's
-    // fourth answer*) → always-last "Sell this post…". Every answer resolves by the
+    // fourth answer*) → always-last "Sell this post…", which only a payments build offers
+    // (dynamic-features.md § Platform-family surface excision → The price-and-route
+    // class). Every answer resolves by the
     // SELECTED INDEX'S POSITION in that layout, never by the item's text: a tier can be
     // named exactly like a room option's "Room: ‹label›" text, and a name must never be
     // able to hijack another answer (mirrors linux's `GateOptions`, pinned by its own
@@ -427,10 +442,12 @@ public sealed partial class FeedComposeBar : UserControl
             GateTierSelect.Items.Add(item);
         }
 
+#if PAYMENTS
         var sellLabel = S.Get("feed/post/gate_sell");
         var sellItem = new ComboBoxItem { Content = sellLabel };
         AutomationProperties.SetName(sellItem, sellLabel);
         GateTierSelect.Items.Add(sellItem);
+#endif
 
         GateTierSelect.SelectedIndex = ResolveGateIndex(current);
     }
@@ -441,7 +458,9 @@ public sealed partial class FeedComposeBar : UserControl
     /// backing field for the rebuild it precedes).</summary>
     private (GateKind Kind, string? Key) CurrentGateSelection()
     {
+#if PAYMENTS
         if (IsSellSelected()) return (GateKind.Sell, null);
+#endif
         if (SelectedGateRoom() is { } room) return (GateKind.Room, room);
         if (SelectedGateTier() is { } tier) return (GateKind.Tier, tier);
         return (GateKind.Public, null);
@@ -455,8 +474,10 @@ public sealed partial class FeedComposeBar : UserControl
     {
         switch (selection.Kind)
         {
+#if PAYMENTS
             case GateKind.Sell:
                 return GateTierSelect.Items.Count - 1;
+#endif
             case GateKind.Tier:
                 for (var i = 0; i < _gateTierNames.Count; i++)
                 {
@@ -521,29 +542,18 @@ public sealed partial class FeedComposeBar : UserControl
 
     private void UpdateSellFieldsVisibility()
     {
-        var visibility = IsSellSelected() ? Visibility.Visible : Visibility.Collapsed;
-        SellPriceBox.Visibility = visibility;
-        SellSubscribersFreeCheck.Visibility = visibility;
-#if PAYMENTS
-        SellAskingPriceHost.Visibility = visibility;
-#endif
+        SellFieldsHost.Visibility = IsSellSelected() ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    /// <summary>True iff "Sell this post…" (always the last item, added unconditionally in
-    /// <see cref="SetGateTiers"/>) is selected.</summary>
+    /// <summary>True iff "Sell this post…" (always the last item, added by
+    /// <see cref="RebuildGateItemsCore"/> under <c>PAYMENTS</c>) is selected — never in a
+    /// store-safe build, which offers no such answer.</summary>
     private bool IsSellSelected()
+#if PAYMENTS
         => GateTierSelect.Items.Count > 0
            && GateTierSelect.SelectedIndex == GateTierSelect.Items.Count - 1;
-
-    /// <summary>The gated <c>compose-sell-asking-price</c> input's raw text — always
-    /// empty in a store-safe build, which the FeedManager reads as no machine
-    /// price (dynamic-features.md § A gated plane's user-facing INPUTS excise
-    /// with it).</summary>
-    private string SellAskingPriceText
-#if PAYMENTS
-        => _sellAskingPriceInput.Text;
 #else
-        => string.Empty;
+        => false;
 #endif
 
     /// <summary>The selected tier name, or <c>null</c> for the "Public" sentinel (index 0), a
@@ -633,14 +643,9 @@ public sealed partial class FeedComposeBar : UserControl
             var answerSent = SelectedGateTier() == gateTier && SelectedGateRoom() == gateRoom
                 && IsSellSelected() == (sell is not null);
             if (GatePreviewBox.Text == gatePreview) GatePreviewBox.Text = string.Empty;
-            if (SellFieldsHold(sell))
-            {
-                SellPriceBox.Text = string.Empty;
 #if PAYMENTS
-                _sellAskingPriceInput.Text = string.Empty;
+            if (SellFieldsHold(sell)) _sellFields.Reset(); // the ratified rank knob defaults ON
 #endif
-                SellSubscribersFreeCheck.IsChecked = true; // the ratified rank knob defaults ON
-            }
             if (answerSent) GateTierSelect.SelectedIndex = 0; // back to the Public sentinel
         }
         // Sent → any box cleared above already fired ComposeChanged with the cleared text,
@@ -650,14 +655,15 @@ public sealed partial class FeedComposeBar : UserControl
         _ = App.FeedDrafts?.SaveNowAsync();
     }
 
+#if PAYMENTS
     /// <summary>True iff the sale fields still hold what a submit sent — <c>sell</c> null is
     /// a non-sale submit, which the fields still hold only while no sale is selected. The
     /// sale half of <see cref="PostButton_Click"/>'s clear-only-what-was-sent rule.</summary>
     private bool SellFieldsHold((string Price, string AskingPrice, bool SubscribersGetItFree)? sell)
         => sell is { } s
-            ? IsSellSelected() && SellPriceBox.Text == s.Price && SellAskingPriceText == s.AskingPrice
-              && (SellSubscribersFreeCheck.IsChecked ?? true) == s.SubscribersGetItFree
+            ? StagedSale() is { } staged && staged == s
             : !IsSellSelected();
+#endif
 
     private async void ComposeFile_Click(object sender, RoutedEventArgs e)
     {

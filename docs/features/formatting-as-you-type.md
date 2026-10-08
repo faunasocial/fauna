@@ -33,7 +33,7 @@ Stamped 2026-09-26 at 175da50d99.
 |---|---|---|
 | web |  no run recorded | |
 | linux | ✅ full | 0.1.2-dev+c4a95c20 standalone |
-| windows |  no run recorded | |
+| windows | ✅ full | 0.1.3-dev+862c7d57 standalone |
 | macos |  no run recorded | |
 | ios |  no run recorded | |
 | android |  no run recorded | |
@@ -41,7 +41,7 @@ Stamped 2026-09-26 at 175da50d99.
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_compose_live_styling.py::test_compose_styles_markdown_as_you_type` | linux (linux): passed, tui (linux): skipped |
-| 2 | app | `tests/e2e-unified/tests/test_conversations_marker_toggle.py::test_compose_hides_inline_markers_by_default_and_toggle_reveals` | linux (linux): passed, tui (linux): skipped |
-| 3 | app | `tests/e2e-unified/tests/test_compose_live_styling.py::test_moving_the_caret_into_formatted_text_brings_its_marks_back` | linux (linux): passed, tui (linux): skipped |
+| 1 | app | `tests/e2e-unified/tests/test_compose_live_styling.py::test_compose_styles_markdown_as_you_type` | linux (linux): passed, windows (windows): passed, tui (linux): skipped |
+| 2 | app | `tests/e2e-unified/tests/test_conversations_marker_toggle.py::test_compose_hides_inline_markers_by_default_and_toggle_reveals` | linux (linux): passed, windows (windows): passed, tui (linux): skipped |
+| 3 | app | `tests/e2e-unified/tests/test_compose_live_styling.py::test_moving_the_caret_into_formatted_text_brings_its_marks_back` | linux (linux): passed, windows (windows): passed, tui (linux): skipped |
 <!-- features-render:end -->

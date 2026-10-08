@@ -129,6 +129,18 @@ pub struct MailboxState {
     pub uid_next: u32,
     pub highestmodseq: u64,
     pub attrs: Vec<String>,
+    /// The prune floor: the highest modseq any tombstone the retention prune
+    /// dropped from this mailbox carried (0 = none ever pruned). Below it the
+    /// manifest's tombstone list is incomplete, so a replica rebuilt from it
+    /// must not enumerate expunges since an older modseq — QRESYNC falls back
+    /// to `OK [HIGHESTMODSEQ]` (`imap-server.md` § QRESYNC). Omitted at rest
+    /// while 0, so a never-pruned manifest encodes as before.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pruned_modseq: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

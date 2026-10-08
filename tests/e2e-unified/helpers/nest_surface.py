@@ -786,6 +786,12 @@ _UNSUPPORTED_VENUE_REASON = (
 #: in `test_nest_mode_axis.py`, which is also the only file the raw-read scan
 #: skips. Naming them here would make this module look like a reader of them.)
 MAIL_VENUE_HOST_AFFORDANCE_READERS = {
+    "tests/test_mail_list_compose.py::"
+    "test_sending_to_a_list_from_the_app_warns_reaches_every_member_once_and_shows_one_sent_entry":
+        "reads the relayed messages out of the in-process stub MX",
+    "tests/test_mail_list_compose.py::"
+    "test_the_compose_form_warns_near_todays_list_limit_and_explains_an_over_limit_send":
+        "reads the relayed messages out of the in-process stub MX",
     "tests/test_mail_enable_then_mua_round_trip.py::"
     "test_client_enabled_mail_submits_outbound_through_submission":
         "relays to the in-process stub MX and dkimpy-verifies the signature "

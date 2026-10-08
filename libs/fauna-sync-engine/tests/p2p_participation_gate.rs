@@ -6,19 +6,31 @@
 //! Driven entirely through the runtime's pump (`reconcile_now`) over the
 //! in-memory transport, the harness `peer_dial_convergence.rs` uses; "no
 //! listener" is asserted on the transport's accept side, never on a flag.
+//!
+//! The listener's other way down lives here too: an app runtime handing the
+//! engine role to the sync agent (`account-runtime.md` § Multi-instance
+//! concurrency → *The agent holds the role when present*, part 3) takes its
+//! listener down before it releases the role.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use fauna_account_store::locks::{EngineLock, EngineLockOutcome};
 use fauna_core::identity::ActorKeypair;
 use fauna_credential_store::CredentialStore;
 use fauna_protocol::discovery::NestInfoReply;
 use fauna_protocol::{RpcErrorClass, RpcRequester, decode_strict, encode_canonical};
 use fauna_sync_engine::account_runtime::{
-    AccountRuntimeParams, AccountStoreHandle, AccountStoreRuntime, CRED_NAMESPACE, PeerLegPass,
-    RuntimePrincipal, StoreRoot, resolve_writer_key_serialized,
+    AccountRuntimeParams, AccountStoreHandle, AccountStoreRuntime, AgentPresenceLock,
+    AgentPresenceLockOutcome, CRED_NAMESPACE, PeerLegBinding, PeerLegFactoryInputs, PeerLegPass,
+    PeerTransportFactory, RuntimePrincipal, StoreRoot, resolve_writer_key_serialized,
 };
-use fauna_transport::testing::{Listeners, await_listening, listeners};
+use fauna_transport::testing::{Listeners, MemTransport, await_listening, listeners};
+use fauna_transport::{
+    EndpointKey, IncomingConns, PathCandidates, PeerConn, PeerTransport, TransportError,
+};
+use futures_util::StreamExt;
 
 mod common;
 use common::mem_factory;
@@ -233,4 +245,140 @@ async fn a_switched_off_device_never_binds_after_a_restart() {
     );
     assert!(!a.p2p_participation().await.unwrap().effective());
     a.shutdown().await;
+}
+
+// ── The yield to the sync agent: the listener goes before the lock ─────────
+
+/// What `engine.lock` looked like at each instant a listener's accept side was
+/// dropped: `true` = still held by someone (the role had not been released).
+struct LockAtListenerDrop {
+    store_dir: PathBuf,
+    held: Mutex<Vec<bool>>,
+}
+
+/// Rides inside a listener's accept stream; its drop is the listener going.
+struct ProbeOnDrop(Arc<LockAtListenerDrop>);
+
+impl Drop for ProbeOnDrop {
+    fn drop(&mut self) {
+        let held = matches!(
+            EngineLock::try_acquire(&self.0.store_dir),
+            EngineLockOutcome::Refused
+        );
+        self.0.held.lock().unwrap().push(held);
+    }
+}
+
+/// `MemTransport`, with every accept stream it hands out carrying a
+/// [`ProbeOnDrop`].
+struct WitnessedListen {
+    inner: MemTransport,
+    witness: Arc<LockAtListenerDrop>,
+}
+
+#[async_trait::async_trait]
+impl PeerTransport for WitnessedListen {
+    async fn dial(
+        &self,
+        peer: EndpointKey,
+        candidates: PathCandidates,
+    ) -> Result<Box<dyn PeerConn>, TransportError> {
+        self.inner.dial(peer, candidates).await
+    }
+
+    async fn listen(&self) -> Result<IncomingConns, TransportError> {
+        let incoming = self.inner.listen().await?;
+        let probe = ProbeOnDrop(Arc::clone(&self.witness));
+        Ok(Box::pin(incoming.map(move |item| {
+            let _held_for_the_streams_life = &probe;
+            item
+        })))
+    }
+
+    fn local_identity(&self) -> EndpointKey {
+        self.inner.local_identity()
+    }
+}
+
+fn witnessed_factory(net: &Listeners, witness: &Arc<LockAtListenerDrop>) -> PeerTransportFactory {
+    let net = Listeners::clone(net);
+    let witness = Arc::clone(witness);
+    Arc::new(move |inputs: PeerLegFactoryInputs| {
+        let net = Listeners::clone(&net);
+        let witness = Arc::clone(&witness);
+        Box::pin(async move {
+            Ok(PeerLegBinding {
+                transport: Arc::new(WitnessedListen {
+                    inner: MemTransport {
+                        me: EndpointKey::from_bytes(inputs.writer_key.verifying_key().to_bytes()),
+                        listeners: net,
+                    },
+                    witness,
+                }),
+                bound_addrs: vec!["203.0.113.9:4711".parse().unwrap()],
+                file_sync: None,
+            })
+        })
+    })
+}
+
+/// **The yield takes the listener down BEFORE it releases the role**
+/// (`account-runtime.md` § Multi-instance concurrency → *The agent holds the
+/// role when present*, part 3 — the one-NodeId-per-machine invariant the
+/// peer-leg assembly seam states). The sync agent can bind the machine's NodeId
+/// only once it holds `engine.lock`; so if the yielding app's accept side is
+/// gone while that lock is still held, no instant has two endpoints on the
+/// one identity.
+///
+/// Causal, never timed: the app's transport carries a probe inside its accept
+/// stream that reads `engine.lock` at the instant the stream is dropped, and
+/// the role fact flips only after the stand-down was awaited — so once the
+/// test reads the app a non-holder, the listener is already gone and the probe
+/// has spoken. Red-verified by releasing the lock ahead of the legs' stand-down
+/// in the driver's yield: the probe then finds the lock free.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_yield_to_the_agent_takes_the_listener_down_before_it_releases_the_role() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base: PathBuf = tmp.path().to_path_buf();
+    let net = listeners();
+    let node = premint(&base, "a");
+    let store_dir = store_root_for(&base, "a")
+        .store_dir(&root().actor_id_hex())
+        .expect("store dir");
+    let witness = Arc::new(LockAtListenerDrop {
+        store_dir: store_dir.clone(),
+        held: Mutex::new(Vec::new()),
+    });
+
+    let app = AccountStoreRuntime::start(AccountRuntimeParams {
+        peer_transport: Some(witnessed_factory(&net, &witness)),
+        ..params(&base, "a", &net)
+    })
+    .await
+    .expect("start");
+    await_listening(&net, &node).await;
+    assert!(app.is_engine_holder(), "alone, the app holds and listens");
+
+    // The agent's mount, as `fauna-sync-agent`'s `account_host` takes it.
+    let presence = match AgentPresenceLock::acquire(&store_dir) {
+        AgentPresenceLockOutcome::Held(lock) => lock,
+        other => panic!("the agent's presence lock: {other:?}"),
+    };
+    let report = app.reconcile_now().await.expect("the yielding command");
+    assert!(report.skipped_non_holder, "{report:?}");
+    assert!(!app.is_engine_holder(), "the app handed the role over");
+
+    assert!(
+        !accepting(&net, &node),
+        "the role fact flips only after the listener is gone"
+    );
+    assert_eq!(
+        *witness.held.lock().unwrap(),
+        vec![true],
+        "the yielding listener went while engine.lock was still held — never after \
+         the role was free for the agent to bind the same NodeId"
+    );
+
+    drop(presence);
+    app.shutdown().await;
 }

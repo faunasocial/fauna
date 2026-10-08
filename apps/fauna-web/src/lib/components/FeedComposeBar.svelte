@@ -4,13 +4,14 @@
   import { byteSize } from '$lib/value-format';
   import { resolveGateSelection } from '$lib/compose-gate';
   import { IDS } from '$lib/generated/uiIds';
-  // compose-sell-asking-price moved into the gated payments id table
-  // (dynamic-features.md § A gated plane's user-facing INPUTS excise with
-  // it; ui.yaml's gated_features.payments.id_prefixes, added 2026-09-06).
-  // The render lives in its own `payments/` component, imported only behind
+  // The sell composer whole — its three controls and the select's "Sell this
+  // post…" answer — is inside the `payments` plane (dynamic-features.md
+  // § Platform-family surface excision → *The price-and-route class*). The
+  // controls live in their own `payments/` component, imported only behind
   // `__FAUNA_PAYMENTS__` below, matching ProviderSection/ClaimSection's own
-  // isolation (dynamic-features.md § Platform-family surface excision).
-  import AskingPriceInput from '$lib/components/payments/AskingPriceInput.svelte';
+  // isolation; the answer is an option value, not an id, so the condition on
+  // its render (and on the arm that enters sell mode) alone carries it.
+  import SellControls from '$lib/components/payments/SellControls.svelte';
 
   interface Props {
     composeBody: string;
@@ -110,7 +111,7 @@
 
   // The controlled `<select>`'s display value — display only, never the answer.
   function selectValue(): string {
-    if (sellSelected) return SELL_VALUE;
+    if (__FAUNA_PAYMENTS__ && sellSelected) return SELL_VALUE;
     if (gateRoom) {
       const room = ownRooms.find((r) => r.room === gateRoom);
       return room ? roomOption(room) : PUBLIC_VALUE;
@@ -119,11 +120,15 @@
   }
 
   function handleGateSelectChange(e: Event & { currentTarget: HTMLSelectElement }): void {
-    const { gateTier: name, gateRoom: room, sellSelected: isSell } = resolveGateSelection(
+    const resolved = resolveGateSelection(
       e.currentTarget.selectedIndex,
       ownTiers.map((tier) => tier.name),
       ownRooms.map((r) => r.room),
     );
+    const { gateTier: name, gateRoom: room } = resolved;
+    // An excised build renders no sell answer, so its index is never picked;
+    // the condition here keeps the arm that enters sell mode out of it too.
+    const isSell = __FAUNA_PAYMENTS__ && resolved.sellSelected;
     onsellselectedchange?.(isSell);
     ongateroomchange?.(room);
     if (!isSell) {
@@ -199,7 +204,9 @@
       {#each ownRooms as room (room.room)}
         <option value={roomOption(room)}>{roomOption(room)}</option>
       {/each}
-      <option value={SELL_VALUE}>{SELL_VALUE}</option>
+      {#if __FAUNA_PAYMENTS__}
+        <option value={SELL_VALUE}>{SELL_VALUE}</option>
+      {/if}
     </select>
     {#if gateTier || gateRoom || sellSelected}
       <input
@@ -212,39 +219,12 @@
       />
     {/if}
   </div>
-  {#if sellSelected}
-    <!-- "Sell this post…" controls (monetization.md § Per-post pay-to-unlock;
-         IDs user-approved 2026-07-29). The rank knob defaults CHECKED — an
-         existing paying subscriber isn't charged twice for a post their
-         subscription would cover; pay-per-view is the deliberate opt-in. -->
-    <div class="compose-meta">
-      <input
-        class="text-input small"
-        data-testid={IDS.COMPOSE_SELL_PRICE}
-        type="text"
-        placeholder={t.feed.post.sell_price_placeholder}
-        value={sellPrice}
-        oninput={(e) => onsellpricechange?.(e.currentTarget.value)}
-      />
-      {#if __FAUNA_PAYMENTS__}
-        <AskingPriceInput
-          variant="compose-sell"
-          placeholder={t.feed.post.sell_asking_price_placeholder}
-          value={sellAskingPrice}
-          onvaluechange={(v) => onsellaskingpricechange?.(v)}
-        />
-      {/if}
-      <label class="sell-subscribers-free-label">
-        <input
-          type="checkbox"
-          data-testid={IDS.COMPOSE_SELL_SUBSCRIBERS_FREE}
-          checked={sellSubscribersFree}
-          data-checked={sellSubscribersFree ? 'true' : 'false'}
-          onchange={(e) => onsellsubscribersfreechange?.(e.currentTarget.checked)}
-        />
-        {t.feed.post.sell_subscribers_free}
-      </label>
-    </div>
+  {#if __FAUNA_PAYMENTS__ && sellSelected}
+    <!-- "Sell this post…" controls — `payments/SellControls.svelte`. -->
+    <SellControls
+      {sellPrice} {sellAskingPrice} {sellSubscribersFree}
+      {onsellpricechange} {onsellaskingpricechange} {onsellsubscribersfreechange}
+    />
   {/if}
   <div class="compose-file">
     <input
@@ -344,14 +324,6 @@
     display: flex;
     gap: 0.5rem;
     margin-top: 0.5rem;
-  }
-  .sell-subscribers-free-label {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-    font-size: 0.8rem;
-    color: var(--text-muted);
-    white-space: nowrap;
   }
   .text-input.small {
     flex: 1;

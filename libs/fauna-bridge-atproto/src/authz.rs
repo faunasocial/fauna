@@ -742,7 +742,7 @@ fn authorize_oauth(input: &AuthzInput, class: LexiconClass, dm: bool) -> AuthzVe
 /// `aud`, and the pin asserting the lifecycle boundary
 /// (`oauth_metadata::tests::no_granular_oauth_scope_reaches_the_session_lifecycle_verbs`)
 /// passed only because its probe left `aud` at `None` — a second, unrelated
-/// condition doing the work the pin named (finding 61's vacuity class, second
+/// condition doing the work the pin named (the vacuous-pin class, second
 /// sighting). The class split alone could never have delivered the property:
 /// splitting a class only helps an arm that *reads* the class.
 ///
@@ -816,7 +816,7 @@ fn granular_scope_permits(scope: &str, input: &AuthzInput, class: LexiconClass) 
     //   that covered nothing would make a spec-compliant `atproto`-only grant
     //   deny `getSession` — a client could authenticate and then not be
     //   allowed to ask who it had authenticated as. That was the state this
-    //   module shipped in until F4 slice 2 (finding 57).
+    //   module shipped in until F4 slice 2.
     // * It must not grant **more**. Reads, writes, blobs, DMs, the AppView and
     //   service-auth minting each have a granular scope whose whole purpose is
     //   to say so explicitly; folding any of them into the base scope would
@@ -1463,7 +1463,7 @@ mod tests {
     /// **The widest granular scope there is cannot reach this box's own account
     /// and credential plane**.
     ///
-    /// `rpc:*?aud=*` is the honest maximum this AS advertises (finding 59), and
+    /// `rpc:*?aud=*` is the honest maximum this AS advertises, and
     /// the `rpc:` arm is class-blind, so before
     /// [`super::no_granular_scope_reaches`] existed this scope permitted
     /// *anything* the moment an `aud` was present — including
@@ -1490,7 +1490,7 @@ mod tests {
             "com.atproto.server.createAccount",
             "com.atproto.server.createAppPassword",
             "com.atproto.server.deleteAccount",
-            // SessionLifecycle — the plane boundary (finding 73).
+            // SessionLifecycle — the plane boundary.
             "com.atproto.server.createSession",
             "com.atproto.server.refreshSession",
             "com.atproto.server.deleteSession",

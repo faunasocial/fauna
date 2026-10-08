@@ -329,10 +329,11 @@ struct PlannedGrant {
 /// account's replicas cannot admit would deposit keys to rows nobody can
 /// merge), then each folder's generation is walked over the stored log
 /// ([`folder_principal_generation`]) and its id derived, then every grant's
-/// `Mint` event is signed and joined into the log in ONE merge, and each blob
-/// is released only against the log that write actually stored
-/// ([`grant_log::UndepositedGrant::release`]) — record-then-deposit, as every
-/// grant this app mints. A replaced twin's id already carries a `Mint`, so its
+/// `Mint` event is signed and joined into the log in ONE merge through the
+/// grant-mint door, and each blob is released only against the log that write
+/// actually stored and the bound nest acknowledged
+/// ([`grant_log::UndepositedGrant::release`]) — record, publish, then deposit,
+/// as every grant this app mints. A replaced twin's id already carries a `Mint`, so its
 /// release check would pass even had its new event been lost; the single
 /// merge, which keeps all of the events or none, is what makes that moot.
 ///
@@ -432,16 +433,16 @@ pub async fn prepare_ext_consent_grant(
             grant,
         ));
     }
-    let stored = owner
+    let published = owner
         .ledger
-        .merge(
+        .merge_published(
             fauna_core::succession_ledger::SuccessionLedger::events_replica(
                 fauna_core::identity::ActorId(owner.actor_id),
                 signed,
             ),
         )
         .await?;
-    let recorded = grant_log::RecordedGrants::from_stored(&stored);
+    let recorded = grant_log::PublishedGrants::from_published(&published);
     pending
         .into_iter()
         .map(|(undeposited, grant)| {
@@ -676,6 +677,53 @@ mod tests {
         );
         let opened = crate::open_ext_kind_keys(&blob, &holder_sk).unwrap();
         assert_eq!(opened.len(), 2, "the holder opens both declared kinds");
+    }
+
+    /// Record, publish, then deposit (`ui/nests.md` § Trust facet — grants →
+    /// *Record-then-deposit*, the published form): a consent `Mint` the bound
+    /// nest did not acknowledge releases no blob — a sibling replica could not
+    /// yet read the event its reconcile sweep judges the row by.
+    #[tokio::test]
+    async fn an_unpublished_consent_mint_releases_no_blob() {
+        let owner_kp = ActorKeypair::generate();
+        let owner = owner_kp.actor_id();
+        let delegable = DelegableSchedule::derive(&BackupKey::derive(&[7u8; 32]));
+        let manifests = FakeKindManifestStore::empty();
+        let ledger = FakeSuccessionLedgerStore::empty(owner);
+        ledger.publish_refuses(true);
+        let signer = KeypairSigner(ActorKeypair::from_secret(*owner_kp.secret_bytes()));
+        let (_holder_sk, holder_pk) = generate_x25519_keypair();
+        let c = consent(
+            &["fauna:records:rw:ext.app.example.*"],
+            holder_pk,
+            Some([0x5A; 32]),
+        );
+
+        let refused = prepare_ext_consent_grant(
+            &ExtConsentOwner {
+                actor_id: owner.0,
+                owner_secret: owner_kp.secret_bytes(),
+                delegable: &delegable,
+                manifests: &manifests,
+                ledger: &ledger,
+                signer: &signer,
+            },
+            &c,
+            &BTreeMap::new(),
+            [9; 16],
+            1_000,
+        )
+        .await;
+
+        assert!(
+            refused.is_err(),
+            "no blob without the nest's acknowledgement"
+        );
+        assert_eq!(
+            ledger.current().grant_events.len(),
+            1,
+            "the Mint stays recorded locally"
+        );
     }
 
     /// A refused manifest-row write deposits nothing and logs nothing — the

@@ -2,6 +2,7 @@ package imap
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,33 @@ import (
 )
 
 const fetchRPCTimeout = 30 * time.Second
+
+// unopenableRecordPlaceholderSubject is the Subject of the placeholder
+// message a body-axis FETCH serves for a record no key in the session's
+// standing set opens (unopenableRecordPlaceholder).
+const unopenableRecordPlaceholderSubject = "This message could not be opened"
+
+// unopenableRecordPlaceholder is the fixed RFC 5322 message a body-axis FETCH
+// serves in place of a record no key in the session's standing set opens —
+// sealed to another recipient, or malformed or tampered at rest
+// (`imap-server.md` § Body-section FETCH → *Unopenable records*, the IMAP twin
+// of `mail-app-surface.md` § Inbound client receive → *Unopenable records*).
+// BODYSTRUCTURE, ENVELOPE, BODY[…] and BINARY[…] are all derived from it by
+// the same shared-Rust calls as a real message, so every section form answers
+// consistently. Pure 7-bit ASCII with CRLF line ends, so BODY[] and BINARY[]
+// agree byte-for-byte. The message deliberately carries no From, Date or
+// Message-ID: the MUA then falls back to INTERNALDATE, which is the record's
+// real one, and no identity is invented.
+const unopenableRecordPlaceholder = "" +
+	"Subject: " + unopenableRecordPlaceholderSubject + "\r\n" +
+	"MIME-Version: 1.0\r\n" +
+	"Content-Type: text/plain; charset=us-ascii\r\n" +
+	"Content-Transfer-Encoding: 7bit\r\n" +
+	"\r\n" +
+	"This message is stored on your Fauna server, but none of your\r\n" +
+	"account's keys can open it: it was sealed to a different recipient,\r\n" +
+	"or its stored copy is damaged. The rest of your mailbox is not\r\n" +
+	"affected.\r\n"
 
 // fetchResponseWriter is the seam Session.fetch dispatches through
 // per-message. Production wraps emersion's *imapserver.FetchResponseWriter;
@@ -383,20 +411,35 @@ func (s *Session) fetchOne(
 			// ONE uniform serve rule (Phase-3 D1): the sealed record
 			// HPKE-opens via the per-connection opener; an unsealed
 			// payload, or a record that fails to open (wrong key /
-			// corruption / no opener), errors — never served verbatim.
-			// OpenStoredRecordAt (not
+			// corruption), is never served verbatim — it is served as the
+			// placeholder below. No opener at all is a SESSION condition
+			// (no MLS snapshot on file) and still fails the FETCH: a
+			// placeholder for every message would be cached by the MUA for
+			// good. OpenStoredRecordAt (not
 			// OpenStoredRecord) so an epoch-aware opener can try the
 			// record's own candidate epoch keys (content-sealing-epochs
 			// design § 4), classified off the record's seal instant
 			// (stored_at, never InternalDate: for
 			// imported mail InternalDate is historical while the seal keyed
 			// off ingest-time now).
+			if opener == nil {
+				return errors.New("imap: FETCH: no MLS snapshot on file")
+			}
+			degraded := false
 			pt, err := mailfauna.OpenStoredRecordAt(opener, sealed, ct.SealEpochBasisUnix())
 			if err != nil {
-				return err
+				// A record no key in the session's standing set opens is a
+				// CONTAINED condition (`imap-server.md` § Body-section FETCH
+				// → *Unopenable records*): serve this one message degraded
+				// and keep the FETCH going, never fail every message the
+				// command spans.
+				s.warnUnopenable(m, err)
+				pt = []byte(unopenableRecordPlaceholder)
+				degraded = true
+			} else {
+				defer zeroize(pt)
 			}
 			plaintext = pt
-			defer zeroize(plaintext)
 
 			derivedBS, err := mailfauna.DeriveBodyStructure(plaintext)
 			if err != nil {
@@ -408,7 +451,12 @@ func (s *Session) fetchOne(
 			}
 			cachedBS = derivedBS
 			cachedEnv = derivedEnv
-			cache.Put(key, derivedBS, derivedEnv)
+			// The placeholder's structure never enters the cache: a record
+			// that opens later (a key the session gains at its next AUTH)
+			// must be served for real, not shadowed by the placeholder.
+			if !degraded {
+				cache.Put(key, derivedBS, derivedEnv)
+			}
 		}
 	}
 
@@ -426,6 +474,10 @@ func (s *Session) fetchOne(
 	if options != nil && options.InternalDate {
 		mw.WriteInternalDate(time.Unix(m.InternalDate, 0).UTC())
 	}
+	// RFC822.SIZE is the stored record's size for every message, a degraded
+	// one included: a metadata-only FETCH never opens the record, so serving
+	// the placeholder's length here would answer the same UID two ways
+	// depending on what else the FETCH asked for.
 	if options != nil && options.RFC822Size {
 		mw.WriteRFC822Size(int64(m.CiphertextSize))
 	}
@@ -491,6 +543,21 @@ func (s *Session) fetchOne(
 	}
 
 	return mw.Close()
+}
+
+// warnUnopenable logs a record the session's standing key set cannot open —
+// WARN the first time the Backend sees that record, DEBUG on every FETCH after
+// (a MUA re-syncing the mailbox spans it again and again), keyed by the
+// record's nest message id. The error text carries no plaintext: the open
+// failed before any existed.
+func (s *Session) warnUnopenable(m wsrpc.MessageMeta, err error) {
+	if s.undecryptableWarn == nil {
+		return
+	}
+	id := hex.EncodeToString(m.MessageID)
+	s.undecryptableWarn.Log(s.logger, id,
+		"imap: serving placeholder for a mail record no session key opens",
+		"message_id", id, "uid", m.UID, "err", err)
 }
 
 // needsPlaintext reports whether the request requires the actual

@@ -239,6 +239,16 @@ impl AbortOnDrop {
     fn is_running(&self) -> bool {
         !self.0.is_finished()
     }
+
+    /// Abort the wrapped task and wait until it has ended — its future, and
+    /// everything it owned, dropped. Plain drop only *requests* the abort; a
+    /// caller that must know the task is gone before it moves on awaits this.
+    async fn abort_and_wait(&mut self) {
+        self.0.abort();
+        // A cancelled join is the expected answer; a panic in the task was
+        // already the task's to report.
+        let _ = (&mut self.0).await;
+    }
 }
 
 impl Drop for AbortOnDrop {

@@ -140,7 +140,9 @@ can send mail that looks like it came from you.
 use **Rotate mail keys** on the same page. It replaces the encryption key
 behind every credential in one step (you can exclude a specific device from
 being re-trusted, if that's the one you suspect), picks up cleanly if it's
-interrupted partway, and never touches mail you've already received.
+interrupted partway, and never touches mail you've already received — it
+stays readable in the app and in your mail apps, however many times you
+rotate.
 
 ## Addresses: aliases, plus-addresses, and role addresses
 
@@ -193,13 +195,21 @@ Running a newsletter or a small announcement list from your own domain is a
 settings page, not a separate service you sign up for.
 
 - **Create a list** with its own sending address (`weekly@yourdomain`), a name,
-  an optional description, and — if you want one — a cap on how many recipients
-  a single send may reach.
+  an optional description, help and archive links, and — if you want one — a
+  cap on how many recipients a single send may reach. The archive link goes out
+  with every message, so if it points somewhere other than your own server, the
+  app asks once before saving it: press the button again to confirm.
 - **Manage members** on the list's own page: add an address at a time, or paste
   a whole block of them and let the app sort out which are new, which were
   already subscribed, and which aren't valid addresses. Each member shows
   whether they're subscribed, and you can unsubscribe or re-subscribe anyone by
   hand.
+- **Send an issue from Conversations.** Start a new conversation and type the
+  list's address as the recipient. Before you send, the composer tells you how
+  many subscribers it will reach and how much of today's sending allowance
+  you've used — and warns you when you're close to the limit, or when this send
+  would go past it. Each subscriber gets their own copy; your sent mail shows
+  the send once, with one progress line for the whole send.
 - **One-click unsubscribe is handled for you.** Every message the list sends
   carries the standard headers modern mail apps read, so a recipient's
   "Unsubscribe" button just works — over the web or by mail, whichever their
@@ -331,7 +341,7 @@ any mail app at your mailbox and copy the folders out.
 | Per-domain catch-all, role addresses, external forwarders; multiple domains | **Available** |
 | Forward-all per account (SRS, loop detection, bounces) and your own hourly forwarding limit | **Available** — set in Settings → Mail & Calendar → Forwarding |
 | Per-rule forward action, with or without keeping your own copy | **Available** — Settings → Privacy → Email Filters, action **Forward** |
-| Newsletters/mailing lists: create a list, manage members (one at a time or pasted in bulk), per-member unsubscribe & re-subscribe, standards-compliant one-click unsubscribe | **Available** |
+| Newsletters/mailing lists: create a list, manage members (one at a time or pasted in bulk), send to a list from Conversations with its reach and daily allowance shown first, per-member unsubscribe & re-subscribe, standards-compliant one-click unsubscribe | **Available** |
 | Personal spam training (in-app + Junk-folder moves), history, undo, reset | **Available** |
 | Opt-in spam-report sharing: your flag joins an anonymized count (visible only once 3+ people on your nest flag the same message) your nest shares with peer nests, with a "what this nest publishes" transparency view | **Available** — off by default |
 | New-IP warm-up & blocklist self-check | **Available** (automatic; admin tuning knobs planned) |

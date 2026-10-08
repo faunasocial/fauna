@@ -81,6 +81,37 @@ impl RailBackend for SmtpBackend {
         })
     }
 
+    async fn list_send_view(
+        &self,
+        recipients: &[TypedAddress],
+    ) -> Option<crate::list_send::ListSendView> {
+        let to = crate::list_send::mail_recipients(recipients, &self.self_address.get());
+        if to.len() != 1 {
+            return None;
+        }
+        let lists = match self.sink.own_lists().await {
+            Ok(lists) => lists,
+            Err(e) => {
+                tracing::warn!("reading own mailing lists for the compose form failed: {e}");
+                return None;
+            }
+        };
+        let list = lists.target(&to)?;
+        let progress = self
+            .sink
+            .latest_list_send(&list.list_id_hex)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("reading a list's send history failed: {e}");
+                None
+            });
+        Some(crate::list_send::list_send_view(
+            list,
+            &lists,
+            progress.as_ref(),
+        ))
+    }
+
     async fn resolve_address(&self, raw: &str) -> ResolveResult {
         // Any well-formed user@host resolves syntactically; real MX check deferred.
         if raw.contains('@') && !raw.starts_with('@') && !raw.ends_with('@') {
@@ -180,14 +211,7 @@ impl RailBackend for SmtpBackend {
         } else {
             &compose.reply_recipients
         };
-        let recipients: Vec<String> = recipient_source
-            .iter()
-            .filter_map(|a| match a {
-                TypedAddress::Email { email_address } => Some(email_address.clone()),
-                _ => None,
-            })
-            .filter(|e| !e.eq_ignore_ascii_case(&self_address))
-            .collect();
+        let recipients = crate::list_send::mail_recipients(recipient_source, &self_address);
         if recipients.is_empty() {
             return Err(BackendError::Refusal(
                 fauna_i18n::strings::error::send::NO_RECIPIENTS.to_string(),
@@ -235,10 +259,28 @@ impl RailBackend for SmtpBackend {
             ));
         }
 
-        self.sink
-            .submit(recipients, raw)
-            .await
-            .map_err(BackendError::transport_from_seam)?;
+        // A compose whose one recipient is one of the account's own lists goes
+        // out as a list send — the nest's fan-out, one copy per subscribed
+        // member — never as plain mail to the list address, which the nest
+        // refuses (`mail-mass-mailing.md` § Composing a list message). A lists
+        // read that fails falls through to plain mail: the nest's refusal of
+        // mail to a list address is then what the user sees.
+        let list = if recipients.len() == 1 {
+            match self.sink.own_lists().await {
+                Ok(lists) => lists.target(&recipients).cloned(),
+                Err(e) => {
+                    tracing::warn!("reading own mailing lists before a send failed: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        match list {
+            Some(list) => self.sink.submit_to_list(&list.list_id_hex, raw).await,
+            None => self.sink.submit(recipients, raw).await,
+        }
+        .map_err(BackendError::transport_from_seam)?;
 
         Ok(SendOutcome {
             message_id: MessageId(message_id),

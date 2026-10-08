@@ -1120,6 +1120,7 @@ pub fn establish(
                             Ok(fauna_sync_engine::account_runtime::PeerLegBinding {
                                 transport,
                                 bound_addrs,
+                                file_sync: None,
                             })
                         })
                     },
@@ -1203,7 +1204,7 @@ pub fn establish(
         });
     }
 
-    discharge_succession_kit(app);
+    discharge_succession_obligations(app);
     Ok(())
 }
 
@@ -1257,13 +1258,14 @@ pub(crate) async fn account_store_watch(
 /// Best-effort by construction: with no `nest` yet there is nothing to mint
 /// against, and the flag stays set so the next authenticated session retries
 /// rather than the obligation being silently dropped.
-pub(crate) fn discharge_succession_kit(app: &mut App) {
+///
+/// The kit half of [`take_succession_obligations`]: consumes the flag and
+/// navigates, returning the mint's op for the caller to spawn.
+fn take_owed_kit(app: &mut App) -> Option<crate::settings::Op> {
     if !app.succession_kit_owed {
-        return;
+        return None;
     }
-    let Some(op) = succession_kit_discharge_op(app) else {
-        return;
-    };
+    let op = succession_kit_discharge_op(app)?;
     app.succession_kit_owed = false;
     app.succession_predecessor = None;
     // Land the user on the section that renders it. The successor is
@@ -1271,7 +1273,44 @@ pub(crate) fn discharge_succession_kit(app: &mut App) {
     // picks its own arm, so this stays correct even if a kit somehow exists.
     app.page = crate::pages::Page::Settings;
     app.settings.sub = crate::settings::SubPage::Account;
-    app.spawn_page_op(crate::app::PageOp::Settings(op));
+    Some(op)
+}
+
+/// Discharge every obligation a succession left the successor's first
+/// authenticated session — run by the post-auth hook, after `attach_session`.
+/// Spawns [`take_succession_obligations`]'s ops in its order.
+pub(crate) fn discharge_succession_obligations(app: &mut App) {
+    for op in take_succession_obligations(app) {
+        app.spawn_page_op(crate::app::PageOp::Settings(op));
+    }
+}
+
+/// The successor's owed ops, in the ceremony's own order — **the group sweep,
+/// then the kit** (`succession-propagation.md` § Propagation → *Own device
+/// fleet*, the relaunch-adoption clause). Split from the spawn so the order and
+/// the payload are testable; each flag is consumed only when its op is built,
+/// so with no nest yet both stay set and the next authenticated session retries.
+///
+/// The owed sweep is set only by a relaunch adoption ([`App::succession_sweep_owed`]),
+/// and its op is the retry button's own, marked `owed` so the answer parks a
+/// report whatever it is. It carries the LIVE successor engine: conversations
+/// are started earlier in this same hook, so the retry never opens a second
+/// engine over the store they hold. It is NEVER the ceremony's pre-switch
+/// `sweep_after_succession` — no old engine exists at relaunch; the retry
+/// rebuilds the sweep off the retired identity's seed and store, which survive
+/// on the device that ran the ceremony.
+pub(crate) fn take_succession_obligations(app: &mut App) -> Vec<crate::settings::Op> {
+    let mut ops = Vec::new();
+    if app.succession_sweep_owed {
+        let old_secret_hex =
+            crate::settings::sweep_retry_predecessor(app).and_then(|(_old_hex, seed)| seed);
+        if let Some(op) = crate::settings::sweep_retry_op(app, old_secret_hex, true) {
+            app.succession_sweep_owed = false;
+            ops.push(op);
+        }
+    }
+    ops.extend(take_owed_kit(app));
+    ops
 }
 
 /// Persist the predecessor identities a phrase-only restore recovered from the
@@ -1311,7 +1350,7 @@ pub fn persist_restored_predecessors(
     );
 }
 
-/// The op [`discharge_succession_kit`] spawns — split out from the spawn so a
+/// The op [`discharge_succession_obligations`] spawns — split out from the spawn so a
 /// test can assert on the **payload**, not just on the navigation the discharge
 /// performs. That split is the point: the predecessor seeds are the whole
 /// reason this op differs from the ordinary create gesture, and a discharge
@@ -1553,7 +1592,7 @@ pub(crate) async fn refresh_filter_marks(
 /// and is worth doing only if that race is ever observed to bite. (The barriers
 /// *inside* the pass are real ones — that is the shared driver's whole point.)
 ///
-/// **Why it is not folded into [`discharge_succession_kit`].** That fires once,
+/// **Why it is not folded into [`discharge_succession_obligations`].** That fires once,
 /// gated on [`App::succession_kit_owed`], on the one device that ran the
 /// ceremony. This must run at **every** sign-in on **every** device until the
 /// corpus is actually re-sealed — which is why there is no progress state at

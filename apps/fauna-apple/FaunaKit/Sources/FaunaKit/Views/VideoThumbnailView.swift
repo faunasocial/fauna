@@ -16,15 +16,24 @@ import SwiftUI
 /// reads the resolved hash) and publishes `state` (`idle` / `loading` / `playing` / `error`),
 /// `position` (the player's seconds) and `source` (what it was handed) for the drivers.
 public struct VideoThumbnailView: View {
-    public let hash: String
+    /// The element's text: a blob video's hash, or a bridged video's nest-relative path.
+    public let text: String
     private let resolve: (() async -> URL?)?
     @State private var playback = InlineVideoPlayer()
 
     /// - Parameter resolve: the playable URL for this video, `nil` when nothing plays. Absent →
     ///   the thumbnail stays inert (no host wired the projection).
     public init(hash: String, resolve: (() async -> URL?)? = nil) {
-        self.hash = hash
+        self.text = hash
         self.resolve = resolve
+    }
+
+    /// A bridged post's `ProxiedVideo` (render-model.md § D6c → *Proxied video*): the glyph + the
+    /// opaque nest-relative `path` as text. Never fetched or parsed, and inert — the shared
+    /// `playback_source` answers `Unplayable` for it until the ticket arm lands.
+    public init(proxiedPath: String) {
+        self.text = proxiedPath
+        self.resolve = nil
     }
 
     public var body: some View {
@@ -45,7 +54,7 @@ public struct VideoThumbnailView: View {
                             Image(systemName: "play.circle.fill")
                                 .foregroundStyle(.secondary)
                         }
-                        Text(hash)
+                        Text(text)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -59,7 +68,7 @@ public struct VideoThumbnailView: View {
         .accessibilityIdentifier(Ids.videoThumbnail)
         .automationActivate(
             Ids.videoThumbnail,
-            text: { hash },
+            text: { text },
             attributes: {
                 ["state": playback.phase.rawValue,
                  "position": String(format: "%.3f", playback.position),

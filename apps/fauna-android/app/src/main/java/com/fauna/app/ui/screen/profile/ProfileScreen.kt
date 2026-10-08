@@ -61,6 +61,7 @@ fun ProfileScreen(
     conversationsVm: ConversationsVM = hiltViewModel(),
     overlaysVm: ContactOverlaysVM = hiltViewModel(),
     privateVm: ProfilePrivateVM = hiltViewModel(),
+    reportVm: com.fauna.app.ui.viewmodel.ReportVM = hiltViewModel(),
 ) {
     var tab by remember { mutableStateOf(ProfileTab.POSTS) }
     // Bumped by every `profile-tiers-tab` activation and passed down as a
@@ -218,6 +219,15 @@ fun ProfileScreen(
                 askRender = askRender,
                 askInFlight = knockAsk.askInFlight,
                 onAskGuardian = { vm.askGuardian() },
+                // Report account — opens the shared report sheet on this OTHER
+                // profile (moderation.md § User-initiated reporting → *App
+                // surface*; the shell's ReportHost paints it). An account has no
+                // text to attach, so the shared target offers no include-text box.
+                onReport = {
+                    vm.profileActorIdHex?.let { hex ->
+                        reportVm.open(com.fauna.ffi.reportActorTarget(hex))
+                    }
+                },
             )
             // ── OTHER: the private section (nickname, notes, labels) ─────────
             ProfilePrivateSection(
@@ -318,6 +328,9 @@ fun ProfileSecondaryActionsRow(
     askRender: ContactAskRender? = null,
     askInFlight: Boolean = false,
     onAskGuardian: () -> Unit = {},
+    // `profile-report-button` (moderation.md § User-initiated reporting): `null`
+    // paints nothing; the stateful caller supplies it for an OTHER profile only.
+    onReport: (() -> Unit)? = null,
 ) {
     Column(modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
         Row(
@@ -335,6 +348,13 @@ fun ProfileSecondaryActionsRow(
                 modifier = Modifier.testTag(Ids.PROFILE_BLOCK_BUTTON),
             ) {
                 Text(blockLabel(blocked))
+            }
+
+            if (onReport != null) {
+                OutlinedButton(
+                    onClick = onReport,
+                    modifier = Modifier.testTag(Ids.PROFILE_REPORT_BUTTON),
+                ) { Text(stringResource(R.string.profile_report)) }
             }
         }
         // Second line: the knock and, beside it, the ward's ask pair (a phone-width

@@ -226,6 +226,15 @@ impl BearerSource for LaunchMachineBearer {
         if snapshot.sign_in_refused {
             return Err(ApiError::SignInRefused);
         }
+        // And for the succession refusal: the refresh met
+        // `fauna.auth.superseded`, which parks the machine in its superseded
+        // state with the claimed successor on a side channel — the phase alone
+        // reads as a generic terminal offline. Without this carry linux's
+        // supervisor stopped as "couldn't obtain a token" and the app sat on a
+        // dead session instead of routing to the identity import.
+        if let Some(new_actor_id_hex) = snapshot.superseded_successor {
+            return Err(ApiError::Superseded { new_actor_id_hex });
+        }
         Err(ApiError::Transport(
             "token refresh failed; LaunchMachine not Online".into(),
         ))
@@ -494,6 +503,48 @@ mod launch_machine_bearer_tests {
             ApiError::SignInRefused,
             "the verdict must not be flattened to a transport fault"
         );
+    }
+    /// The same seam for the succession refusal — the one a device's OWN
+    /// stolen-identity ceremony causes the instant the nest commits: the
+    /// post-`4401` refresh meets `fauna.auth.superseded`, the machine parks in
+    /// its superseded state, and the bearer must name it (linux read it as
+    /// "LaunchMachine not Online" and never left the dead session).
+    #[tokio::test]
+    async fn a_machine_whose_identity_was_succeeded_mid_session_says_so_instead_of_a_transport_fault()
+     {
+        let successor = "ab".repeat(32);
+        let superseded = || SilentChallengeOutcome::Superseded {
+            new_actor_id_hex: "ab".repeat(32),
+        };
+        let connector = MockAuthConnector::new()
+            .push_silent_challenge(SilentChallengeOutcome::Success(verify_reply("a.bearer")))
+            .push_silent_challenge(superseded())
+            .push_silent_challenge(superseded());
+        let machine = LaunchMachine::new_with_connector(
+            Arc::new(NullObserver),
+            persistence(),
+            Arc::new(connector),
+        );
+        machine.start().await;
+        assert_eq!(machine.snapshot().phase, LaunchPhase::Online);
+
+        let bearer = LaunchMachineBearer(Arc::clone(&machine));
+        bearer.notify_401().await;
+        assert_eq!(
+            machine.snapshot().superseded_successor.as_deref(),
+            Some(successor.as_str()),
+            "precondition: the machine itself must have reached the verdict"
+        );
+
+        let err = bearer.bearer().await.expect_err("no bearer is available");
+        assert_eq!(
+            err,
+            ApiError::Superseded {
+                new_actor_id_hex: successor
+            },
+            "the verdict must not be flattened to a transport fault"
+        );
+        assert!(!err.is_transient());
     }
 }
 

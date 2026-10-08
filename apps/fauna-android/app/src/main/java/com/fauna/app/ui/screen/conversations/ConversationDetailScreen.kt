@@ -471,6 +471,7 @@ fun ConversationDetailScreen(
         // audit row. Silent no-op when mail isn't enabled (client-only content the
         // nest can't read → no server fallback). Mirrors linux `mark_message_spam`.
         onMarkSpam = { msg -> vm.markMessageSpam(msg) },
+        onReportMessage = { target -> vm.openReport(target) },
     )
 
     // The "more" emoji picker dialog — shown iff a bubble requested it. The
@@ -681,6 +682,9 @@ fun ConversationDetailContent(
     // retained decrypted body + subject + opaque message id. Default `{}` keeps the
     // Content/test harness FFI-free (the stateful screen routes it to the VM).
     onMarkSpam: (MessageSnapshot) -> Unit = {},
+    // `dm-message-report-button` → the shared report sheet (moderation.md
+    // § User-initiated reporting); lifts the target the shared Rust constructor built.
+    onReportMessage: (com.fauna.ffi.FfiReportTarget) -> Unit = {},
 ) {
     // Rename overlay visibility is local Compose state (the only client-side
     // state in this view) — the button opens it, Save lifts the label out via
@@ -823,8 +827,22 @@ fun ConversationDetailContent(
                                 msg.subjectLine?.let { subject ->
                                     SubjectDivider(subject)
                                 }
+                                // The report identity (moderation.md § User-initiated
+                                // reporting): a message's PLANE record digest and its
+                                // Fauna-rail sender — `null` for a mail/bridged message,
+                                // which has no plane identity and paints no report verb.
+                                val senderActor = messageSenderActorHex(msg)
+                                val reportKey = msg.planeRef?.recordDigest
+                                val reported = remember(reportKey, senderActor, contentPolicyInputs) {
+                                    contentPolicyInputs.isReported(reportKey, senderActor)
+                                }
+                                val reportTarget = remember(msg.messageId, msg.isOwn, msg.body, senderActor) {
+                                    messageReportTarget(msg, senderActor)
+                                }
                                 MessageBubble(
                                     msg = msg,
+                                    reported = reported,
+                                    onReport = reportTarget?.let { target -> { onReportMessage(target) } },
                                     // `SearchNav::Mail`'s second half (conversations.md § The
                                     // selected message) — the read-time-resolved id, `None`
                                     // unless it names a message this thread currently holds.
@@ -854,7 +872,7 @@ fun ConversationDetailContent(
                                     // floor + the viewer's own thresholds, resolved in
                                     // shared Rust; a `block` collapses ahead of the muted
                                     // arm (never revealable), a `collapse` behind a reveal.
-                                    contentVerdict = contentPolicyInputs.verdictFor(msg.labels),
+                                    contentVerdict = if (reported) "block" else contentPolicyInputs.verdictFor(msg.labels),
                                     // Reactions / delete affordances — capability-gated,
                                     // never rail-branched (rule #5). delete is further
                                     // gated on msg.isOwn inside the bubble.
@@ -1544,6 +1562,13 @@ private fun MessageBubble(
     // AHEAD of the muted arm (never revealable); a `collapse` collapses behind a
     // one-tap, session-local reveal. Default "show" keeps the harness FFI-free.
     contentVerdict: String = "show",
+    // The viewer's OWN report hid this message (moderation.md § Corollary — block
+    // also hides): the `block` notice names that act — "You reported this" — not a
+    // policy. `contentVerdict` is already `block` when this is set.
+    reported: Boolean = false,
+    // `dm-message-report-button` (moderation.md § User-initiated reporting): `null`
+    // paints nothing — own messages and mail/bridged messages have no verb.
+    onReport: (() -> Unit)? = null,
     // Reactions / delete (conversations.md § Reactions & message delete) —
     // capability-gated, never rail-branched. `onToggleReaction` takes the emoji;
     // delete is sender-only (gated on msg.isOwn here too, defence-in-depth with
@@ -1618,7 +1643,10 @@ private fun MessageBubble(
             modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).selectedMessageMark(isSelected),
         ) {
             Text(
-                stringResource(R.string.family_content_blocked_notice),
+                stringResource(
+                    if (reported) R.string.moderation_report_hidden_placeholder
+                    else R.string.family_content_blocked_notice,
+                ),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.testTag(Ids.CONTENT_POLICY_BLOCKED_NOTICE),
@@ -1892,6 +1920,7 @@ private fun MessageBubble(
                 onMoreReaction = onMoreReaction,
                 onDeleteMessage = onDeleteMessage,
                 onMarkSpam = onMarkSpam,
+                onReport = onReport,
             )
             IconButton(
                 onClick = onReply,
@@ -2061,8 +2090,9 @@ private fun MessageActionsMenu(
     onMoreReaction: () -> Unit,
     onDeleteMessage: () -> Unit,
     onMarkSpam: () -> Unit,
+    onReport: (() -> Unit)? = null,
 ) {
-    if (!canReact && !canDelete && !canFlagSpam) return
+    if (!canReact && !canDelete && !canFlagSpam && onReport == null) return
 
     var expanded by remember { mutableStateOf(false) }
     // The destructive delete is a two-step inside the same flyout: tapping
@@ -2174,6 +2204,19 @@ private fun MessageActionsMenu(
                     },
                     enabled = spamGate.enabled,
                     modifier = Modifier.testTag(Ids.DM_MESSAGE_MARK_AS_SPAM_BUTTON),
+                )
+            }
+            if (onReport != null) {
+                // Opens the shared report sheet (moderation.md § User-initiated
+                // reporting) — received messages with a plane ref only; the
+                // shell's ReportHost paints it.
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.conversations_detail_report_message)) },
+                    onClick = {
+                        expanded = false
+                        onReport()
+                    },
+                    modifier = Modifier.testTag(Ids.DM_MESSAGE_REPORT_BUTTON),
                 )
             }
         }

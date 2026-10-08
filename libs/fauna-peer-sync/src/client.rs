@@ -240,6 +240,129 @@ pub struct PullReport {
 /// How many CIDs one `blocks.pull` request names.
 const WANT_LIST_CHUNK: usize = 32;
 
+/// What one [`pull_file_chunks`] call brought back.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileChunkPull {
+    /// Whole, content-address-verified chunk bodies by store key.
+    pub bodies: std::collections::HashMap<ContentHash, Vec<u8>>,
+    /// Keys the sibling holds no body for — the nest path's to serve.
+    pub missing: Vec<ContentHash>,
+    /// Keys left to the nest path because the connection ran over a relay
+    /// while the nest could carry them (`fauna_transport::bytes_may_ride`) —
+    /// deferred, never failed.
+    pub relay_deferred: Vec<ContentHash>,
+    /// Body bytes that crossed the wire, slices later refused included.
+    pub arrived: u64,
+}
+
+/// The same-account ranged chunk pull (`fauna.peer.sync.chunks.pull`): fetch
+/// what an admitted sibling holds of `store_keys` in `folder` (its `FolderRef`
+/// wire string), over the shared ranged assembler
+/// ([`crate::ranged::assemble`], [`Missing::Reported`](crate::ranged::Missing)
+/// — a key the sibling lacks is the nest's, never a failure).
+///
+/// Bytes ride direct paths only (`p2p.md` § The relay, ruling 4): the channel's
+/// path is re-read before every round, and while it is relayed and `nest` is
+/// [`NestPath::Reachable`] every key still wanted is handed back in
+/// [`FileChunkPull::relay_deferred`] — bodies already whole are kept.
+///
+/// An error means the sibling misbehaved or the channel failed (a refused
+/// slice, a body that does not hash to its key, a dropped connection); the
+/// caller treats every key as the nest's, exactly as for a miss.
+pub async fn pull_file_chunks(
+    channel: &PeerChannel,
+    folder: &str,
+    store_keys: &[ContentHash],
+    relative_path: &str,
+    nest: NestPath,
+) -> Result<FileChunkPull> {
+    use fauna_protocol::peer_sync::{
+        KIND_PEER_SYNC_CHUNKS_PULL, PeerSyncChunkWant, PeerSyncChunksPullReply,
+        PeerSyncChunksPullRequest,
+    };
+    let relayed = std::sync::Mutex::new(Vec::<ContentHash>::new());
+    let mut arrived = 0u64;
+    let assembled = crate::ranged::assemble(
+        store_keys,
+        relative_path,
+        crate::ranged::Missing::Reported,
+        &mut arrived,
+        |wants| {
+            let relayed = &relayed;
+            async move {
+                let path = channel.path();
+                if !bytes_may_ride(path, nest) {
+                    tracing::debug!(
+                        path = path.label(),
+                        deferred = wants.len(),
+                        "peer chunks pull: relayed connection while the nest path is \
+                         reachable; the bodies are left to the nest path"
+                    );
+                    // Handed back as missing so the assembler stops wanting them;
+                    // remembered here so the caller can tell the two apart.
+                    let keys: Vec<ContentHash> = wants.iter().map(|(k, _)| *k).collect();
+                    relayed
+                        .lock()
+                        .expect("relay-deferred keys")
+                        .extend(keys.iter().copied());
+                    return Ok(crate::ranged::Round {
+                        slices: Vec::new(),
+                        missing: keys.iter().map(|k| k.digest().to_vec()).collect(),
+                    });
+                }
+                let req: Value = decode_strict(
+                    &encode_canonical(&PeerSyncChunksPullRequest {
+                        folder: folder.to_string(),
+                        wants: wants
+                            .iter()
+                            .map(|(k, offset)| PeerSyncChunkWant {
+                                store_key: serde_bytes::ByteBuf::from(k.digest().to_vec()),
+                                offset: *offset,
+                                extra: Default::default(),
+                            })
+                            .collect(),
+                        extra: Default::default(),
+                    })
+                    .context("encode chunks.pull")?,
+                )
+                .context("chunks.pull as Value")?;
+                let reply = channel
+                    .request(KIND_PEER_SYNC_CHUNKS_PULL, req)
+                    .await
+                    .context("peer chunks.pull")?;
+                let reply: PeerSyncChunksPullReply =
+                    decode_strict(&encode_canonical(&reply).context("encode chunks reply")?)
+                        .context("decode chunks reply")?;
+                Ok(crate::ranged::Round {
+                    slices: reply
+                        .chunks
+                        .into_iter()
+                        .map(|c| crate::ranged::Slice {
+                            store_key: c.store_key.into_vec(),
+                            offset: c.offset,
+                            bytes: c.bytes.into_vec(),
+                            total_len: c.total_len,
+                        })
+                        .collect(),
+                    missing: reply.missing.into_iter().map(|m| m.into_vec()).collect(),
+                })
+            }
+        },
+    )
+    .await?;
+    let relay_deferred = relayed.into_inner().expect("relay-deferred keys");
+    Ok(FileChunkPull {
+        bodies: assembled.bodies,
+        missing: assembled
+            .missing
+            .into_iter()
+            .filter(|k| !relay_deferred.contains(k))
+            .collect(),
+        relay_deferred,
+        arrived,
+    })
+}
+
 /// The want-list pull: fetch every indexed-but-absent block of `scope` from
 /// the admitted peer, hydrating each through the store's content-address
 /// check (a poisoned block fails there and is refused — wormability rule 4).

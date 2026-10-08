@@ -309,6 +309,11 @@ struct Inner {
     /// Requests parked on this client's connection, as the reconnect loop sees
     /// them ([`DialDemand`]).
     demand: DialDemand,
+    /// The push device id every (re)connect announces as `fauna.push.presence`,
+    /// or `None` to announce nothing — the wasm twin of native `NestClient`'s
+    /// `push_presence` slot, written by [`WsRpcClient::set_push_presence`] and
+    /// read by the reconnect loop on each established connection.
+    push_presence: RefCell<Option<String>>,
 }
 
 /// Requests parked on a client's connection — `transport.md` § Request
@@ -375,6 +380,7 @@ impl Inner {
             #[cfg(any(test, feature = "test-helpers"))]
             backoff_override: Cell::new(None),
             demand: DialDemand::default(),
+            push_presence: RefCell::new(None),
         }
     }
 }
@@ -525,6 +531,26 @@ impl WsRpcClient {
         match self.own() {
             Some(inner) => *inner.on_reconnected.borrow_mut() = Some(cb),
             None => self.warn_owner_only("set_on_reconnected"),
+        }
+    }
+
+    /// Name the push device this client's connections serve: from now on every
+    /// (re)connect announces `fauna.push.presence { device_id }`, and a live
+    /// connection announces it at once — the wasm twin of native
+    /// `NestClient::set_push_presence` (`common.md` § Registration → *Every
+    /// connection announces*). `device_id` must be the id this install's push
+    /// row is keyed under, or the nest reads the browser's own row as absent
+    /// and dials it while the tab is open. Only the socket's owner announces: a
+    /// port-built client rides the owner's connection, which already does.
+    pub fn set_push_presence(&self, device_id: String) {
+        let Some(inner) = self.own() else {
+            self.warn_owner_only("set_push_presence");
+            return;
+        };
+        *inner.push_presence.borrow_mut() = Some(device_id.clone());
+        let live = inner.dispatcher.borrow().as_ref().map(Rc::clone);
+        if let Some(dispatcher) = live {
+            spawn_local(announce_presence(dispatcher, device_id));
         }
     }
 
@@ -1002,6 +1028,31 @@ fn record_supervisor_stop(inner: &Inner, stop: SupervisorStop) {
     set_state(inner, ConnectionState::Disconnected);
 }
 
+/// Ceiling on one presence announce, in ms. The nest registers the kind at 5 s;
+/// this is the client-side backstop, as native's `PRESENCE_ANNOUNCE_DEADLINE`.
+const PRESENCE_ANNOUNCE_MS: u32 = 5_000;
+
+/// Announce `device_id` on `dispatcher`'s connection — best-effort, and never in
+/// the way of the connection's own serving: a refusal or failure leaves the
+/// connection unannounced (the wasm twin of `fauna_client::reconnect::
+/// announce_presence`).
+async fn announce_presence(dispatcher: Rc<RpcDispatcher>, device_id: String) {
+    let request = fauna_protocol::push::PresenceRequest {
+        device_id,
+        extra: Default::default(),
+    };
+    let reply: Result<fauna_protocol::push::PresenceReply, _> = dispatch_typed(
+        &dispatcher,
+        "fauna.push.presence",
+        request,
+        PRESENCE_ANNOUNCE_MS,
+    )
+    .await;
+    if let Err(e) = reply {
+        tracing::debug!("push presence: not announced on this connection: {e}");
+    }
+}
+
 /// Forward one connection's decoded pushes to the SPA's registered JS callback
 /// as `(kind, payload)` — the wasm twin of a native consumer looping over
 /// `NestClient::subscribe_pushes` (`transport.md` § Push events).
@@ -1343,6 +1394,13 @@ async fn run_reconnect_loop(inner: Rc<Inner>, mut close_rx: oneshot::Receiver<()
                 // counting from zero.
                 consecutive_failures = 0;
                 mark_connected(&inner);
+                // Every proven connection announces this install's push device,
+                // as native `ClientChannel::on_connect` does: the tag lasts as
+                // long as the connection, so a reconnect must say it again.
+                let presence = inner.push_presence.borrow().clone();
+                if let Some(device_id) = presence {
+                    spawn_local(announce_presence(Rc::clone(&dispatcher), device_id));
+                }
                 matches!(select(driver, &mut close_rx).await, Either::Right(_))
             }
         };

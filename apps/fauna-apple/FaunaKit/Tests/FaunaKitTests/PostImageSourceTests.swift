@@ -112,3 +112,18 @@ private let proxiedPath = "/api/v1/bluesky/media?url=https%3A%2F%2Fcdn.bsky.app%
     #expect(documentMediaProxiedImagePath(mixed) == nil)
     #expect(documentMediaProxiedImagePath(RenderDocument(blocks: [])) == nil)
 }
+
+@Test func theProxiedVideoPathIsTakenOnlyWhenThePostHasNoBlobVideo() {
+    // `RenderDocument::proxied_post_video`'s precedence: the one `video-thumbnail` slot takes
+    // a blob video first; a proxied-only post paints the path; an image-only post has none.
+    let bridged = RenderDocument(blocks: [.proxiedVideo(path: proxiedPath, alt: "")])
+    #expect(documentMediaProxiedVideoPath(bridged) == proxiedPath)
+
+    let mixed = RenderDocument(blocks: [.video(hash: "b1a5e0", alt: ""),
+                                        .proxiedVideo(path: proxiedPath, alt: "")])
+    #expect(documentMediaProxiedVideoPath(mixed) == nil)
+
+    let imageOnly = RenderDocument(blocks: [.proxiedImage(path: proxiedPath, alt: "")])
+    #expect(documentMediaProxiedVideoPath(imageOnly) == nil)
+    #expect(documentMediaProxiedVideoPath(RenderDocument(blocks: [])) == nil)
+}

@@ -16,8 +16,14 @@ default = []
 # set_step_for_test) on the wasm surface. The e2e test build (just web-test)
 # enables it; production
 # `just wasm` / `just web` does not. Keeps the test setters out of the
-# production bundle (tracked internally).
-test-helpers = ["fauna-onboarding-machine/test-helpers"]
+# production bundle (tracked internally). Also forwards to
+# fauna-client-accounts/test-helpers: `callMachineFreeMethodForTest` tries the
+# registry arms of the E2E bridge first, and those are compiled in only under
+# that feature (or debug_assertions, which the release-profile wasm lacks).
+test-helpers = [
+    "fauna-onboarding-machine/test-helpers",
+    "fauna-client-accounts/test-helpers",
+]
 
 # wasm32-scoped on purpose: this crate builds only for wasm32, and a plain
 # [dependencies] table would leak its wasm-only feature activations (js,

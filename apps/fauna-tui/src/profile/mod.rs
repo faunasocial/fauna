@@ -541,7 +541,9 @@ pub enum Action {
     /// `subscription-offer-subscribe-button[i]` — subscribe to that tier.
     Subscribe(String),
     /// `subscription-offer-payment-link[i]` — open the offer's external
-    /// `payment_url` in the OS browser (off-platform checkout).
+    /// `payment_url` in the OS browser (off-platform checkout). The money
+    /// plane's buyer half, with the offer row's link that paints it.
+    #[cfg(feature = "payments")]
     OpenPaymentLink(String),
 
     // ── OTHER private section ([`private`]) ─────────────────────────────
@@ -655,7 +657,10 @@ impl Action {
             // Local. Clipboard writes, tab switches whose refetch is a `Read`,
             // the edit/tier/provider form buffers, the Start-DM nav glue
             // (`start_dm` — "pure nav glue, no new kind"), and the OS handoff
-            // of a payment URL.
+            // of a payment URL (its own arm, so the flavor without the
+            // variant compiles the list unchanged).
+            #[cfg(feature = "payments")]
+            Action::OpenPaymentLink(_) => None,
             Action::Copy
             | Action::OpenEdit
             | Action::CancelEdit
@@ -666,7 +671,6 @@ impl Action {
             | Action::StartDm
             | Action::ShowPosts
             | Action::ShowTiers
-            | Action::OpenPaymentLink(_)
             | Action::OpenTierForm(_)
             | Action::CancelTierForm
             | Action::ToggleAutoApprove
@@ -856,6 +860,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // subscription::is_safe_payment_url` guard (F-CL2 anti-phishing-redirect
         // class) — author-supplied content, same check the feed's
         // `gated-post-payment-link` applies.
+        #[cfg(feature = "payments")]
         Action::OpenPaymentLink(url) => {
             if fauna_core::subscription::is_safe_payment_url(&url) {
                 crate::os_open::open(&url);
@@ -2225,7 +2230,12 @@ pub fn elements(app: &App) -> Vec<Element> {
                 tier.name.clone(),
             ));
             // Always emit price + status per row (empty allowed) so the flat
-            // per-id index stays aligned with the row index.
+            // per-id index stays aligned with the row index. The price and the
+            // payment link below are the money plane's buyer half
+            // (`dynamic-features.md` § Platform-family surface excision → *The
+            // price-and-route class*): a store-safe build shows a priced tier
+            // as an ordinary approval-gated one — name, description, Subscribe.
+            #[cfg(feature = "payments")]
             out.push(Element::label(
                 ids::SUBSCRIPTION_OFFER_PRICE,
                 tier.price_hint.clone().unwrap_or_default(),
@@ -2239,6 +2249,7 @@ pub fn elements(app: &App) -> Vec<Element> {
             ));
             // Only when the tier carries one — an offer with no external
             // checkout paints no link (ui.yaml: "opens external payment_url").
+            #[cfg(feature = "payments")]
             if let Some(url) = tier.payment_url.as_deref().filter(|u| !u.is_empty()) {
                 out.push(Element::gesture_button(
                     ids::SUBSCRIPTION_OFFER_PAYMENT_LINK,
@@ -2937,6 +2948,7 @@ mod tests {
             "followers is filtered out"
         );
         assert_eq!(text_of(&app, "subscription-offer-name"), "gold");
+        #[cfg(feature = "payments")]
         assert_eq!(text_of(&app, "subscription-offer-price"), "$5/mo");
         // No held tier, no pending ⇒ "Not subscribed".
         assert_eq!(text_of(&app, "subscription-offer-status"), "Not subscribed");
@@ -3504,6 +3516,7 @@ mod tests {
     /// An offer's external payment link paints only when the tier carries one,
     /// and a non-https link is refused rather than opened (author-supplied
     /// content — the feed's `gated-post-payment-link` guard).
+    #[cfg(feature = "payments")]
     #[test]
     fn offer_payment_link_is_conditional_and_https_only() {
         let mut app = other_app();

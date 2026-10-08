@@ -42,6 +42,13 @@ Stamped 2026-09-24 at 89bb22083d.
    - `tests/e2e-unified/tests/test_push_settings.py::test_push_turned_off_stays_off_across_a_relaunch`
    - `tests/e2e-unified/tests/test_push_settings.py::test_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting`
    - `tests/e2e-unified/tests/test_push_settings.py::test_sign_out_drops_the_row_and_the_next_sign_in_rearms`
+   - `tests/e2e-unified/tests/test_push_settings.py::test_windows_push_turned_off_stays_off_across_a_relaunch`
+   - `tests/e2e-unified/tests/test_push_settings.py::test_windows_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting`
+   - `tests/e2e-unified/tests/test_push_settings.py::test_windows_sign_out_drops_the_row_and_the_next_sign_in_rearms`
+   - `tests/e2e-unified/tests/test_push_settings.py::test_linux_push_turned_off_stays_off_across_a_relaunch`
+   - `tests/e2e-unified/tests/test_push_settings.py::test_linux_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting`
+   - `tests/e2e-unified/tests/test_push_settings.py::test_linux_sign_out_drops_the_row_and_the_next_sign_in_rearms`
+   - `tests/e2e-unified/tests/test_push_settings.py::test_web_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting`
 10. [nest] Your nest only sends a push to a real push service on the public internet, never to an address inside its own network — `docs/goal/architecture/apps/common.md` § Push Notifications
    - `tests/e2e-unified/tests/api/test_push_api.py::test_push_subscribe_refuses_an_endpoint_the_nest_must_never_dial`
 11. [app] Each notification reads in your app's language, and one your app is too old to know still reads as a whole sentence, never a code — `docs/goal/behavior/notifications.md` § Localized body (ratified 2026-09-20)
@@ -76,9 +83,16 @@ Stamped 2026-09-24 at 89bb22083d.
 | 7 | app | `tests/e2e-unified/tests/test_nest_flip_resilience.py::test_nest_flip_resilience` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 8 | nest | `tests/e2e-unified/tests/api/test_push_dispatch.py::test_push_reaches_an_offline_device_for_a_knock_a_message_and_an_invite` | nest (linux): passed |
 | 8 | nest | `tests/e2e-unified/tests/api/test_push_dispatch.py::test_push_is_decided_per_device` | nest (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_push_turned_off_stays_off_across_a_relaunch` | tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_sign_out_drops_the_row_and_the_next_sign_in_rearms` | tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_push_turned_off_stays_off_across_a_relaunch` | tui (linux): passed, tui (windows): passed |
+| 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | tui (linux): passed, tui (windows): passed |
+| 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_sign_out_drops_the_row_and_the_next_sign_in_rearms` | tui (linux): passed, tui (windows): passed |
+| 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_windows_push_turned_off_stays_off_across_a_relaunch` | windows (windows): passed |
+| 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_windows_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | windows (windows): passed |
+| 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_windows_sign_out_drops_the_row_and_the_next_sign_in_rearms` | windows (windows): passed |
+| 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_linux_push_turned_off_stays_off_across_a_relaunch` | — |
+| 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_linux_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | — |
+| 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_linux_sign_out_drops_the_row_and_the_next_sign_in_rearms` | — |
+| 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_web_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | web (linux): passed |
 | 10 | nest | `tests/e2e-unified/tests/api/test_push_api.py::test_push_subscribe_refuses_an_endpoint_the_nest_must_never_dial` | nest (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_notifications_localized_body.py::test_a_row_paints_its_localized_body_and_an_unknown_key_paints_the_summary` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 <!-- features-render:end -->

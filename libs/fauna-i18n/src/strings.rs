@@ -2189,6 +2189,31 @@ pub mod conversations {
             format!("Could not send this message: {message}")
         }
 
+        pub const LIST_SEND_WARNING: &str = "This will send to {count} subscribed recipients on {list}. Today's quota: {used} / {limit}.";
+        pub fn list_send_warning(count: &str, list: &str, used: &str, limit: &str) -> String {
+            format!("This will send to {count} subscribed recipients on {list}. Today's quota: {used} / {limit}.")
+        }
+
+        pub const LIST_SEND_WARNING_NO_LIMIT: &str = "This will send to {count} subscribed recipients on {list}.";
+        pub fn list_send_warning_no_limit(count: &str, list: &str) -> String {
+            format!("This will send to {count} subscribed recipients on {list}.")
+        }
+
+        pub const LIST_QUOTA_APPROACHING: &str = "Approaching daily limit — {remaining} more recipients today";
+        pub fn list_quota_approaching(remaining: &str) -> String {
+            format!("Approaching daily limit — {remaining} more recipients today")
+        }
+
+        pub const LIST_QUOTA_OVER: &str = "Sending to {count} recipients would pass today's limit of {limit} ({remaining} left). Try again tomorrow.";
+        pub fn list_quota_over(count: &str, limit: &str, remaining: &str) -> String {
+            format!("Sending to {count} recipients would pass today's limit of {limit} ({remaining} left). Try again tomorrow.")
+        }
+
+        pub const LIST_SEND_PROGRESS: &str = "Sent to {list}: {delivered} of {count} recipients delivered";
+        pub fn list_send_progress(list: &str, delivered: &str, count: &str) -> String {
+            format!("Sent to {list}: {delivered} of {count} recipients delivered")
+        }
+
         pub const ERROR_ATTACHMENT_NO_COMPOSER: &str = "Open a message composer before attaching a file.";
 
         pub const GROUP_CONVERSATION_HINT: &str = "This will start a group conversation.";
@@ -6108,8 +6133,6 @@ pub mod settings {
 
     pub const UPDATE_BUTTON: &str = "Update";
 
-    pub const UPDATES: &str = "Updates";
-
     pub const STORAGE_DESC: &str = "Account storage usage.";
 
     pub const ABOUT: &str = "About";
@@ -6127,12 +6150,6 @@ pub mod settings {
     pub const APPEARANCE: &str = "Appearance";
 
     pub const SHOW_IN_DOCK: &str = "Show in Dock";
-
-    pub const AUTO_CHECK_UPDATES: &str = "Automatically check for updates";
-
-    pub const AUTO_DOWNLOAD_UPDATES: &str = "Automatically download updates";
-
-    pub const LAST_CHECKED: &str = "Last checked:";
 
     pub const P2P_REDIRECT: &str = "Peer connections and bridges are managed on the Devices and Bridges pages.";
 
@@ -6796,6 +6813,8 @@ pub mod mail_lists {
     pub const DELETE: &str = "Delete";
 
     pub const DELETE_CONFIRM: &str = "Delete the list and all its members?";
+
+    pub const ARCHIVE_OFF_SERVER_CONFIRM: &str = "This archive link is not on your server and goes out with every message. Save anyway?";
 
     pub const MEMBERS: &str = "Members";
 
@@ -10576,6 +10595,26 @@ pub mod error {
         pub const GUARDIAN_APPROVAL_REQUIRED: &str = "This account can only message approved contacts.";
     }
 
+    pub mod activitypub {
+        pub const NOT_LINKED: &str = "This post came from the fediverse, and ActivityPub isn't enabled for your account yet. Enable it on the Bridges page first.";
+
+        pub const SWITCHED_OFF: &str = "Your ActivityPub federation is switched off, so this can't be sent to the fediverse. Turn it back on from the Bridges page.";
+    }
+
+    pub mod bluesky {
+        pub const NOT_LINKED: &str = "This post came from Bluesky, and no Bluesky account is linked for you. Link one on the AT Protocol page first.";
+    }
+
+    pub mod nostr {
+        pub const NOT_LINKED: &str = "This post came from Nostr, and no Nostr key is linked for you. Link one on the Nostr page first.";
+
+        pub const NO_CUSTODIAL_KEY: &str = "Your nest doesn't hold your Nostr key, so it can't sign this for you. Switch to a generated or imported key on the Nostr page.";
+
+        pub const NO_RELAYS_CONFIGURED: &str = "You've removed every Nostr relay, so there is nowhere to publish this. Add a relay on the Nostr page first.";
+
+        pub const REPLIES_OFF: &str = "Replies to Nostr are switched off, so this wasn't sent. Turn on Publish replies on the Nostr page.";
+    }
+
     pub mod nest {
         pub const OUTDATED: &str = "This nest is running an outdated version and must be updated before you can connect.";
 
@@ -12074,6 +12113,11 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "conversations.unified.room_labeler_on" => Some(conversations::unified::ROOM_LABELER_ON),
         "conversations.unified.room_labeler_off" => Some(conversations::unified::ROOM_LABELER_OFF),
         "conversations.unified.error_send" => Some(conversations::unified::ERROR_SEND),
+        "conversations.unified.list_send_warning" => Some(conversations::unified::LIST_SEND_WARNING),
+        "conversations.unified.list_send_warning_no_limit" => Some(conversations::unified::LIST_SEND_WARNING_NO_LIMIT),
+        "conversations.unified.list_quota_approaching" => Some(conversations::unified::LIST_QUOTA_APPROACHING),
+        "conversations.unified.list_quota_over" => Some(conversations::unified::LIST_QUOTA_OVER),
+        "conversations.unified.list_send_progress" => Some(conversations::unified::LIST_SEND_PROGRESS),
         "conversations.unified.error_attachment_no_composer" => Some(conversations::unified::ERROR_ATTACHMENT_NO_COMPOSER),
         "conversations.unified.group_conversation_hint" => Some(conversations::unified::GROUP_CONVERSATION_HINT),
         "conversations.unified.recipient_picker_placeholder" => Some(conversations::unified::RECIPIENT_PICKER_PLACEHOLDER),
@@ -13558,7 +13602,6 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "settings.new_nest_url" => Some(settings::NEW_NEST_URL),
         "settings.new_nest_url_placeholder" => Some(settings::NEW_NEST_URL_PLACEHOLDER),
         "settings.update_button" => Some(settings::UPDATE_BUTTON),
-        "settings.updates" => Some(settings::UPDATES),
         "settings.storage_desc" => Some(settings::STORAGE_DESC),
         "settings.about" => Some(settings::ABOUT),
         "settings.about_name" => Some(settings::ABOUT_NAME),
@@ -13568,9 +13611,6 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "settings.general" => Some(settings::GENERAL),
         "settings.appearance" => Some(settings::APPEARANCE),
         "settings.show_in_dock" => Some(settings::SHOW_IN_DOCK),
-        "settings.auto_check_updates" => Some(settings::AUTO_CHECK_UPDATES),
-        "settings.auto_download_updates" => Some(settings::AUTO_DOWNLOAD_UPDATES),
-        "settings.last_checked" => Some(settings::LAST_CHECKED),
         "settings.p2p_redirect" => Some(settings::P2P_REDIRECT),
         "settings.open_devices" => Some(settings::OPEN_DEVICES),
         "settings.open_bridges" => Some(settings::OPEN_BRIDGES),
@@ -13842,6 +13882,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "mail_lists.edit" => Some(mail_lists::EDIT),
         "mail_lists.delete" => Some(mail_lists::DELETE),
         "mail_lists.delete_confirm" => Some(mail_lists::DELETE_CONFIRM),
+        "mail_lists.archive_off_server_confirm" => Some(mail_lists::ARCHIVE_OFF_SERVER_CONFIRM),
         "mail_lists.members" => Some(mail_lists::MEMBERS),
         "mail_lists.no_domain" => Some(mail_lists::NO_DOMAIN),
         "mail_lists.members_title" => Some(mail_lists::MEMBERS_TITLE),
@@ -15315,6 +15356,13 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "error.bridges.address_refused" => Some(error::bridges::ADDRESS_REFUSED),
         "error.bridges.conversation_store_full" => Some(error::bridges::CONVERSATION_STORE_FULL),
         "error.bridges.guardian_approval_required" => Some(error::bridges::GUARDIAN_APPROVAL_REQUIRED),
+        "error.activitypub.not_linked" => Some(error::activitypub::NOT_LINKED),
+        "error.activitypub.switched_off" => Some(error::activitypub::SWITCHED_OFF),
+        "error.bluesky.not_linked" => Some(error::bluesky::NOT_LINKED),
+        "error.nostr.not_linked" => Some(error::nostr::NOT_LINKED),
+        "error.nostr.no_custodial_key" => Some(error::nostr::NO_CUSTODIAL_KEY),
+        "error.nostr.no_relays_configured" => Some(error::nostr::NO_RELAYS_CONFIGURED),
+        "error.nostr.replies_off" => Some(error::nostr::REPLIES_OFF),
         "error.nest.outdated" => Some(error::nest::OUTDATED),
         "error.nest.schema_mismatch" => Some(error::nest::SCHEMA_MISMATCH),
         "error.federation.peer_nest_outdated" => Some(error::federation::PEER_NEST_OUTDATED),

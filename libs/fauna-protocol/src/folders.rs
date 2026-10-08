@@ -109,8 +109,8 @@ pub struct NestPlacePolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshots: Option<bool>,
     /// Seconds of quiet before the nest place cuts a snapshot. `None` = unset ⇒
-    /// the nest-wide scheduler cadence. Non-negative; the nest refuses a negative
-    /// value rather than normalizing it.
+    /// the nest-wide scheduler cadence. In `0..=`[`Self::MAX_QUIET_SECS`]; the
+    /// nest refuses a value outside it rather than normalizing it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quiet_secs: Option<i64>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -118,6 +118,16 @@ pub struct NestPlacePolicy {
 }
 
 impl NestPlacePolicy {
+    /// The longest quiet period an owner may choose: seven days. A quiet period
+    /// is how long a folder must sit unchanged before the nest cuts its
+    /// snapshot, so a week already means "only after the folder has gone
+    /// still"; anything longer stops being a cadence and only lets one owner's
+    /// value reach the nest-wide scheduler's arithmetic. The nest refuses a
+    /// larger value (`fauna.folders.bad_request`) exactly as it refuses a
+    /// negative one, and the shared editor reads one as unset
+    /// (`docs/goal/behavior/backup-restore.md` § 8b).
+    pub const MAX_QUIET_SECS: i64 = 7 * 24 * 60 * 60;
+
     /// True when no knob is set — the resting state of every folder whose owner
     /// has never touched the policy, and the case the projections omit entirely
     /// so an unset folder's wire bytes are unchanged from before this field

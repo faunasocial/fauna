@@ -15,8 +15,8 @@ import (
 	"github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/caldav"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mailfauna"
-	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mda/dav"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mda/davauth"
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mda/undecryptable"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/wsrpc"
 	"lukechampine.com/blake3"
 )
@@ -86,7 +86,7 @@ type Backend struct {
 	classifyTransport func(addr string) (mailfauna.AttendeeTransport, error)
 	// undecryptableWarn collapses the per-PROPFIND "undecryptable metadata"
 	// WARN to once per calendar. Zero value ready for use.
-	undecryptableWarn dav.UndecryptableWarnDedup
+	undecryptableWarn undecryptable.WarnDedup
 }
 
 // nestMailEnabled reports whether the deployment has email enabled, defaulting to
@@ -238,7 +238,7 @@ func (b *Backend) ListCalendars(ctx context.Context) ([]caldav.Calendar, error) 
 			//
 			// WARN once per calendar, DEBUG on the repeats: this fires on
 			// every PROPFIND for as long as the row stays unopenable, which
-			// is indefinitely (see dav.UndecryptableWarnDedup).
+			// is indefinitely (see undecryptable.WarnDedup).
 			idHex := hex.EncodeToString(entries[i].CalendarID)
 			b.undecryptableWarn.Log(
 				b.logger, idHex,

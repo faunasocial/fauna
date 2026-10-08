@@ -403,11 +403,13 @@ private fun TierRow(
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag(Ids.SUBSCRIPTION_TIER_RANK),
             )
-            Text(
-                tier.priceHint.orEmpty(),
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.testTag(Ids.SUBSCRIPTION_TIER_PRICE),
-            )
+            if (BuildConfig.PAYMENTS) {
+                Text(
+                    tier.priceHint.orEmpty(),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag(Ids.SUBSCRIPTION_TIER_PRICE),
+                )
+            }
             OutlinedButton(
                 onClick = onEdit,
                 enabled = !working,
@@ -800,30 +802,35 @@ private fun TierForm(
                 label = { Text(stringResource(R.string.subscriptions_description)) },
                 modifier = Modifier.fillMaxWidth().testTag(Ids.SUBSCRIPTION_TIER_FORM_DESCRIPTION),
             )
-            OutlinedTextField(
-                value = priceHint,
-                onValueChange = { priceHint = it },
-                singleLine = true,
-                label = { Text(stringResource(R.string.subscriptions_price_hint)) },
-                modifier = Modifier.fillMaxWidth().testTag(Ids.SUBSCRIPTION_TIER_FORM_PRICE_HINT),
-            )
-            OutlinedTextField(
-                value = askingPrice,
-                onValueChange = { askingPrice = it },
-                singleLine = true,
-                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                    keyboardType = KeyboardType.Number,
-                ),
-                label = { Text(stringResource(R.string.subscriptions_asking_price)) },
-                modifier = Modifier.fillMaxWidth().testTag(Ids.SUBSCRIPTION_TIER_FORM_ASKING_PRICE),
-            )
-            OutlinedTextField(
-                value = paymentUrl,
-                onValueChange = { paymentUrl = it },
-                singleLine = true,
-                label = { Text(stringResource(R.string.subscriptions_payment_url)) },
-                modifier = Modifier.fillMaxWidth().testTag(Ids.SUBSCRIPTION_TIER_FORM_PAYMENT_URL),
-            )
+            // Price-and-route class (dynamic-features.md § Platform-family surface
+            // excision): the three money fields exist only to state a price or a
+            // payment route, so they sit behind the family compile condition.
+            if (BuildConfig.PAYMENTS) {
+                OutlinedTextField(
+                    value = priceHint,
+                    onValueChange = { priceHint = it },
+                    singleLine = true,
+                    label = { Text(stringResource(R.string.subscriptions_price_hint)) },
+                    modifier = Modifier.fillMaxWidth().testTag(Ids.SUBSCRIPTION_TIER_FORM_PRICE_HINT),
+                )
+                OutlinedTextField(
+                    value = askingPrice,
+                    onValueChange = { askingPrice = it },
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = KeyboardType.Number,
+                    ),
+                    label = { Text(stringResource(R.string.subscriptions_asking_price)) },
+                    modifier = Modifier.fillMaxWidth().testTag(Ids.SUBSCRIPTION_TIER_FORM_ASKING_PRICE),
+                )
+                OutlinedTextField(
+                    value = paymentUrl,
+                    onValueChange = { paymentUrl = it },
+                    singleLine = true,
+                    label = { Text(stringResource(R.string.subscriptions_payment_url)) },
+                    modifier = Modifier.fillMaxWidth().testTag(Ids.SUBSCRIPTION_TIER_FORM_PAYMENT_URL),
+                )
+            }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),

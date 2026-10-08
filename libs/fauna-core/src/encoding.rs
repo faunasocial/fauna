@@ -938,7 +938,7 @@ mod tests {
         }
     }
 
-    /// Finding 2 (Layer 6): `compute_post_id` must hash the *canonical dag-cbor*
+    /// Layer 6: `compute_post_id` must hash the *canonical dag-cbor*
     /// of the Post, so the PostId equals the CID the sign-over-CID envelope
     /// signs. Before the Layer-6 at-rest flip `compute_post_id` hashed BARE
     /// bytes while `sign_envelope` signed the dag-cbor CID — the two diverged.
@@ -951,7 +951,7 @@ mod tests {
         assert_eq!(
             pid,
             *env.cid(),
-            "compute_post_id must equal the signed-envelope CID (Layer 6 Finding 2)"
+            "compute_post_id must equal the signed-envelope CID (Layer 6)"
         );
     }
 

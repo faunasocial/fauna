@@ -386,6 +386,24 @@ pub fn teardown(reason: StopReason, then: impl FnOnce() + 'static) {
     #[cfg(feature = "p2p-share")]
     crate::share_glue::forget();
     let unprovision = crate::sync_agent::teardown();
+    // The push row follows the signed-in identity (`common.md` § Registration
+    // → the leave-shapes): every way this session leaves — sign-out, switch,
+    // factory reset — drops the leaving actor's row over its own client, on
+    // the same spawned stop and ahead of the agent's un-provision and the
+    // store's erase. Never touches the install's opt-in bit, so the next
+    // identity re-arms. Bounded and best-effort: a leave gesture completes
+    // offline.
+    let unprovision = match (crate::push::take_leave(), unprovision) {
+        (Some((_, drop)), Some(u)) => Some(crate::sync_agent::Unprovision {
+            rt: u.rt,
+            reply: Box::pin(async move {
+                drop.await;
+                u.reply.await;
+            }),
+        }),
+        (Some((rt, drop)), None) => Some(crate::sync_agent::Unprovision { rt, reply: drop }),
+        (None, u) => u,
+    };
     // `take` advances the generation even when the slot is empty — the case
     // that matters, since a sign-out landing during the first assembly has
     // nothing to take and everything to prevent — and hands back the in-flight

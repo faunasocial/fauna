@@ -1859,6 +1859,12 @@ impl OnboardingMachine {
     #[cfg(feature = "test-helpers")]
     #[wasm_bindgen(js_name = callMachineMethodForTest)]
     pub fn call_machine_method_for_test(&self, name: String, json_arg: String) -> js_sys::Promise {
+        // The registry arms first, as the machine-free door does: the driver
+        // reaches this door instead of that one once the onboarding page has
+        // mounted in this document.
+        if let Some(v) = registry_method_for_test(&name, &json_arg) {
+            return js_sys::Promise::resolve(&js_sys::JSON::parse(&v).unwrap_or(JsValue::NULL));
+        }
         let m = Arc::clone(&self.0);
         let method = name.clone();
         wasm_bindgen_futures::future_to_promise(async move {
@@ -2359,13 +2365,44 @@ pub fn panic_for_test_only() {
 /// (`security.md` § Post-auth surfacing, seam 1), and
 /// `call_machine_free_method` is the shared answer to it — this export is web's
 /// door onto it, not a second implementation of the name table.
+///
+/// The registry arms go first ([`registry_method_for_test`]).
 #[cfg(feature = "test-helpers")]
 #[wasm_bindgen(js_name = callMachineFreeMethodForTest)]
 pub fn call_machine_free_method_for_test(name: String, json_arg: String) -> Option<String> {
+    if let Some(v) = registry_method_for_test(&name, &json_arg) {
+        return Some(v);
+    }
     match fauna_onboarding_machine::call_machine_free_method(&name, &json_arg) {
         fauna_onboarding_machine::FreeMethodOutcome::Handled(v) => {
             Some(v.unwrap_or_else(|| "null".to_string()))
         }
         fauna_onboarding_machine::FreeMethodOutcome::NeedsMachine => None,
+    }
+}
+
+/// The **registry** arms of the cross-app E2E bridge
+/// (`fauna_client_accounts::call_registry_method_for_test` — the account-reach
+/// seams and the sticky secret-write fault the stolen-identity journey arms,
+/// `onboarding.md` § E2E bridge contract), served over the same stateless
+/// localStorage registry view [`pending_provision_store`] builds. `Some(json)`
+/// (`"null"` for a setter) when the name is a registry arm, `None` otherwise.
+///
+/// Both of web's doors try it first — the machine-free one and the
+/// machine-bound `callMachineMethodForTest` — because the driver prefers the
+/// machine-bound hook whenever the onboarding page has been mounted in this
+/// document, which a post-signup session reached by an in-document `goto` has.
+/// The fault lives in the store's backing, not in this module's statics, so the
+/// ceremony in the `fauna-wasm` chunk sees what this door arms.
+#[cfg(feature = "test-helpers")]
+fn registry_method_for_test(name: &str, json_arg: &str) -> Option<String> {
+    let registry = fauna_client_accounts::AccountRegistry::new(Arc::new(
+        fauna_client_accounts::LocalStorageSecretStore,
+    ));
+    match fauna_client_accounts::call_registry_method_for_test(&registry, name, json_arg) {
+        fauna_client_accounts::RegistryMethodOutcome::Handled(v) => {
+            Some(v.unwrap_or_else(|| "null".to_string()))
+        }
+        fauna_client_accounts::RegistryMethodOutcome::NotMine => None,
     }
 }

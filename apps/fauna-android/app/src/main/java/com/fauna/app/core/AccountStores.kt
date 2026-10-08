@@ -273,6 +273,30 @@ class AccountStores @Inject constructor(
     /** The conversations MLS group store (`ApiClient.ensureNestConnected`). */
     fun conversationsMlsDbPath(): String = File(filesScope(), SCOPED_MLS_DB_NAME).absolutePath
 
+    /**
+     * [actorIdHex]'s conversations MLS store, its scope dir **created** — the
+     * same file [conversationsMlsDbPath] names once that actor is active. The
+     * succession ceremony's successor resolver ([SuccessorStorePath]); a
+     * malformed hex lands under [UNRESOLVED_ACTOR_COMPONENT], never the root.
+     */
+    fun mlsDbPathFor(actorIdHex: String): String {
+        val dir = scopeFor(filesRoot, actorIdHex)
+        dir.mkdirs()
+        return File(dir, SCOPED_MLS_DB_NAME).absolutePath
+    }
+
+    /**
+     * [mlsDbPathFor] **without creating anything** — the retired identity's
+     * resolver ([RetiredIdentityStorePath]). The sweep retry turns on whether
+     * that store already exists, so asking must never make one.
+     */
+    fun pureMlsDbPathFor(actorIdHex: String): String =
+        File(scopeFor(filesRoot, actorIdHex), SCOPED_MLS_DB_NAME).absolutePath
+
+    private fun scopeFor(root: File, actorIdHex: String): File =
+        runCatching { accountRoot(root, actorIdHex) }.getOrNull()
+            ?: File(root, UNRESOLVED_ACTOR_COMPONENT)
+
     /** The P2P peer store (`P2PManager.db`). */
     fun p2pContactsDbPath(): String = File(filesScope(), P2P_DB_NAME).absolutePath
 

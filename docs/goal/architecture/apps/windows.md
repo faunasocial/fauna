@@ -31,7 +31,7 @@ for basic connectivity.
 | Backend processes | Per-user sync agent (`fauna-sync-agent.exe`) + optional `fauna-nest-service` / `fauna-bridge-service` |
 | Shell integration | Cloud Files API (cfapi) via Rust FFI |
 | Installer | WiX v6 MSI |
-| Auto-updates | `UpdateService` — polls GitHub Releases API, shared `fauna_core::version::is_newer` compare |
+| Auto-updates | `UpdateCheck` — notice-only, over the shared `fauna-ffi` face of `fauna_client::update_look` (§ Auto-Updates) |
 
 ## Architecture: the two-plane nest connection
 
@@ -646,16 +646,22 @@ where `FeedPage.xaml` painted the tip ids directly in the shared per-card
 shell, outside the excision mechanism) live as `UserControl`s under
 `Views/Payments/`, dropped from the store-safe csproj's `Page`/`Compile`
 items via a wildcard glob (`Views\Payments\**\*.xaml`/`**\*.cs`), so the count
-grows without a csproj edit — six today, joined 2026-09-06 by the tier/sell
-asking-price input (`AskingPriceInput`) and the Nostr zap-signer designation
-control (`NostrZapSignersSection`), both last-of-7-apps landings. Recipes: `just windows-ffi-store-safe`
+grows without a csproj edit — eleven today: the four above (the §§4–5 sections,
+the claim-redeem panel, the tip display and its list dialog), the Nostr zap-signer
+designation control (`NostrZapSignersSection`, 2026-09-06), and the six renders of
+the price-and-route class (2026-10-08; the class is owned by
+[`../dynamic-features.md`](../dynamic-features.md) § Platform-family surface
+excision → *The price-and-route class*) — the tier editor's money fields, the tier
+list's and the offer row's price, the offer's checkout link, the sell composer and
+the sold-post teaser, which together retired the single asking-price input
+(`AskingPriceInput`, 2026-09-06). Recipes: `just windows-ffi-store-safe`
 (the dll), `just windows-store-safe` (the app), `just windows-store-safe-check`
 (the two-column witness, scanning both the managed assembly and every compiled
 `.xbf`, since WinUI puts markup beside the assembly, not inside it).
 
 ### Auto-Updates
 
-`UpdateService` polls the GitHub Releases API (`faunasocial/fauna/releases/latest`), compares versions, and reports whether a newer version is available. **The one rule every desktop follows** (amended 2026-10-03): the user can trigger the check from Settings, and the app also looks ONCE per sign-in and only shows the same notice — through the shared `fauna_client::update_look::look_at_sign_in_over_http`, the entry point linux and tui call, never a copy of its own; a failed look is silent. No timer, no download, no self-replacement, no toggle. **Today windows has the asked check only, over a feed URL of its own;** the sign-in look is owed, and both are to call the shared FFI face `fauna-ffi`'s `version` module exports for them (2026-10-05): `check_for_newer_release(feed_origin, user_agent)` (newer with tag, bare version and release page / up to date / failed), `look_at_sign_in(feed_origin, user_agent)` (the newer release or nothing) and `release_feed_origin()` (production's origin — the e2e seam passes the stub's), so no C# keeps a URL or a round trip (tracked internally). The semver comparison is the shared `fauna_core::version::is_newer` via UniFFI (`FaunaFfiMethods.IsNewer`) — cross-language conformance pinned by `VersionCompareFfiTests`. The cross-platform promise this serves — and its desktop-only scope (owed on linux, windows, macOS and, once it has a channel, tui; absent by design on web, iOS and Android) — is owned by [`../installers/README.md`](../installers/README.md) § Knowing a newer version is out.
+`UpdateCheck` (`FaunaApp.Core/Services/UpdateCheck.cs`, one process-wide instance) is windows' newer-version notice. **The one rule every desktop follows** (amended 2026-10-03): the user can trigger the check from Settings, and the app also looks ONCE per sign-in and only shows the same notice — through the shared `fauna_client::update_look`, the entry point linux and tui call, never a copy of its own; a failed look is silent. No timer, no download, no self-replacement, no toggle. Windows reaches it through the `fauna-ffi` `version` module's exports, macOS's face (built 2026-10-08): `check_for_newer_release(feed_origin, user_agent)` is the asked check (newer with tag, bare version and release page / up to date / failed — a failed round trip paints *Check failed*, never *Up to date*), `look_at_sign_in(feed_origin, user_agent)` runs from both session-building paths (`StartMainAppAsync` and the e2e session patch, which never reaches it), and `release_feed_origin()` is production's origin; under e2e a test-capable build passes the harness's stub feed instead, read only through `E2eEnv.ReleaseFeedUrl` (convention 15). No C# keeps a URL or a round trip, and the user agent is `fauna-windows/<fauna_ffi_build_version()>`. The door is Settings → General's About block, linux's and macOS's shape: `settings-app-version` (`fauna_ffi_build_version()`), `settings-check-updates-button` (its label carries the check's state — *Checking…*, *Up to date*, *Check failed*, *<version> available* — and holds an answer for three seconds), and `update-available-notice`, collapsed until the check or the look finds a newer release; `UpdateCheckFfiTests` drives the real exports against a loopback feed. The semver rule is the shared `fauna_core::version::is_newer`, applied inside the update look; the `IsNewer` export's cross-language conformance stays pinned by `VersionCompareFfiTests`. The cross-platform promise this serves — and its desktop-only scope (owed on linux, windows, macOS and, once it has a channel, tui; absent by design on web, iOS and Android) — is owned by [`../installers/README.md`](../installers/README.md) § Knowing a newer version is out.
 
 ---
 
@@ -679,9 +685,48 @@ Toast notifications via `NotificationService` (`AppNotificationManager`); OS
 notifications are fed by **WS-RPC push** (re-homed off the removed
 `WebSocketService`). With the app closed, the per-user sync agent posts the
 push toast instead — the `ws-device` transport ([`common.md`](common.md)
-§ Push Notifications → *Transports*, ruled 2026-09-26, unbuilt; WNS was
-considered and rejected there): the agent posts only while no app is attached
-over the IPC seam, so the two never both fire. System tray icon via Win32 `Shell_NotifyIconW`;
+§ Push Notifications → *Transports*, ruled 2026-09-26; WNS was considered and
+rejected there): the agent posts only while no app is attached over the IPC
+seam, so the two never both fire.
+
+**The app's half (built 2026-10-08).** The Settings → Account push toggle
+(`PushNotificationsViewModel` over the shared registration machine through
+`FfiPushRegistration`; `Core/Services/PushSession.cs` names the inputs — the
+install's derived device id for the actor and the install-scoped intent file
+`push-intent.cbor` in the data dir); every session start (`StartMainAppAsync`,
+and the e2e `session` login) announces the device and re-arms; a committed
+switch drops the outgoing actor's row inside `TearDownAndRelaunchAsync` and a
+sign-out drops it before the credential erase, each bounded at 3 s. From its
+first session the app holds the agent's attachment lease for the process's life
+(`FaunaFfiMethods.AttachToSyncAgent` — the shared `fauna_client_sync::attachment`,
+gated like the provision path), and the attach names **the AUMID its own toasts
+post under** (`NotificationService.Identity`): the package app's AUMID with
+package identity (the Store package, or the MSI's sparse identity), otherwise
+the unpackaged registration `AppNotificationManager.Register()` keeps under
+`HKCU\Software\Classes\AppUserModelId` (a key named for the exe's path whose
+`NotificationGUID` names the AUMID — the SDK's layout, measured 2026-10-08, not
+a documented contract, so a read that finds nothing sends no identity and the
+agent honestly reports no sink).
+
+**The agent's half (built 2026-10-08).** `bins/fauna-sync-agent/src/push_arm.rs`'s
+`toast` sink posts the frame's title and body as a WinRT toast under the
+identity the app named, which it keeps in a file under its flat base so a toast
+still finds it after an agent restart with the app closed. The toast is
+therefore the app's — its name, its icon, its group in the notification centre —
+and its registration's activator is what a tap would launch. The sink is
+available when the platform's own `ToastNotifier.Setting` reads enabled for that
+identity; an unpackaged identity the platform has not met yet (nothing posted
+under it) answers "not found" until its first toast, so there the documented
+unpackaged registration key decides (measured 2026-10-08: a packaged identity
+reads enabled from its registration on, and an unpackaged process posts under
+it). Pinned against the real notification platform by `push_arm.rs`'s
+`toast_tests` (a per-run registered identity; popup suppressed, the toast read
+back from the identity's history and removed).
+
+**Not yet witnessed:** a tap on an agent toast launching the app (the
+`common.md` status line's cross-platform "tapped banner" gap — the activator is
+the app's own registration's, untested here), and an end-to-end frame from a
+live nest reaching a toast through the agent process. System tray icon via Win32 `Shell_NotifyIconW`;
 window-close behavior follows the user's **Close to tray** setting (§ App
 Lifecycle). The notifications page reads `fauna.notifications.*`
 (`behavior/notifications.md`).

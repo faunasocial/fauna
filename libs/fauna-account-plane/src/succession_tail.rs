@@ -575,8 +575,7 @@ mod tests {
     /// **The compaction commits before the marker clear**, so a crash between
     /// the two leaves the marker, and the compaction owed, rather than a
     /// cleared marker over rows still shadowing the fleet's. Observed from a
-    /// second connection inside the clear's own window; fires from another
-    /// test's pass (other threads) are ignored.
+    /// second connection inside the clear's own window.
     #[tokio::test]
     async fn the_compaction_commits_before_the_marker_clear() {
         let (a, b) = (writer(0xaa), writer(0xbb));
@@ -591,12 +590,8 @@ mod tests {
         type AtTheClear = Option<(Vec<u64>, Vec<WriterId>)>;
         let seen: Arc<Mutex<AtTheClear>> = Arc::default();
         let record = Arc::clone(&seen);
-        let this_test = std::thread::current().id();
         let installed = reauthor_window::install(Arc::new(move || {
             use futures_util::FutureExt;
-            if std::thread::current().id() != this_test {
-                return;
-            }
             let backend = sibling.lock().unwrap();
             let rows = backend
                 .rows_for_scope("state", &a, 0, 100)

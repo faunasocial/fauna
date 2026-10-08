@@ -641,12 +641,12 @@ On Windows the count is the badge on Fauna's taskbar icon, which Windows keeps
 showing even after you close the window; it needs the Explorer integration
 that a default install includes, and an install without it shows no badge.
 
-**Alerts on a device that isn't open.** In the browser and on Mac and iPhone,
-**Settings → Notifications** turns on alerts your nest can send while the app is
-closed — one switch, **Notify me on this device** (in the browser, an **Enable
-Notifications** button). Switching them on asks your device for permission once,
-then tells your nest where to send them; switching them off (in the browser,
-**Disable Notifications**) tells your nest to stop and forget the address. Off
+**Alerts on a device that isn't open.** In the browser and on Mac,
+**Settings → General** (on iPhone, **Settings → Notifications**) turns on alerts
+your nest can send while the app is closed — one switch, **Notify me on this
+device**. Switching it on asks your device for permission once, then tells your
+nest where to send them; switching it off tells your nest to stop and forget
+the address. Off
 stays off — the app will not quietly turn alerts back on the next time you open
 it, and the switch reads off again so you can see that the change took. If
 switching on does not work, the switch settles back off and a line under it

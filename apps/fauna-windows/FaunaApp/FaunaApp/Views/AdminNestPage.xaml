@@ -9,6 +9,10 @@
     Loaded="Page_Loaded"
     xmlns:ids="using:FaunaApp.UiIds">
 
+    <Page.Resources>
+        <local:BoolToVisibilityConverter x:Key="BoolToVis" />
+    </Page.Resources>
+
     <!--
       admin-nest (admin.md § N Nest) — the home for nest-wide settings that aren't
       a feature page, introduced by the per-page-services redesign (2026-06-04,
@@ -391,6 +395,67 @@
                 <TextBlock x:Name="TakedownStatusText"
                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestTakedownStatus}"
                            Visibility="Collapsed"
+                           Opacity="0.7" TextWrapping="Wrap" />
+            </StackPanel>
+
+            <!-- Abuse reports queue (moderation.md § User-initiated reporting → Where
+                 it lands), AFTER the takedown console it feeds. A report is EVIDENCE
+                 for the admin to weigh: it removes nothing, and resolving a row only
+                 RECORDS what the admin decided (acting is the console or a
+                 suspension). Rows are FLAT (`admin-nest-report-item[i]` with its
+                 buttons beside it), in a non-virtualizing ItemsControl so count-all
+                 sees every row; the loading line paints until the queue read lands and
+                 the empty line only after it (ui/README.md § List pages). Every word is
+                 shared Rust's; this page only paints AdminNestViewModel's state.
+                 Reference: tui's admin/nest.rs::reports_elements, web's reportLine. -->
+            <StackPanel x:Name="ReportsSection"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestReportsSection}"
+                        AutomationProperties.Name="admin-nest-reports-section"
+                        Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/nest_page/reports_label}" />
+                <TextBlock TextWrapping="Wrap" Opacity="0.7"
+                           Text="{loc:Localize Key=admin/nest_page/reports_desc}" />
+                <TextBlock x:Name="ReportsLoadingText" Opacity="0.6"
+                           Text="{loc:Localize Key=admin/nest_page/reports_loading}" />
+                <TextBlock x:Name="ReportsEmptyText" Opacity="0.6" Visibility="Collapsed"
+                           Text="{loc:Localize Key=admin/nest_page/reports_empty}" />
+                <ItemsControl x:Name="ReportsList">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <!-- Literal ids below — this DataTemplate has no x:DataType, so
+                                 `{x:Bind ids:Ids.…}` silently drops here; see
+                                 Controls/RecipientPicker.xaml. -->
+                            <StackPanel Spacing="4" Padding="0,6">
+                                <TextBlock Text="{Binding Line}"
+                                           AutomationProperties.Name="{Binding Line}"
+                                           AutomationProperties.AutomationId="admin-nest-report-item"
+                                           TextWrapping="Wrap" />
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <!-- Posts and messages only (the shared can_open_takedown):
+                                         an account report paints no such button. -->
+                                    <Button Content="{loc:Localize Key=admin/nest_page/reports_open_takedown}"
+                                            Tag="{Binding ReportId}" Click="ReportOpenTakedown_Click"
+                                            Visibility="{Binding CanOpenTakedown, Converter={StaticResource BoolToVis}}"
+                                            AutomationProperties.AutomationId="admin-nest-report-open-takedown-button" />
+                                    <Button Content="{loc:Localize Key=admin/nest_page/reports_acted}"
+                                            Tag="{Binding ReportId}" Click="ReportActed_Click"
+                                            Loaded="ReportActedButton_Loaded"
+                                            AutomationProperties.AutomationId="admin-nest-report-acted-button" />
+                                    <Button Content="{loc:Localize Key=admin/nest_page/reports_dismiss}"
+                                            Tag="{Binding ReportId}" Click="ReportDismiss_Click"
+                                            Loaded="ReportDismissButton_Loaded"
+                                            AutomationProperties.AutomationId="admin-nest-report-dismiss-button" />
+                                </StackPanel>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <!-- Present only after a resolve (or a failed queue read): the shared
+                     verdict's words — not error-message, since a recorded outcome is a
+                     success and a faulted queue must not blank the page's other
+                     sections. -->
+                <TextBlock x:Name="ReportsStatusText" Visibility="Collapsed"
                            Opacity="0.7" TextWrapping="Wrap" />
             </StackPanel>
 

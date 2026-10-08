@@ -119,7 +119,8 @@ public struct PostCardBody: View {
     /// enforcement — see `ContentPolicyInputs.recordedRender`'s doc.
     private var decision: RegionRenderDecision {
         appState.contentPolicy.inputs.recordedRender(
-            itemId: post.postId, labels: post.labels, region: appState.region, subject: .post(post))
+            itemId: post.postId, labels: post.labels, region: appState.region, subject: .post(post),
+            reportKey: post.postId, reportAuthor: post.author)
     }
 
     private var witnessKey: String { "feed:\(post.postId)" }
@@ -144,7 +145,7 @@ public struct PostCardBody: View {
                 contentRevealed = true
             }.padding(.vertical, verticalPadding))
         } else if contentVerdict == "block" {
-            postCardId(ContentPolicyBlockedNotice().padding(.vertical, verticalPadding))
+            postCardId(ContentPolicyBlockedNotice(reported: decision.reported).padding(.vertical, verticalPadding))
         } else if contentVerdict == "collapse" && !contentRevealed {
             postCardId(ContentPolicyCollapsedPlaceholder { contentRevealed = true }.padding(.vertical, verticalPadding))
         } else if (vm.manager?.isMuted(postId: post.postId) ?? false) && !mutedRevealed {
@@ -272,6 +273,9 @@ public struct PostCardBody: View {
                 // place off the shared `playback_source` (§ D6c → Inline playback).
                 if let hash = documentMediaVideoHash(post.document) {
                     VideoThumbnailView(hash: hash, resolve: { await vm.videoPlaybackURL(hash) })
+                } else if let path = documentMediaProxiedVideoPath(post.document) {
+                    // A bridged post's `ProxiedVideo` (§ D6c → Proxied video): glyph + path, inert.
+                    VideoThumbnailView(proxiedPath: path)
                 }
 
                 // Quoted post — the document's folded `QuotedPost` block (render-model.md § D6);
@@ -340,6 +344,9 @@ public struct PostCardBody: View {
                     webSlug: post.webSlug, gatedTier: post.gatedTier,
                     webPublish: appState.webPublish,
                     handle: appState.session.handle ?? "",
+                    reportTarget: isOwn ? nil : reportPostTarget(
+                        cid: post.postId, author: post.author, plaintext: post.body,
+                        gated: post.gatedTier != nil || post.gatedRoom != nil),
                     onNavigateToPersonalization: onNavigateToPersonalization)
             }
             .padding(.vertical, verticalPadding)

@@ -29,7 +29,7 @@
   import { flushCuesNow } from '$lib/feed-cues';
   import { flushEventDraftNow } from '$lib/event-drafts';
   import { startSubscriptionsAuthorPump } from '$lib/subscriptionsAuthor';
-  import { reconcileSubscriptionActor } from '$lib/push';
+  import { rearmPush } from '$lib/push';
   // The post-succession aftermath pass — see its registration below.
   import { runSuccessionAftermath } from '$lib/rpc';
   import { successionKitOwed } from '$lib/wasm';
@@ -156,7 +156,7 @@
       const id = $identity;
       if (settled > 0 && id) void refreshMemberReviewRoster();
     });
-    onActorChange((id) => void reconcileSubscriptionActor(id));
+    onActorChange((id) => void rearmPush(id));
 
     // Leave-flush (`reserved-folders.md` § The leave-flush promise, row 481):
     // web's leave door is the tab-leave events the browser actually

@@ -146,9 +146,15 @@ pub async fn unkeyed_hold<B: StoreBackend>(
         if fauna_core::generation::generation_id(&core).ok() != Some(generation_id) {
             continue;
         }
-        if generation_tip::generation_key_for(store, &generation_id, cx.writer_key, cx.custody)
-            .await?
-            .is_some()
+        if generation_tip::generation_key_for(
+            store,
+            &generation_id,
+            cx.writer_key,
+            cx.custody,
+            Some(&view),
+        )
+        .await?
+        .is_some()
         {
             sources.device = true;
         }

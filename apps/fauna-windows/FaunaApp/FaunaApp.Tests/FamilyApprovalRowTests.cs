@@ -98,10 +98,31 @@ public class FamilyApprovalRowTests
     [Fact]
     public void AnUnknownFutureKind_FallsBackToSummary_RatherThanRenderingAnAddress()
     {
-        // v1.x adds kinds (feed-source approval, child-initiated contact requests). They are
-        // actor-shaped like `contact`, so summary is the safe default; only mail_hold is
-        // address-shaped (family-safety.md:134).
-        var row = Row("feed_source", summary: "a feed wants to follow", peerAddress: "");
-        Assert.Equal("a feed wants to follow", row.DisplayText);
+        // A kind this build does not know yet is treated like `contact`: summary is the
+        // safe default; only the envelope kinds are address-shaped.
+        var row = Row("a_future_kind", summary: "a future ask", peerAddress: "");
+        Assert.Equal("a future ask", row.DisplayText);
+    }
+
+    [Fact]
+    public void FeedSource_NamesTheGrantKey_NeverOnlyTheWardsLabel()
+    {
+        // family-safety.md § Feed-source approvals: the grant matches
+        // (bridge_id, operation, target), never the label, so the row names what
+        // Approve grants and quotes the ward's label after it.
+        var row = FamilyApprovalRow.From(new FfiFamilyApprovalEntry(
+            supervisedActorId: new byte[32],
+            supervisedHandle: "ward",
+            kind: "feed_source",
+            peerActorId: new byte[32],
+            peerAddress: "",
+            messageId: Array.Empty<byte>(),
+            summary: "a science feed",
+            peerHandle: "",
+            bridgeId: "bluesky",
+            operation: "follow",
+            target: "did:plc:example",
+            createdAt: 0L));
+        Assert.Equal("bluesky · follow · did:plc:example — “a science feed”", row.DisplayText);
     }
 }

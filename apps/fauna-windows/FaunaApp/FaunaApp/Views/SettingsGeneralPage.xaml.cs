@@ -13,15 +13,33 @@ namespace FaunaApp.Views;
 /// <see cref="SettingsViewModel"/> from <see cref="ServiceClients"/> in
 /// OnNavigatedTo, mirroring the admin sub-pages. The Storage bar reuses the
 /// VM's quota-derived StoragePercent (the same fetch the Status sub-page shows
-/// in the quota section).
+/// in the quota section). The About block paints the process-wide
+/// <see cref="UpdateCheck"/> (the version, the asked check, the newer-version
+/// notice), which outlives the page: the once-per-sign-in look may have painted
+/// the notice before the page was ever opened.
 /// </summary>
 public sealed partial class SettingsGeneralPage : Page
 {
     private SettingsViewModel? _viewModel;
+    private readonly UpdateCheck _updates = UpdateCheck.Shared;
 
     public SettingsGeneralPage()
     {
         this.InitializeComponent();
+        AppVersionText.Text = _updates.RunningVersion;
+        Unloaded += (_, _) => _updates.PropertyChanged -= UpdateCheck_PropertyChanged;
+    }
+
+    // The sign-in look can land from the e2e agent's command thread, so every
+    // repaint is marshalled onto this page's own dispatcher.
+    private void UpdateCheck_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e) =>
+        DispatcherQueue.TryEnqueue(PaintUpdateCheck);
+
+    private void PaintUpdateCheck()
+    {
+        CheckUpdateButton.Content = _updates.ButtonLabel;
+        UpdateNoticeText.Text = _updates.Notice ?? string.Empty;
+        UpdateNoticeText.Visibility = _updates.Notice is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
@@ -36,6 +54,10 @@ public sealed partial class SettingsGeneralPage : Page
 
     private async void Page_Loaded(object sender, RoutedEventArgs e)
     {
+        PaintUpdateCheck();
+        _updates.PropertyChanged -= UpdateCheck_PropertyChanged;
+        _updates.PropertyChanged += UpdateCheck_PropertyChanged;
+
         if (_viewModel is null) return;
 
         await _viewModel.LoadCommand.ExecuteAsync(null);
@@ -82,14 +104,6 @@ public sealed partial class SettingsGeneralPage : Page
                 ConfigureProgress.Visibility = _viewModel.IsLoading ? Visibility.Visible : Visibility.Collapsed;
                 ConfigureButton.IsEnabled = !_viewModel.IsLoading;
                 break;
-            case nameof(SettingsViewModel.UpdateStatus):
-                UpdateStatusText.Text = _viewModel.UpdateStatus;
-                break;
-            case nameof(SettingsViewModel.IsCheckingUpdate):
-                UpdateProgress.IsActive = _viewModel.IsCheckingUpdate;
-                UpdateProgress.Visibility = _viewModel.IsCheckingUpdate ? Visibility.Visible : Visibility.Collapsed;
-                CheckUpdateButton.IsEnabled = !_viewModel.IsCheckingUpdate;
-                break;
             case nameof(SettingsViewModel.StoragePercent):
                 StorageBar.Value = _viewModel.StoragePercent;
                 var usedLabel = ValueFormat.ByteSize((ulong)Math.Max(0, _viewModel.StorageUsedBytes));
@@ -110,12 +124,8 @@ public sealed partial class SettingsGeneralPage : Page
         await _viewModel.ConfigureCommand.ExecuteAsync(null);
     }
 
-    private async void CheckUpdateButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_viewModel is null) return;
-
-        await _viewModel.CheckForUpdateCommand.ExecuteAsync(null);
-    }
+    private async void CheckUpdateButton_Click(object sender, RoutedEventArgs e) =>
+        await _updates.CheckAsync();
 
     private void AutoStartToggle_Toggled(object sender, RoutedEventArgs e)
     {

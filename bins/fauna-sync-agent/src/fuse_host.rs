@@ -607,6 +607,13 @@ impl crate::bridge::PlaceholderInvalidator for FuseInvalidator {
             .with_context(|| format!("unlinking freed bytes at {}", abs_path.display()))
     }
 
+    /// The unlink, as [`Self::dehydrate`]: a placeholder here is its row, whose size and
+    /// mtime the re-point that follows moves — the view reads both from it on every
+    /// `getattr`, so there is nothing on the disk left to describe the old version.
+    fn supersede(&self, abs_path: &Path, _size: u64, _mtime: i64) -> Result<()> {
+        self.dehydrate(abs_path)
+    }
+
     /// Pins live in the rows here, and the off-disk pin sweep reads them there; no
     /// file on the disk carries a pin to classify.
     fn pin_action(&self, _abs_path: &Path) -> Option<crate::pin_reaction::PinAction> {

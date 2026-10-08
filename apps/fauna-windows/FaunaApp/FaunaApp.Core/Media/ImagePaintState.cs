@@ -27,4 +27,13 @@ public static class ImagePaintState
     /// <summary><see cref="Painted"/> once the element actually holds a picture,
     /// <see cref="Placeholder"/> otherwise.</summary>
     public static string From(bool hasPicture) => hasPicture ? Painted : Placeholder;
+
+    /// <summary>What <c>get_text(post-image)</c> answers while a placeholder stands in
+    /// for a bridged post's picture: its nest-relative path (render-model.md § D6c — the
+    /// label tui paints until the bytes arrive, and what apple's
+    /// <c>PostImageSource.placeholderText</c> answers), so the slot stays addressable
+    /// when the bytes are slow or never come. Empty once the picture is on screen, and
+    /// always for a picture that is not proxied: a blob image has no placeholder text.</summary>
+    public static string PlaceholderText(string? proxiedPath, bool hasPicture)
+        => hasPicture || string.IsNullOrEmpty(proxiedPath) ? "" : proxiedPath;
 }

@@ -940,6 +940,29 @@ impl CacheDb {
         })
     }
 
+    /// Recipients `owner`'s list sends have reserved on the UTC day of `now_ms`
+    /// (the per-account meter `try_consume_list_quota` checks against; 0 when
+    /// nothing was sent that day — the counter is keyed by epoch-day, so it
+    /// never needs a reset).
+    pub async fn account_list_recipients_today(
+        &self,
+        owner: &[u8; 32],
+        now_ms: i64,
+    ) -> Result<i64> {
+        let day = now_ms.div_euclid(86_400_000);
+        let conn = self.conn.lock().await;
+        Ok(conn
+            .query_row(
+                "SELECT recipients_sent FROM mail_list_account_daily_counter
+                 WHERE actor_id = ?1 AND day = ?2",
+                rusqlite::params![&owner[..], day],
+                |r| r.get(0),
+            )
+            .optional()
+            .context("read account day counter")?
+            .unwrap_or(0))
+    }
+
     /// Record one list-send event in `mail_list_sends` (the audit
     /// `list_list_send_history` reads). `delivered_count` is the count the nest
     /// successfully queued (per-recipient MX-delivery tracking is a later

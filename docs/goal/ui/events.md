@@ -413,7 +413,7 @@ Dated history (one line each):
   roster is empty, and a bare `ATTENDEES` heading while the event is not yet cached — never a
   settled "no attendees" for an event that simply has not loaded. The provenance is the tightest
   possible case for this lint fix: the id was added to ui.yaml's `event_detail` block **by a tui
-  session** (see `ui-actual-tui.yaml`'s KEY FINDINGS 6), which then built `attendee-item` and never
+  session** (see `ui-actual-tui.yaml`), which then built `attendee-item` and never
   the container, and no gate could see it.
 - 2026-08-05 (windows trickle-down): retires the dead `Visibility="Collapsed"` whole-list-collapse
   button (`CalendarVisibilityButton`/`CalendarVisibility_Click`) and builds the real per-row filter

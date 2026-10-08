@@ -1470,7 +1470,7 @@ impl MediaMachine {
     /// of different lengths pair nothing, since a positional slip would hand
     /// one identity another's root.
     pub fn set_predecessor_chain(&self, actor_ids: Vec<Vec<u8>>, keys: Vec<Vec<u8>>) {
-        if actor_ids.len() != keys.len() {
+        let Some(chain) = PredecessorSealKey::chain_from_wire(&actor_ids, &keys) else {
             tracing::warn!(
                 target: "fauna_media",
                 ids = actor_ids.len(),
@@ -1478,19 +1478,7 @@ impl MediaMachine {
                 "predecessor chain: ids and keys differ in length; pairing nothing"
             );
             return;
-        }
-        let chain: Vec<PredecessorSealKey> = actor_ids
-            .iter()
-            .zip(&keys)
-            .filter_map(|(id, key)| {
-                let id = <[u8; 32]>::try_from(id.as_slice()).ok()?;
-                let key = <[u8; 32]>::try_from(key.as_slice()).ok()?;
-                Some(PredecessorSealKey::named(
-                    fauna_core::identity::ActorId(id),
-                    fauna_core::crypto::BackupKey::from_bytes(key),
-                ))
-            })
-            .collect();
+        };
         let ids: Vec<[u8; 32]> = chain
             .iter()
             .filter_map(|k| k.actor_id.map(|a| a.0))

@@ -43,6 +43,7 @@ use fauna_client_dns::host_address::{HostAddressOutcome, HostAddressProbe};
 use fauna_client_email::EmailClient;
 use std::sync::Arc;
 
+use crate::push_registration::LocalStorageIntentStore;
 use fauna_account_plane::preference_surfaces;
 use fauna_client_accounts::{AccountRegistry, LocalStorageSecretStore};
 use fauna_client_core::nest_trust::NestIdentityPinStore;
@@ -61,7 +62,7 @@ use fauna_client_personalization::{TrainedTopicRow, TrainedTopics, TrainedTopics
 use fauna_client_posts::PostsClient;
 use fauna_client_profile::ProfileClient;
 use fauna_client_push::PushClient;
-use fauna_client_push::push::SubscribeRequest;
+use fauna_client_push::registration::{PushRegistration, clear_opt_in, web_push_subscription};
 use fauna_client_recovery::{PredecessorSeed, RecoveryClient, RecoveryKit, RecoveryKitStatus};
 use fauna_client_search::SearchClient;
 use fauna_client_snapshots::SnapshotsClient;
@@ -1513,6 +1514,17 @@ pub struct WsRpcClient {
     subscriptions_connect_pass: ConnectPassLatch,
 }
 
+/// This browser's device id for `actor_id_hex` — the same derivation
+/// `$lib/device-id`'s `getDeviceId` reaches (`WasmAccountRegistry::
+/// deviceIdForActor`), so the id the session's connection announces and the id
+/// its push row is keyed under are one value by construction.
+fn this_browsers_device_id(
+    actor_id_hex: &str,
+) -> Result<String, fauna_client_accounts::DeviceIdError> {
+    AccountRegistry::new(Arc::new(LocalStorageSecretStore))
+        .device_id_for_actor(&LocalStorageSecretStore, actor_id_hex)
+}
+
 impl WsRpcClient {
     /// The shared transport client, for a sibling module's face that rides
     /// this session (`region::WasmRegionPlane::refresh`).
@@ -1527,14 +1539,27 @@ impl WsRpcClient {
     /// immediately. `token_provider` is a JS `(forceRefresh: boolean) =>
     /// Promise<string>` yielding the bearer (called on connect, and again with
     /// `force = true` after a 4401 close).
+    ///
+    /// Every connection the session makes announces this browser's push device
+    /// (`fauna.push.presence`, `common.md` § Registration → *Every connection
+    /// announces*): the id is this browser's device id for the actor, the key
+    /// its `web-push` row is registered under (`Self::push_enable`), so an open
+    /// tab suppresses exactly its own row's relay push and no other device's.
+    /// A browser with no stable device id announces nothing (and can key no
+    /// row either).
     #[wasm_bindgen(constructor)]
     pub fn new(
         node_url: String,
         actor_id_hex: String,
         token_provider: js_sys::Function,
     ) -> WsRpcClient {
+        let inner = InnerClient::connect(node_url, actor_id_hex.clone(), token_provider);
+        match this_browsers_device_id(&actor_id_hex) {
+            Ok(device_id) => inner.set_push_presence(device_id),
+            Err(e) => tracing::warn!("push presence: no device id for this account: {e}"),
+        }
         WsRpcClient {
-            inner: InnerClient::connect(node_url, actor_id_hex.clone(), token_provider),
+            inner,
             actor_id_hex,
             subscriptions_connect_pass: ConnectPassLatch::default(),
         }
@@ -7689,33 +7714,98 @@ impl WsRpcClient {
         })
     }
 
-    /// `fauna.push.subscribe` → `SubscribeReply { ok }` — register/update the
-    /// connection actor's push subscription for one device (idempotent upsert).
-    /// `req` is `{ device_id, endpoint, key_p256dh?, key_auth?, transport? }`.
-    #[wasm_bindgen(js_name = pushSubscribe)]
-    pub fn push_subscribe(&self, req: JsValue) -> js_sys::Promise {
-        let client = self.inner.clone();
+    /// The shared registration machine for this session's actor
+    /// (`fauna_client_push::registration`), over web's `localStorage` intent
+    /// store and keyed under this browser's device id for the actor — the id
+    /// the session's connection announces as presence (`Self::new`).
+    fn push_registration(
+        &self,
+    ) -> Result<PushRegistration<InnerClient, LocalStorageIntentStore>, JsValue> {
+        let device_id = this_browsers_device_id(&self.actor_id_hex).map_err(err_to_js)?;
+        Ok(PushRegistration::new(
+            self.inner.clone(),
+            LocalStorageIntentStore,
+            self.actor_id_hex.clone(),
+            device_id,
+        ))
+    }
+
+    /// The user's Enable (`PushRegistration::enable`): register this browser's
+    /// `web-push` row from the subscription `PushManager` handed back, then
+    /// set the install's opt-in bit. A failed subscribe leaves the bit unset,
+    /// so the toggle settles back off.
+    #[wasm_bindgen(js_name = pushEnable, unchecked_return_type = "Promise<void>")]
+    pub fn push_enable(
+        &self,
+        endpoint: String,
+        key_p256dh: String,
+        key_auth: String,
+    ) -> js_sys::Promise {
+        let registration = self.push_registration();
         future_to_promise(async move {
-            let req: SubscribeRequest = from_js(req)?;
-            let reply = PushClient::new(client)
-                .subscribe(req)
-                .await
-                .map_err(err_to_js)?;
-            to_js(&reply)
+            let registration = registration?;
+            let subscription =
+                web_push_subscription(registration.device_id(), endpoint, key_p256dh, key_auth);
+            registration.enable(subscription).await.map_err(err_to_js)?;
+            Ok(JsValue::UNDEFINED)
         })
     }
 
-    /// `fauna.push.unsubscribe` → `UnsubscribeReply { ok }` — remove the
-    /// connection actor's push subscription for `device_id`.
-    #[wasm_bindgen(js_name = pushUnsubscribe)]
-    pub fn push_unsubscribe(&self, device_id: String) -> js_sys::Promise {
-        let client = self.inner.clone();
+    /// The user's Disable (`PushRegistration::disable`): clear the bit first —
+    /// off stays off even when the nest cannot be reached — then remove this
+    /// browser's row.
+    #[wasm_bindgen(js_name = pushDisable, unchecked_return_type = "Promise<void>")]
+    pub fn push_disable(&self) -> js_sys::Promise {
+        let registration = self.push_registration();
         future_to_promise(async move {
-            let reply = PushClient::new(client)
-                .unsubscribe(device_id)
-                .await
-                .map_err(err_to_js)?;
-            to_js(&reply)
+            let registration = match registration {
+                Ok(registration) => registration,
+                // No device id means no row could have been keyed; the bit
+                // still clears, so off stays off.
+                Err(e) => {
+                    clear_opt_in(&LocalStorageIntentStore).map_err(err_to_js)?;
+                    return Err(e);
+                }
+            };
+            registration.disable().await.map_err(err_to_js)?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// Identity settle (`PushRegistration::rearm`): re-register this browser's
+    /// row under the signed-in actor while the install is opted in; otherwise
+    /// nothing — a re-arm never opts a browser in. Resolves to whether a
+    /// subscribe was issued. The SPA checks `pushOptedIn()` before asking
+    /// `PushManager` for the subscription, so an opted-out browser never
+    /// touches the push service.
+    #[wasm_bindgen(js_name = pushRearm, unchecked_return_type = "Promise<boolean>")]
+    pub fn push_rearm(
+        &self,
+        endpoint: String,
+        key_p256dh: String,
+        key_auth: String,
+    ) -> js_sys::Promise {
+        let registration = self.push_registration();
+        future_to_promise(async move {
+            let registration = registration?;
+            let subscription =
+                web_push_subscription(registration.device_id(), endpoint, key_p256dh, key_auth);
+            let issued = registration.rearm(subscription).await.map_err(err_to_js)?;
+            Ok(JsValue::from_bool(issued))
+        })
+    }
+
+    /// A leave gesture — switch, sign-out, add-account
+    /// (`PushRegistration::drop_actor_row`): drop this actor's row, issued by
+    /// the leaving session while its authority is in hand. Never touches the
+    /// bit; issues nothing on a browser with no push history. Best-effort by
+    /// ruling — the caller proceeds whatever this resolves to.
+    #[wasm_bindgen(js_name = pushDropActorRow, unchecked_return_type = "Promise<void>")]
+    pub fn push_drop_actor_row(&self) -> js_sys::Promise {
+        let registration = self.push_registration();
+        future_to_promise(async move {
+            registration?.drop_actor_row().await.map_err(err_to_js)?;
+            Ok(JsValue::UNDEFINED)
         })
     }
 }

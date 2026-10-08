@@ -10,6 +10,7 @@
   import ProxiedImage from './ProxiedImage.svelte';
   import VideoThumbnail from './VideoThumbnail.svelte';
   import TipSurface from './payments/TipSurface.svelte';
+  import SoldPostTeaser from './payments/SoldPostTeaser.svelte';
   import RegionPlaceholder from './RegionPlaceholder.svelte';
   import { markdownToHtml } from '$lib/markdown';
   import { shortActor, liveStatusClass } from '$lib/feed-utils';
@@ -420,21 +421,17 @@
          fauna.subscriptions.post_unlock.get once gated_tier names a
          post-unlock-* tier (+page.svelte's augmentPost). Absent covers both
          "not yet resolved" and "the nest answered no offer": both leave the
-         priceless teaser, with claim-code redemption (§5) as the fallback. -->
-    {#if post.unlock_offer}
-      <span class="muted" data-testid={IDS.GATED_POST_PRICE}>{post.unlock_offer.price_hint ?? ''}</span>
-      {#if post.unlock_offer.payment_url}
-        <button
-          class="btn-secondary small"
-          data-testid={IDS.GATED_POST_PAYMENT_LINK}
-          onclick={(e) => { e.stopPropagation(); onopenpaymentlink?.(post.unlock_offer.payment_url); }}
-        >{t.subscriptions.payment_url}</button>
-      {/if}
-      <button
-        class="btn-primary small"
-        data-testid={IDS.GATED_POST_BUY_BUTTON}
-        onclick={(e) => { e.stopPropagation(); onbuyunlockoffer?.(post.post_id); }}
-      >{t.feed.post.buy_button}</button>
+         priceless teaser, with claim-code redemption (§5) as the fallback.
+         Inside the `payments` plane (dynamic-features.md § Platform-family
+         surface excision → *The price-and-route class*): the render lives in
+         `payments/SoldPostTeaser.svelte`, imported only behind the condition, so
+         an excised build shows the badge and nothing more. -->
+    {#if __FAUNA_PAYMENTS__ && post.unlock_offer}
+      <SoldPostTeaser
+        offer={post.unlock_offer}
+        {onopenpaymentlink}
+        onbuy={() => onbuyunlockoffer?.(post.post_id)}
+      />
     {/if}
     {#if ontrain || showDelete || showWebPublish || showReport}
       <!-- Per-card ⋯ overflow (the dm-message-actions-button precedent applied to

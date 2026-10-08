@@ -8,25 +8,29 @@ background without the app being opened.
 
 **How the widget is observed.** A widget lives outside the app's automation
 surface, so these tests never ask the app what its widget shows. The apple
-widget is a sandboxed extension holding no credential; it renders the snapshot
-the app publishes for it (`WidgetUnreadPublisher` → `UnreadSnapshotStore`), so
-the witness reads that snapshot straight off disk, from outside the app
-(`helpers.home_screen_widget`). What the widget paints for a given snapshot is
-pinned headlessly beside the widget code (`HomeScreenWidgetTests` under
-`just swift-test`); these tests prove the app's own number reaches the file the
-widget reads, and moves with it.
+widget is a sandboxed extension holding no credential, and android's Glance
+widget never computes a count either; each renders the snapshot the app
+publishes for it (`WidgetUnreadPublisher` → `UnreadSnapshotStore`, one file
+format on both), so the witness reads that snapshot from outside the app —
+straight off disk on apple, through adb `run-as` on android
+(`helpers.home_screen_widget`, `driver.widget_dir()`). What the widget paints
+for a given snapshot is pinned headlessly beside the widget code
+(`HomeScreenWidgetTests` under `just swift-test`, `WidgetUnreadPublisherTest`
+under `just android-host-test`); these tests prove the app's own number reaches
+the file the widget reads, and moves with it.
 
 **The oracle is the app's own list, never a constant** — the linux witness's
 shape (`test_home_screen_widget_launcher_badge.py`): the session-scoped account
 may already hold unread threads from earlier tests, so every assertion compares
 the snapshot against the app's thread list summed at that moment.
 
-**Marked `macos` / `ios` — the apps whose driver can read the snapshot**
-(`feature-catalog.md` § Cell semantics, the marked-witness rule). Outcome 2's
-test here is `macos` only: macOS keeps the app — and so the conversations
-observer that publishes — running with its window closed, which is exactly what
-it proves. iOS's background leg is a `BGAppRefreshTask` the OS alone schedules,
-so a foreground run here would prove the wrong mechanism; its witness is
+**Marked `macos` / `ios` / `android` — the apps whose driver can read the
+snapshot** (`feature-catalog.md` § Cell semantics, the marked-witness rule).
+Outcome 2's test here is `macos` only: macOS keeps the app — and so the
+conversations observer that publishes — running with its window closed, which is
+exactly what it proves. iOS's and android's background legs are tasks the OS
+alone schedules (a `BGAppRefreshTask`, a WorkManager periodic worker), so a
+foreground run here would prove the wrong mechanism; their witness is
 `test_home_screen_widget_background_refresh.py`, which drives that task's
 production body through the convention-14 poke.
 """
@@ -54,6 +58,7 @@ pytestmark = pytest.mark.tier_2
 @pytest.mark.feature("home-screen-widget")
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 def test_the_widget_shows_the_apps_own_unread_count(logged_in_app):
     """A message you have not read → the widget's number is the list's total."""
     conv = ConversationsActions(logged_in_app.driver)

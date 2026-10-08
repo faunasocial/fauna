@@ -1,6 +1,7 @@
 using System;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
+using FaunaApp.Core.Logs;
 using FaunaApp.Core.Services;
 using uniffi.fauna_ffi;
 using S = FaunaApp.Core.Services.Strings;
@@ -116,8 +117,10 @@ internal partial class RecoveryKitViewModel : ViewModelBase
 
     /// <summary>
     /// True while a stolen-identity ceremony's persist-failure message
-    /// (<see cref="SucceedWithHeldKitAsync"/>'s <c>!landed.persisted</c> arm) sits
-    /// in <see cref="ViewModelBase.ErrorMessage"/>, not yet acknowledged
+    /// (<see cref="SucceedWithHeldKitAsync"/>'s <c>!landed.persisted</c> arm, or the
+    /// undecided outcome whose record <c>carriesTheOnlySeed</c> — both parked by
+    /// <see cref="ParkStolenMessage"/>) sits in
+    /// <see cref="ViewModelBase.ErrorMessage"/>, not yet acknowledged
     /// (<c>docs/goal/ui/settings.md</c> § Recovery kit → <i>The persist-failure
     /// message survives the page</i>). It is the ONLY surviving copy of the
     /// successor's new identity secret, so every other writer of the error slot —
@@ -480,6 +483,15 @@ internal partial class RecoveryKitViewModel : ViewModelBase
     /// <para>⚠ <see cref="SuccessionHandoff.Record"/> happens on BOTH arms and before
     /// either — the succession landed either way, so the owed kit, the sweep report
     /// and the predecessor id are owed either way.</para>
+    ///
+    /// <para>Every ceremony that ran answers with its typed
+    /// <see cref="FfiStolenOutcome"/>, folded here by arm (<c>settings.md</c>
+    /// § Recovery kit → <i>The ceremony's outcome is headlined by its arm</i>): the
+    /// two landed halves above, and every other arm's shared sentence on
+    /// <c>error-message</c> verbatim, wrapping nothing — parked when the record says
+    /// it carries the only copy of the successor seed. apple's
+    /// <c>applyStolenOutcome</c> and linux's <c>dispatch_unlanded</c> are the
+    /// twins.</para>
     /// </summary>
     public async Task SucceedWithHeldKitAsync(
         string? predecessorActorIdHex, Func<string, Task>? onSucceeded)
@@ -503,40 +515,52 @@ internal partial class RecoveryKitViewModel : ViewModelBase
         var adopted = false;
         try
         {
-            var landed = await _nest.SuccessionSucceedWithHeldKitAsync(PhraseInput);
-            PhraseInput = string.Empty;
-            StolenConfirmInput = string.Empty;
-            LandedSuccession = landed;
-            // Hand the ceremony's survivors over BEFORE the switch below:
-            // `onSucceeded` tears this session (and this view model) down moments
-            // from now, and everything recorded here is declared to outlive that.
-            SuccessionHandoff.Record(landed, predecessorActorIdHex);
-            if (landed.persisted)
+            var outcome = await _nest.SuccessionSucceedWithHeldKitAsync(PhraseInput);
+            if (outcome.landed is not { } landed)
             {
-                adopted = true;
-                SetGuardedError(null);
-                if (onSucceeded is not null) await onSucceeded(landed.newActorIdHex);
+                // Nothing moved, landed for another, undecided: the shared sentence
+                // already carries its own headline (and only nothing-moved's says
+                // "failed"), so a wrapper here would be a second one — false on two
+                // of the three. The undecided arm whose persist was not verified
+                // carries the only copy of the successor seed: parked, decided by
+                // the record's flag and never by its kind or key, and no switch.
+                var sentence = outcome.message is { } message ? S.Resolve(message) : outcome.kind;
+                if (outcome.carriesTheOnlySeed) ParkStolenMessage(sentence);
+                else SetGuardedError(sentence);
             }
             else
             {
-                // The one arm where the secret must go on screen. Never phrased as
-                // "nothing happened" — the account DID move.
-                MintedSecretHex = landed.successorSecretHex;
-                MintedEscrowStored = true;
-                // The park write itself — deliberately the RAW, unguarded `SetError`
-                // (never `SetGuardedError`, which would refuse its own display) —
-                // and `StolenPersistFailurePending` is flipped only AFTER it, not
-                // before: this call already reaches the page's `RenderError` funnel
-                // synchronously (via the `ErrorMessage` property change), so setting
-                // the flag first would have the guard there refuse the very message
-                // it exists to protect.
-                SetError(S.Format(
-                    "settings/recovery_kit/stolen_persist_failed", landed.successorSecretHex));
-                StolenPersistFailurePending = true;
+                PhraseInput = string.Empty;
+                StolenConfirmInput = string.Empty;
+                LandedSuccession = landed;
+                // Hand the ceremony's survivors over BEFORE the switch below:
+                // `onSucceeded` tears this session (and this view model) down
+                // moments from now, and everything recorded here is declared to
+                // outlive that.
+                SuccessionHandoff.Record(landed, predecessorActorIdHex);
+                if (landed.persisted)
+                {
+                    adopted = true;
+                    SetGuardedError(null);
+                    if (onSucceeded is not null) await onSucceeded(landed.newActorIdHex);
+                }
+                else
+                {
+                    // The one landed arm where the secret must go on screen. Never
+                    // phrased as "nothing happened" — the account DID move.
+                    MintedSecretHex = landed.successorSecretHex;
+                    MintedEscrowStored = true;
+                    ParkStolenMessage(S.Format(
+                        "settings/recovery_kit/stolen_persist_failed", landed.successorSecretHex));
+                }
             }
         }
         catch (Exception ex)
         {
+            // No ceremony outcome reaches here: every ceremony that ran is an
+            // outcome above, never an exception. Only a failure BEFORE it could
+            // start (no connection, unparseable secret bytes) does — or a throw
+            // from the caller's own switch.
             ShowGuardedError(ex);
         }
         finally
@@ -544,6 +568,34 @@ internal partial class RecoveryKitViewModel : ViewModelBase
             Busy = false;
         }
         await _ceremonyHold.CeremonyEndedAsync(adopted, messageParked: StolenPersistFailurePending);
+    }
+
+    /// <summary>
+    /// Park a sentence that carries the only copy of the successor's seed — the
+    /// persist-failure message and the undecided-unsaved outcome alike — on
+    /// <c>error-message</c>, where every other writer then leaves it alone
+    /// (<c>settings.md</c> § Recovery kit → <i>The persist-failure message survives
+    /// the page</i>). apple's <c>parkStolenMessage</c> and linux's
+    /// <c>park_stolen_failed_message</c> are the twins.
+    ///
+    /// <para>The write is deliberately unguarded (<see cref="SetGuardedError"/>
+    /// would refuse its own display), and <see cref="StolenPersistFailurePending"/>
+    /// flips only AFTER it: the write reaches the page's <c>RenderError</c> funnel
+    /// synchronously (via the <c>ErrorMessage</c> property change), so setting the
+    /// flag first would have the guard there refuse the very message it exists to
+    /// protect.</para>
+    ///
+    /// <para>⚠ Never through <see cref="ViewModelBase.SetError"/>, which logs its
+    /// whole argument: the seed would land in the shared log ring and its on-disk
+    /// file, against <c>ShellLog</c>'s redaction rule (never secrets or keys). The
+    /// log gets a seed-free line instead.</para>
+    /// </summary>
+    private void ParkStolenMessage(string sentence)
+    {
+        ErrorMessage = sentence;
+        ShellLog.Error(GetType().Name,
+            "the stolen ceremony parked the successor's only secret on error-message");
+        StolenPersistFailurePending = true;
     }
 
     /// <summary>

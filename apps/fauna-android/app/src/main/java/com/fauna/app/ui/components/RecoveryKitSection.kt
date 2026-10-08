@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
@@ -22,15 +23,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.fauna.app.R
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.RecoveryKitUiState
 import com.fauna.app.ui.viewmodel.RecoveryKitVM
 import com.fauna.ffi.FfiRecoveryKitStatus
+import com.fauna.ffi.FfiSweepCopy
+import com.fauna.ffi.FfiSweepView
 import social.fauna.generated.Ids
 import uniffi.fauna_core.QrMatrix
 
@@ -47,28 +52,57 @@ import uniffi.fauna_core.QrMatrix
  * § The RecoveryKey — *Custody*). Everything visible is
  * [RecoveryKitSectionContent].
  *
- * @param sessionActorIdHex the signed-in identity; a change re-scopes the whole
- *   section (the previous account's status and kit never carry over).
+ * @param sessionActorIdHex the signed-in identity — **one value, two roles**. At
+ *   ceremony time it is the identity the account is moving *away* from, so the
+ *   succession records which registry row the retired identity is before the
+ *   switch makes it unnameable; at hydrate time it is whoever is signed in now,
+ *   which is what lets the owed kit be claimed by the successor's session and
+ *   refused to the departing one. A change re-scopes the whole section.
+ * @param onSucceeded switch to the successor (its actor id) after a succession
+ *   the device managed to persist — an account *switch*, never the sign-out
+ *   reset. ⚠ Not called on the persist-failure arm: tearing the session down
+ *   there takes the only copy of the successor seed with it.
  */
 @Composable
 fun RecoveryKitSection(
     sessionActorIdHex: String?,
+    onSucceeded: (String) -> Unit,
     vm: RecoveryKitVM = hiltViewModel(),
 ) {
     val state by vm.state.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
     val appMessages = LocalAppMessages.current
+    // What makes this section's state stale is who is signed in AND which
+    // actor's seat the client signs as: a succession's owed kit/sweep defers
+    // while the client still holds the predecessor's (revoked) seat, so the
+    // successor's seat arriving must re-fire the hydrate (apple's
+    // `hydrateKey`, measured on iOS 2026-08-26).
+    val connection by vm.connectionState.collectAsState()
+    val seat = remember(connection) { vm.boundSeat() }
 
-    LaunchedEffect(sessionActorIdHex) { vm.hydrate(sessionActorIdHex) }
+    LaunchedEffect(sessionActorIdHex, seat) { vm.hydrate(sessionActorIdHex) }
     LaunchedEffect(errorMessage) {
         errorMessage?.let {
             appMessages.showError(it)
             vm.consumeError()
         }
     }
-    // The minted kit must not survive the view that displayed it — leaving the
-    // Account page (or navigating deeper) drops it along with the typed phrase.
-    DisposableEffect(vm) { onDispose { vm.clearHeldSecrets() } }
+    DisposableEffect(vm) {
+        vm.onScreen = true
+        vm.ceremonyHold.accountAppeared()
+        onDispose {
+            vm.onScreen = false
+            // Leaving Account is also the edge a held-back supersession waits
+            // for (`settings.md` § Recovery kit → *The persist-failure message
+            // survives the page*): the user has had the whole visit to copy the
+            // key, and the dead session under it may now go the ordinary way.
+            vm.ceremonyHold.accountLeft()
+            // The minted kit must not survive the view that displayed it —
+            // leaving the Account page (or navigating deeper) drops it along
+            // with the typed phrase and confirm token.
+            vm.clearHeldSecrets()
+        }
+    }
 
     RecoveryKitSectionContent(
         state = state,
@@ -78,6 +112,9 @@ fun RecoveryKitSection(
         onLost = vm::requestSeedAloneReplacement,
         onEscrowReseal = vm::resealEscrowWithHeldKit,
         onVeto = vm::vetoPendingReplacement,
+        onStolenConfirmChange = vm::onStolenConfirmChange,
+        onStolen = { vm.succeedWithHeldKit(sessionActorIdHex, onSucceeded) },
+        onSweepRetry = vm::retrySweep,
     )
 }
 
@@ -90,8 +127,12 @@ fun RecoveryKitSection(
  * record's `allows_*` fields; the veto renders only while `pendingLandsAt` is
  * set and the escrow re-seal only when `allowsEscrowReseal` — never re-derived
  * from `status.kind`, which this function reads for the status line's copy
- * alone. With the status unread no action renders: an un-hydrated section must
- * not offer ceremonies the account may not be able to run.
+ * alone. With the status unread the four kit actions do not render — an
+ * un-hydrated section must not offer ceremonies the account may not be able to
+ * run — but the stolen trigger does ([RecoveryKitUiState.stolenVisible]): its
+ * authorization is the kit, and the unread chain is exactly what a locked-out
+ * owner cannot read. The sweep's lines are selected by the shared `sweepCopy`
+ * ([sweepCopyOf]), never matched on the view's `kind` here.
  */
 @Composable
 fun RecoveryKitSectionContent(
@@ -102,6 +143,13 @@ fun RecoveryKitSectionContent(
     onLost: () -> Unit,
     onEscrowReseal: () -> Unit,
     onVeto: () -> Unit,
+    onStolenConfirmChange: (String) -> Unit = {},
+    onStolen: () -> Unit = {},
+    onSweepRetry: () -> Unit = {},
+    // The shared `sweep_copy` projection — android renders the retry button,
+    // so it always declares `rendersRetry = true` (the degraded lines may then
+    // name it). Injected FFI-free for the Robolectric harness.
+    sweepCopyOf: (FfiSweepView) -> FfiSweepCopy = { view -> com.fauna.ffi.sweepCopy(view, true) },
     // `recovery_pending_days_remaining` — the shared rounding rule; only `now`
     // is this view's to own. Injected FFI-free for the Robolectric harness.
     pendingDays: (landsAt: Long) -> Long = { landsAt ->
@@ -125,6 +173,8 @@ fun RecoveryKitSectionContent(
                 style = MaterialTheme.typography.titleMedium,
             )
             Spacer(Modifier.height(8.dp))
+
+            state.sweepView?.let { view -> SweepLines(view, state.busy, sweepCopyOf, onSweepRetry) }
 
             Text(
                 statusLine(state.status, pendingDays),
@@ -164,8 +214,93 @@ fun RecoveryKitSectionContent(
             }
 
             state.status?.let { status -> ActionButtons(status, state.busy, onCreate, onReplace, onLost, onEscrowReseal, onVeto) }
+
+            if (state.stolenVisible) StolenAction(state, onStolenConfirmChange, onStolen)
         }
     }
+}
+
+/**
+ * The post-succession group sweep's own lines (`settings.md` § Recovery kit →
+ * *The sweep's own lines*): `recovery-kit-sweep-status` (what the sweep did)
+ * and, its OWN element, never a qualifier on the first,
+ * `recovery-kit-sweep-unvouched-status` (the roster it cannot vouch for). Each
+ * is ABSENT, never present and empty, when the projection returns no line for
+ * it — the silence on a succession with no groups at all is the projection's.
+ *
+ * The retry renders directly under them, gated on `owesWork` — deliberately NOT
+ * on whether THIS device can finish the sweep: hiding it where the retry cannot
+ * run would leave the degraded copy naming a control that is not on screen.
+ * Every press answers in words on `error-message`.
+ */
+@Composable
+private fun SweepLines(
+    view: FfiSweepView,
+    busy: Boolean,
+    sweepCopyOf: (FfiSweepView) -> FfiSweepCopy,
+    onSweepRetry: () -> Unit,
+) {
+    val copy = remember(view) { sweepCopyOf(view) }
+    localized(copy.outcome)?.let {
+        Text(
+            it,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.testTag(Ids.RECOVERY_KIT_SWEEP_STATUS),
+        )
+    }
+    localized(copy.unattested)?.let {
+        Text(
+            it,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.testTag(Ids.RECOVERY_KIT_SWEEP_UNVOUCHED_STATUS),
+        )
+    }
+    if (view.owesWork) {
+        OutlinedButton(
+            onClick = onSweepRetry,
+            enabled = !busy,
+            modifier = Modifier.testTag(Ids.RECOVERY_KIT_SWEEP_RETRY_BUTTON),
+        ) { Text(stringResource(R.string.settings_recovery_kit_sweep_retry)) }
+    }
+    Spacer(Modifier.height(4.dp))
+}
+
+/**
+ * The succession trigger and its type-to-confirm gate — account deletion's
+ * idiom, for the same reason: this is irreversible and re-points the whole
+ * account, so a bare tap must not reach it. The warning rides as ID-less
+ * chrome, as on every other app. The COMMIT gates on its wire kind; the confirm
+ * field beside it stays typeable with no nest.
+ */
+@Composable
+private fun StolenAction(
+    state: RecoveryKitUiState,
+    onStolenConfirmChange: (String) -> Unit,
+    onStolen: () -> Unit,
+) {
+    val gate = faunaGate("fauna.recovery.succession.submit", enabled = state.stolenArmed)
+    Spacer(Modifier.height(12.dp))
+    Text(
+        stringResource(R.string.settings_recovery_kit_stolen_warning),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.error,
+    )
+    OutlinedTextField(
+        value = state.stolenConfirmInput,
+        onValueChange = onStolenConfirmChange,
+        label = { Text(stringResource(R.string.settings_recovery_kit_stolen_confirm_placeholder)) },
+        singleLine = true,
+        // The gate compares against a literal, so an auto-capitalized
+        // "Succeed" would never arm the button and the user could not see why.
+        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrect = false),
+        modifier = Modifier.fillMaxWidth().testTag(Ids.IDENTITY_STOLEN_CONFIRM_FIELD),
+    )
+    OutlinedButton(
+        onClick = onStolen,
+        enabled = gate.enabled,
+        modifier = Modifier.testTag(Ids.IDENTITY_STOLEN_BUTTON),
+    ) { Text(stringResource(R.string.settings_recovery_kit_stolen), color = MaterialTheme.colorScheme.error) }
+    DisabledControlReasonText(gate.reason)
 }
 
 @Composable

@@ -51,6 +51,13 @@ public sealed partial class ModerationPage : Page
             // The empty-state placeholder tracks the queue's row count, including
             // train-driven changes (RefreshQueueAsync mutates Actions in place).
             _viewModel.Actions.CollectionChanged += Actions_CollectionChanged;
+            // The reporter's own ledger beside the queue (moderation.md §
+            // User-initiated reporting → What the reporter is told); its empty line
+            // tracks the rows AND the VM's loaded bit.
+            ReportsHeader.Text = _viewModel.ReportsTitle;
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ReportsSection, _viewModel.ReportsTitle);
+            ReportsList.ItemsSource = _viewModel.Reports;
+            _viewModel.Reports.CollectionChanged += (_, _) => UpdateReportsState();
         }
     }
 
@@ -73,6 +80,14 @@ public sealed partial class ModerationPage : Page
                 LoadingRing.IsActive = _viewModel.IsLoading;
                 LoadingRing.Visibility = _viewModel.IsLoading ? Visibility.Visible : Visibility.Collapsed;
                 break;
+            case nameof(ModerationViewModel.ReportsLoaded):
+                UpdateReportsState();
+                break;
+            case nameof(ModerationViewModel.ReportWithdrawStatus):
+                ReportWithdrawStatusText.Text = _viewModel.ReportWithdrawStatus ?? "";
+                ReportWithdrawStatusText.Visibility = string.IsNullOrEmpty(_viewModel.ReportWithdrawStatus)
+                    ? Visibility.Collapsed : Visibility.Visible;
+                break;
             case nameof(ModerationViewModel.ErrorMessage):
                 if (_viewModel.ErrorMessage is not null)
                 {
@@ -93,6 +108,22 @@ public sealed partial class ModerationPage : Page
     {
         if (_viewModel is null) return;
         NoActionsText.Visibility = _viewModel.Actions.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    // The ledger's empty line paints only off a landed read AND zero rows — a read in
+    // flight (or one that failed) never reads as "you have not reported anything".
+    private void UpdateReportsState()
+    {
+        if (_viewModel is null) return;
+        var empty = _viewModel.ReportsLoaded && _viewModel.Reports.Count == 0;
+        ReportsEmptyText.Text = empty ? _viewModel.ReportsEmptyText : "";
+        ReportsEmptyText.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private async void WithdrawReport_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null || sender is not Button { Tag: ReportLedgerRowView row }) return;
+        await _viewModel.WithdrawReportCommand.ExecuteAsync(row);
     }
 
     private async void TrainCorrection_Click(object sender, RoutedEventArgs e)

@@ -64,7 +64,15 @@ public record DmMessageView(
     // `ThreadDetail.selectedMessageId`, painted as the shared `selected`
     // attribute on `dm-message-timestamp` (the one child every render arm
     // paints, including the withheld ones) rather than a new element id.
-    bool Selected = false);
+    bool Selected = false,
+    // The viewer's OWN report hid this message (moderation.md § Corollary — block
+    // also hides): the content-policy block arm then paints "You reported this"
+    // instead of the family-policy sentence. From the same one
+    // ContentPolicyCache.RenderFor call as ContentVerdict.
+    bool Reported = false,
+    // Whether the ⋯ menu offers `dm-message-report-button`: a RECEIVED message with a
+    // plane identity to report it against (mail and bridged messages have none).
+    bool CanReport = false);
 
 /// <summary>
 /// One reaction group projected from the shared <c>MessageSnapshot.reactions</c>
@@ -180,6 +188,15 @@ public sealed partial class DmMessageBubble : UserControl
     /// <see cref="DeleteRequested"/>; unlike delete this button is offered on a
     /// received message (<c>!IsOwn</c>), never an own one.</summary>
     public Action<DmMessageView>? MarkAsSpamRequested;
+
+    /// <summary>Raised when the user picks <c>dm-message-report-button</c> on a received
+    /// message that can be reported (<see cref="DmMessageView.CanReport"/>;
+    /// moderation.md § User-initiated reporting). The page builds the report target
+    /// off the source <c>MessageSnapshot</c> it holds (its plane ref and sender are
+    /// not carried on this UI-projection view) and opens the shared report sheet.
+    /// Reaches a human with authority, where mark-as-spam only trains the reporter's
+    /// own model.</summary>
+    public Action<DmMessageView>? ReportRequested;
 
     /// <summary>Raised when user taps an attachment image.</summary>
     public Action<BitmapImage>? ImageClicked;
@@ -364,6 +381,14 @@ public sealed partial class DmMessageBubble : UserControl
         if (arm == SocialRenderArm.ContentBlocked)
         {
             CollapseAllArms();
+            // The words follow the cause: the viewer's own report ("You reported
+            // this") or the guardian's floor. Set per bind, Name beside Text, or
+            // FlaUI reads the stale static sentence.
+            var blockedText = Strings.Get(msg.Reported
+                ? "moderation/report/hidden_placeholder"
+                : "family/content_blocked_notice");
+            ContentBlockedPlaceholder.Text = blockedText;
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ContentBlockedPlaceholder, blockedText);
             ContentBlockedPlaceholder.Visibility = Visibility.Visible;
             return;
         }
@@ -565,7 +590,8 @@ public sealed partial class DmMessageBubble : UserControl
     {
         var showDelete = SupportsMessageDelete && msg.IsOwn;
         var showMarkAsSpam = !msg.IsOwn;
-        var anyAction = SupportsReactions || showDelete || showMarkAsSpam;
+        var showReport = !msg.IsOwn && msg.CanReport;
+        var anyAction = SupportsReactions || showDelete || showMarkAsSpam || showReport;
         MessageActionsButton.Visibility = anyAction ? Visibility.Visible : Visibility.Collapsed;
         MessageActionsButton.Flyout = null;
         if (!anyAction) return;
@@ -597,7 +623,7 @@ public sealed partial class DmMessageBubble : UserControl
             menu.Items.Add(more);
         }
 
-        if (showDelete || showMarkAsSpam)
+        if (showDelete || showMarkAsSpam || showReport)
         {
             if (SupportsReactions) menu.Items.Add(new MenuFlyoutSeparator());
             if (showDelete)
@@ -622,6 +648,19 @@ public sealed partial class DmMessageBubble : UserControl
                     if (_message is not null) MarkAsSpamRequested?.Invoke(_message);
                 };
                 menu.Items.Add(spam);
+            }
+            if (showReport)
+            {
+                var report = new MenuFlyoutItem
+                {
+                    Text = Strings.Get("conversations/detail/report_message"),
+                };
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(report, Ids.DmMessageReportButton);
+                report.Click += (_, _) =>
+                {
+                    if (_message is not null) ReportRequested?.Invoke(_message);
+                };
+                menu.Items.Add(report);
             }
         }
 

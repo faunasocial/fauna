@@ -1711,6 +1711,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_func_push_standing_failure()
+		})
+		if checksum != 21724 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_push_standing_failure: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_calendar_is_displayed()
 		})
 		if checksum != 22831 {
@@ -3099,7 +3108,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_method_mailrecordopener_open()
 		})
-		if checksum != 17603 {
+		if checksum != 33636 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_mailrecordopener_open: UniFFI API checksum mismatch")
 		}
@@ -3108,7 +3117,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_method_mailrecordopener_open_mail()
 		})
-		if checksum != 31912 {
+		if checksum != 55208 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_mailrecordopener_open_mail: UniFFI API checksum mismatch")
 		}
@@ -15931,8 +15940,9 @@ type MailRecordOpenerInterface interface {
 	// Open a sealed `MailRecordEnvelope` (either suite — classical
 	// X25519, or hybrid X-Wing when the snapshot entry carries the
 	// MSEK-derived ML-KEM decapsulation key). Each leaf keypair is
-	// tried in order (current + grace rotations), exactly the
-	// `MlsCapability::open_mail_record` semantics.
+	// tried newest first (current, then every prior generation — no seal
+	// basis is known here), exactly the `MlsCapability::open_mail_record`
+	// semantics.
 	//
 	// # Errors
 	//
@@ -15941,15 +15951,17 @@ type MailRecordOpenerInterface interface {
 	// - `"decode mail-record envelope: ..."` for a non-envelope input
 	// (an unsealed payload — refused, never passed through);
 	// - `"HPKE open failed: no matching leaf keypair in snapshot"` when
-	// every keypair fails (wrong recipient, rotation past the grace
-	// window, or tampered envelope).
+	// every keypair fails (wrong recipient or tampered envelope).
 	Open(envelopeBytes []byte) ([]byte, error)
 	// Open a sealed `MailRecordEnvelope` known to be a genuine mail-new-
 	// ingest record — the MSEK-holder opener chain (content-sealing-epochs
 	// design § 4). `record_unix_secs` is the record's own seal instant
 	// (the Go MDA's `FetchedCiphertext.SealEpochBasisUnix()` — the nest's
 	// `stored_at`; `0` when unknown, a standing-sealed record),
-	// used to compute its candidate sealing epoch. Trial order: the
+	// used to compute its candidate sealing epoch AND to select its MSEK
+	// generation: every per-generation step below runs the generation
+	// current at that instant first, then outward, by the snapshot's
+	// `generation_retired_at_unix` (`generation_trial_order`). Trial order: the
 	// record's target epoch key then the immediately-prior epoch key
 	// (boundary/clock-skew tolerance) — for the CURRENT generation's root
 	// first, then each MSEK-rotation grace root from the snapshot's
@@ -16017,8 +16029,9 @@ func NewMailRecordOpener(snapshotPlaintextBytes []byte) (*MailRecordOpener, erro
 // Open a sealed `MailRecordEnvelope` (either suite — classical
 // X25519, or hybrid X-Wing when the snapshot entry carries the
 // MSEK-derived ML-KEM decapsulation key). Each leaf keypair is
-// tried in order (current + grace rotations), exactly the
-// `MlsCapability::open_mail_record` semantics.
+// tried newest first (current, then every prior generation — no seal
+// basis is known here), exactly the `MlsCapability::open_mail_record`
+// semantics.
 //
 // # Errors
 //
@@ -16027,8 +16040,7 @@ func NewMailRecordOpener(snapshotPlaintextBytes []byte) (*MailRecordOpener, erro
 // - `"decode mail-record envelope: ..."` for a non-envelope input
 // (an unsealed payload — refused, never passed through);
 // - `"HPKE open failed: no matching leaf keypair in snapshot"` when
-// every keypair fails (wrong recipient, rotation past the grace
-// window, or tampered envelope).
+// every keypair fails (wrong recipient or tampered envelope).
 func (_self *MailRecordOpener) Open(envelopeBytes []byte) ([]byte, error) {
 	_pointer := _self.ffiObject.incrementPointer("*MailRecordOpener")
 	defer _self.ffiObject.decrementPointer()
@@ -16051,7 +16063,10 @@ func (_self *MailRecordOpener) Open(envelopeBytes []byte) ([]byte, error) {
 // design § 4). `record_unix_secs` is the record's own seal instant
 // (the Go MDA's `FetchedCiphertext.SealEpochBasisUnix()` — the nest's
 // `stored_at`; `0` when unknown, a standing-sealed record),
-// used to compute its candidate sealing epoch. Trial order: the
+// used to compute its candidate sealing epoch AND to select its MSEK
+// generation: every per-generation step below runs the generation
+// current at that instant first, then outward, by the snapshot's
+// `generation_retired_at_unix` (`generation_trial_order`). Trial order: the
 // record's target epoch key then the immediately-prior epoch key
 // (boundary/clock-skew tolerance) — for the CURRENT generation's root
 // first, then each MSEK-rotation grace root from the snapshot's
@@ -30546,6 +30561,47 @@ func (_ FfiDestroyerFfiProfileImageEdit) Destroy(value FfiProfileImageEdit) {
 	value.Destroy()
 }
 
+// FFI mirror of [`fauna_client_push::registration::StandingFailure`]: why a
+// desktop's push banner cannot reach this machine right now.
+type FfiPushStandingFailure uint
+
+const (
+	// The sync agent, which posts the banner while the app is closed, did not
+	// answer.
+	FfiPushStandingFailureAgentUnreachable FfiPushStandingFailure = 1
+	// The agent answered and has no notification sink here.
+	FfiPushStandingFailureNoSink FfiPushStandingFailure = 2
+)
+
+type FfiConverterFfiPushStandingFailure struct{}
+
+var FfiConverterFfiPushStandingFailureINSTANCE = FfiConverterFfiPushStandingFailure{}
+
+func (c FfiConverterFfiPushStandingFailure) Lift(rb RustBufferI) FfiPushStandingFailure {
+	return LiftFromRustBuffer[FfiPushStandingFailure](c, rb)
+}
+
+func (c FfiConverterFfiPushStandingFailure) Lower(value FfiPushStandingFailure) C.RustBuffer {
+	return LowerIntoRustBuffer[FfiPushStandingFailure](c, value)
+}
+
+func (c FfiConverterFfiPushStandingFailure) LowerExternal(value FfiPushStandingFailure) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[FfiPushStandingFailure](c, value))
+}
+func (FfiConverterFfiPushStandingFailure) Read(reader io.Reader) FfiPushStandingFailure {
+	id := readInt32(reader)
+	return FfiPushStandingFailure(id)
+}
+
+func (FfiConverterFfiPushStandingFailure) Write(writer io.Writer, value FfiPushStandingFailure) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerFfiPushStandingFailure struct{}
+
+func (_ FfiDestroyerFfiPushStandingFailure) Destroy(value FfiPushStandingFailure) {
+}
+
 // The deployment's registration posture — the three modes of `admin-users`'
 // `admin-users-registration-mode-select`. Mirrors
 // [`fauna_protocol::node_policy::RegistrationMode`] across the FFI boundary.
@@ -32744,6 +32800,47 @@ type FfiDestroyerOptionalFfiNotificationDestination struct{}
 func (_ FfiDestroyerOptionalFfiNotificationDestination) Destroy(value *FfiNotificationDestination) {
 	if value != nil {
 		FfiDestroyerFfiNotificationDestination{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalFfiPushStandingFailure struct{}
+
+var FfiConverterOptionalFfiPushStandingFailureINSTANCE = FfiConverterOptionalFfiPushStandingFailure{}
+
+func (c FfiConverterOptionalFfiPushStandingFailure) Lift(rb RustBufferI) *FfiPushStandingFailure {
+	return LiftFromRustBuffer[*FfiPushStandingFailure](c, rb)
+}
+
+func (_ FfiConverterOptionalFfiPushStandingFailure) Read(reader io.Reader) *FfiPushStandingFailure {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterFfiPushStandingFailureINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalFfiPushStandingFailure) Lower(value *FfiPushStandingFailure) C.RustBuffer {
+	return LowerIntoRustBuffer[*FfiPushStandingFailure](c, value)
+}
+
+func (c FfiConverterOptionalFfiPushStandingFailure) LowerExternal(value *FfiPushStandingFailure) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*FfiPushStandingFailure](c, value))
+}
+
+func (_ FfiConverterOptionalFfiPushStandingFailure) Write(writer io.Writer, value *FfiPushStandingFailure) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterFfiPushStandingFailureINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalFfiPushStandingFailure struct{}
+
+func (_ FfiDestroyerOptionalFfiPushStandingFailure) Destroy(value *FfiPushStandingFailure) {
+	if value != nil {
+		FfiDestroyerFfiPushStandingFailure{}.Destroy(*value)
 	}
 }
 
@@ -41061,6 +41158,20 @@ func PushIntent(intentPath string) FfiPushIntent {
 	return FfiConverterFfiPushIntentINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_ffi_fn_func_push_intent(FfiConverterStringINSTANCE.Lower(intentPath), _uniffiStatus),
+		}
+	}))
+}
+
+// The push control's standing inline line on a desktop — the shared rule
+// tui renders (`fauna_client_push::registration::standing_failure`): `None`
+// for an opted-out install, the unreachable agent first, then a sink the
+// agent reports absent. `notification_sink` is the agent status's field
+// (`FfiAgentStatus::notification_sink`); `agent_running` whether the agent
+// answered at all.
+func PushStandingFailure(optedIn bool, agentRunning bool, notificationSink *bool) *FfiPushStandingFailure {
+	return FfiConverterOptionalFfiPushStandingFailureINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_ffi_fn_func_push_standing_failure(FfiConverterBoolINSTANCE.Lower(optedIn), FfiConverterBoolINSTANCE.Lower(agentRunning), FfiConverterOptionalBoolINSTANCE.Lower(notificationSink), _uniffiStatus),
 		}
 	}))
 }

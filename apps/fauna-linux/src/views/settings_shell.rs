@@ -1,5 +1,4 @@
 use adw::prelude::*;
-use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -313,13 +312,16 @@ pub fn build_settings_shell(
     // approved a pending request, or the user subscribed elsewhere). Mirrors the
     // profile Tiers-tab on-visible refresh.
     //
-    // Also the nav-edge-AWAY-from-`account` hook: leaving the Account
+    // Also half of the nav-edge-AWAY-from-`account` hook: leaving the Account
     // sub-page is the one acknowledgment gesture that discharges a pending
     // stolen-ceremony persist-failure message (`settings.md` § Recovery kit
     // → *The persist-failure message survives the page*) — the user has had the whole visit to read or
-    // copy it. No new `ui.yaml` element: this reuses the same visible-child
-    // notify every other on-visible refresh below already wires to.
-    let was_on_account = Rc::new(Cell::new(false));
+    // copy it — and performs a supersession the ceremony held back. No new
+    // `ui.yaml` element: this reuses the same visible-child notify every other
+    // on-visible refresh below already wires to. The other half is `app.rs`'s
+    // content-stack notify (leaving the shell from Account); the pair and its
+    // edge live in `settings::stolen_hold`. A fresh shell starts a fresh visit.
+    crate::settings::reset_account_visit();
     let knock_list_client = Rc::clone(client);
     let devices_machine = Arc::clone(&devices_folders_handles.devices_machine);
     let devices_runtime = client.runtime_handle();
@@ -361,10 +363,7 @@ pub fn build_settings_shell(
     };
     stack.connect_visible_child_name_notify(move |s| {
         let name = s.visible_child_name();
-        let now_on_account = name.as_deref() == Some("account");
-        if was_on_account.replace(now_on_account) && !now_on_account {
-            crate::settings::acknowledge_stolen_failed_message();
-        }
+        crate::settings::note_settings_sub_page(name.as_deref() == Some("account"));
         match name.as_deref() {
             // Folders' "Shared with you" section: the folder-share knocks and
             // the co-present ceremony's consent cards. The page's own map hook

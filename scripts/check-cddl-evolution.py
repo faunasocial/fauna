@@ -45,6 +45,32 @@ RETYPED_PREFIX = "retyped→"
 TRANSITIONS = frozenset({REMOVED, TIGHTENED})
 
 
+def product_version(cargo_toml: str) -> str | None:
+    """The product version (`[workspace.package] version`) from the root
+    `Cargo.toml` text, or None when the section or key is absent."""
+    in_section = False
+    for raw in cargo_toml.splitlines():
+        line = raw.strip()
+        if line.startswith("["):
+            in_section = line == "[workspace.package]"
+            continue
+        if in_section and line.startswith("version"):
+            rest = line[len("version"):].lstrip()
+            if rest.startswith("="):
+                return rest[1:].strip().strip('"')
+    return None
+
+
+def in_compat_free_window(version: str) -> bool:
+    """Every 0.1.x is the compat-free window (version-compatibility.md
+    § Dimension 2, the fifth ratified exception, user-ruled 2026-10-08):
+    a break against the base is reported, not refused; the ratified list
+    still only grows. The window closes at 0.2.0. Twin of the Rust gate's
+    `in_compat_free_window`."""
+    parts = version.split(".")
+    return len(parts) >= 2 and parts[0] == "0" and parts[1] == "1"
+
+
 def is_transition(token: str) -> bool:
     return token in TRANSITIONS or (
         token.startswith(RETYPED_PREFIX) and len(token) > len(RETYPED_PREFIX)
@@ -249,6 +275,7 @@ def main() -> int:
             "is missing from HEAD — the list only grows"
         )
 
+    breaks = []
     for cddl in base_root.glob("*.cddl"):
         # `git show <ref>:<path>` needs a /-separated pathspec — str(cddl) on
         # Windows renders `\`, which `git show` can't resolve, so base_text
@@ -257,7 +284,21 @@ def main() -> int:
         rel = cddl.as_posix()
         head_text = cddl.read_text()
         base_text = git_show(base, rel)
-        all_errors.extend(check_schema_pair(rel, base_text, head_text, allow))
+        breaks.extend(check_schema_pair(rel, base_text, head_text, allow))
+
+    cargo = Path("Cargo.toml")
+    version = product_version(cargo.read_text(encoding="utf-8")) if cargo.exists() else None
+    if version is not None and in_compat_free_window(version):
+        if breaks:
+            print(
+                f"Product version {version} is inside the 0.1.x compat-free window "
+                "(version-compatibility.md § Dimension 2, the fifth ratified exception): "
+                f"{len(breaks)} break(s) against the base are reported, not refused:"
+            )
+            for b in breaks:
+                print(f"  note: {b}")
+    else:
+        all_errors.extend(breaks)
 
     if all_errors:
         print("Schema-evolution violations:")

@@ -70,6 +70,10 @@ class FeedVM @Inject constructor(
      */
     val contentPolicyInputs: StateFlow<ContentPolicyInputs> get() = contentPolicyStore.inputs
 
+    /** `feed-post-report-button` — open the shared report sheet on [target]
+     *  (moderation.md § User-initiated reporting; the shell's ReportHost paints it). */
+    fun openReport(target: com.fauna.ffi.FfiReportTarget) = contentPolicyStore.report.open(target)
+
     /** Count a rendered post's guardian-floor enforcement for **Guardian Notify**
      *  (family-safety.md § Guardian Notify) — a no-op unless the ward's
      *  `content_notify` knob is on and the guardian floor bites. */

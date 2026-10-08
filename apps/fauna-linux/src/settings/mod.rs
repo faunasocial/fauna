@@ -27,9 +27,15 @@ pub mod p2p_tab;
 pub mod pending_actions;
 pub mod privacy;
 pub mod recovery_kit;
+mod stolen_hold;
 pub mod subscriptions;
 pub mod task_delegation;
 pub mod web;
+
+pub(crate) use stolen_hold::{
+    begin_stolen_ceremony, defer_own_supersession, note_settings_sub_page, note_shell_page,
+    reset_account_visit, stolen_ceremony_teardown,
+};
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -874,6 +880,14 @@ pub(super) fn render_account_error_label(label: &gtk::Label, error: Option<&str>
     render_error_label(label, error);
 }
 
+/// Whether the app-wide `error-message` banner must drop a write: a
+/// persist-failure message is pending AND the user is on Settings → Account,
+/// where that banner reads as the page's own error surface. Off Account the
+/// banner is another page's, and the parked key is not on screen to clobber.
+pub(crate) fn account_error_slot_is_held() -> bool {
+    has_pending_stolen_failed_message() && stolen_hold::on_account()
+}
+
 /// Discharge a still-pending persist-failure message: the user has navigated
 /// away from the Account sub-page, having had the whole visit to read or copy
 /// it (`settings.md` § Recovery kit → *The persist-failure message survives
@@ -959,7 +973,11 @@ pub fn apply_recovery_succeeded(outcome: &fauna_client_recovery::ceremony::Stole
     };
     let landed = match outcome {
         fauna_client_recovery::ceremony::StolenOutcome::Landed(landed) => landed,
-        unlanded => return dispatch_unlanded(unlanded, say),
+        unlanded => {
+            dispatch_unlanded(unlanded, say);
+            stolen_hold::settle_stolen_ceremony(false);
+            return;
+        }
     };
 
     // Park the sweep BEFORE the switch: the switch destroys every window and
@@ -1006,8 +1024,19 @@ pub fn apply_recovery_succeeded(outcome: &fauna_client_recovery::ceremony::Stole
         // seconds ago by `add_account` with no flag on it, so the honest value is
         // also the safe one; passing `true` would quietly hand every future
         // successor a re-auth bypass to keep this one path from being refused.
+        //
+        // Settled BEFORE the switch: adopting the successor is itself the full
+        // relaunch, so a supersession the ceremony held back is spent here,
+        // never performed over the successor's fresh session.
+        stolen_hold::settle_stolen_ceremony(true);
         trigger_switch_account(new_actor_hex, false);
     });
+    if !persisted {
+        // The key is parked: the hold keeps the owed escalation until the user
+        // leaves Account (`settings.md` § Recovery kit → *The persist-failure
+        // message survives the page*).
+        stolen_hold::settle_stolen_ceremony(false);
+    }
 }
 
 /// `apply_recovery_succeeded`'s persist-check dispatch, pulled out so it is
@@ -1086,6 +1115,75 @@ pub fn apply_sweep_retried(
             "[settings/recovery] a sweep retry came back with no section registered to show it"
         ),
     }
+}
+
+/// Fold the relaunch adoption's owed sweep: park the report the answer chose
+/// (`Swept`'s own, else an arm that still owes work so the retry button
+/// renders) and put the answer's sentence on `error-message`, as a press would.
+/// Nothing ran (`Err`) → re-arm the obligation for the next authenticated
+/// session rather than spend it.
+pub fn apply_owed_sweep_discharged(
+    result: &Result<
+        (
+            Box<fauna_client_recovery::ceremony::SweepStatus>,
+            Option<String>,
+        ),
+        String,
+    >,
+    successor: &str,
+) {
+    let answer = match result {
+        Ok((parked, sentence)) => {
+            recovery_kit::park_succession_sweep((**parked).clone());
+            sentence.clone()
+        }
+        Err(e) => {
+            tracing::warn!(
+                "[succession-sweep] the owed sweep could not run ({e}) — re-arming it for the \
+                 next authenticated session"
+            );
+            if !successor.is_empty() {
+                recovery_kit::owe_succession_sweep(successor.to_string());
+            }
+            return;
+        }
+    };
+    let handler = SWEEP_RETRIED_HANDLER.with(|cell| cell.borrow().clone());
+    match handler {
+        Some(handler) => handler(answer),
+        // The report is parked either way; the section paints it from there
+        // when it is next built.
+        None => tracing::info!(
+            "[succession-sweep] the owed sweep answered before the Recovery kit section was built"
+        ),
+    }
+}
+
+/// A relaunch refused as superseded whose **chain-verified** successor this
+/// device holds: adopt it (`identity-succession.md` § Implementation status
+/// today, *a lost submit reply no longer destroys the account* — the undecidable
+/// arm's "reopening the app signs you in as it"). `true` means the switch was
+/// triggered.
+///
+/// Whether to adopt — and the succession link it records — is the shared
+/// `AccountRegistry::adopt_held_successor`; what stays here is the obligations
+/// the lost ceremony never reached, carried across the switch beside its own
+/// owed flags: the successor's fresh kit, and the group sweep
+/// (`succession-propagation.md` § Propagation → *Own device fleet*, the
+/// relaunch-adoption clause), both discharged by the successor's post-auth
+/// hook. tui's `App::adopt_held_successor`, apple's `recordRelaunchAdoption` and
+/// windows' `SuccessionHandoff.RecordRelaunchAdoption` are the twins.
+///
+/// ⚠ `verified_successor` must be `client::verify_succession_successor`'s
+/// answer — the registration chain's, never the nest's claim.
+pub fn adopt_held_successor(predecessor: &str, verified_successor: &str) -> bool {
+    if !crate::account_registry().adopt_held_successor(predecessor, verified_successor) {
+        return false;
+    }
+    recovery_kit::owe_succession_kit(verified_successor.to_string());
+    recovery_kit::owe_succession_sweep(verified_successor.to_string());
+    trigger_switch_account(verified_successor.to_string(), false);
+    true
 }
 
 // ---------------------------------------------------------------------------

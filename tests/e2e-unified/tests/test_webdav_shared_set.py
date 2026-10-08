@@ -16,7 +16,7 @@ two seats:
   * **owner** — the mail venue's claimed admin on the cached `app`, mail enabled
     through its own UI (the MSEK the serve seals the `WebdavKeysBlob` under) and
     the WebDAV client authenticated with that mail credential;
-  * **member** — a fresh tui launch signed in as a handled actor the owner shares
+  * **member** — a fresh app launch (tui or macOS, `_MEMBER_SEATS`) signed in as a handled actor the owner shares
     the set with and promotes to writer (a reader never binds an engine).
 
 Journey, every mutation through the app UI (convention 8): the owner creates the
@@ -45,7 +45,16 @@ which runs no MDA; the member seat here is the same generator those fixtures use
 (`conftest._folder_share_recipient_seat`), pointed at this venue.
 
 tui leads (`docs/goal/architecture/testing.md` § Default app and nest mode); the
-other bound-folder apps follow by gaining a param here.
+other bound-folder apps follow by gaining a param here — the owner is the run's
+cached `app`, the member a `_MEMBER_SEATS` arm, so every owner × member pairing
+the run's app axis can drive is collected (`served_share_member` is in
+`conftest._REAL_SECOND_APP_FIXTURES`: both seats must be drivable here). macOS
+is a MEMBER column only — the owner promotes the member to writer, and apple
+declares no owner-side access-grant UI (`ui/folders.md`), so a macOS owner arm
+is a declared absence and the macOS witness is `[tui-macos]`, run with
+`--app macos,tui`. macOS spawns its agent only under `real_sync_agent`, which
+the module already carries; the restart barrier reads the macOS launch's
+`app.err`, where the direct-spawned agent's stderr lands.
 """
 
 from __future__ import annotations
@@ -72,6 +81,7 @@ pytestmark = [
     pytest.mark.tier1,
     pytest.mark.tier_3,
     pytest.mark.tui,
+    pytest.mark.macos,
     pytest.mark.real_conversations,
     pytest.mark.real_sync_agent,
 ]
@@ -122,17 +132,28 @@ def _served(nest, name: str) -> bool:
     return bool(row and row.get("webdav_enabled"))
 
 
+# The member seat's arms — each carries its app mark, so the run's app axis
+# selects it (the `_MEMBER_SEATS` shape of `test_folder_member_media_decrypt.py`).
+# Only apps that bind a folder can hold a writer member's place.
+_MEMBER_SEATS = [
+    pytest.param("tui", marks=pytest.mark.tui),
+    pytest.param("macos", marks=pytest.mark.macos),
+]
+
+
 @pytest.fixture
 def served_share_member(request, dedicated_caldav_mailbox_less_nest):
-    """A fresh tui member seat on the mail venue — `(member_app, member)`."""
+    """A fresh member seat on the mail venue, over ``request.param`` —
+    `(member_app, member)`."""
     from conftest import _folder_share_recipient_seat
 
+    seat = request.param
     yield from _folder_share_recipient_seat(
-        "tui",
+        seat,
         dedicated_caldav_mailbox_less_nest.nest,
         request,
         handle_prefix="member",
-        screenshot="teardown-tui-served-share-member",
+        screenshot=f"teardown-{seat}-served-share-member",
     )
 
 
@@ -140,6 +161,7 @@ def served_share_member(request, dedicated_caldav_mailbox_less_nest):
 # share/accept, then three engine cycles (seed hydration, served re-key, DAV
 # hydration). A ceiling, not an expectation (conventions point 9).
 @pytest.mark.timeout(1800)
+@pytest.mark.parametrize("served_share_member", _MEMBER_SEATS, indirect=True)
 @pytest.mark.feature("files-in-standard-apps")
 def test_a_shared_and_served_folder_shows_owner_mount_and_member_the_same_files(
     app, dedicated_caldav_mailbox_less_nest, served_share_member, request, tmp_path
@@ -147,7 +169,18 @@ def test_a_shared_and_served_folder_shows_owner_mount_and_member_the_same_files(
     """A folder shared with a member and served over WebDAV: a member-synced file
     reads back byte-identically through the owner's mount, and a file written
     through the mount hydrates byte-identically into the member's bound place."""
+    from helpers.app_surface import declared_absence
     from tests.api import conv_api
+
+    if app.driver.is_macos() or app.driver.is_ios():
+        # The owner promotes the member to writer, and apple carries no
+        # owner-side access-grant UI; its column is the MEMBER seat of a tui
+        # owner (`[tui-macos]`, the `test_folder_writer_revocation.py` shape).
+        declared_absence(
+            app.driver,
+            capability="owner-side access-grant surface (folder-member-role-select)",
+            doc="ui/folders.md § Implementation status today (macOS and iOS have none at all)",
+        )
 
     handle = dedicated_caldav_mailbox_less_nest
     handle.assert_mta_running()

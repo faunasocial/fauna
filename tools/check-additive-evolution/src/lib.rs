@@ -118,6 +118,43 @@ impl Violation {
     }
 }
 
+// ── The 0.1.x compat-free window ────────────────────────────────────────────
+
+/// The product version (`[workspace.package] version`) from the root
+/// `Cargo.toml` text, or `None` when the section or key is absent.
+pub fn product_version(cargo_toml: &str) -> Option<String> {
+    let mut in_section = false;
+    for line in cargo_toml.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_section = line == "[workspace.package]";
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("version") else {
+            continue;
+        };
+        let Some(value) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        return Some(value.trim().trim_matches('"').to_string());
+    }
+    None
+}
+
+/// Whether `version` sits in the compat-free window: every `0.1.x`
+/// (version-compatibility.md § Dimension 2, the fifth ratified exception,
+/// user-ruled 2026-10-08). Inside it a break against the base — a removed,
+/// renamed or retyped field or variant — is reported, not refused; the
+/// forward-compat discipline (catch-all, enum ledger, the ratified list only
+/// growing) is enforced as ever. The window closes at `0.2.0`.
+pub fn in_compat_free_window(version: &str) -> bool {
+    let mut parts = version.split('.');
+    parts.next() == Some("0") && parts.next() == Some("1")
+}
+
 // ── Parsing ─────────────────────────────────────────────────────────────────
 
 /// Parse one source file's tracked structs into `map`, keyed

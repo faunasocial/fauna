@@ -470,6 +470,40 @@
             <!-- Separator -->
             <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
 
+            <!-- Push notifications (settings.md § Push notifications; ids rule-A signed
+                 off 2026-09-26, tui leads). The toggle is this install's opt-in bit over
+                 the shared registration machine (PushNotificationsViewModel), never the
+                 OS permission; its HelpText carries "on"/"off", what the e2e `state`
+                 read answers from (the flaui bridge's catch-all attribute) — unset until
+                 the page has painted the stored bit, so a read can tell "not yet
+                 rendered" from "off". The line
+                 renders only with text: the last toggle's failure, else the
+                 agent-unreachable / no-sink cause while opted in. AutomationId ONLY on
+                 the line (a static Name would shadow its text in get_text); the section
+                 carries a Name or UIA does not realize the panel. -->
+            <StackPanel x:Name="PushNotificationsSection"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.PushNotificationsSection}"
+                        AutomationProperties.Name="{loc:Localize Key=settings/push_notifications/title}"
+                        Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=settings/push_notifications/title}" />
+                <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=settings/push_notifications/device_description}" />
+                <ToggleSwitch x:Name="PushOptInToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.PushNotificationsOptInToggle}"
+                              AutomationProperties.Name="{loc:Localize Key=settings/push_notifications/opt_in_label}"
+                              Header="{loc:Localize Key=settings/push_notifications/opt_in_label}"
+                              Toggled="PushOptInToggle_Toggled" />
+                <TextBlock x:Name="PushNotificationsErrorText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.PushNotificationsError}"
+                           Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                           TextWrapping="Wrap"
+                           Visibility="Collapsed" />
+            </StackPanel>
+
+            <!-- Separator -->
+            <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
             <!-- Data export (settings.md § Data export; account-data-plane.md §
                  Nest-side requirements item 1, Payload stores decision (5) — the
                  full archive is the DEFAULT and there is no toggle). Placed here,

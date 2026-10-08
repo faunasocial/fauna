@@ -12,6 +12,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.components.DisabledControlReasonText
@@ -142,13 +143,15 @@ private fun OfferRow(
                 style = MaterialTheme.typography.titleSmall,
                 modifier = Modifier.testTag(Ids.SUBSCRIPTION_OFFER_NAME),
             )
-            tier.priceHint?.let {
-                Text(
-                    it,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.testTag(Ids.SUBSCRIPTION_OFFER_PRICE),
-                )
+            if (BuildConfig.PAYMENTS) {
+                tier.priceHint?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag(Ids.SUBSCRIPTION_OFFER_PRICE),
+                    )
+                }
             }
             tier.description?.let {
                 Text(
@@ -171,11 +174,13 @@ private fun OfferRow(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f).testTag(Ids.SUBSCRIPTION_OFFER_STATUS),
                 )
-                tier.paymentUrl?.let { url ->
-                    OutlinedButton(
-                        onClick = { uriHandler.openUri(url) },
-                        modifier = Modifier.testTag(Ids.SUBSCRIPTION_OFFER_PAYMENT_LINK),
-                    ) { Text(stringResource(R.string.subscriptions_payment_url)) }
+                if (BuildConfig.PAYMENTS) {
+                    tier.paymentUrl?.let { url ->
+                        OutlinedButton(
+                            onClick = { uriHandler.openUri(url) },
+                            modifier = Modifier.testTag(Ids.SUBSCRIPTION_OFFER_PAYMENT_LINK),
+                        ) { Text(stringResource(R.string.subscriptions_payment_url)) }
+                    }
                 }
                 // `fauna.subscriptions.subscribe` is OnlineOnly. The payment-link
                 // button beside it opens an external URL and declares nothing —

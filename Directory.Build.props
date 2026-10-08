@@ -1,0 +1,22 @@
+<Project>
+  <!-- The NuGet pin (owner-ruled 2026-10-05, landed in bump round 1): every tracked
+       project restores from its committed packages.lock.json and ONLY from it.
+       RestoreLockedMode turns a resolution that would differ from the lock — a
+       moved reference, a new transitive version, a changed runtime id — into
+       error NU1004 instead of a silent move, so a version changes only by a
+       round's lockfile edit (docs/goal/architecture/release-integrity.md
+       § Minimum release age for new dependency versions; dependency-bump-report.md
+       § Who opens a round). Committed constants, never a per-machine knob.
+
+       Conditioned on the lockfile being there, so a project with none (a scratch
+       project a tool generates under this tree) is never forced into locked mode;
+       a tracked project with none fails test_nuget_references_pinned.py instead.
+
+       A round regenerates a lock deliberately, on a scratch copy: one restore with
+       locked mode switched off and a forced re-evaluation, typed by hand — never
+       committed to a recipe, script or workflow (the same test holds that). -->
+  <PropertyGroup Condition="Exists('$(MSBuildProjectDirectory)/packages.lock.json')">
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode>true</RestoreLockedMode>
+  </PropertyGroup>
+</Project>

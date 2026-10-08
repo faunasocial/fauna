@@ -135,6 +135,9 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         self._download_mirror: str | None = None
         # name -> (size, mtime_ms) of each file as last fetched into the mirror.
         self._download_mirrored: dict[str, tuple[int, int]] = {}
+        # The host directory `widget_dir()` mirrors the widget snapshot into;
+        # made on first use, removed at teardown.
+        self._widget_mirror: str | None = None
 
     # The Kotlin bridge serves POST /element/scroll-into-view
     # (`ElementOps.scrollIntoView`: the accessibility ACTION_SHOW_ON_SCREEN,
@@ -419,6 +422,9 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             shutil.rmtree(self._download_mirror, ignore_errors=True)
             self._download_mirror = None
             self._download_mirrored = {}
+        if self._widget_mirror:
+            shutil.rmtree(self._widget_mirror, ignore_errors=True)
+            self._widget_mirror = None
 
     def credential_map(self) -> dict[str, str]:
         """The on-device e2e credential file, read back over the bridge.
@@ -503,6 +509,48 @@ class AndroidBridgeDriver(HttpBridgeDriver):
                 fh.write(data)
             self._download_mirrored[name] = stamp
         return mirror
+
+    #: Where the app publishes its home-screen widget snapshot, relative to its
+    #: private data directory (`UnreadSnapshotStore.forApp`: `filesDir/widget`).
+    _WIDGET_SNAPSHOT = "files/widget/unread.json"
+
+    def widget_dir(self) -> str | None:
+        """A host directory mirroring the app's widget snapshot, as of this call.
+
+        The widget lives outside the app's automation surface, so the witness
+        reads what the app published for it from OUTSIDE the app
+        (`apps/common.md` § Home-screen widget → *Witnessing it*): the
+        ``unread.json`` `WidgetUnreadPublisher` writes into the app's private
+        ``files/widget/``, read through adb (``run-as`` — the e2e build is
+        debuggable), never through the bridge that runs inside the app. The
+        apple drivers name a host directory the app writes into; the android
+        file is on the device, so — like ``download_dir()`` — the answer is a
+        host mirror, refreshed by THIS call and nothing else: a wait must call
+        ``widget_dir()`` inside its predicate (``helpers.home_screen_widget``
+        does). No snapshot on the device → none in the mirror.
+        """
+        if self._widget_mirror is None:
+            import tempfile
+
+            self._widget_mirror = tempfile.mkdtemp(prefix="fauna-e2e-android-widget-")
+        local = os.path.join(self._widget_mirror, os.path.basename(self._WIDGET_SNAPSHOT))
+        result = subprocess.run(
+            [*self._adb_cmd(), "exec-out", "run-as", "social.fauna.fauna",
+             "cat", self._WIDGET_SNAPSHOT],
+            capture_output=True, timeout=15,
+        )
+        body = result.stdout.strip()
+        # `exec-out` does not reliably carry the remote exit status, and
+        # `run-as`/`cat` print their refusal ("No such file …") on stdout on
+        # some images: only a JSON object is a snapshot.
+        if result.returncode == 0 and body.startswith(b"{"):
+            tmp = f"{local}.tmp"
+            with open(tmp, "wb") as fh:
+                fh.write(body)
+            os.replace(tmp, local)
+        elif os.path.exists(local):
+            os.remove(local)
+        return self._widget_mirror
 
     def press_system_back(self) -> None:
         """Send the system back — the phone's back gesture/button — through the

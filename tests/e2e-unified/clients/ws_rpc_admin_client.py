@@ -91,7 +91,7 @@ class WsRpcAdminClient(_WsRpcClientBase):
 
     The class is not Admin-specific in its plumbing — every nest WS-RPC
     caller class shares the same envelope/auth flow. It carries the
-    Admin name only because finding #5 of an internal investigation
+    Admin name only because an internal investigation
     spawned it for the Admin-only ``provision_*`` kinds, and the typed
     convenience methods (`provision_tls_cert_blob`, …) only target
     Admin kinds. The generic ``.call(kind, payload)`` surface works for

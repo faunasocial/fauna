@@ -82,39 +82,6 @@
             <!-- Separator -->
             <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
 
-            <!-- Updates section -->
-            <StackPanel Spacing="12">
-                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="{loc:Localize Key=settings/updates}" />
-
-                <Grid ColumnSpacing="12">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-
-                    <Button
-                        Grid.Column="0"
-                        x:Name="CheckUpdateButton"
-                        Click="CheckUpdateButton_Click"
-                        Content="{loc:Localize Key=settings/check_for_updates}" />
-
-                    <TextBlock
-                        Grid.Column="1"
-                        x:Name="UpdateStatusText"
-                        VerticalAlignment="Center"
-                        Opacity="0.7" />
-                </Grid>
-
-                <ProgressRing
-                    x:Name="UpdateProgress"
-                    IsActive="False"
-                    Visibility="Collapsed"
-                    HorizontalAlignment="Left" />
-            </StackPanel>
-
-            <!-- Separator -->
-            <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
-
             <!-- Storage section -->
             <StackPanel Spacing="12">
                 <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="{loc:Localize Key=common/storage}" />
@@ -138,11 +105,40 @@
             <!-- Separator -->
             <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
 
-            <!-- About section -->
+            <!-- About section — linux's and macOS's shape: the version this build is,
+                 the asked newer-version check, and the notice either the check or the
+                 once-per-sign-in look paints (installers/README.md § Knowing a newer
+                 version is out; Core/Services/UpdateCheck.cs holds the state). -->
             <StackPanel Spacing="8">
                 <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="{loc:Localize Key=settings/about}" />
                 <TextBlock Opacity="0.7" Text="{loc:Localize Key=settings/about_name}" />
                 <TextBlock Opacity="0.5" FontSize="12" Text="{loc:Localize Key=settings/about_desc}" />
+
+                <!-- The one product version every app renders (product-version.md
+                     § The model). The id sits on the value alone, so get_text reads
+                     the bare version. -->
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBlock Opacity="0.7" Text="{loc:Localize Key=settings/general_page/version}" />
+                    <TextBlock x:Name="AppVersionText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.SettingsAppVersion}"
+                               IsTextSelectionEnabled="True" />
+                </StackPanel>
+
+                <!-- The label carries the check's state (Checking… / Up to date /
+                     Check failed / <version> available). Never disabled while in
+                     flight — a disabled WinUI button cannot be Invoked; UpdateCheck
+                     ignores a press during a check. -->
+                <Button x:Name="CheckUpdateButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.SettingsCheckUpdatesButton}"
+                        Click="CheckUpdateButton_Click" />
+
+                <!-- Collapsed — absent from the automation tree — until a newer
+                     release is known. -->
+                <TextBlock x:Name="UpdateNoticeText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.UpdateAvailableNotice}"
+                           TextWrapping="Wrap"
+                           IsTextSelectionEnabled="True"
+                           Visibility="Collapsed" />
             </StackPanel>
         </StackPanel>
     </ScrollViewer>

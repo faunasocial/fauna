@@ -90,7 +90,24 @@
 //! step, intent enqueue — but runs no pass, dropping nudges and reconnect
 //! wakes, and re-tries the election on the backstop tick (and on an explicit
 //! `reconcile_now`) so the role transfers when the holder exits.
-//! [`PumpReport::skipped_non_holder`] is the in-band role answer. The MLS
+//! [`PumpReport::skipped_non_holder`] is the in-band role answer.
+//!
+//! **The agent holds the role when present** (`account-runtime.md`
+//! § Multi-instance concurrency, the 2026-10-08 ruling). The election is
+//! first-come, so a seed-holding runtime — every app — asks the host's
+//! presence probe ([`EngineElection::agent_present`]) before every try, at
+//! assembly and at each re-try, and contends only while no agent hosts the
+//! store. While it holds the role it re-reads presence between passes — on its
+//! own poll (`Wake::PresencePoll`, the grant latch's 500 ms doubling, capped
+//! at the backstop interval and re-armed from the floor whenever the role is
+//! taken), at the tick and on `reconcile_now` — and on `Present` **yields**:
+//! its legs come down first ([`HostLegs::stand_down`]), then its lock is
+//! released, then the role fact flips ([`PumpReport::yielded`] on a
+//! `reconcile_now` that did it). That order is the one-NodeId-per-machine
+//! invariant: the yielding listener is gone before the taker can bind. A
+//! degraded probe reads absent before a try (degrade open) and keeps a held
+//! role (a degrade is never a yield). A seedless runtime — the agent — never
+//! probes; its host takes the presence lock. The MLS
 //! drain carve-out is unaffected: whichever process holds the role,
 //! `IntentDrainer::Mls` intents are never its leg to send
 //! (`outbox::drain_outbox` owns that predicate).
@@ -142,7 +159,7 @@ pub use handle_source::{
 pub use pass::{PassTimings, PumpReport, push_step_error};
 pub use stop::{ACCOUNT_RUNTIME_STOP_BUDGET, StopReason, stop_one};
 
-pub use crate::host_legs::{ElectionOutcome, EngineElection};
+pub use crate::host_legs::{ElectionOutcome, EngineElection, Presence};
 pub use crate::principal_custody::{EnrollmentRefusal, PrincipalCustody};
 
 use std::collections::{BTreeSet, VecDeque};
@@ -542,6 +559,16 @@ pub trait HostLegs<B: StoreBackend, R: RpcRequester> {
         ctx: LegsCtx<'_, B, R>,
         report: &mut PumpReport,
     ) -> impl std::future::Future<Output = LegsOutput>;
+
+    /// Bring every leg down because this runtime is handing the engine role to
+    /// the sync agent (`account-runtime.md` § Multi-instance concurrency →
+    /// *The agent holds the role when present*, part 3): the peer node, its
+    /// serve side and transport, the sibling channels and file-sync hooks, the
+    /// custody leg's holder state. Resolves only once the listener is GONE —
+    /// the driver releases `engine.lock` after this returns, and the machine's
+    /// one NodeId must never be an endpoint in two processes. The next pass
+    /// this runtime runs, if it ever holds the role again, rebuilds them.
+    fn stand_down(&mut self) -> impl std::future::Future<Output = ()>;
 }
 
 /// A host with no legs — web, and any test that wants the pass alone.
@@ -552,6 +579,8 @@ impl<B: StoreBackend, R: RpcRequester> HostLegs<B, R> for NoLegs {
     async fn run(&mut self, _ctx: LegsCtx<'_, B, R>, _report: &mut PumpReport) -> LegsOutput {
         LegsOutput::default()
     }
+
+    async fn stand_down(&mut self) {}
 }
 
 /// The engine-singleton role this runtime plays (`account-runtime.md`
@@ -563,9 +592,11 @@ pub enum EngineRole<H> {
     /// a degraded acquire at start (see [`elect_at_start`]'s ruling), where
     /// this runtime pumps unguarded for its lifetime.
     Holder { _lock: Option<H> },
-    /// Another holder (usually another process) has the role. Serve reads
-    /// and plain writes; re-try the election on the backstop cadence — no
-    /// timer of its own — to pick the role up when the holder exits.
+    /// Another holder (usually another process) has the role — or, for a
+    /// seed-holding runtime, the sync agent hosts the store, so it does not
+    /// contend. Serve reads and plain writes; re-try the election on the
+    /// backstop cadence — no timer of its own — to pick the role up when the
+    /// holder exits.
     NonHolder,
 }
 
@@ -592,7 +623,23 @@ impl<H> EngineRole<H> {
 /// both processes fine, and the store contract (WAL + transactions + keyed
 /// drains) keeps even that window safe from corruption; duplicate work is the
 /// cost, not integrity.
-pub async fn elect_at_start<E: EngineElection>(election: &E) -> EngineRole<E::Held> {
+///
+/// **A seed-holding runtime probes first** (`account-runtime.md`
+/// § Multi-instance concurrency → *The agent holds the role when present*,
+/// part 2): with the sync agent hosting the store it starts a non-holder with
+/// no try at all; a degraded probe reads absent. A seedless runtime — the
+/// agent — never probes.
+pub async fn elect_at_start<E: EngineElection>(
+    election: &E,
+    principal: &RuntimePrincipal,
+) -> EngineRole<E::Held> {
+    if agent_keeps_out(election, principal).await {
+        tracing::info!(
+            "account runtime: the sync agent hosts this store — starting as a plain \
+             reader/writer (the agent holds the engine role when present)"
+        );
+        return EngineRole::NonHolder;
+    }
     match election.try_acquire().await {
         ElectionOutcome::Held(lock) => EngineRole::Holder { _lock: Some(lock) },
         ElectionOutcome::Refused => {
@@ -610,6 +657,56 @@ pub async fn elect_at_start<E: EngineElection>(election: &E) -> EngineRole<E::He
             EngineRole::Holder { _lock: None }
         }
     }
+}
+
+/// Before an engine try: does the sync agent's presence keep this runtime
+/// out? Only a seed-holding runtime asks — a seedless one is the agent — and
+/// only `Present` keeps it out: a probe that cannot ask reads absent, the
+/// election's own degrade-open posture (a lone app must pump).
+async fn agent_keeps_out<E: EngineElection>(election: &E, principal: &RuntimePrincipal) -> bool {
+    if principal.keypair().is_none() {
+        return false;
+    }
+    match election.agent_present().await {
+        Presence::Present => true,
+        Presence::Absent => false,
+        Presence::Degraded(e) => {
+            tracing::warn!(
+                "account runtime: the agent presence probe degraded ({e}) — reading the \
+                 agent as absent (degrade-open)"
+            );
+            false
+        }
+    }
+}
+
+/// A seed-holding holder's re-read: has the sync agent arrived? Only `Present`
+/// answers yes — a degraded re-read keeps the role, because a degrade is never
+/// a yield. A seedless holder never asks.
+async fn agent_arrived<E: EngineElection>(election: &E, principal: &RuntimePrincipal) -> bool {
+    if principal.keypair().is_none() {
+        return false;
+    }
+    match election.agent_present().await {
+        Presence::Present => true,
+        Presence::Absent => false,
+        Presence::Degraded(e) => {
+            tracing::debug!(
+                "account runtime: the agent presence re-read degraded ({e}) — keeping the role"
+            );
+            false
+        }
+    }
+}
+
+/// The holder's presence poll: its floor, the grant latch's own
+/// ([`GRANT_LATCH_POLL`] — an agent that mounts seconds after the app's
+/// sign-in is noticed within seconds), doubling up to the backstop interval,
+/// past which the tick it already has re-reads anyway. A backstop shorter
+/// than the floor (a test's) is the floor too.
+fn presence_poll_backoff(backstop: Duration) -> fauna_protocol::reconnect::Backoff {
+    let floor = GRANT_LATCH_POLL.0.min(backstop);
+    fauna_protocol::reconnect::Backoff::new(floor, backstop)
 }
 
 /// The seed-leg role this runtime plays (`account-runtime.md`
@@ -950,6 +1047,12 @@ impl AccountDriver {
         let mut latch_backoff =
             fauna_protocol::reconnect::Backoff::new(GRANT_LATCH_POLL.0, GRANT_LATCH_POLL.1);
         let mut latch_poll = std::pin::pin!(fauna_sleep::sleep(latch_backoff.ceiling()));
+        // A seed-holding holder's presence re-read (`presence_poll_backoff`),
+        // armed only while it holds the role; re-armed from the floor at each
+        // win below, so a role just taken is re-read within the floor.
+        let mut presence_backoff = presence_poll_backoff(settings.backstop_interval);
+        let mut presence_poll = std::pin::pin!(fauna_sleep::sleep(presence_backoff.ceiling()));
+        let seed_holding = principal.keypair().is_some();
         // Publish the election result the moment assembly settles it, and
         // again at both re-try wins below — the three places `role` can move.
         // A reader holding the handle must be able to tell a frozen
@@ -1279,6 +1382,26 @@ impl AccountDriver {
                 }
             };
         }
+        // The yield to the sync agent (`account-runtime.md` § Multi-instance
+        // concurrency → *The agent holds the role when present*, part 3), in
+        // its one order: the legs come down — the listener GONE — then the
+        // lock is released (the old `Holder` drops with its lock as `role` is
+        // overwritten), then the role fact flips. The order is the
+        // one-NodeId-per-machine invariant: the agent can take the role only
+        // once the lock is free, and by then nothing of this runtime listens.
+        // Every call site is a wake between passes, so nothing mid-pass is cut.
+        macro_rules! stand_down {
+            ($why:expr) => {{
+                legs.stand_down().await;
+                role = EngineRole::NonHolder;
+                cycles.set_holder(false);
+                tracing::info!(
+                    "account runtime: the sync agent hosts this store — engine role handed \
+                     over ({}); now a plain reader/writer",
+                    $why
+                );
+            }};
+        }
 
         // ── Prologue: run to completion before the first wait (contained like
         // every other pass — a poisoned prologue must not kill the thread —
@@ -1417,6 +1540,9 @@ impl AccountDriver {
                     () = &mut latch_poll, if !role.is_holder() && !*grant_registered.borrow() => {
                         Wake::GrantLatch
                     }
+                    () = &mut presence_poll, if seed_holding && role.is_holder() => {
+                        Wake::PresencePoll
+                    }
                 },
             };
             match wake {
@@ -1444,9 +1570,24 @@ impl AccountDriver {
                             // elsewhere → report the role; the seed-leg role's
                             // holder runs its seed pass and reports its slots,
                             // any other runtime runs nothing.
+                            //
+                            // A seed-holding holder first re-reads the agent's
+                            // presence and yields if it arrived; a seed-holding
+                            // non-holder does not contend while it is present.
                             retry_seed_legs(election, principal, &mut seed_legs).await;
+                            let mut yielded = false;
+                            if role.is_holder() && agent_arrived(election, principal).await {
+                                stand_down!("reconcile-now");
+                                yielded = true;
+                            }
                             if !role.is_holder() {
-                                match election.try_acquire().await {
+                                let outcome =
+                                    if yielded || agent_keeps_out(election, principal).await {
+                                        ElectionOutcome::Refused
+                                    } else {
+                                        election.try_acquire().await
+                                    };
+                                match outcome {
                                     ElectionOutcome::Held(lock) => {
                                         tracing::info!(
                                             "account runtime: engine singleton acquired \
@@ -1454,17 +1595,21 @@ impl AccountDriver {
                                         );
                                         role = EngineRole::Holder { _lock: Some(lock) };
                                         cycles.set_holder(true);
+                                        presence_backoff.reset();
+                                        presence_poll
+                                            .set(fauna_sleep::sleep(presence_backoff.ceiling()));
                                     }
                                     ElectionOutcome::Refused | ElectionOutcome::Degraded(_) => {
                                         let skipped = PumpReport {
                                             skipped_non_holder: true,
+                                            yielded,
                                             ..PumpReport::default()
                                         };
                                         if !seed_legs.is_holder() {
                                             let _ = reply.send(skipped);
                                             continue;
                                         }
-                                        let Ok(report) = run_seed_pass!("seed reconcile-now")
+                                        let Ok(mut report) = run_seed_pass!("seed reconcile-now")
                                         else {
                                             // As below: the pass was dropped
                                             // for a reassembly, and the caller
@@ -1475,6 +1620,7 @@ impl AccountDriver {
                                             });
                                             return ServeEnd::Reassemble;
                                         };
+                                        report.yielded = yielded;
                                         let reason = seed_pass_reassembly!(&report);
                                         let _ = reply.send(report);
                                         if let Some(reason) = reason {
@@ -1534,6 +1680,60 @@ impl AccountDriver {
                                 tracing::info!("account runtime: reassembling — {reason}");
                                 return ServeEnd::Reassemble;
                             }
+                        }
+                        // The grant-mint door's publish: the local-write
+                        // wake's step, run now on every role (a non-holder's
+                        // own rows are its own to publish), then the one
+                        // question the mint asks — does any ledger row this
+                        // device wrote still sit above its published
+                        // high-water?
+                        Cmd::PublishLedger { reply } => {
+                            *publish_due = false;
+                            let outcome = contained_pump(
+                                "publish-ledger",
+                                None,
+                                sign_out,
+                                &mut drive!(),
+                                publish_step(planes),
+                            )
+                            .await;
+                            let Ok(report) = outcome else {
+                                let _ = reply.send(Err(
+                                    "the account runtime reassembled during the publish".into(),
+                                ));
+                                return ServeEnd::Reassemble;
+                            };
+                            log_pump("publish-ledger", &report);
+                            if report.stale_writer {
+                                let _ = reply.send(Err(
+                                    "the writer was rotated under this process; the publish \
+                                     retries after reassembly"
+                                        .into(),
+                                ));
+                                tracing::info!(
+                                    "account runtime: reassembling — the writer was rotated \
+                                     under this process (publish-ledger)"
+                                );
+                                return ServeEnd::Reassemble;
+                            }
+                            let owed = planes
+                                .fleet
+                                .owes_own_state(|kind, _| {
+                                    kind == fauna_protocol::merge_policy::KIND_SUCCESSION_LEDGER
+                                })
+                                .await;
+                            let _ = reply.send(match owed {
+                                Ok(false) => Ok(()),
+                                Ok(true) if report.errors.is_empty() => {
+                                    Err("the bound nest has not acknowledged the grant log yet"
+                                        .into())
+                                }
+                                Ok(true) => Err(format!(
+                                    "the bound nest did not acknowledge the grant log: {}",
+                                    report.errors.join("; ")
+                                )),
+                                Err(e) => Err(format!("reading the unpublished rows: {e:#}")),
+                            });
                         }
                         // The explicit pass barrier: answered here, between
                         // passes, after every command parked before it.
@@ -1772,6 +1972,19 @@ impl AccountDriver {
                     }
                 }
 
+                // A seed-holding holder's presence re-read between passes: the
+                // agent arrived → hand it the role; else back off toward the
+                // backstop interval. No seed pass here — the poll is not a wake
+                // an engine holder runs a full pass on.
+                Wake::PresencePoll => {
+                    if agent_arrived(election, principal).await {
+                        stand_down!("presence poll");
+                    } else {
+                        presence_backoff.grow();
+                        presence_poll.set(fauna_sleep::sleep(presence_backoff.ceiling()));
+                    }
+                }
+
                 Wake::Tick => {
                     // The backstop tick doubles as the non-holder's re-election
                     // cadence (T9: no timer of its own). On a win — the previous
@@ -1786,8 +1999,19 @@ impl AccountDriver {
                     // tick's pass, full or seed, and from no pass before it.
                     *removed_heal_taken = false;
                     retry_seed_legs(election, principal, &mut seed_legs).await;
+                    // The tick is a presence re-read too: a seed-holding holder
+                    // the agent arrived beside yields here, and runs this
+                    // tick's seed pass as the non-holder it now is.
+                    if role.is_holder() && agent_arrived(election, principal).await {
+                        stand_down!("ticker");
+                        seed_pass_if_held!("seed ticker");
+                        continue;
+                    }
                     let label = if role.is_holder() {
                         "ticker"
+                    } else if agent_keeps_out(election, principal).await {
+                        seed_pass_if_held!("seed ticker");
+                        continue;
                     } else {
                         match election.try_acquire().await {
                             ElectionOutcome::Held(lock) => {
@@ -1797,6 +2021,8 @@ impl AccountDriver {
                                 );
                                 role = EngineRole::Holder { _lock: Some(lock) };
                                 cycles.set_holder(true);
+                                presence_backoff.reset();
+                                presence_poll.set(fauna_sleep::sleep(presence_backoff.ceiling()));
                                 "acquired"
                             }
                             ElectionOutcome::Refused => {
@@ -1875,6 +2101,8 @@ enum Wake {
     Tick,
     /// A non-holder's re-read of the slot's registration latch is due.
     GrantLatch,
+    /// A seed-holding holder's re-read of the agent's presence is due.
+    PresencePoll,
 }
 
 /// Which plane scope a push wakes, if any — the ONE push→nudge mapping every

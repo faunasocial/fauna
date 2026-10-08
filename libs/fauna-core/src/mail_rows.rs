@@ -4,37 +4,45 @@
 //! plane* owns the ruling; `mail-credentials.md` § Rotation and recovery →
 //! *The generation marker* owns the marker's invariant).
 //!
-//! **Two row families, the key's first segment dispatching:**
+//! **Three row families, the key's first segment dispatching:**
 //!
 //! | key | value |
 //! |---|---|
-//! | `self` | the account's ONE [`MailStateRow`] — the MSEK, its cap-2 grace window with retirements, the succession burns, the rotation sentinel, the three flags, the row's own stamp |
+//! | `self` | the account's ONE [`MailStateRow`] — the MSEK, the succession burns, the rotation sentinel, the three flags, the row's own stamp |
 //! | `credential/<credential_id>` | one [`MailCredential`], the value naming its key |
+//! | `generation/<fingerprint>` | one retired MSEK generation — a [`PriorMsekRetirement`] (the MSEK and its retirement instant), keyed by its [`MsekFingerprint`] in lowercase hex |
 //!
 //! The credentials are one row each for the atproto reason: the list grows by
 //! one per MUA with no count cap, every row carries a secret, and a burned
 //! row is kept on purpose — a `self` row holding them would be bounded by
-//! use, not by shape. Everything else is fixed by shape except the burns,
-//! which grow by one per succession *ceremony* (the size pin seals a 512-burn
-//! row under half the cap).
+//! use, not by shape. The generations are one row each for the same reason:
+//! every MSEK ever retired is kept, UNCAPPED, so a record sealed to any
+//! generation still opens (`owner-key-material.md` § Path B-sibling-2 →
+//! *Pre-rotation mail at rest*) — the list grows by one per rotation
+//! *ceremony*. Everything else is fixed by shape except the burns, which grow
+//! by one per succession ceremony (the size pin seals a 512-burn row under
+//! half the cap).
 //!
-//! **The joins.** [`MailStateRow::merge`] runs the MSEK, grace-window and
-//! burn halves [`MailConfig::merge`] runs — the same three
-//! functions — then decides the recreatable FOUR (`pending_rotation` and the
+//! **The joins.** [`MailStateRow::merge`] runs the MSEK and burn halves
+//! [`MailConfig::merge`] runs — the same functions — then decides the recreatable FOUR (`pending_rotation` and the
 //! three flags) as ONE latest-wins record on the row's own `updated_at`,
 //! `mail_enabled` present-wins beside the MSEK; [`MailConfig::merge`] decides FIVE (the
 //! credential list rides with them there), the one ruled divergence between
 //! the two. [`MailCredential::merge`] ORs the two monotone markers and takes
-//! the remainder on the row's stamp. There is no deletion: a revoke and a burn
-//! are markers, and a marked id is **spent** ([`MailRows::spent_credential_ids`]).
+//! the remainder on the row's stamp. A generation row is immutable once
+//! written: its MSEK is its key's preimage, and two devices recording one
+//! retirement join on the LATER instant ([`merge_generation`]). There is no
+//! deletion: a revoke and a burn are markers, a marked id is **spent**
+//! ([`MailRows::spent_credential_ids`]), and a generation is never dropped.
 //!
 //! **Decode posture.** [`MailStateRow`] is `deny_unknown_fields` (it has no
-//! whole-record twin); [`MailCredential`] stays tolerant (it is shared with
-//! [`MailConfig`]), so both families are ALSO decoded strict by round-trip — a row
-//! must re-encode to exactly its own bytes, which a value carrying a field
-//! this build does not know (at any depth) or any non-canonical spelling
-//! cannot. A marked credential row carrying a secret is refused too: the join
-//! never produces one.
+//! whole-record twin); [`MailCredential`] and [`PriorMsekRetirement`] stay
+//! tolerant (they are shared with [`MailConfig`]), so every family is ALSO
+//! decoded strict by round-trip — a row must re-encode to exactly its own
+//! bytes, which a value carrying a field this build does not know (at any
+//! depth) or any non-canonical spelling cannot. A marked credential row
+//! carrying a secret is refused too: the join never produces one. So is a
+//! generation row whose MSEK does not fingerprint to its key.
 
 use std::collections::BTreeMap;
 
@@ -42,7 +50,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::{
     MailConfig, MailCredential, MailSuccessionBurn, MsekFingerprint, PendingRotation,
-    PriorMsekRetirement, Timestamp, merge_grace_window, merge_msek, merge_succession_burns,
+    PriorMsekRetirement, Timestamp, merge_msek, merge_prior_generations, merge_succession_burns,
 };
 use crate::error::{Error, Result};
 use crate::secret::SecretArray32;
@@ -51,6 +59,9 @@ use crate::secret::SecretArray32;
 pub const STATE_KEY: &str = "self";
 /// Key prefix of a credential row: `credential/<credential_id>`.
 pub const CREDENTIAL_PREFIX: &str = "credential/";
+/// Key prefix of a retired-generation row: `generation/<fingerprint>`, the
+/// [`MsekFingerprint`] as 64 lowercase hex digits.
+pub const GENERATION_PREFIX: &str = "generation/";
 
 /// A parsed `fauna.state.mail` row key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,16 +70,29 @@ pub enum MailRowKey {
     State,
     /// `credential/<credential_id>` — one [`MailCredential`].
     Credential(String),
+    /// `generation/<fingerprint>` — one retired MSEK generation.
+    Generation(MsekFingerprint),
 }
 
 impl MailRowKey {
     /// Parse a row key.
     ///
     /// # Errors
-    /// A key outside the grammar, or a credential key with an empty id.
+    /// A key outside the grammar, a credential key with an empty id, or a
+    /// generation key that is not 64 lowercase hex digits.
     pub fn parse(key: &str) -> Result<Self> {
         if key == STATE_KEY {
             return Ok(Self::State);
+        }
+        if let Some(hex_fp) = key.strip_prefix(GENERATION_PREFIX) {
+            let mut fp = [0u8; 32];
+            // Lowercase only: one generation, one key spelling.
+            if !hex_fp.bytes().any(|b| b.is_ascii_uppercase())
+                && hex::decode_to_slice(hex_fp, &mut fp).is_ok()
+            {
+                return Ok(Self::Generation(MsekFingerprint(fp)));
+            }
+            return Err(Error::Encoding(format!("not a mail row key: {key:?}")));
         }
         match key.strip_prefix(CREDENTIAL_PREFIX) {
             Some(id) if !id.is_empty() => Ok(Self::Credential(id.to_string())),
@@ -82,7 +106,26 @@ impl MailRowKey {
         match self {
             Self::State => STATE_KEY.to_string(),
             Self::Credential(id) => format!("{CREDENTIAL_PREFIX}{id}"),
+            Self::Generation(fp) => format!("{GENERATION_PREFIX}{}", hex::encode(fp.0)),
         }
+    }
+}
+
+/// **The generation row's join**: one MSEK (the key's preimage, so both sides
+/// carry the same one), the LATER of two recorded retirement instants. Two
+/// devices retiring one generation in a cross-device finalize race each record
+/// their own instant; the instant bounds the generation's seal interval for
+/// the bounded-mail mint and orders the openers' trial, so extending it is the
+/// no-data-loss direction, and `max` is symmetric where first-recorded is not
+/// (the rule the retired capped window's retirement map ran, kept).
+#[must_use]
+pub fn merge_generation(
+    ours: &PriorMsekRetirement,
+    theirs: &PriorMsekRetirement,
+) -> PriorMsekRetirement {
+    PriorMsekRetirement {
+        msek: ours.msek.clone(),
+        retired_at_unix: ours.retired_at_unix.max(theirs.retired_at_unix),
     }
 }
 
@@ -102,12 +145,9 @@ pub struct MailRotationSentinel {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MailStateRow {
-    /// [`MailConfig::msek`].
+    /// [`MailConfig::msek`]. The generations it displaced live in their own
+    /// `generation/<fingerprint>` rows, never here.
     pub msek: Option<SecretArray32>,
-    /// [`MailConfig::prior_mseks`] — the cap-2 grace window.
-    pub prior_mseks: Vec<SecretArray32>,
-    /// [`MailConfig::prior_msek_retirements`].
-    pub prior_msek_retirements: Vec<PriorMsekRetirement>,
     /// [`MailConfig::succession_burns`] — one per succession ceremony.
     pub succession_burns: Vec<MailSuccessionBurn>,
     /// The rotation sentinel ([`MailRotationSentinel`]).
@@ -125,20 +165,14 @@ pub struct MailStateRow {
 
 impl MailStateRow {
     /// **The state row's join** (`config-dissolution.md` § *The mail plane*):
-    /// the MSEK present-wins / rotation-LWW, the capped grace window with its
-    /// retirements and the burn min-union — the three functions
-    /// [`MailConfig::merge`] runs — over the rows' own stamps; then the
+    /// the MSEK present-wins / rotation-LWW and the burn min-union — the
+    /// functions [`MailConfig::merge`] runs — over the rows' own stamps; then the
     /// recreatable FOUR (`pending_rotation`, the three flags) as ONE
     /// latest-wins decision on `updated_at`, `mail_enabled` present-wins
     /// beside the MSEK. The joined stamp is the later of the two.
     #[must_use]
     pub fn merge(&self, other: &Self) -> Self {
         let msek = merge_msek(&self.msek, self.updated_at, &other.msek, other.updated_at);
-        let (prior_mseks, prior_msek_retirements) = merge_grace_window(
-            msek.as_ref(),
-            (&self.prior_mseks, &self.prior_msek_retirements[..]),
-            (&other.prior_mseks, &other.prior_msek_retirements[..]),
-        );
         let succession_burns =
             merge_succession_burns(&self.succession_burns, &other.succession_burns);
         let (win, lose) = if crate::latest_wins::theirs_wins(
@@ -163,8 +197,6 @@ impl MailStateRow {
         };
         Self {
             msek,
-            prior_mseks,
-            prior_msek_retirements,
             succession_burns,
             pending_rotation: win.pending_rotation.clone(),
             // Present-wins, the winner's own value first ([`MailConfig::merge`]'s rule).
@@ -175,13 +207,12 @@ impl MailStateRow {
         }
     }
 
-    /// The state half of a [`MailConfig`], stamped `updated_at`.
+    /// The state half of a [`MailConfig`], stamped `updated_at` (its prior
+    /// generations are [`MailConfig::generation_rows`]).
     #[must_use]
     pub fn from_config(config: &MailConfig, updated_at: Timestamp) -> Self {
         Self {
             msek: config.msek.clone(),
-            prior_mseks: config.prior_mseks.clone(),
-            prior_msek_retirements: config.prior_msek_retirements.clone(),
             succession_burns: config.succession_burns.clone(),
             pending_rotation: config
                 .pending_rotation
@@ -198,9 +229,9 @@ impl MailStateRow {
 
     /// **A write of the recreatable half alone** — `pending_rotation`, the
     /// three flags and `mail_enabled` as `config` holds them, with the key
-    /// material left OUT: `msek` absent, the window and the burns empty. Every
-    /// key-material field joins present-wins or as a union, so the stored MSEK,
-    /// its window and its burns come through the door's join untouched, while
+    /// material left OUT: `msek` absent, the burns empty. Every key-material
+    /// field joins present-wins or as a union, so the stored MSEK and its
+    /// burns come through the door's join untouched, while
     /// the door's stamp (strictly above the stored row) makes these four win.
     /// The shape every flag write takes, so a flag flip made from a replica
     /// that has not yet seen another device's rotation can never revert the
@@ -209,8 +240,6 @@ impl MailStateRow {
     pub fn recreatable_of(config: &MailConfig) -> Self {
         Self {
             msek: None,
-            prior_mseks: Vec::new(),
-            prior_msek_retirements: Vec::new(),
             succession_burns: Vec::new(),
             ..Self::from_config(config, Timestamp::default())
         }
@@ -234,6 +263,8 @@ pub enum MailRecord {
     State(MailStateRow),
     /// A `credential/<credential_id>` row.
     Credential(MailCredential),
+    /// A `generation/<fingerprint>` row.
+    Generation(PriorMsekRetirement),
 }
 
 impl MailRecord {
@@ -248,6 +279,7 @@ impl MailRecord {
                 "a mail credential needs a credential_id to key its row".into(),
             )),
             Self::Credential(c) => Ok(MailRowKey::Credential(c.credential_id.clone()).key()),
+            Self::Generation(g) => Ok(MailRowKey::Generation(MsekFingerprint::of(&g.msek)).key()),
         }
     }
 
@@ -259,10 +291,12 @@ impl MailRecord {
         match self {
             Self::State(s) => crate::encoding::canonical_encode(s),
             Self::Credential(c) => crate::encoding::canonical_encode(c),
+            Self::Generation(g) => crate::encoding::canonical_encode(g),
         }
     }
 
-    /// The per-row join: [`MailStateRow::merge`] or [`MailCredential::merge`].
+    /// The per-row join: [`MailStateRow::merge`], [`MailCredential::merge`] or
+    /// [`merge_generation`].
     ///
     /// # Errors
     /// The two sides are different rows.
@@ -271,6 +305,9 @@ impl MailRecord {
             (Self::State(a), Self::State(b)) => Ok(Self::State(a.merge(b))),
             (Self::Credential(a), Self::Credential(b)) if a.credential_id == b.credential_id => {
                 Ok(Self::Credential(a.merge(b)))
+            }
+            (Self::Generation(a), Self::Generation(b)) if a.msek == b.msek => {
+                Ok(Self::Generation(merge_generation(a, b)))
             }
             _ => Err(Error::Encoding("mail rows name different rows".into())),
         }
@@ -294,12 +331,12 @@ where
 
 /// Decode one `fauna.state.mail` row: the key's first segment picks the
 /// family, the value must decode as it exactly (the module doc's posture), a
-/// credential must name its key's id, and a marked credential must carry no
-/// secret.
+/// credential must name its key's id, a marked credential must carry no
+/// secret, and a generation's MSEK must fingerprint to its key.
 ///
 /// # Errors
 /// A key outside the grammar, an undecodable or inexact value, a misfiled
-/// credential, or a marked credential still holding a secret.
+/// credential or generation, or a marked credential still holding a secret.
 pub fn decode_mail_row(key: &str, value: &[u8]) -> Result<MailRecord> {
     match MailRowKey::parse(key)? {
         MailRowKey::State => Ok(MailRecord::State(decode_exact(value)?)),
@@ -318,6 +355,15 @@ pub fn decode_mail_row(key: &str, value: &[u8]) -> Result<MailRecord> {
             }
             Ok(MailRecord::Credential(c))
         }
+        MailRowKey::Generation(fp) => {
+            let g: PriorMsekRetirement = decode_exact(value)?;
+            if MsekFingerprint::of(&g.msek) != fp {
+                return Err(Error::Encoding(format!(
+                    "mail generation row at {key:?} holds another generation"
+                )));
+            }
+            Ok(MailRecord::Generation(g))
+        }
     }
 }
 
@@ -329,6 +375,8 @@ pub struct MailRows {
     pub state: Option<MailStateRow>,
     /// Every credential row, revoked included, by id.
     pub credentials: BTreeMap<String, MailCredential>,
+    /// Every retired MSEK generation, by fingerprint — uncapped.
+    pub generations: BTreeMap<MsekFingerprint, PriorMsekRetirement>,
 }
 
 impl MailRows {
@@ -353,8 +401,19 @@ impl MailRows {
                 self.credentials
                     .insert(joined.credential_id.clone(), joined);
             }
+            MailRecord::Generation(g) => self.join_generation(g),
         }
         Ok(())
+    }
+
+    /// Join one retired generation into the set ([`merge_generation`]).
+    pub fn join_generation(&mut self, g: PriorMsekRetirement) {
+        let fp = MsekFingerprint::of(&g.msek);
+        let joined = match self.generations.get(&fp) {
+            Some(cur) => merge_generation(cur, &g),
+            None => g,
+        };
+        self.generations.insert(fp, joined);
     }
 
     /// Fold every `(key, value)` row.
@@ -436,9 +495,11 @@ impl MailRows {
     }
 
     /// **The READ fold** — the composite [`MailConfig`]: the state row's
-    /// fields plus every credential row that is not revoked (burned rows
-    /// SHOWN, they are the user's list to re-add), oldest first by
-    /// `created_at` then id.
+    /// fields, every retired generation as `prior_mseks` +
+    /// `prior_msek_retirements` (most recently retired first, ties by key
+    /// bytes, the current MSEK excluded — UNCAPPED), plus every credential row
+    /// that is not revoked (burned rows SHOWN, they are the user's list to
+    /// re-add), oldest first by `created_at` then id.
     #[must_use]
     pub fn config(&self) -> MailConfig {
         let state = self.state.clone().unwrap_or_default();
@@ -454,15 +515,19 @@ impl MailRows {
         let pending_rotation = state.pending_rotation.as_ref().map(|s| PendingRotation {
             new_msek: s.new_msek.clone(),
         });
+        let retirements: Vec<PriorMsekRetirement> = self.generations.values().cloned().collect();
+        let mseks: Vec<SecretArray32> = retirements.iter().map(|g| g.msek.clone()).collect();
+        let (prior_mseks, prior_msek_retirements) =
+            merge_prior_generations(state.msek.as_ref(), (&mseks, &retirements), (&[], &[]));
         MailConfig {
             msek: state.msek,
-            prior_mseks: state.prior_mseks,
+            prior_mseks,
             credentials,
             pending_rotation,
             mail_enabled: state.mail_enabled,
             caldav_enabled: state.caldav_enabled,
             carddav_enabled: state.carddav_enabled,
-            prior_msek_retirements: state.prior_msek_retirements,
+            prior_msek_retirements,
             succession_burns: state.succession_burns,
         }
     }
@@ -470,14 +535,43 @@ impl MailRows {
 
 impl MailConfig {
     /// Every plane row of this composite, `(key, record)`: the state row
-    /// stamped `state_at`, then each credential in list order.
+    /// stamped `state_at`, then each credential in list order, then each prior
+    /// generation ([`Self::generation_rows`]).
     ///
     /// # Errors
-    /// A credential with an empty id.
+    /// A credential with an empty id, or a prior generation with no recorded
+    /// retirement instant.
     pub fn rows(&self, state_at: Timestamp) -> Result<Vec<(String, MailRecord)>> {
         std::iter::once(MailRecord::State(MailStateRow::from_config(self, state_at)))
             .chain(self.credentials.iter().cloned().map(MailRecord::Credential))
+            .chain(
+                self.generation_rows()?
+                    .into_iter()
+                    .map(MailRecord::Generation),
+            )
             .map(|r| Ok((r.plane_key()?, r)))
+            .collect()
+    }
+
+    /// Each prior generation as its `generation/<fingerprint>` row's value, in
+    /// `prior_mseks` order.
+    ///
+    /// # Errors
+    /// A prior generation with no recorded retirement instant — an
+    /// inconsistent composite (the fold never produces one).
+    pub fn generation_rows(&self) -> Result<Vec<PriorMsekRetirement>> {
+        self.prior_mseks
+            .iter()
+            .map(|k| {
+                self.prior_msek_retired_at(k)
+                    .map(|retired_at_unix| PriorMsekRetirement {
+                        msek: k.clone(),
+                        retired_at_unix,
+                    })
+                    .ok_or_else(|| {
+                        Error::Encoding("a prior mail generation has no retirement instant".into())
+                    })
+            })
             .collect()
     }
 
@@ -537,7 +631,19 @@ mod tests {
         let cfg = sample();
         let rows = cfg.rows(Timestamp(1)).unwrap();
         let keys: Vec<&str> = rows.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, ["self", "credential/b-mail", "credential/a-mail"]);
+        let gen_key = format!(
+            "generation/{}",
+            hex::encode(MsekFingerprint::of(&SecretArray32::new([2; 32])).0)
+        );
+        assert_eq!(
+            keys,
+            [
+                "self",
+                "credential/b-mail",
+                "credential/a-mail",
+                gen_key.as_str()
+            ]
+        );
         let enc: Vec<(String, Vec<u8>)> = rows
             .iter()
             .rev()
@@ -631,11 +737,14 @@ mod tests {
         let mut rows = MailRows {
             state: Some(MailStateRow {
                 msek: Some(current.clone()),
-                prior_mseks: vec![prior.clone()],
                 ..MailStateRow::default()
             }),
             ..MailRows::default()
         };
+        rows.join_generation(PriorMsekRetirement {
+            msek: prior.clone(),
+            retired_at_unix: 1,
+        });
         let named = |id: &str, created: u64, gen_: Option<&SecretArray32>| MailCredential {
             wrapped_under: gen_.map(MsekFingerprint::of),
             ..cred(id, created, 1)
@@ -675,7 +784,7 @@ mod tests {
     }
 
     /// A recreatable-half write restates no key material, so the join keeps
-    /// the stored MSEK, window and burns whatever the writer's replica held —
+    /// the stored MSEK and burns whatever the writer's replica held —
     /// while its newer stamp carries the flags and the sentinel.
     #[test]
     fn a_recreatable_write_never_restates_the_key_material() {
@@ -695,11 +804,108 @@ mod tests {
         };
         let joined = stored.merge(&intent);
         assert_eq!(joined.msek, stored.msek, "the MSEK survives");
-        assert_eq!(joined.prior_mseks, stored.prior_mseks);
-        assert_eq!(joined.prior_msek_retirements, stored.prior_msek_retirements);
         assert_eq!(joined.succession_burns, stored.succession_burns);
         assert!(!joined.caldav_enabled, "the newer flags win");
         assert_eq!(joined.mail_enabled, Some(false));
+    }
+
+    fn generation(seed: u8, at: u64) -> PriorMsekRetirement {
+        PriorMsekRetirement {
+            msek: SecretArray32::new([seed; 32]),
+            retired_at_unix: at,
+        }
+    }
+
+    /// **Every generation ever retired is carried, uncapped** (`owner-key-material.md`
+    /// § Path B-sibling-2 → *Pre-rotation mail at rest*): five generation rows
+    /// fold into five priors, most recently retired first, each with its own
+    /// instant, the current MSEK excluded — whatever order the rows arrive in.
+    #[test]
+    fn the_fold_carries_every_generation_most_recent_first() {
+        let state = MailRecord::State(MailStateRow {
+            msek: Some(SecretArray32::new([9; 32])),
+            ..MailStateRow::default()
+        });
+        let mut recs = vec![state];
+        // Generation `n` retired at `100 * n`; plus a stray row for the
+        // current MSEK, which the fold must not list as a prior.
+        for n in [3u8, 1, 5, 2, 4] {
+            recs.push(MailRecord::Generation(generation(n, 100 * u64::from(n))));
+        }
+        recs.push(MailRecord::Generation(generation(9, 600)));
+        let enc: Vec<(String, Vec<u8>)> = recs
+            .iter()
+            .map(|r| (r.plane_key().unwrap(), r.encode().unwrap()))
+            .collect();
+        let cfg = MailConfig::fold(enc.iter().map(|(k, v)| (k.as_str(), v.as_slice()))).unwrap();
+        let seeds: Vec<u8> = cfg.prior_mseks.iter().map(|k| k.as_ref()[0]).collect();
+        assert_eq!(
+            seeds,
+            [5, 4, 3, 2, 1],
+            "uncapped, most recently retired first"
+        );
+        let instants: Vec<u64> = cfg
+            .prior_msek_retirements
+            .iter()
+            .map(|r| r.retired_at_unix)
+            .collect();
+        assert_eq!(instants, [500, 400, 300, 200, 100]);
+        // And the composite splits back into the same five rows.
+        let regen = cfg.generation_rows().unwrap();
+        assert_eq!(regen.len(), 5);
+        assert!(
+            regen
+                .iter()
+                .zip(&cfg.prior_msek_retirements)
+                .all(|(a, b)| a == b)
+        );
+    }
+
+    /// A generation row is keyed by its fingerprint in lowercase hex; a row
+    /// filed under another generation's key, an uppercase or short key, and a
+    /// value carrying an unknown field are refused. Two records of one
+    /// retirement join on the later instant, in either order.
+    #[test]
+    fn a_generation_row_is_keyed_by_its_fingerprint_and_joins_on_the_later_instant() {
+        let g = MailRecord::Generation(generation(4, 70));
+        let key = g.plane_key().unwrap();
+        assert_eq!(
+            key,
+            format!(
+                "generation/{}",
+                hex::encode(MsekFingerprint::of(&SecretArray32::new([4; 32])).0)
+            )
+        );
+        let v = g.encode().unwrap();
+        assert!(matches!(
+            decode_mail_row(&key, &v),
+            Ok(MailRecord::Generation(_))
+        ));
+        let other_key = MailRecord::Generation(generation(5, 70))
+            .plane_key()
+            .unwrap();
+        assert!(decode_mail_row(&other_key, &v).is_err(), "misfiled");
+        assert!(
+            decode_mail_row(&key.to_uppercase().replace("GENERATION", "generation"), &v).is_err()
+        );
+        assert!(decode_mail_row(&key[..key.len() - 2], &v).is_err());
+        assert!(decode_mail_row("generation/", &v).is_err());
+        assert!(decode_mail_row("self", &v).is_err());
+
+        let early = MailRecord::Generation(generation(4, 70));
+        let late = MailRecord::Generation(generation(4, 90));
+        for (a, b) in [(&early, &late), (&late, &early)] {
+            let MailRecord::Generation(j) = a.merge(b).unwrap() else {
+                panic!("a generation joins as a generation");
+            };
+            assert_eq!(j.retired_at_unix, 90);
+        }
+        assert!(
+            early
+                .merge(&MailRecord::Generation(generation(5, 70)))
+                .is_err(),
+            "two generations are different rows"
+        );
     }
 
     /// The fingerprint is the frozen derivation, and differs per generation.

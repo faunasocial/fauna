@@ -547,9 +547,27 @@ public partial class FeedPostItem : ObservableObject
     /// hash text render — see <see cref="HasVideo"/>.</summary>
     public string VideoHashHex { get; }
 
+    /// <summary>The nest-relative path of a bridged post's picture (its first folded
+    /// <c>ProxiedImage</c>), or <c>""</c> when the post carries none or has a blob image —
+    /// <see cref="MediaHashHex"/> wins the one <c>post-image</c> slot (render-model.md
+    /// § D6c). The card fetches it from the user's own nest with the session bearer and
+    /// shows a placeholder addressed by this path until the bytes land.</summary>
+    public string MediaProxiedPath { get; }
+
+    /// <summary>The nest-relative path of a bridged post's video (its first folded
+    /// <c>ProxiedVideo</c>), or <c>""</c> when the post carries none or has a blob video
+    /// (render-model.md § D6c → Proxied video). Painted as text only — never
+    /// byte-loaded.</summary>
+    public string VideoProxiedPath { get; }
+
+    /// <summary>What <c>video-thumbnail</c> paints beside the play glyph: the content hash
+    /// of a blob <c>Video</c>, else the path of a bridged <c>ProxiedVideo</c>, else
+    /// <c>""</c>.</summary>
+    public string VideoThumbnailText => VideoHashHex.Length > 0 ? VideoHashHex : VideoProxiedPath;
+
     /// <summary>Gate for <c>video-thumbnail</c>'s visibility — true iff the document folded a
-    /// <c>Video</c> embed.</summary>
-    public bool HasVideo => VideoHashHex.Length > 0;
+    /// <c>Video</c> or a <c>ProxiedVideo</c> embed.</summary>
+    public bool HasVideo => VideoThumbnailText.Length > 0;
 
     /// <summary>The post body as the shared semantic <c>RenderDocument</c>
     /// (<c>PostSummary.document</c>, produced once by the feed manager via
@@ -941,6 +959,19 @@ public partial class FeedPostItem : ObservableObject
     /// policy, it never silently disappears). No reveal affordance accompanies it.</summary>
     public bool ShowContentBlockedNotice => RenderArm == SocialRenderArm.ContentBlocked;
 
+    /// <summary>The viewer's own report hid this post (moderation.md § Corollary):
+    /// the <c>content-policy-blocked-notice</c> then reads "You reported this"
+    /// (<see cref="ContentBlockedNoticeText"/>, <c>source="reported"</c>) instead of
+    /// the family-policy sentence. Part of <see cref="ContentEquals"/> through
+    /// <see cref="ContentVerdict"/>/<see cref="Reported"/>, so reporting repaints
+    /// the row on the next re-sync.</summary>
+    public bool Reported { get; }
+
+    /// <summary>The words of the blocked-notice: the viewer's own act when they
+    /// reported it, else the family-policy sentence.</summary>
+    public string ContentBlockedNoticeText => Strings.Get(
+        Reported ? "moderation/report/hidden_placeholder" : "family/content_blocked_notice");
+
     /// <summary>Gate for the muted-keyword placeholder + its reveal button.</summary>
     public bool ShowMutedCollapse => RenderArm == SocialRenderArm.Muted;
 
@@ -1132,6 +1163,10 @@ public partial class FeedPostItem : ObservableObject
         // to the shared UniFFI faces rather than re-walking the block tree here.
         MediaHashHex = FaunaApp.Core.Helpers.DocumentRenderer.MediaImageHash(p.document) ?? "";
         VideoHashHex = FaunaApp.Core.Helpers.DocumentRenderer.MediaVideoHash(p.document) ?? "";
+        // A bridged post's media folds in as ProxiedImage / ProxiedVideo — a nest-relative
+        // path instead of a content hash (render-model.md § D6c).
+        MediaProxiedPath = FaunaApp.Core.Helpers.DocumentRenderer.MediaProxiedPath(p.document) ?? "";
+        VideoProxiedPath = FaunaApp.Core.Helpers.DocumentRenderer.MediaProxiedVideoPath(p.document) ?? "";
         var quote = FaunaApp.Core.Helpers.DocumentRenderer.QuotedPost(p.document);
         HasQuotedPost = quote is not null;
         QuotedPostAuthor = quote is not null ? FaunaFfiMethods.ShortId(quote.author) : "";
@@ -1231,6 +1266,7 @@ public partial class FeedPostItem : ObservableObject
         var decision = ContentPolicyCache.RenderFor(p.labels, RegionSubject.Post(p));
         ContentVerdict = decision.Verdict;
         Region = decision.Placeholder;
+        Reported = decision.Reported;
         // Guardian Notify (family-safety.md § Guardian Notify): count any
         // GUARDIAN-floor enforcement on this item — never the own-threshold
         // collapse above, which is a different lens. A no-op unless the ward's
@@ -1271,6 +1307,8 @@ public partial class FeedPostItem : ObservableObject
             && IsReplyPost == other.IsReplyPost
             && MediaHashHex == other.MediaHashHex
             && VideoHashHex == other.VideoHashHex
+            && MediaProxiedPath == other.MediaProxiedPath
+            && VideoProxiedPath == other.VideoProxiedPath
             && HasBlockedRemoteImage == other.HasBlockedRemoteImage
             && LikeCount == other.LikeCount
             && ReplyCount == other.ReplyCount
@@ -1324,6 +1362,7 @@ public partial class FeedPostItem : ObservableObject
             // row. ContentRevealed is NOT here, for the same reason Revealed isn't: it's
             // session-local reveal state, not snapshot content.
             && ContentVerdict == other.ContentVerdict
+            && Reported == other.Reported
             // ...and the region placeholder beside it (a record: verb, region,
             // authority, reason) — a newer document can keep the verb and change
             // the reason, which is render-bound content too.

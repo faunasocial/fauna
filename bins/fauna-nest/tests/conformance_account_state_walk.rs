@@ -2473,11 +2473,10 @@ async fn the_retained_bundle_bridges_the_unkeyed_window_and_drops_on_shred() {
     else {
         panic!("the mint is live before the shred");
     };
-    let shred = fauna_core::generation::GenerationMintRecord::Shredded {
-        core,
-        shredded_at_ms: 9_000,
-        shredded_by: writer_id(0x0A).0,
-    };
+    // Authored by A, a verified member — an unauthored shred drops no key
+    // (`account-data-taxonomy.md` § *Fleet-scope reclamation* → *the
+    // authored shred*; the plane's own tier_1 tests pin that half).
+    let shred = fauna_core::generation::sign_shred(&signing_key(0x0A), core, 9_000).unwrap();
     plane_fleet(&a, &rpc, &keys, &signing_key(0x0A))
         .put(
             &ItemId {
@@ -2509,10 +2508,18 @@ async fn the_retained_bundle_bridges_the_unkeyed_window_and_drops_on_shred() {
         .walk()
         .await
         .unwrap();
-    let opened =
-        generation_tip::generation_key_for(&c, &generation, &signing_key(0x0C), Some(&c_custody))
-            .await
-            .unwrap();
+    let view = fauna_sync_engine::fleet_removal::fleet_view(&c, &TRUST)
+        .await
+        .unwrap();
+    let opened = generation_tip::generation_key_for(
+        &c,
+        &generation,
+        &signing_key(0x0C),
+        Some(&c_custody),
+        Some(&view),
+    )
+    .await
+    .unwrap();
     assert!(
         opened.is_none(),
         "a shredded generation keys nothing, bundle or not"
@@ -5295,6 +5302,7 @@ async fn holds_generation_key(seat: &Seat, generation: &[u8; 32]) -> bool {
             generation,
             &seat.key,
             Some(&seat.custody),
+            None,
         )
         .await
         .unwrap()
@@ -5319,6 +5327,33 @@ async fn is_shredded(seat: &Seat, generation: &[u8; 32]) -> bool {
                 fauna_core::generation::GenerationMintRecord::Shredded { .. }
             )
         })
+}
+
+/// Does `seat`'s merged state read `generation` as an AUTHORED shred at its
+/// current fleet view — the one row that licenses dropping the generation's
+/// key from the retained bundle (`account-data-taxonomy.md` § Fleet-scope
+/// reclamation → *the authored shred*)?
+async fn is_authored_shred(seat: &Seat, generation: &[u8; 32]) -> bool {
+    let Some(record) = seat
+        .store
+        .state(KIND_GENERATION_MINT, &fauna_core::hex32::encode(generation))
+        .await
+        .unwrap()
+        .and_then(|e| {
+            fauna_core::encoding::canonical_decode::<fauna_core::generation::GenerationMintRecord>(
+                &e.value,
+            )
+            .ok()
+        })
+    else {
+        return false;
+    };
+    let view = fauna_sync_engine::fleet_removal::fleet_view(&seat.store, seat.trust())
+        .await
+        .unwrap();
+    record
+        .shred_is_authored(&view)
+        .is_ok_and(|id| id == *generation)
 }
 
 /// **The control.** A stays: its device-endpoints row and the account's
@@ -5638,13 +5673,24 @@ async fn a_single_device_sign_in_recovers_its_generation_from_escrow_and_holds_t
         folder_key_custody(),
         "A′ reads the account's folder-key custody again"
     );
-    let recovered = a2.custody.0.lock().unwrap().contains_key(&g1);
+    let in_bundle = a2.custody.0.lock().unwrap().contains_key(&g1);
+    let authored_shred = is_authored_shred(&a2, &g1).await;
     let held = reception_keys_held(&a2).await;
-    let state =
-        format!("generation 1 in A′'s bundle: {recovered}, reception keys A′ holds: {held}");
+    let state = format!(
+        "generation 1 in A′'s bundle: {in_bundle}, g1 under an authored shred: \
+         {authored_shred}, reception keys A′ holds: {held}"
+    );
+    // A′ keyed generation 1 from its escrow wrap: the reads above and below
+    // open only under it or under a generation A′'s hand-over minted from it.
+    // The key rides the retained bundle until generation 1's AUTHORED shred —
+    // the reclaim pass signs the shred it writes, and an authored shred is the
+    // one row that drops the key (`account-data-taxonomy.md` § Fleet-scope
+    // reclamation → *the authored shred*). So "still held" is pinned only
+    // while no authored shred stands.
     assert!(
-        recovered,
-        "A′ keys generation 1 from its escrow wrap and the key rides its retained bundle — {state}"
+        in_bundle || authored_shred,
+        "A′ keys generation 1 from its escrow wrap and the key rides its retained bundle until \
+         an authored shred — {state}"
     );
     assert_eq!(
         held, 1,
@@ -6293,9 +6339,15 @@ async fn an_unkeyed_successor_keys_a_pre_succession_generation_from_the_kept_wra
         g1,
         measured,
     } = an_unkeyed_successor().await;
+    // U keyed g1 from the kept wrap; the key rides U's retained bundle until
+    // g1's AUTHORED shred, which the reclaim pass below writes and which is
+    // the one row that drops it (`account-data-taxonomy.md` § Fleet-scope
+    // reclamation → *the authored shred*). The keying itself is pinned by the
+    // carried mint record (next assert) and the reads at the end.
+    let in_bundle = u.custody.0.lock().unwrap().contains_key(&g1);
     assert!(
-        u.custody.0.lock().unwrap().contains_key(&g1),
-        "U keys g1 from the wrap the ceremony kept — {measured}"
+        in_bundle || is_authored_shred(&u, &g1).await,
+        "U keys g1 from the wrap the ceremony kept, until its authored shred — {measured}"
     );
     assert!(
         u.store
@@ -6307,11 +6359,12 @@ async fn an_unkeyed_successor_keys_a_pre_succession_generation_from_the_kept_wra
     );
     // From there g1 is any carried generation: U's first tip-sealed write
     // mints its own, the hand-over re-seals every pre-succession row under
-    // it, and g1 — nothing resting under it — shreds and its wrap is swept,
-    // as `a_successor_on_its_own_generation_0_schedule_reads_a_pre_succession_tip_sealed_row`
+    // it, and g1 — nothing resting under it — shreds under U's signature, its
+    // wrap is swept and its key dropped, as
+    // `a_successor_on_its_own_generation_0_schedule_reads_a_pre_succession_tip_sealed_row`
     // measures for a successor that carried the key.
     assert!(
-        is_shredded(&u, &g1).await && !escrowed(&rpc, &g1).await,
+        is_authored_shred(&u, &g1).await && !escrowed(&rpc, &g1).await,
         "g1 is reclaimed behind the hand-over — {measured}"
     );
     assert_reads_every_pre_succession_row(&u, &format!("U, keyed from the kept wrap ({measured})"))

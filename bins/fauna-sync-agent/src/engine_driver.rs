@@ -354,6 +354,9 @@ struct LocationEngineSpec {
     /// host's background task announces the set and routes the nest's asks.
     /// One per host, so it is account-scoped exactly as the spec is.
     relay_seat: Arc<RelaySeat>,
+    /// The agent's sibling registry ([`crate::peer_files`]): every engine asks
+    /// this account's other devices for chunk bodies before the nest.
+    siblings: Arc<fauna_sync_engine::sibling_chunks::SiblingChannels>,
 }
 
 impl LocationEngineSpec {
@@ -363,6 +366,7 @@ impl LocationEngineSpec {
         event_tx: broadcast::Sender<Event>,
         paths: SyncPaths,
         state: Weak<SyncServiceState>,
+        siblings: Arc<fauna_sync_engine::sibling_chunks::SiblingChannels>,
     ) -> Self {
         Self {
             capability,
@@ -375,6 +379,7 @@ impl LocationEngineSpec {
             backup_key: inputs.backup_key,
             predecessors: inputs.predecessors,
             relay_seat: RelaySeat::new(),
+            siblings,
         }
     }
 }
@@ -406,6 +411,7 @@ impl EngineSpec for LocationEngineSpec {
         let folder = desc.folder.clone();
         let mode = desc.mode;
         let relay_seat = Arc::clone(&self.relay_seat);
+        let siblings = Arc::clone(&self.siblings);
 
         Box::pin(async move {
             // Per-folder state DBs live under the resolved data-root
@@ -538,7 +544,12 @@ impl EngineSpec for LocationEngineSpec {
                     }),
                 }
             };
-            let engine = built.engine.with_binding_edge(edge);
+            // Sibling devices first, the nest for the rest — the folder is
+            // named by the edge's ref, which is how a sibling's seat routes it.
+            let engine = built
+                .engine
+                .with_binding_edge(edge)
+                .with_sibling_chunks(siblings);
 
             // Both modes register the SAME two per-folder channels — the
             // remote-change nudge and the invoke-and-reply command — so a
@@ -1827,7 +1838,11 @@ pub(crate) async fn reconcile_resolved(state: &Arc<SyncServiceState>) -> Result<
                 // Weak: the state owns the host, the host owns this spec — a
                 // strong handle here would close the cycle and leak the service.
                 Arc::downgrade(state),
+                state.peer_files.siblings(),
             );
+            // The peer leg's chunk door serves through this host's seat from
+            // now on (`crate::peer_files`).
+            state.peer_files.set_seat(&spec.relay_seat);
             let host = EngineHost::start(spec, desired);
             tracing::info!(engines = started.len(), "multi-root sync host started");
             *guard = Some(RunningEngines {

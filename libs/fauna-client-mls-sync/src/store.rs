@@ -270,7 +270,7 @@ pub enum MlsReplicaClientError {
     /// it (`fauna.mls.too_large`) and the WS frame would drop it, so the client
     /// surfaces it **before** the put rather than that path silently failing to
     /// sync. A `history/<hex>` slice hitting this needs the deferred chunked
-    /// history path (finding 1 / design § 2).
+    /// history path (design § 2).
     TooLarge { path: String, size: usize },
     /// A `save_*_cas` hit `fauna.mls.conflict` on every one of its bounded
     /// retries — another of the user's devices kept winning the race. Surfaced
@@ -375,7 +375,7 @@ impl MlsReplicaClient {
     }
 
     /// Raw `fauna.mls.put` of an already-sealed blob under `base`. Enforces
-    /// [`MAX_MLS_REPLICA_BYTES`] client-side first (finding 1). Returns the
+    /// [`MAX_MLS_REPLICA_BYTES`] client-side first. Returns the
     /// [`PutOutcome`] so `save_*_cas` can retry on a classified conflict.
     pub(crate) async fn put_blob(
         &self,
@@ -1192,7 +1192,7 @@ mod tests {
         }
     }
 
-    /// Finding 1: an over-`MAX_MLS_REPLICA_BYTES` sealed blob is rejected client-
+    /// An over-`MAX_MLS_REPLICA_BYTES` sealed blob is rejected client-
     /// side **before** the put (no wasted round-trip), not silently frame-dropped.
     #[test]
     fn oversize_history_slice_is_too_large_before_put() {

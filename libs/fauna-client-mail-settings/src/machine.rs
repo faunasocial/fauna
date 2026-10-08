@@ -29,13 +29,12 @@ use fauna_mail::spam::model_write::{
 };
 use fauna_mail::spam::{SpamLabel, SpamModel};
 use fauna_mls::wrapped_blob::{
-    GrantWindow, MAIL_EPOCH_PUBLISH_HORIZON, MLKEM768_DECAPS_KEY_LEN, MlsSnapshotBlob,
-    SNAPSHOT_GRACE_KEYPAIRS, ScopeTuple, StandingMailKeypair, SubmissionToken, WrappedMsekBlob,
-    WrappedSubmissionTokenBlob, XWingPublicKey, build_mls_snapshot_plaintext,
-    derive_mail_epoch_root, derive_recipient_epoch_hpke_keypair,
-    derive_recipient_epoch_xwing_keypair, derive_recipient_hpke_keypair,
-    derive_recipient_xwing_keypair, derive_standing_mail_keypairs, mail_sealing_epoch_of,
-    seal_spam_model_copy,
+    GrantWindow, MAIL_EPOCH_PUBLISH_HORIZON, MLKEM768_DECAPS_KEY_LEN, MlsSnapshotBlob, ScopeTuple,
+    StandingMailKeypair, SubmissionToken, WrappedMsekBlob, WrappedSubmissionTokenBlob,
+    XWingPublicKey, build_mls_snapshot_plaintext, derive_mail_epoch_root,
+    derive_recipient_epoch_hpke_keypair, derive_recipient_epoch_xwing_keypair,
+    derive_recipient_hpke_keypair, derive_recipient_xwing_keypair, derive_standing_mail_keypairs,
+    mail_sealing_epoch_of, seal_spam_model_copy,
 };
 use fauna_protocol::bridge_routing::{
     EpochSealKey, SpamHistoryOp, SpamLabel as WireSpamLabel, TrainingSource as WireTrainingSource,
@@ -534,19 +533,17 @@ impl crate::export::MailExportKeyCustody for MailSettingsMachine {
     ) -> Result<Arc<dyn crate::export::MailRecordOpening>, DispatchError> {
         let mail = self.mail.load().await?;
         let msek = mail.msek.as_ref().ok_or_else(export_needs_mail)?;
-        // Current generation first, then the grace generations a rotation
-        // retained — the exact history `standing_mail_keypairs` reads, so the
-        // export can open whatever the user's inbox can.
+        // Current generation first, then every generation a rotation retired
+        // — the exact history `standing_mail_keypairs` reads, so the export
+        // can open whatever the user's inbox can.
         let history: Vec<[u8; 32]> = std::iter::once(**msek)
-            .chain(
-                mail.prior_mseks
-                    .iter()
-                    .take(SNAPSHOT_GRACE_KEYPAIRS - 1)
-                    .map(|prior| **prior),
-            )
+            .chain(mail.prior_mseks.iter().map(|prior| **prior))
             .collect();
         Ok(Arc::new(
-            crate::export::StandingKeyRecordOpener::from_msek_history(&history),
+            crate::export::StandingKeyRecordOpener::from_msek_history(
+                &history,
+                &mail.prior_retired_at_unix(),
+            ),
         ))
     }
 
@@ -562,12 +559,7 @@ impl crate::export::MailExportKeyCustody for MailSettingsMachine {
         // doc). A current-generation-only unwrap would hand such a client a row
         // it can see, a blob it can download, and no way to read it.
         let history: Vec<[u8; 32]> = std::iter::once(**msek)
-            .chain(
-                mail.prior_mseks
-                    .iter()
-                    .take(SNAPSHOT_GRACE_KEYPAIRS - 1)
-                    .map(|prior| **prior),
-            )
+            .chain(mail.prior_mseks.iter().map(|prior| **prior))
             .collect();
         let standing = fauna_mls::wrapped_blob::derive_standing_mail_keypairs(&history);
         let blob = fauna_mls::wrapped_blob::ExportSessionKeyBlob::from_canonical_bytes(wrapped)
@@ -792,9 +784,8 @@ impl MailSettingsMachine {
     }
 
     /// The account's complete **standing** recipient-mail key set — the current
-    /// MSEK's keypair first, then one per prior grace generation
-    /// (the custody's `prior_mseks`, capped so the total is
-    /// [`SNAPSHOT_GRACE_KEYPAIRS`]) — from the ONE shared derivation the MDA's
+    /// MSEK's keypair first, then one per prior generation (the custody's
+    /// `prior_mseks`, every one ever retired) — from the ONE shared derivation the MDA's
     /// snapshot is built from (`derive_standing_mail_keypairs`), so what a
     /// client can open is exactly what the MDA can (`owner-key-material.md`
     /// § Path B-sibling-2). Empty when mail isn't enabled. The web receive rail
@@ -804,9 +795,9 @@ impl MailSettingsMachine {
     ///
     /// The client's **mail-epoch roots** for the content-sealing-epochs opener
     /// chain (design § 4/§ 5), as a flat `Vec<u8>` of `N × 32` bytes: root `[0]`
-    /// = the current MSEK's [`derive_mail_epoch_root`], then one per prior grace
-    /// generation (the custody's `prior_mseks`, capped so the total is
-    /// [`SNAPSHOT_GRACE_KEYPAIRS`]) — exactly the set the shared snapshot builder
+    /// = the current MSEK's [`derive_mail_epoch_root`], then one per prior
+    /// generation (the custody's `prior_mseks`, every one ever retired) —
+    /// exactly the set the shared snapshot builder
     /// carries as `mail_epoch_grace_roots`. Empty when mail isn't enabled (no
     /// MSEK). The web/UniFFI receive rail threads this into the epoch opener
     /// (`fauna_mail::open_inbound_record_epoch_hybrid`) so a client reads mail
@@ -829,12 +820,7 @@ impl MailSettingsMachine {
             return Ok(Vec::new());
         };
         let mseks: Vec<[u8; 32]> = std::iter::once(**msek)
-            .chain(
-                mail.prior_mseks
-                    .iter()
-                    .take(SNAPSHOT_GRACE_KEYPAIRS - 1)
-                    .map(|prior| **prior),
-            )
+            .chain(mail.prior_mseks.iter().map(|prior| **prior))
             .collect();
         Ok(derive_standing_mail_keypairs(&mseks))
     }
@@ -858,18 +844,20 @@ impl MailSettingsMachine {
         let Some(msek) = mail.msek.as_ref() else {
             return Ok(Vec::new());
         };
-        let mut out = Vec::with_capacity(SNAPSHOT_GRACE_KEYPAIRS * 32);
+        let mut out = Vec::with_capacity((1 + mail.prior_mseks.len()) * 32);
         out.extend_from_slice(derive_mail_epoch_root(msek).as_slice());
-        for prior in mail.prior_mseks.iter().take(SNAPSHOT_GRACE_KEYPAIRS - 1) {
+        for prior in &mail.prior_mseks {
             out.extend_from_slice(derive_mail_epoch_root(prior).as_slice());
         }
         Ok(out)
     }
 
     /// Build + seal + provision the read-side MLS snapshot for an MSEK history
-    /// (`mseks[0]` = current generation, the rest grace, deduped; the builder
-    /// caps at [`SNAPSHOT_GRACE_KEYPAIRS`]). Sealed under `mseks[0]` — the key
-    /// the MDA unwraps it with.
+    /// (`mseks[0]` = current generation, then every prior, deduped — the
+    /// builder caps nothing) with each prior's retirement instant
+    /// (`retired_at_unix`, aligned with `mseks[1..]`; the alignment is kept
+    /// through the dedup and the list cut at the first gap). Sealed under
+    /// `mseks[0]` — the key the MDA unwraps it with.
     ///
     /// **This is the dk half of the recipient keypair**, and the *only* route
     /// by which it reaches the nest. Its ek half rides
@@ -886,15 +874,25 @@ impl MailSettingsMachine {
     pub(crate) async fn provision_snapshot_for(
         &self,
         mseks: &[[u8; 32]],
+        retired_at_unix: &[u64],
     ) -> Result<(), DispatchError> {
         let Some(current) = mseks.first() else {
             return Ok(());
         };
         let mut deduped: Vec<[u8; 32]> = Vec::with_capacity(mseks.len());
-        for k in mseks {
-            if !deduped.contains(k) {
-                deduped.push(*k);
+        let mut instants: Vec<u64> = Vec::with_capacity(retired_at_unix.len());
+        let mut aligned = true;
+        for (i, k) in mseks.iter().enumerate() {
+            if deduped.contains(k) {
+                continue;
             }
+            if i > 0 {
+                match retired_at_unix.get(i - 1) {
+                    Some(&at) if aligned => instants.push(at),
+                    _ => aligned = false,
+                }
+            }
+            deduped.push(*k);
         }
         // ⚠ **OFF the caller's stack, on purpose** — this line derives an X-Wing
         // (ML-KEM-768 ∥ X25519) keypair per grace MSEK, and it is the exact leaf
@@ -924,12 +922,13 @@ impl MailSettingsMachine {
         // takes the synchronous derivation directly.)
         #[cfg(not(target_arch = "wasm32"))]
         let snapshot_state = tokio::task::spawn_blocking(move || {
-            build_mls_snapshot_plaintext(&deduped).to_canonical_bytes()
+            build_mls_snapshot_plaintext(&deduped, &instants).to_canonical_bytes()
         })
         .await
         .map_err(|e| DispatchError::Wrap(format!("mls snapshot plaintext task failed: {e}")))??;
         #[cfg(target_arch = "wasm32")]
-        let snapshot_state = build_mls_snapshot_plaintext(&deduped).to_canonical_bytes()?;
+        let snapshot_state =
+            build_mls_snapshot_plaintext(&deduped, &instants).to_canonical_bytes()?;
         let snapshot_blob =
             wrap::seal_snapshot_under_msek(&snapshot_state, &self.actor_id, current)?;
         self.nest.provision_mls_snapshot_blob(snapshot_blob).await?;
@@ -1279,8 +1278,9 @@ impl MailSettingsMachine {
     /// (`mail-spam.md` § Encrypted-mode interaction; the artifact travels as the
     /// separately-attached holder copy, this grant conveys **no** key material —
     /// `derive_scope_payload` returns `None` for the spam-model kind). The log
-    /// records the mint **first**, and only a durable record releases the blob
-    /// for deposit ([`grant_log::UndepositedGrant`] — the record-then-deposit
+    /// records the mint **first**, and only a durable record the bound nest
+    /// has acknowledged releases the blob for deposit
+    /// ([`grant_log::UndepositedGrant`] — the record, publish, then deposit
     /// rule, shared with `LinkedNestsMachine::mint`). ⚠ This comment used to say
     /// the opposite, having copied the pre-2026-08-14 order from that same site
     /// and cited it as canonical prior art; that is how finding reached
@@ -1340,15 +1340,15 @@ impl MailSettingsMachine {
             now,
         );
         let signed = self.signer.sign_grant_event(unsigned)?;
-        let stored = self
+        let published = self
             .ledger
-            .merge(SuccessionLedger::events_replica(
+            .merge_published(SuccessionLedger::events_replica(
                 ActorId(self.actor_id),
                 vec![signed],
             ))
             .await?;
         let blob_bytes = pending
-            .release(&grant_log::RecordedGrants::from_stored(&stored))
+            .release(&grant_log::PublishedGrants::from_published(&published))
             .map_err(|e| DispatchError::InvalidState(e.to_string()))?;
         self.nest.mint_grant(blob_bytes).await?;
         Ok(())
@@ -1682,12 +1682,19 @@ impl MailSettingsMachine {
     ) -> Result<(), DispatchError> {
         let credential_id = derive_credential_id(&display_name, &rows.spent_credential_ids());
         let mut history = Self::snapshot_mseks(mail);
-        if history.first() != Some(&msek.to_array()) {
+        // The custody's instants describe its own priors; a fresh `msek`
+        // pushed in front leaves them unaligned, so they are dropped then
+        // (the snapshot's openers walk the whole ring).
+        let retired_at_unix = if history.first() == Some(&msek.to_array()) {
+            mail.prior_retired_at_unix()
+        } else {
             history.insert(0, msek.to_array());
-        }
+            Vec::new()
+        };
         self.provision_mailbox_blobs(
             msek,
             &history,
+            &retired_at_unix,
             &credential_id,
             credential,
             with_submission_token,
@@ -1837,12 +1844,14 @@ impl MailSettingsMachine {
         &self,
         msek: &[u8; 32],
         history: &[[u8; 32]],
+        retired_at_unix: &[u64],
         credential_id: &str,
         credential: &Credential,
         with_submission_token: bool,
     ) -> Result<(), DispatchError> {
         // The read-side snapshot, sealed under `history[0]` (= `msek`).
-        self.provision_snapshot_for(history).await?;
+        self.provision_snapshot_for(history, retired_at_unix)
+            .await?;
 
         // Register the actor's recipient-mail pubkey (derived from MSEK) *after*
         // the snapshot, so the matching secret is reachable before the MTA can
@@ -1934,6 +1943,7 @@ impl MailSettingsMachine {
         self.provision_mailbox_blobs(
             msek,
             &Self::snapshot_mseks(&mail),
+            &mail.prior_retired_at_unix(),
             &credential_id,
             &credential,
             false,
@@ -2454,7 +2464,7 @@ impl MailSettingsMachine {
         // conditional on a read-back: the blob is small, the write is an
         // idempotent atomic replace, and a pairing that holds by construction
         // is worth one extra write per connect.
-        self.provision_snapshot_for(&Self::snapshot_mseks(&mail))
+        self.provision_snapshot_for(&Self::snapshot_mseks(&mail), &mail.prior_retired_at_unix())
             .await?;
         self.nest
             .provision_recipient_mls_pubkey(

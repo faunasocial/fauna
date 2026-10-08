@@ -232,7 +232,7 @@ The guard is covered end-to-end by `tests/e2e-unified/tests/test_tray_close_to_t
 
 ### Desktop Notifications
 
-Freedesktop notifications via `notify-rust`. Notifications are suppressed when the main window has focus to avoid double-alerting the user. With the app closed, the per-user sync agent posts the push banner instead — the `ws-device` transport ([`common.md`](common.md) § Push Notifications → *Transports*, ruled 2026-09-26, unbuilt): the agent posts only while no app is attached over the IPC seam, so this focus rule and the agent's arm never both fire. Per-file completed-sync notifications are pushed from the per-user sync agent's event socket, not generated in-process — the agent and its IPC event contract are owned by [`sync-agent.md`](sync-agent.md) § Implementation status (A3 remainder).
+Freedesktop notifications via `notify-rust`. Notifications are suppressed when the main window has focus to avoid double-alerting the user. With the app closed, the per-user sync agent posts the push banner instead — the `ws-device` transport ([`common.md`](common.md) § Push Notifications → *Transports*, ruled 2026-09-26, built 2026-10-08): the agent posts only while no app is attached over the IPC seam, so this focus rule and the agent's arm never both fire — the app holds its attachment lease from the post-auth `sync_agent::install`, once per process. Per-file completed-sync notifications are pushed from the per-user sync agent's event socket, not generated in-process — the agent and its IPC event contract are owned by [`sync-agent.md`](sync-agent.md) § Implementation status (A3 remainder).
 
 ### Update check
 

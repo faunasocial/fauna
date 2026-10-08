@@ -63,7 +63,10 @@ public class NestRpcClientMediaPredecessorChainPinTests
 
         var keys = RequireIndex(body, "machine.SetPredecessorBackupKeys(", 0,
             "the bare backup-key injection moved — update this test's anchor");
-        var read = RequireIndex(body, "PredecessorChain(_crypto.ActorIdHex)", keys,
+        // The read itself is the shared `PredecessorChainOrEmpty`, pinned to the
+        // registry's walk for the session actor by
+        // `NestRpcClientDevicesPredecessorChainPinTests`.
+        var read = RequireIndex(body, "PredecessorChainOrEmpty(", keys,
             "BuildMediaMachineAsync no longer reads the registry's paired predecessor chain — a bare key never opens a predecessor-signed row, so the inherited corpus stays unopenable");
         RequireIndex(body, "machine.SetPredecessorChain(", read,
             "BuildMediaMachineAsync reads the paired chain but never hands it to the machine");

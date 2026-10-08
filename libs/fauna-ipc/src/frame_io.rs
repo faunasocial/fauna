@@ -424,6 +424,7 @@ mod tests {
             id: 1,
             method: RequestMethod::AttachApp {
                 app: Some("tui".into()),
+                notification_identity: None,
             },
         })
         .unwrap();

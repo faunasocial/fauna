@@ -25,7 +25,7 @@
 //!
 //! - **Rule 3 (least-kind dispatcher):** the serve set is the allowlist in
 //!   [`server`] — `node_info`, the admission exchange, `changes.list`,
-//!   `blocks.pull` — and nothing else; `PeerChannel::serve` answers every
+//!   `blocks.pull`, `chunks.pull` — and nothing else; `PeerChannel::serve` answers every
 //!   other kind `fauna.protocol.unknown_kind`. Class-2 state rides as sealed
 //!   *content* inside transfer kinds, never as imperative kinds.
 //! - **Rule 5 (no listener when off):** the listener exists iff a
@@ -52,6 +52,7 @@ pub mod client;
 pub mod discovery;
 pub mod lan;
 pub mod quota;
+pub mod ranged;
 pub mod server;
 
 pub use admission::{
@@ -59,8 +60,8 @@ pub use admission::{
     evaluate_witness,
 };
 pub use client::{
-    AdmissionOutcome, AdmissionViews, CustodyRevocationView, DeviceRemovedView, PeerRequester,
-    PullReport, admit_over, admit_over_as, pull_missing_blocks,
+    AdmissionOutcome, AdmissionViews, CustodyRevocationView, DeviceRemovedView, FileChunkPull,
+    PeerRequester, PullReport, admit_over, admit_over_as, pull_file_chunks, pull_missing_blocks,
 };
 pub use discovery::{
     PeerDialTarget, bind_carried_endpoints, custodian_dial_targets, dial_target_from,
@@ -68,6 +69,6 @@ pub use discovery::{
 };
 pub use quota::{MeteredPlane, QuotaConfig, QuotaLedger, metered_handler_factory};
 pub use server::{
-    CustodyRevocationFn, DeviceRemovedFn, PeerSyncServer, PeerSyncServerConfig,
+    CustodyRevocationFn, DeviceRemovedFn, FileChunkFn, PeerSyncServer, PeerSyncServerConfig,
     start_peer_sync_node,
 };

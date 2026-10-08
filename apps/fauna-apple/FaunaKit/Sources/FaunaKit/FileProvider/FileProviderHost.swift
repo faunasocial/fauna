@@ -78,7 +78,8 @@ public func makeFileProviderHost(domainId: String) throws -> FfiFileProviderHost
         signer: KeychainChangeSignerProvider(),
         stateDir: stateDir.path,
         folderId: identity.folderId,
-        rootDir: rootDir.path
+        rootDir: rootDir.path,
+        predecessorChain: creds.predecessorChain
     )
 }
 

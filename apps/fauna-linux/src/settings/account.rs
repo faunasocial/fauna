@@ -558,6 +558,9 @@ pub fn build_account_page() -> (gtk::Box, std::rc::Rc<dyn Fn()>) {
         crate::settings::pending_actions::build_pending_actions_group();
     page.add(&pending_actions_group);
 
+    let (push_group, push_refresh) = build_push_group();
+    page.add(&push_group);
+
     // Re-sync the Stage-2 toggles from the registry AND re-read the recovery
     // kit status whenever this page becomes visible — see `confirm_toggles`
     // and `recovery_kit_refresh`. Wired to the shell stack's visible-child
@@ -611,6 +614,7 @@ pub fn build_account_page() -> (gtk::Box, std::rc::Rc<dyn Fn()>) {
             }
             recovery_kit_refresh();
             pending_actions_refresh();
+            push_refresh();
         })
     };
 
@@ -618,6 +622,97 @@ pub fn build_account_page() -> (gtk::Box, std::rc::Rc<dyn Fn()>) {
         crate::testid::wrap_page_with_heading(ap::TITLE, ids::PAGE_HEADING, &page),
         refresh,
     )
+}
+
+/// Settings → Push notifications (`settings.md` § Push notifications): the
+/// section, its one toggle over the shared registration machine
+/// (`crate::push`), and the inline failure line — shown only when something
+/// failed or, while opted in, the agent cannot show notifications. Returns the
+/// group plus a repaint closure that re-reads the install's stored bit (the
+/// on-visible refresh).
+fn build_push_group() -> (adw::PreferencesGroup, std::rc::Rc<dyn Fn()>) {
+    use crate::i18n::strings::settings::push_notifications as p;
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    let group = adw::PreferencesGroup::builder()
+        .title(p::TITLE)
+        .description(p::DEVICE_DESCRIPTION)
+        .build();
+    crate::testid::set_test_id(&group, ids::PUSH_NOTIFICATIONS_SECTION);
+
+    let toggle = gtk::Switch::builder().valign(gtk::Align::Center).build();
+    crate::testid::set_test_id(&toggle, ids::PUSH_NOTIFICATIONS_OPT_IN_TOGGLE);
+    let row = adw::ActionRow::builder()
+        .title(p::OPT_IN_LABEL)
+        .activatable_widget(&toggle)
+        .build();
+    row.add_suffix(&toggle);
+    group.add(&row);
+
+    let error = gtk::Label::builder().visible(false).build();
+    error.set_halign(gtk::Align::Start);
+    error.set_wrap(true);
+    error.add_css_class("error");
+    crate::testid::set_test_id(&error, ids::PUSH_NOTIFICATIONS_ERROR);
+    group.add(&error);
+
+    // Set while the page writes the switch from the stored bit, so the
+    // `active` notify can tell a repaint from a human tap.
+    let syncing = Rc::new(Cell::new(false));
+    // The last toggle's failure, for the inline line.
+    let last_error: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+
+    let paint = {
+        let toggle = toggle.clone();
+        let error = error.clone();
+        let syncing = syncing.clone();
+        let last_error = last_error.clone();
+        Rc::new(move || {
+            let opted_in = crate::push::stored_intent().opted_in;
+            if toggle.is_active() != opted_in {
+                syncing.set(true);
+                toggle.set_active(opted_in);
+                syncing.set(false);
+            }
+            // The uniform toggle reading every app's witness uses
+            // (`get_attr(id, "state")` → "on"/"off").
+            crate::testid::set_test_attr(&toggle, "state", if opted_in { "on" } else { "off" });
+            let failure = last_error
+                .borrow()
+                .as_deref()
+                .map(|e| format!("{}: {e}", p::UPDATE_FAILED))
+                .or_else(|| crate::push::standing_failure(opted_in).map(str::to_string));
+            match failure {
+                Some(text) => {
+                    error.set_text(&text);
+                    error.set_visible(true);
+                }
+                None => error.set_visible(false),
+            }
+        }) as Rc<dyn Fn()>
+    };
+
+    {
+        let paint = paint.clone();
+        let syncing = syncing.clone();
+        let last_error = last_error.clone();
+        toggle.connect_active_notify(move |sw| {
+            if syncing.get() {
+                return;
+            }
+            let paint = paint.clone();
+            let last_error = last_error.clone();
+            crate::push::set_opt_in(sw.is_active(), move |_intent, err| {
+                *last_error.borrow_mut() = err;
+                paint();
+            });
+        });
+    }
+
+    crate::push::set_repaint(paint.clone());
+    paint();
+    (group, paint)
 }
 
 /// Launch append-mode onboarding ("Add account") from a widget in the running

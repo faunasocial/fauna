@@ -289,8 +289,11 @@ terminal app first, and is rolling out to the rest.
 **The same ask now covers outside sources.** If you have limited which feeds and
 accounts your child can add through a connected outside account, then connecting
 one, or following someone through it, stops with the same kind of dead end — and
-the same "Ask your guardian" appears beside it. The request names the source, and
-lands in the same approval queue. While you are deciding, the child's screen
+the same "Ask your guardian" appears beside it. The request lands in the same
+approval queue, and it shows exactly what approving would allow: the service,
+whether it is a connection, a follow or a feed, and the account or feed address
+itself. Any name your child gave it follows in quotes, as their own description,
+so check the address rather than the name. While you are deciding, the child's screen
 reads "asked — waiting for your guardian"; once you approve, it changes to
 "approved — try again", and the child adds the source themselves. That last step
 is deliberate: approving grants the one addition, and the app never quietly

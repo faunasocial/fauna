@@ -12,9 +12,9 @@
 //! The flows this file drives:
 //!
 //! - **(a) the lag pin, PROBE-801-24-A at the pass level:** two runtimes for
-//!   one account on one nest. A records a `Mint` through the handle's ledger
-//!   door, releases the blob against what the door stored, and the row is
-//!   deposited. B still holds a replica without that `Mint`. B's Nests page
+//!   one account on one nest. A records a `Mint` through the handle's
+//!   grant-mint door (`merge_published`), releases the blob against what the
+//!   bound nest acknowledged, and the row is deposited. B still holds a replica without that `Mint`. B's Nests page
 //!   hydrates over B's own handle (the page-refresh shape — red while the page
 //!   swept), then B runs a full pass: no revoke reaches the nest, and B's log
 //!   now holds the `Mint`.
@@ -24,12 +24,18 @@
 //!   judge fires follows it (the requester's own trace).
 //! - **(d) no sweep from a pass whose fleet walk failed, and none from a
 //!   non-holder's `reconcile_now`.**
+//! - **(e) the grant-mint door over a real runtime** (`ui/nests.md` § Trust
+//!   facet — grants → *Record-then-deposit*, the published form): the door's
+//!   answer means the bound nest holds the `Mint` — a sibling's walk reads it
+//!   before any blob is released — and a publish the nest refuses answers a
+//!   refusal, so no proof exists to release a blob against.
 //!
 //! ⚠ **The deposits are seeded into `capability_grants`, deliberately** (as the
 //! page-level sweep test this file replaces did): the subject is the judgement
 //! over nest rows, and an orphan is a state no well-behaved mint chain
 //! produces; the mint chain itself is `conformance_capability_trust_client.rs`'s. Pin (a)'s `Mint` itself crosses the
-//! production ledger door; its blob is released only against the stored log.
+//! production grant-mint door; its blob is released only against the log the
+//! bound nest acknowledged.
 //!
 //! Every positive wait is a named-budget deadline poll (convention 14).
 
@@ -43,7 +49,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use ed25519_dalek::SigningKey;
-use fauna_client_capabilities::grant_log::{self, RecordedGrants, UndepositedGrant};
+use fauna_client_capabilities::grant_log::{self, PublishedGrants, UndepositedGrant};
 use fauna_client_config::SuccessionLedgerStore;
 use fauna_core::grant_event::{GrantEvent, GrantEventScope};
 use fauna_core::identity::ActorKeypair;
@@ -107,6 +113,8 @@ struct RouterRequester {
     trace: Mutex<Vec<Traced>>,
     /// Refuse every listing of the fleet scope — the pass's fleet walk errs.
     refuse_fleet_list: AtomicBool,
+    /// Refuse every state put — the bound nest refusing the publish.
+    refuse_state_put: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -152,6 +160,14 @@ impl RpcRequester for RouterRequester {
             return Err(Refused(RpcError::new(
                 "unavailable",
                 "test.router.fleet_list_refused",
+            )));
+        }
+        if kind == fauna_protocol::account_state::KIND_STATE_PUT
+            && self.refuse_state_put.load(Ordering::SeqCst)
+        {
+            return Err(Refused(RpcError::new(
+                "unavailable",
+                "test.router.state_put_refused",
             )));
         }
         let Some(meta) = self.state.rpc_router.kind_meta(kind) else {
@@ -232,6 +248,7 @@ async fn nest() -> (
         state: Arc::clone(&state),
         trace: Mutex::new(Vec::new()),
         refuse_fleet_list: AtomicBool::new(false),
+        refuse_state_put: AtomicBool::new(false),
     });
     (rpc, format!("http://{authority}"), state, tmp)
 }
@@ -350,6 +367,34 @@ async fn record(
         .expect("the ledger door stores the events")
 }
 
+/// Record grant events through the runtime's grant-mint door: load, append,
+/// `merge_published` — the stored ledger once the bound nest acknowledged it,
+/// or the door's refusal.
+async fn record_published(
+    handle: &AccountStoreHandle,
+    append: impl FnOnce(&mut SuccessionLedger),
+) -> Result<fauna_client_config::PublishedLedger, fauna_client_config::StoreError> {
+    let mut ledger = SuccessionLedgerStore::load(handle)
+        .await
+        .expect("load the ledger");
+    append(&mut ledger);
+    SuccessionLedgerStore::merge_published(handle, ledger).await
+}
+
+fn mint_fresh(ledger: &mut SuccessionLedger, now: u64) {
+    grant_log::record_mint(
+        ledger,
+        account().signing_key(),
+        FRESH,
+        HOLDER,
+        vec![label_write_scope()],
+        now,
+        now + 86_400,
+        now,
+    )
+    .expect("record the Mint");
+}
+
 async fn grant_events(handle: &AccountStoreHandle) -> Vec<GrantEvent> {
     SuccessionLedgerStore::load(handle)
         .await
@@ -406,30 +451,16 @@ async fn a_sibling_whose_replica_lags_a_fresh_mint_never_revokes_it() {
         .expect("start B");
     settle(&[&a, &b], 2).await;
 
-    // A mints through the record-then-deposit order: the event is recorded by
-    // the ledger door, the blob is released only against what that door
-    // stored, and its own pass publishes the row before the deposit lands.
+    // A mints through the record, publish, then deposit order: the event is
+    // recorded by the grant-mint door and acknowledged by the nest, and the
+    // blob is released only against what the door answered.
     let now = now_secs();
-    let stored = record(&a, |ledger| {
-        grant_log::record_mint(
-            ledger,
-            account().signing_key(),
-            FRESH,
-            HOLDER,
-            vec![label_write_scope()],
-            now,
-            now + 86_400,
-            now,
-        )
-        .expect("record the Mint");
-    })
-    .await;
-    UndepositedGrant::new(FRESH, b"blob".to_vec())
-        .release(&RecordedGrants::from_stored(&stored))
-        .expect("the stored log records the Mint");
-    a.reconcile_now()
+    let published = record_published(&a, |ledger| mint_fresh(ledger, now))
         .await
-        .expect("A's pass publishes the Mint");
+        .expect("the nest acknowledges A's Mint");
+    UndepositedGrant::new(FRESH, b"blob".to_vec())
+        .release(&PublishedGrants::from_published(&published))
+        .expect("the published log records the Mint");
     deposit(&state, FRESH, now).await;
 
     // Precondition — the lag: B's replica does not hold the Mint yet.
@@ -649,4 +680,83 @@ async fn a_non_holders_reconcile_now_never_sweeps() {
 
     holder.shutdown().await;
     other.shutdown().await;
+}
+
+// ── (e) the grant-mint door over a real runtime ─────────────────────────────
+
+/// The door's answer is the nest's acknowledgement: once `merge_published`
+/// returns, the bound nest holds the `Mint` — a sibling's fleet walk reads it
+/// before any blob is released or deposited — so the capability row can only
+/// ever follow the event row onto the nest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_grant_mint_door_answers_only_once_the_nest_holds_the_mint() {
+    let (rpc, _base_url, state, tmp) = nest().await;
+    let a = AccountStoreRuntime::start(params(tmp.path(), "a", &rpc))
+        .await
+        .expect("start A");
+    let b = AccountStoreRuntime::start(params(tmp.path(), "b", &rpc))
+        .await
+        .expect("start B");
+    settle(&[&a, &b], 2).await;
+
+    let now = now_secs();
+    let published = record_published(&a, |ledger| mint_fresh(ledger, now))
+        .await
+        .expect("the nest acknowledges A's Mint");
+    assert!(
+        rows_on_nest(&state).await.is_empty(),
+        "precondition: no capability row yet"
+    );
+
+    // Before any deposit: B's walk reads the event off the nest.
+    b.reconcile_now().await.expect("B's pass");
+    assert!(
+        holds_event(&grant_events(&b).await, FRESH),
+        "the nest held A's Mint when the door answered"
+    );
+
+    let blob = UndepositedGrant::new(FRESH, b"blob".to_vec())
+        .release(&PublishedGrants::from_published(&published))
+        .expect("the published log records the Mint");
+    assert_eq!(blob, b"blob".to_vec());
+}
+
+/// **The refusal pin.** A publish the nest refuses answers a refusal: the
+/// `Mint` stays recorded on A (the recoverable phantom-row direction), no
+/// proof exists to release its blob against, and nothing reaches the nest's
+/// capability table. Red with the door bypassed — a `publish_ledger` that
+/// answers `Ok` without the nest's acknowledgement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_publish_the_nest_refuses_releases_no_blob() {
+    let (rpc, _base_url, state, tmp) = nest().await;
+    let a = AccountStoreRuntime::start(params(tmp.path(), "a", &rpc))
+        .await
+        .expect("start A");
+    settle(&[&a], 1).await;
+
+    rpc.refuse_state_put.store(true, Ordering::SeqCst);
+    let now = now_secs();
+    let refused = record_published(&a, |ledger| mint_fresh(ledger, now)).await;
+    assert!(
+        refused.is_err(),
+        "a refused publish is the door's refusal, not an acknowledged ledger"
+    );
+    assert!(
+        holds_event(&grant_events(&a).await, FRESH),
+        "the Mint stays recorded locally"
+    );
+    assert!(
+        rows_on_nest(&state).await.is_empty(),
+        "no blob was deposited"
+    );
+
+    // The nest takes the publish again: the next door call over the same
+    // ledger (an empty join) answers once the owed row lands.
+    rpc.refuse_state_put.store(false, Ordering::SeqCst);
+    let published = record_published(&a, |_| {})
+        .await
+        .expect("the owed Mint is acknowledged");
+    UndepositedGrant::new(FRESH, b"blob".to_vec())
+        .release(&PublishedGrants::from_published(&published))
+        .expect("the published log records the Mint");
 }

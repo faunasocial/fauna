@@ -547,7 +547,7 @@ async fn a_plain_user_discovers_holders_and_mints_then_revokes() {
 #[tokio::test]
 async fn a_custody_grant_row_mints_keyless_and_revoke_deletes_it() {
     use fauna_client_capabilities::custody_grants::{custody_event_scopes, custody_mint_blob};
-    use fauna_client_capabilities::grant_log::{self, RecordedGrants};
+    use fauna_client_capabilities::grant_log::{self, PublishedGrants};
     use fauna_client_capabilities::rpc::CapabilitiesClient;
     use fauna_core::custody_grant::CustodyScopeSet;
     use fauna_mls::wrapped_blob::{GrantBlob, GrantWindow, ScopeTuple};
@@ -596,10 +596,16 @@ async fn a_custody_grant_row_mints_keyless_and_revoke_deletes_it() {
         now,
     )
     .expect("record the Mint event");
+    // The log stands in for one the bound nest acknowledged: this test drives
+    // the custody row's mint and revoke, and the grant-mint door itself is
+    // pinned over a real account runtime in
+    // `conformance_capability_reconcile_sweep_pass.rs`.
     let stored = log.clone();
     let blob_bytes = undeposited
-        .release(&RecordedGrants::from_stored(&stored))
-        .expect("released against the stored log");
+        .release(&PublishedGrants::from_published(
+            &fauna_client_config::PublishedLedger::acknowledged_for_test(stored),
+        ))
+        .expect("released against the published log");
 
     // Deposit over the real wire — the unmodified mint handler accepts the
     // custody-class keyless blob.

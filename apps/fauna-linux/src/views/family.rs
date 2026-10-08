@@ -1517,7 +1517,12 @@ fn build_approval_row(ctx: &Rc<Ctx>, index: usize, entry: &FamilyApprovalEntry) 
         .build();
     set_test_id(&row, ids::FAMILY_APPROVAL_ITEM);
 
-    let text = gtk::Label::new(Some(entry.display_text().unwrap_or(S::APPROVAL_NO_SENDER)));
+    let text = gtk::Label::new(Some(
+        entry
+            .display_text()
+            .as_deref()
+            .unwrap_or(S::APPROVAL_NO_SENDER),
+    ));
     text.set_hexpand(true);
     text.set_halign(gtk::Align::Start);
     text.set_wrap(true);
@@ -2354,7 +2359,7 @@ mod tests {
     /// `peer_address` (its `summary` is deliberately always empty — a subject
     /// line is content), every other kind its `summary`. The rule itself is
     /// `fauna_core::format::approval_display_text` (pinned there); this test
-    /// confirms linux's call site — `entry.display_text().unwrap_or(...)` —
+    /// confirms linux's call site — `entry.display_text().as_deref().unwrap_or(...)` —
     /// wires it correctly.
     #[test]
     fn mail_hold_row_renders_peer_address_not_the_empty_summary() {
@@ -2371,11 +2376,16 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            hold.display_text().unwrap_or(S::APPROVAL_NO_SENDER),
+            hold.display_text()
+                .as_deref()
+                .unwrap_or(S::APPROVAL_NO_SENDER),
             "stranger@example.com"
         );
         assert_eq!(
-            contact.display_text().unwrap_or(S::APPROVAL_NO_SENDER),
+            contact
+                .display_text()
+                .as_deref()
+                .unwrap_or(S::APPROVAL_NO_SENDER),
             "hi from bob"
         );
     }
@@ -2394,6 +2404,7 @@ mod tests {
         assert_eq!(
             null_path_hold
                 .display_text()
+                .as_deref()
                 .unwrap_or(S::APPROVAL_NO_SENDER),
             S::APPROVAL_NO_SENDER
         );

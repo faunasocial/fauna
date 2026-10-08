@@ -266,6 +266,8 @@ private func auditStatus(_ id: String, auditState: String?, lastAuditPassedAt: U
 /// remove-with-opt-in contract (reclaim strictly after a landed deregister).
 @MainActor private final class CallLog {
     var calls: [String] = []
+    /// The `ownCustodian` argument of each audit pass, in order.
+    var auditOwnCustodians: [FfiOwnCustodianStore?] = []
 }
 
 @MainActor private final class RecordingCustodian: CustodianStoreAccess {
@@ -273,13 +275,15 @@ private func auditStatus(_ id: String, auditState: String?, lastAuditPassedAt: U
     var bytes: UInt64 = 0
     var stillHosting = false
     var footprintThrows = false
+    var sourceRegressions: [FfiCustodianSourceRegression] = []
 
     init(log: CallLog) { self.log = log }
 
     func custodianStoreFootprint() async throws -> FfiCustodianStoreInfo {
         log.calls.append("footprint")
         if footprintThrows { throw APIError.ffiError("no store read") }
-        return FfiCustodianStoreInfo(generations: 0, files: 2, bytes: bytes)
+        return FfiCustodianStoreInfo(
+            generations: 0, files: 2, bytes: bytes, sourceRegressions: sourceRegressions)
     }
 
     func reclaimCustodianStore() async throws -> FfiCustodianReclaimOutcome {
@@ -309,6 +313,14 @@ private final class RecordingAPI: APIClient {
 
     override func removeBackupDestination(id: String) async throws -> [FfiBackupDestinationView] {
         await MainActor.run { log.calls.append("remove:\(id)") }
+        return []
+    }
+
+    /// The audit pass — recorded with its own-custodian argument, and empty.
+    override func backupAuditRunPass(
+        statePath: String, syncStateDir: String, ownCustodian: FfiOwnCustodianStore?
+    ) async throws -> [FfiDestinationAuditRow] {
+        await MainActor.run { log.auditOwnCustodians.append(ownCustodian) }
         return []
     }
 
@@ -635,4 +647,75 @@ private final class RecordingAPI: APIClient {
         isWhole: true, reenrollError: "offline"))
     #expect(vm.reseedResultText == L.backups.reseedResultWhole)
     #expect(vm.errorMessage == L.backups.backupReseedReenrollFailed(reason: "offline"))
+}
+
+// MARK: - Audit-alert banners: every reason the shared pass yields
+
+private func auditRow(_ reasons: [BackupAuditAlertReason]) -> FfiDestinationAuditRow {
+    FfiDestinationAuditRow(
+        destinationId: "d1", lastPassedAt: nil, alertReason: reasons.first, alertReasons: reasons)
+}
+
+private func alertLabel(_ reason: BackupAuditAlertReason) -> String {
+    renderLocalizedText(backupAuditAlertLabel(reason: reason, destinationLabel: "Site"))
+}
+
+@Test @MainActor func anOpenRecoveryWindowPaintsANamedBanner() {
+    let reason = BackupAuditAlertReason.sourceRegressed(leftSecs: 3600)
+    let texts = BackupDestinationsVM.alertTexts(auditRow([reason]), destinationLabel: "Site")
+    #expect(texts == [alertLabel(reason)])
+}
+
+@Test @MainActor func aClosedRecoveryWindowPaintsNothing() {
+    #expect(BackupDestinationsVM.alertTexts(auditRow([]), destinationLabel: "Site").isEmpty)
+}
+
+@Test @MainActor func aStandingVerdictAndAnOpenWindowPaintTwoBanners() {
+    let verdict = BackupAuditAlertReason.freshness(lagSecs: 90_000)
+    let window = BackupAuditAlertReason.sourceRegressed(leftSecs: nil)
+    let texts = BackupDestinationsVM.alertTexts(auditRow([verdict, window]), destinationLabel: "Site")
+    #expect(texts == [alertLabel(verdict), alertLabel(window)])
+    #expect(texts[0] != texts[1])
+}
+
+// MARK: - The own-custodian store read reaches the audit pass
+
+@Test @MainActor func aStoreReadCarryingARegressionReachesTheAuditPass() async {
+    let log = CallLog()
+    let custodian = RecordingCustodian(log: log)
+    let regression = FfiCustodianSourceRegression(
+        ledger: "set-1/folders", held: 7, served: 3, observedAt: 1_700_000_000)
+    custodian.sourceRegressions = [regression]
+    let vm = wired(log, custodian: custodian)
+    vm.seedDestinationsForTest([clientDest("d1", deviceId: "dev-1")])
+
+    await vm.runAudit()
+
+    #expect(log.auditOwnCustodians.count == 1)
+    #expect(log.auditOwnCustodians.first??.deviceId == "dev-1")
+    #expect(log.auditOwnCustodians.first??.sourceRegressions == [regression])
+}
+
+@Test @MainActor func noStoreReadPassesNoOwnCustodian() async {
+    // "No store was read" is nil — never an empty store, which would clear a
+    // standing regression the shared pass is still holding up.
+    let log = CallLog()
+    let failing = RecordingCustodian(log: log)
+    failing.footprintThrows = true
+    let seeded = [clientDest("d1", deviceId: "dev-1")]
+
+    let readFails = wired(log, custodian: failing)
+    readFails.seedDestinationsForTest(seeded)
+    await readFails.runAudit()
+
+    let noDevice = wired(log, deviceId: nil, custodian: RecordingCustodian(log: log))
+    noDevice.seedDestinationsForTest(seeded)
+    await noDevice.runAudit()
+
+    let noSeam = wired(log, custodian: nil)
+    noSeam.seedDestinationsForTest(seeded)
+    await noSeam.runAudit()
+
+    #expect(log.auditOwnCustodians.count == 3)
+    #expect(log.auditOwnCustodians.allSatisfy { $0 == nil })
 }

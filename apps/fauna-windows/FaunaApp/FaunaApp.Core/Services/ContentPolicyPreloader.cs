@@ -61,5 +61,23 @@ internal sealed class ContentPolicyPreloader
                 "ContentPolicyPreloader",
                 $"own thresholds skipped: {ex.GetType().Name}: {ex.Message}");
         }
+
+        // The third input: what the owner's own reports hid (moderation.md §
+        // Corollary — block also hides; `load_hidden_content`). Independent of the
+        // two reads above — a failure here leaves only this half absent, which
+        // under-enforces (a reported item paints again), never wrongly hides.
+        // Fired from the same fire-and-forget site, so no surface awaits it on its
+        // mount path (web's first run hung the feed behind exactly that await).
+        try
+        {
+            ContentPolicyCache.SetHiddenContent(
+                await _rpc.LoadHiddenContentAsync().ConfigureAwait(false));
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn(
+                "ContentPolicyPreloader",
+                $"hidden content skipped: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 }

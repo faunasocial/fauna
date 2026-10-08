@@ -221,14 +221,32 @@ def _await(seat, want: Callable[[], list[str]], phase: str, budget: float, note)
         )
 
 
+def _act_on(seat, act: Callable[[Path], None], step_name: str, note) -> None:
+    """Run ``act`` in ``seat``'s folder; a refusal from the folder itself fails
+    as that seat's, with every seat's diagnostics (convention 6).
+
+    The writer's own folder can refuse plain file I/O — on windows a cfapi root
+    whose provider never answers the create's placeholder fetch surfaces as a
+    bare ``OSError`` EINVAL — and the agent log saying why is in the note, not
+    in the error."""
+    try:
+        act(seat.path)
+    except OSError as e:
+        _fail(
+            f"[{seat.name}] {step_name}: the act failed on this seat: {e!r}\n"
+            f"  self-check: {seat.self_note()}",
+            note,
+        )
+
+
 def run_step(step: Step, seats, budget: float, note) -> None:
     """Act, then await every expectation on every peer (and, for ``converge``,
     on every seat)."""
     writer = seats[step.writer]
     peers = [s for i, s in enumerate(seats) if i != step.writer]
-    step.act(writer.path)
+    _act_on(writer, step.act, step.name, note)
     if step.other_act is not None:
-        step.other_act(seats[step.other_writer].path)
+        _act_on(seats[step.other_writer], step.other_act, step.name, note)
     print(f"[scenarios] {step.name}: seat {writer.name} acted, awaiting peers", flush=True)
 
     for peer in peers:

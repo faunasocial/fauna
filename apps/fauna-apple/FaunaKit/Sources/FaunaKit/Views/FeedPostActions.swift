@@ -49,10 +49,18 @@ public struct FeedPostActionsButton: View {
     /// own nav closures, since FaunaKit has no cross-tab navigation model of
     /// its own.
     public var onNavigateToPersonalization: () -> Void
+    /// The report target the platform card view built from this post
+    /// (`report_post_target` — it carries the sealed rule once, so a gated post
+    /// offers the include-text checkbox). `feed-post-report-button` paints only
+    /// on another author's post (`!isOwn`), opening the shared ``ReportHost``
+    /// sheet through ``ReportSheetStore``.
+    public let reportTarget: FfiReportTarget?
+    @Environment(ContentPolicyStore.self) private var contentPolicy: ContentPolicyStore?
 
     public init(
         postId: String, vm: FeedVM, isOwn: Bool, webSlug: String?, gatedTier: String?,
         webPublish: WebPublishStore, handle: String,
+        reportTarget: FfiReportTarget? = nil,
         onNavigateToPersonalization: @escaping () -> Void
     ) {
         self.postId = postId
@@ -62,6 +70,7 @@ public struct FeedPostActionsButton: View {
         self.gatedTier = gatedTier
         self.webPublish = webPublish
         self.handle = handle
+        self.reportTarget = reportTarget
         self.onNavigateToPersonalization = onNavigateToPersonalization
     }
 
@@ -146,6 +155,10 @@ public struct FeedPostActionsButton: View {
                 Divider()
                 deleteRow
             }
+            if !isOwn, reportTarget != nil {
+                Divider()
+                reportRow
+            }
         }
         .padding(8)
         .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
@@ -176,6 +189,23 @@ public struct FeedPostActionsButton: View {
         .buttonStyle(.borderless)
         .accessibilityIdentifier(id)
         .automationActivate(id, value: { marked ? "on" : "off" }, perform: action)
+    }
+
+    /// The report verb (moderation.md § User-initiated reporting → *App surface*):
+    /// another author's post only. Dismisses the overflow and opens the shared
+    /// sheet; the ``ReportHost`` the shell mounts paints it.
+    private var reportRow: some View {
+        let open: () -> Void = {
+            guard let reportTarget, let contentPolicy else { return }
+            showActions = false
+            contentPolicy.report.open(reportTarget)
+        }
+        return Button(action: open) {
+            Label(L.feed.reportPost, systemImage: "flag").font(.caption)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityIdentifier(Ids.feedPostReportButton)
+        .automationActivate(Ids.feedPostReportButton, perform: open)
     }
 
     /// Own-post delete row (feed.md § State & data shape → Post deletion) —

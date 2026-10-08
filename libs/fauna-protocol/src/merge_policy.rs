@@ -604,22 +604,27 @@ pub const KIND_ATPROTO_IDENTITY: &str = "fauna.state.atproto-identity";
 
 /// Class-2 kind: this account's **mail custody** — the MLS Storage Encryption
 /// Key (irrecoverable: losing it loses stored mail, `key-material-hierarchy.md`
-/// § Path B), its cap-2 grace window with retirements, the succession burns,
-/// the rotation sentinel, the three enablement flags, and one row per MUA
-/// credential with its raw secret (`fauna_core::mail_rows` owns the rows,
-/// their key grammar and their joins; `mail-credentials.md` owns the
-/// concept). **Two row families, the key's first segment dispatching**
-/// (`config-dissolution.md` § Phases and gates → *Bounded rows* → *The mail
-/// plane*): `self` → the ONE `MailStateRow` (bounded by construction; the
-/// burns grow one per succession ceremony), `credential/<credential_id>` →
-/// one `MailCredential`, the value naming its key — the credential list grows
-/// with use and every row carries a secret, so each is its own row. Per-field
-/// CRDT: the state row's arm is the MSEK present-wins / rotation-LWW, the
-/// capped window and the burn min-union shared with `MailConfig::merge`, then
+/// § Path B), every MSEK generation it ever retired with its retirement
+/// instant, the succession burns, the rotation sentinel, the three enablement
+/// flags, and one row per MUA credential with its raw secret
+/// (`fauna_core::mail_rows` owns the rows, their key grammar and their joins;
+/// `mail-credentials.md` owns the concept). **Three row families, the key's
+/// first segment dispatching** (`config-dissolution.md` § Phases and gates →
+/// *Bounded rows* → *The mail plane*): `self` → the ONE `MailStateRow`
+/// (bounded by construction; the burns grow one per succession ceremony),
+/// `credential/<credential_id>` → one `MailCredential`, the value naming its
+/// key — the credential list grows with use and every row carries a secret,
+/// so each is its own row — and `generation/<fingerprint>` → one retired MSEK
+/// generation (`PriorMsekRetirement`), uncapped, one per rotation ceremony
+/// (`owner-key-material.md` § Path B-sibling-2 → *Pre-rotation mail at
+/// rest*). Per-field CRDT: the state row's arm is the MSEK present-wins /
+/// rotation-LWW and the burn min-union shared with `MailConfig::merge`, then
 /// the recreatable four latest-wins on the row's own stamp; a credential
 /// row's arm ORs the two monotone markers (burned, revoked — a marked join
-/// carries an empty secret) and takes the remainder on its own stamp. No
-/// deletion: a revoke is a marker, and the kind has no tombstone. Decode
+/// carries an empty secret) and takes the remainder on its own stamp; a
+/// generation row is immutable, two records of it joining on the later
+/// instant. No deletion: a revoke is a marker, a generation is never dropped,
+/// and the kind has no tombstone. Decode
 /// refuses an unknown field (P4). Fleet-only on the charter's own proof (the
 /// [`POLICIES`] doc: the MSEK and the MUA secrets are the account's mail
 /// authority) and tip-sealed (`owner-key-material.md` § Path A-sibling-2: a
@@ -650,7 +655,13 @@ pub const KIND_MAIL: &str = "fauna.state.mail";
 /// the arm is the per-record half of `CustodyConfig::merge` (the shipped
 /// union — progress marks OR, envelopes non-empty-wins, the freshest receipt
 /// with its own written/posted mark); nothing is ever removed, so the kind has
-/// no tombstone. Fleet-only (`account-data-taxonomy.md` § The audience ladder
+/// no tombstone — and a spent, unanswered offer is not reclaimed either (ruled
+/// 2026-10-08, `account-replica-posture.md` § Replica posture → *The custody
+/// grant + ceremony*, step 1: this policy refuses tombstones and a published
+/// row is permanent per `(item_key, writer)`, so the one convergent reclaim is
+/// an absorbing in-value phase, which shrinks a record and never the row
+/// count; the bounded capture rate stands). Fleet-only
+/// (`account-data-taxonomy.md` § The audience ladder
 /// → *The `UserConfig` disposition*: which custodies the account runs, and
 /// with whom, is no grantee's business) and tip-sealed (`owner-key-material.md`
 /// § Path A-sibling-2: no fleet-only production entry seals under the
@@ -2753,13 +2764,15 @@ fn merge_atproto_identity_entry(
     })))
 }
 
-/// The mail arm — two row families, the key's first segment dispatching
+/// The mail arm — three row families, the key's first segment dispatching
 /// (`fauna_core::mail_rows::decode_mail_row`): both sides decode as the
 /// key's family exactly, a credential must name its key's id and a marked
-/// one carry no secret; the join is `MailStateRow::merge` (the MSEK, window
-/// and burn halves `MailConfig::merge` runs, the recreatable four on the
-/// row's stamp) or `MailCredential::merge` (the markers ORed, the remainder
-/// on the row's stamp), with the byte-equality echo-stop.
+/// one carry no secret, a generation's MSEK must fingerprint to its key; the
+/// join is `MailStateRow::merge` (the MSEK and burn halves
+/// `MailConfig::merge` runs, the recreatable four on the row's stamp),
+/// `MailCredential::merge` (the markers ORed, the remainder on the row's
+/// stamp) or `merge_generation` (the later instant), with the byte-equality
+/// echo-stop.
 fn merge_mail_entry(
     current: &EntryPlaintext,
     incoming: &EntryPlaintext,
@@ -4358,6 +4371,7 @@ mod tests {
             core,
             shredded_at_ms: 2,
             shredded_by: [2; 32],
+            shredder_sig: vec![],
         })
         .unwrap();
         let gen_id = "bb".repeat(32);
@@ -6420,11 +6434,12 @@ mod tests {
 
     /// The join laws, ON BYTES through the plane arm, per row family:
     /// commutative, associative, idempotent. The state row's samples cover a
-    /// rotation (a displaced MSEK with its retirement), two concurrent
-    /// rotations tied on the stamp, an in-flight sentinel, a fresh device
-    /// with no MSEK, the flags and the burns; the credential row's cover a
-    /// re-wrap, a rename, a burn, a revoke at two instants, a re-minted secret
-    /// under one id and a stamp tie.
+    /// rotation, two concurrent rotations tied on the stamp, an in-flight
+    /// sentinel, a fresh device with no MSEK, the flags and the burns; the
+    /// credential row's cover a re-wrap, a rename, a burn, a revoke at two
+    /// instants, a re-minted secret under one id and a stamp tie; the
+    /// generation row's cover one retirement recorded at three instants (a
+    /// cross-device finalize race).
     #[test]
     fn mail_merge_is_a_join_on_bytes() {
         use fauna_core::data::{MsekFingerprint, PriorMsekRetirement};
@@ -6436,13 +6451,8 @@ mod tests {
         mail_join_laws(&[
             R::State(mail_state(None, 5, |s| s.mail_enabled = None)),
             R::State(mail_state(Some(1), 10, |_| {})),
-            R::State(mail_state(Some(2), 20, |s| {
-                s.prior_mseks = vec![mail_key(1)];
-                s.prior_msek_retirements = vec![retired(1, 100)];
-            })),
+            R::State(mail_state(Some(2), 20, |_| {})),
             R::State(mail_state(Some(3), 20, |s| {
-                s.prior_mseks = vec![mail_key(1)];
-                s.prior_msek_retirements = vec![retired(1, 90)];
                 s.caldav_enabled = true;
             })),
             R::State(mail_state(Some(1), 15, |s| {
@@ -6478,6 +6488,65 @@ mod tests {
                 c.secret = Default::default();
             })),
         ]);
+        mail_join_laws(&[
+            R::Generation(retired(1, 100)),
+            R::Generation(retired(1, 90)),
+            R::Generation(retired(1, 1_800_000_000)),
+        ]);
+    }
+
+    /// **The generation row** (`owner-key-material.md` § Path B-sibling-2 →
+    /// *Pre-rotation mail at rest*): keyed by its MSEK's fingerprint, it
+    /// joins on the later retirement instant and is never dropped — and a
+    /// row filed under another generation's key, or under a non-canonical
+    /// spelling of its own, is refused at merge and first contact alike.
+    #[test]
+    fn a_mail_generation_row_joins_on_the_later_instant_and_refuses_a_misfiled_key() {
+        use fauna_core::data::{MsekFingerprint, PriorMsekRetirement};
+        use fauna_core::mail_rows::MailRecord as R;
+        let retired = |seed: u8, at: u64| {
+            R::Generation(PriorMsekRetirement {
+                msek: mail_key(seed),
+                retired_at_unix: at,
+            })
+        };
+        let key = retired(1, 0).plane_key().unwrap();
+        assert_eq!(
+            key,
+            format!(
+                "generation/{}",
+                hex::encode(MsekFingerprint::of(&mail_key(1)).0)
+            )
+        );
+        let joined: PriorMsekRetirement = fauna_core::encoding::canonical_decode(&merged_mail_row(
+            &key,
+            &retired(1, 200).encode().unwrap(),
+            &retired(1, 100).encode().unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(
+            joined.retired_at_unix, 200,
+            "the later instant, either order"
+        );
+        assert_eq!(joined.msek, mail_key(1));
+        let current = mail_entry(&retired(1, 100));
+        for bad_key in [
+            retired(2, 100).plane_key().unwrap(),
+            key.to_uppercase().replace("GENERATION", "generation"),
+            "generation/".to_string(),
+        ] {
+            let mut e = mail_entry(&retired(1, 100));
+            e.key = bad_key.clone();
+            for cur in [None, Some(&current)] {
+                assert!(
+                    matches!(
+                        apply_class2(MergePolicy::CrdtPerField, cur, &e),
+                        Err(MergeError::BadValue { .. })
+                    ),
+                    "{bad_key} must be refused"
+                );
+            }
+        }
     }
 
     /// The state row's rule, pinned by value: a rotation's newer stamp takes
@@ -6488,11 +6557,6 @@ mod tests {
     fn the_mail_state_row_joins_the_msek_halves_and_the_recreatable_four() {
         use fauna_core::mail_rows::{MailRecord as R, MailRotationSentinel, MailStateRow};
         let rotated = mail_state(Some(2), 20, |s| {
-            s.prior_mseks = vec![mail_key(1)];
-            s.prior_msek_retirements = vec![fauna_core::data::PriorMsekRetirement {
-                msek: mail_key(1),
-                retired_at_unix: 100,
-            }];
             s.mail_enabled = None;
             s.succession_burns = vec![a_mail_burn(7, 50)];
         });
@@ -6510,7 +6574,6 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(joined.msek, Some(mail_key(2)));
-        assert_eq!(joined.prior_mseks, vec![mail_key(1)]);
         assert_eq!(joined.pending_rotation, None, "the newer four win whole");
         assert!(!joined.caldav_enabled);
         assert_eq!(
@@ -6655,8 +6718,8 @@ mod tests {
 
     /// The P4 decode posture — an unknown field is refused, never stripped:
     /// on the state row (`deny_unknown_fields`, and at depth, inside a
-    /// burn), and on the credential row (strict by round-trip, since its
-    /// value type stays tolerant). A row from a build past this one
+    /// burn), and on the credential and generation rows (strict by
+    /// round-trip, since their value types stay tolerant). A row from a build past this one
     /// answers `BadValue` and re-presents on the next reconcile.
     #[test]
     fn a_newer_mail_field_is_refused_not_stripped() {
@@ -6673,8 +6736,12 @@ mod tests {
             s.succession_burns = vec![a_mail_burn(7, 1)];
         })));
         let credential = mail_entry(&R::Credential(mail_credential(1, |_| {})));
+        let generation = mail_entry(&R::Generation(fauna_core::data::PriorMsekRetirement {
+            msek: mail_key(2),
+            retired_at_unix: 1,
+        }));
         let mut newers = Vec::new();
-        for current in [&state, &credential] {
+        for current in [&state, &credential, &generation] {
             let mut map = as_map(&current.value);
             map.insert("from_the_future".into(), Value::Integer(1));
             let mut newer = current.clone();
@@ -6707,10 +6774,12 @@ mod tests {
 
     /// **The size pins (`config-dissolution.md` § Phases and gates → *Bounded
     /// rows* → *The mail plane*):** the state row is bounded by shape but for
-    /// the burns, one per succession ceremony — a row with a full window
-    /// (2 priors + 2 retirements), a sentinel, every flag and 512 burns seals
-    /// under HALF the per-entry cap; a credential row with a 4 KiB id, a 4 KiB
-    /// name, a 4 KiB secret, both markers and a fingerprint does too. A
+    /// the burns, one per succession ceremony — a row with a sentinel, every
+    /// flag and 512 burns seals under HALF the per-entry cap (the retired
+    /// generations are their own rows, so the state row no longer counts a
+    /// window); a credential row with a 4 KiB id, a 4 KiB name, a 4 KiB
+    /// secret, both markers and a fingerprint does too, and a generation row
+    /// at its widest instant is fixed by shape. A
     /// burn's instant is unix SECONDS, so it is pinned at `u32::MAX` (the year
     /// 2106) — at `u64::MAX` each burn's instant would take four bytes more on
     /// the wire, and 512 of them tip the row just over the half-cap (33 462
@@ -6724,13 +6793,6 @@ mod tests {
         let generation_sealed =
             matches!(sealing_epoch(KIND_MAIL), Some(SealingEpoch::GenerationTip));
         let state = mail_state(Some(1), u64::MAX, |s| {
-            s.prior_mseks = vec![mail_key(2), mail_key(3)];
-            s.prior_msek_retirements = [2, 3]
-                .map(|k| PriorMsekRetirement {
-                    msek: mail_key(k),
-                    retired_at_unix: u64::MAX,
-                })
-                .to_vec();
             s.pending_rotation = Some(MailRotationSentinel {
                 new_msek: mail_key(4),
             });
@@ -6758,7 +6820,11 @@ mod tests {
             c.revoked_at_unix = Some(u64::MAX);
             c.burned = Some(a_mail_burn(7, u64::MAX));
         });
-        for rec in [R::State(state), R::Credential(credential)] {
+        let generation = R::Generation(PriorMsekRetirement {
+            msek: mail_key(2),
+            retired_at_unix: u64::MAX,
+        });
+        for rec in [R::State(state), R::Credential(credential), generation] {
             let key = rec.plane_key().unwrap();
             let entry = stamped(KIND_MAIL, &key, &rec.encode().unwrap(), i64::MAX, 0xff);
             let len = sealed_envelope_len(&entry, generation_sealed).unwrap();
@@ -6773,8 +6839,9 @@ mod tests {
     /// **Bytes are byte strings** (the *Bounded rows* rider): the credential
     /// secret (a `SecretByteBuf` since the 2026-09-30 re-cut — a `SecretBytes`
     /// encoded an integer array), the generation fingerprint, every MSEK
-    /// carrier on the state row and the burn's predecessor id all ride as
-    /// CBOR byte strings (major 2), never serde's default integer array.
+    /// carrier on the state row and the generation row, and the burn's
+    /// predecessor id all ride as CBOR byte strings (major 2), never serde's
+    /// default integer array.
     #[test]
     fn the_mail_credential_secret_is_a_cbor_byte_string() {
         use fauna_core::data::{MsekFingerprint, PriorMsekRetirement};
@@ -6801,11 +6868,6 @@ mod tests {
         byte_string(&cred, &[0xab; 32], "the credential secret");
         byte_string(&cred, &fp.0, "the generation fingerprint");
         let state = R::State(mail_state(Some(0xa1), 1, |s| {
-            s.prior_mseks = vec![mail_key(0xa2)];
-            s.prior_msek_retirements = vec![PriorMsekRetirement {
-                msek: mail_key(0xa2),
-                retired_at_unix: 1,
-            }];
             s.pending_rotation = Some(MailRotationSentinel {
                 new_msek: mail_key(0xa3),
             });
@@ -6814,7 +6876,13 @@ mod tests {
         .encode()
         .unwrap();
         byte_string(&state, &[0xa1; 32], "the MSEK");
-        byte_string(&state, &[0xa2; 32], "a prior MSEK and its retirement key");
+        let generation = R::Generation(PriorMsekRetirement {
+            msek: mail_key(0xa2),
+            retired_at_unix: 1,
+        })
+        .encode()
+        .unwrap();
+        byte_string(&generation, &[0xa2; 32], "a retired generation's MSEK");
         byte_string(&state, &[0xa3; 32], "the sentinel's incoming MSEK");
         byte_string(&state, &[0xa4; 32], "a burn's predecessor id");
     }

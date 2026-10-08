@@ -397,7 +397,10 @@ public sealed partial class ConversationsPage : Page
         // dm-send-button lesson two overlays up does not repeat. The state
         // channel below is unaffected either way, which is what the action
         // layer actually reads.
-        var sendError = _vm.ActiveSendErrorReason;
+        // The report sheet's own failure line (a failed send, or a block/hide that did
+        // not land beside a landed report) rides the same surface, held across ticks —
+        // Refresh runs on every observer tick and would otherwise clear it at once.
+        var sendError = _vm.ActiveSendErrorReason ?? _reportError;
         App.CurrentErrorMessage = sendError;
         var roomEditorOpen = RoomSettingsOverlay.Visibility == Visibility.Visible;
         if (sendError is not null && roomEditorOpen)
@@ -747,6 +750,16 @@ public sealed partial class ConversationsPage : Page
         {
             if (_latestSnapshotById.TryGetValue(msg.Id, out var m))
                 _ = _vm?.MarkMessageSpamAsync(msg.Id, m.body, m.subjectLine, msg.IsOwn);
+        };
+        // dm-message-report-button → the shared report sheet (moderation.md §
+        // User-initiated reporting). The plane ref and sender are not carried on the
+        // bubble's UI-projection view — read them off the message's newest snapshot,
+        // exactly as mark-as-spam does. The shared report_message_target answers
+        // none for a mail / bridged message (no plane identity): nothing opens.
+        bubble.ReportRequested += msg =>
+        {
+            if (_latestSnapshotById.TryGetValue(msg.Id, out var m))
+                _ = OpenReportSheetAsync(m);
         };
         return bubble;
     }
@@ -1510,7 +1523,52 @@ public sealed partial class ConversationsPage : Page
         _vm?.CancelAddParticipant();
     }
 
+    // ── Reporting (moderation.md § User-initiated reporting) ─────
+
+    /// <summary>The report sheet's failure line, held across observer ticks (see the
+    /// error surface in <see cref="Refresh"/>); <c>null</c> when there is none.</summary>
+    private string? _reportError;
+
+    private void ReportPageError(string message)
+    {
+        _reportError = message.Length > 0 ? message : null;
+        Refresh();
+    }
+
+    /// <summary>Open the shared report sheet on the received message
+    /// <paramref name="m"/>. A landed report is acknowledged OUTSIDE the closed sheet
+    /// (<c>report-status</c>); the sheet has already stored the reporter-side hide, so
+    /// the re-bind below paints "You reported this" at once. A failed send keeps the
+    /// sheet open and reports on <c>error-message</c>; a failed block/hide lands there
+    /// BESIDE the acknowledgement.</summary>
+    private async Task OpenReportSheetAsync(MessageSnapshot m)
+    {
+        if (_rpc is null || m.planeRef is not { } plane) return;
+        var target = uniffi.fauna_ffi.FaunaFfiMethods.ReportMessageTarget(
+            plane.scope, plane.recordDigest, SenderActorHex(m.sender), m.body);
+        // None for a mail or bridged message — it paints no report verb at all.
+        if (target is null) return;
+        ReportStatusText.Visibility = Visibility.Collapsed;
+        _reportError = null;
+        var outcome = await Controls.ReportSheetDialog.ShowAsync(
+            this.XamlRoot, _rpc, target, ReportPageError);
+        if (outcome is null) return;
+        ReportStatusText.Text = outcome.Acknowledgement ?? "";
+        ReportStatusText.Visibility = Visibility.Visible;
+        _reportError = outcome.FollowUpError;
+        // The hide list changed: re-bind the messages (each verdict is read at bind).
+        Refresh();
+    }
+
     // ── Helpers ──────────────────────────────────────────────────
+
+    /// <summary>The sender's lowercase-hex actor id for a Fauna-rail address, else
+    /// <c>null</c> — a mail or bridged sender has none. Routes a report to the
+    /// sender's home nest and keys the hide of everything they sent.</summary>
+    private static string? SenderActorHex(TypedAddress sender) =>
+        sender is TypedAddress.Fauna fauna
+            ? Convert.ToHexString(fauna.@actorId).ToLowerInvariant()
+            : null;
 
     private static FaunaApp.Controls.DmMessageView ToMessageView(MessageSnapshot m, bool selected)
     {
@@ -1523,8 +1581,15 @@ public sealed partial class ConversationsPage : Page
             m.labels, FaunaApp.Core.Services.ContentPolicyCache.Current.ContentPolicy);
         if (guardianEnforcedCategories.Length > 0)
             FaunaApp.Core.Services.GuardianNotifyCache.Record(m.messageId, guardianEnforcedCategories);
+        // The viewer's own reports are the verdict's third input (moderation.md §
+        // Corollary): a reported message hides under the plane record DIGEST — the
+        // id a report names, never the message id — and a reported sender's messages
+        // hide with them. Null for a message with no plane ref (mail, bridged): it
+        // can be neither reported nor hidden.
+        var reportKey = m.planeRef?.recordDigest;
         var region = FaunaApp.Core.Services.ContentPolicyCache.RenderFor(
-            m.labels, FaunaApp.Core.Services.RegionSubject.Message(m.messageId, m.body));
+            m.labels, FaunaApp.Core.Services.RegionSubject.Message(
+                m.messageId, m.body, reportKey, SenderActorHex(m.sender)));
         return new FaunaApp.Controls.DmMessageView(
             Id: m.messageId,
             From: from,
@@ -1570,6 +1635,13 @@ public sealed partial class ConversationsPage : Page
             // when the region drove it — the placeholder painted ahead of the family arm.
             ContentVerdict: region.Verdict,
             Region: region.Placeholder,
+            // The viewer's own report is what hid it: the blocked-notice then reads
+            // "You reported this" (`source="reported"`), not the family-policy words.
+            Reported: region.Reported,
+            // The report verb is offered on a RECEIVED message that has a plane
+            // identity to be reported against (the shared report_message_target
+            // answers none for mail / bridged — the verb paints nothing there).
+            CanReport: !m.isOwn && reportKey is not null,
             // ...and its OWN session reveal set (separate from the muted one above), keyed
             // on the message id so a Refresh re-bind keeps a revealed message revealed.
             ContentRevealed: FaunaApp.Core.Services.ContentPolicyCache.IsRevealed(m.messageId),

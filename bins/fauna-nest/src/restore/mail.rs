@@ -26,19 +26,23 @@ pub fn replay_mail_manifest_into_sqlite(
     actor: &[u8; 32],
     manifest: &MailPlacementManifest,
 ) -> Result<()> {
-    // bridge_imap_mailbox_state: (actor_id, mailbox, uid_validity, uid_next, highestmodseq)
+    // bridge_imap_mailbox_state: (actor_id, mailbox, uid_validity, uid_next,
+    // highestmodseq, pruned_modseq). The prune floor rides the restore: the
+    // tombstones replayed below are only those the retention prune kept, so
+    // the rebuilt expunge log is incomplete below it (imap-server.md § QRESYNC).
     // Note: manifest's MailboxState.attrs is manifest-only — no attrs column in the DB.
     for m in &manifest.mailboxes {
         tx.execute(
             "INSERT INTO bridge_imap_mailbox_state
-                (actor_id, mailbox, uid_validity, uid_next, highestmodseq)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+                (actor_id, mailbox, uid_validity, uid_next, highestmodseq, pruned_modseq)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 actor.as_slice(),
                 &m.name,
                 m.uid_validity as i64,
                 m.uid_next as i64,
                 m.highestmodseq as i64,
+                m.pruned_modseq as i64,
             ],
         )
         .context("INSERT bridge_imap_mailbox_state")?;
@@ -114,6 +118,7 @@ mod tests {
             uid_next: 42,
             highestmodseq: 100,
             attrs: vec![],
+            pruned_modseq: 50,
         });
         manifest.placements.push(RecordPlacement {
             mailbox: "INBOX".to_string(),
@@ -157,6 +162,14 @@ mod tests {
             )
             .expect("count mailbox_state");
         assert_eq!(mb_count, 1);
+        let floor: i64 = conn
+            .query_row(
+                "SELECT pruned_modseq FROM bridge_imap_mailbox_state WHERE actor_id = ?1",
+                rusqlite::params![actor.as_slice()],
+                |r| r.get(0),
+            )
+            .expect("read prune floor");
+        assert_eq!(floor, 50, "the manifest's prune floor rides the restore");
 
         let msg_count: i64 = conn
             .query_row(

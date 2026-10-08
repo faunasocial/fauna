@@ -349,8 +349,7 @@ mod manager {
             self.manager.update_compose_gate(gate_tier, gate_preview);
         }
 
-        /// Stage the composer's **"Sell this post…"** fields
-        /// (`compose-sell-price` / `compose-sell-subscribers-free`) — the sell
+        /// Stage the composer's **"Sell this post…"** fields — the sell
         /// sibling of [`update_compose_gate`](Self::update_compose_gate),
         /// sharing its teaser. `selling: false` leaves sell mode (back to
         /// Public); `true` enters it and clears any selected gate tier, since
@@ -361,6 +360,14 @@ mod manager {
         /// Takes the sell params flat rather than a struct because that is
         /// the ergonomic JS face; the `Option<SellComposeState>` the manager
         /// wants is rebuilt here.
+        // `payments`-gated doc line: the ids are the price-and-route class
+        // (`dynamic-features.md` § Platform-family surface excision), and
+        // wasm-bindgen records every exported docstring in the `.wasm`
+        // (criterion 1, prose included) — gate the line, never reword it.
+        #[cfg_attr(
+            feature = "payments",
+            doc = " The fields paint `compose-sell-price` / `compose-sell-subscribers-free`."
+        )]
         #[wasm_bindgen(js_name = updateComposeSell)]
         pub fn update_compose_sell(
             &self,
@@ -945,10 +952,14 @@ mod manager {
         /// Per-post pay-to-unlock → *the buyer's price read is post-addressed*)
         /// and fold it into the matching `PostSummary.unlock_offer`. A no-op
         /// unless `gated_tier` names a `post-unlock-*` tier and the offer isn't
-        /// already resolved. Drives `gated-post-price` / `gated-post-payment-link`
-        /// / `gated-post-buy-button` — the purchase itself is the existing
-        /// subscribe call against the resolved `tier_name`, no new RPC face.
-        /// Resolves `undefined`.
+        /// already resolved. The purchase itself is the existing subscribe
+        /// call against the resolved `tier_name`, no new RPC face. Resolves
+        /// `undefined`.
+        // `payments`-gated doc line — see `update_compose_sell` above.
+        #[cfg_attr(
+            feature = "payments",
+            doc = " Drives `gated-post-price` / `gated-post-payment-link` / `gated-post-buy-button`."
+        )]
         #[wasm_bindgen(js_name = resolvePostUnlockOffer)]
         pub fn resolve_post_unlock_offer(&self, post_id: String) -> js_sys::Promise {
             let m = self.manager.clone();
@@ -981,12 +992,16 @@ mod manager {
             })
         }
 
-        /// Buy a sold post via the self-serve teaser affordance
-        /// (`gated-post-buy-button`) — the existing subscribe flow against the
-        /// resolved offer's `tier_name`, no new nest write. Resolves `true` if
-        /// queued (pending author approval), `false` if approved outright;
-        /// rejects if the post isn't loaded, its offer hasn't resolved, or the
-        /// subscribe call itself fails.
+        /// Buy a sold post via the self-serve teaser affordance — the existing
+        /// subscribe flow against the resolved offer's `tier_name`, no new nest
+        /// write. Resolves `true` if queued (pending author approval), `false`
+        /// if approved outright; rejects if the post isn't loaded, its offer
+        /// hasn't resolved, or the subscribe call itself fails.
+        // `payments`-gated doc line — see `resolve_post_unlock_offer` above.
+        #[cfg_attr(
+            feature = "payments",
+            doc = " The affordance is `gated-post-buy-button`."
+        )]
         #[wasm_bindgen(js_name = buyUnlockOffer)]
         pub fn buy_unlock_offer(&self, post_id: String) -> js_sys::Promise {
             let m = self.manager.clone();

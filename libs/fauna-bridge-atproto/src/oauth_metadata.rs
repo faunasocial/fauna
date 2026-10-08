@@ -762,7 +762,7 @@ mod tests {
     }
 
     /// The base scope must leave an `atproto`-only grant able to ask who it is
-    /// (finding 57 — before F4 slice 2 this denied, including `getSession`),
+    /// (before F4 slice 2 this denied, including `getSession`),
     /// and must not have quietly become a second `transition:generic`.
     #[test]
     fn the_base_scope_grants_identity_and_nothing_more() {

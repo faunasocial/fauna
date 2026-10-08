@@ -750,7 +750,7 @@ introduced, it is manager-owned state, never per-app storage. (The local
 ## Errors & edge cases
 
 - `error-message` page-level.
-- `search-no-results` for empty result sets (both arms settled, zero merged rows).
+- `search-no-results` for empty result sets (both arms answered, zero merged rows). A search with zero rows behind a failed arm could not look, so it shows the error alone, never `search-no-results`.
 - Network failure / nest-arm error: the snapshot's `error: Option<LocalizedText>`
   is set and any local rows are kept (§ State & data shape — partial results
   shown honestly). Query syntax errors surface the same way (the nest maps

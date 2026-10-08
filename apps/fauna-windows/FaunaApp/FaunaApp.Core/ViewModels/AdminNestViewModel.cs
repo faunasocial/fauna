@@ -293,6 +293,12 @@ public partial class AdminNestViewModel : ObservableObject
         {
             IsLoading = false;
         }
+
+        // The abuse-report queue (moderation.md § User-initiated reporting → Where
+        // it lands) is read in the page's load too, with its own `loaded` bit and
+        // reason line — NEVER through the catch above, so a faulted queue read still
+        // shows every other section (and an earlier fault still shows the queue).
+        await LoadReportsAsync();
     }
 
     /// <summary>Flip the admin <c>pairing</c> flag and re-read <c>services.list</c>
@@ -822,4 +828,121 @@ public partial class AdminNestViewModel : ObservableObject
         TakedownStatus = Strings.Resolve(
             FaunaFfiMethods.TakedownVerdict(form.Restore, error));
     }
+
+    // ── User-initiated abuse reports queue (moderation.md § User-initiated
+    //     reporting → Where it lands) ─────────────────────────────────────────
+    //
+    // The takedown console's inbox, after it on the page. Every row arrives
+    // already worded from shared Rust (`fauna.moderation.abuse_report.queue`,
+    // admin-class): the reason, the origin (a local reporter by handle, a
+    // forwarded report as "a user of <nest>" — never a forwarded reporter), whether
+    // the row can open the takedown console (posts and messages only). A report is
+    // EVIDENCE for the admin to weigh, so resolving a row only RECORDS the outcome;
+    // acting is the console or a suspension. Reference: tui's `reports_elements`,
+    // web's `reportLine`.
+
+    /// <summary>The open queue rows as the page paints them (flat
+    /// <c>admin-nest-report-item[i]</c>); the raw rows stay in
+    /// <see cref="_reportRows"/> — UniFFI types are <c>internal</c> and a row
+    /// template needs public ones.</summary>
+    public ObservableCollection<ReportQueueRowView> Reports { get; } = new();
+
+    private readonly Dictionary<string, FfiReportQueueRow> _reportRows = new();
+
+    /// <summary>Whether a queue read has landed. The loading line paints until it
+    /// has and the empty line only after it (ui/README.md § List pages: loading is
+    /// not empty).</summary>
+    [ObservableProperty] private bool _reportsLoaded;
+
+    /// <summary>The line the last resolve (or a failed queue read) painted; its own
+    /// line, never <see cref="Error"/>, so a faulted queue still shows every other
+    /// section.</summary>
+    [ObservableProperty] private string? _reportsStatus;
+
+    /// <summary>Read the open queue (<c>fauna.moderation.abuse_report.queue</c>) and
+    /// repaint it. A failed read says so on <see cref="ReportsStatus"/> and leaves
+    /// <see cref="ReportsLoaded"/> as it was — never an empty line off a read that
+    /// did not land.</summary>
+    public async Task LoadReportsAsync()
+    {
+        try
+        {
+            var rows = await _rpc.AbuseReportQueueAsync();
+            _reportRows.Clear();
+            Reports.Clear();
+            foreach (var r in rows)
+            {
+                _reportRows[r.reportId] = r;
+                Reports.Add(MapReportRow(r));
+            }
+            ReportsLoaded = true;
+        }
+        catch (Exception ex)
+        {
+            ReportsStatus = Strings.Format("admin/nest_page/reports_failed", Strings.Error(ex));
+        }
+    }
+
+    /// <summary><c>admin-nest-report-acted-button</c> (<paramref name="acted"/> true)
+    /// / <c>-dismiss-button</c>: record the outcome, say so in the shared verdict's
+    /// words (<c>report_resolve_verdict</c>), and re-read the queue — a resolved row
+    /// leaves it. The reporter is told the outcome, nothing more.</summary>
+    public async Task ResolveReportAsync(string reportId, bool acted)
+    {
+        string? failure = null;
+        try
+        {
+            await _rpc.AbuseReportResolveAsync(reportId, acted);
+        }
+        catch (Exception ex)
+        {
+            failure = Strings.Error(ex);
+        }
+        ReportsStatus = Strings.Resolve(FaunaFfiMethods.ReportResolveVerdict(acted, failure));
+        await LoadReportsAsync();
+    }
+
+    /// <summary><c>admin-nest-report-open-takedown-button</c>: pre-fill the takedown
+    /// console from the row (the shared <c>report_takedown_prefill</c>) with NO
+    /// citation — the console's own guard stands, so a pre-filled takedown is still
+    /// un-armable until the admin names a legal reference. Returns whether the row had
+    /// a takedown to open (an account has none).</summary>
+    public bool OpenReportTakedown(string reportId)
+    {
+        if (!_reportRows.TryGetValue(reportId, out var row)) return false;
+        if (FaunaFfiMethods.ReportTakedownPrefill(row.subject) is not { } prefill) return false;
+        CancelTakedown();
+        TakedownContentId = prefill.contentId;
+        TakedownConversation = prefill.conversation;
+        TakedownReference = string.Empty;
+        TakedownRestore = false;
+        TakedownStatus = null;
+        RefreshTakedownArm();
+        return true;
+    }
+
+    /// <summary>One queue row's line — <c>reason · kind id · origin · when — note —
+    /// “excerpt”</c> — the same join web's <c>reportLine</c> and tui's
+    /// <c>reports_elements</c> make (the e2e reads it); every part but the join is
+    /// shared Rust's, and the time is the shared fixed local render.</summary>
+    internal static ReportQueueRowView MapReportRow(FfiReportQueueRow r)
+    {
+        var id = ReportSheetViewModel.SubjectIdOf(r.subject);
+        var kind = ReportSheetViewModel.SubjectKindOf(r.subject);
+        var text =
+            $"{Strings.Resolve(r.reason)} · {kind} {id} · {Strings.Resolve(r.origin)} · " +
+            FaunaFfiMethods.FormatUnixLocal(r.createdAt / 1_000_000);
+        if (!string.IsNullOrEmpty(r.note)) text += $" — {r.note}";
+        if (!string.IsNullOrEmpty(r.excerpt)) text += $" — “{r.excerpt}”";
+        return new ReportQueueRowView(r.reportId, id, kind, text, r.canOpenTakedown);
+    }
 }
+
+/// <summary>
+/// One open row of the admin's abuse-report queue (<c>admin-nest-report-item</c>):
+/// the id the three buttons act on, the subject it names, the shared-worded line the
+/// e2e reads, and whether <c>admin-nest-report-open-takedown-button</c> paints
+/// (posts and messages only).
+/// </summary>
+public record ReportQueueRowView(
+    string ReportId, string SubjectId, string Kind, string Line, bool CanOpenTakedown);

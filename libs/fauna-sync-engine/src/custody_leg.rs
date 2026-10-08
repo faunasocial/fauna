@@ -563,6 +563,15 @@ impl CustodyLegState {
         }
     }
 
+    /// Drop every custodied store this holder opened — the custody leg's half
+    /// of the yield to the sync agent (`account-runtime.md` § Multi-instance
+    /// concurrency → *The agent holds the role when present*, part 3). The
+    /// stores reopen lazily from the `custodies-held` rows if this runtime
+    /// ever holds the role again, exactly as at a first pass.
+    pub(crate) fn stand_down(&mut self) {
+        self.held.clear();
+    }
+
     /// The device principal's public bytes — the custodied stores' writer tag
     /// and the witness's `custodian_key`, derived rather than stored.
     fn device_id(&self) -> [u8; 32] {

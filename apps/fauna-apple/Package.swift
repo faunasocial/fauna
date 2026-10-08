@@ -89,7 +89,6 @@ var targets: [Target] = [
         dependencies: [
             "FaunaKit",
             "FaunaDeepLink",
-            .product(name: "Sparkle", package: "Sparkle", condition: .when(platforms: [.macOS])),
         ],
         path: "Fauna-macOS",
         // `Resources/LaunchAgents` is bundle layout, not a SwiftPM resource: the
@@ -100,7 +99,7 @@ var targets: [Target] = [
     ),
     // Thin `@main` shell over FaunaMacOSLib. The single source file is also
     // compiled by the `.xcodeproj` app target, so the two entry points can never
-    // drift (Sparkle for auto-updates, macOS-only).
+    // drift.
     .executableTarget(
         name: "FaunaMacOS",
         dependencies: ["FaunaMacOSLib"],
@@ -109,7 +108,7 @@ var targets: [Target] = [
     ),
     // Unit tests for macOS-app types that live in FaunaMacOSLib (e.g.
     // `LocationsModel`'s reconcile logic). Runs under `swift test` on the macOS
-    // host only — FaunaMacOSLib is macOS-only (Sparkle).
+    // host only — FaunaMacOSLib is macOS-only (AppKit).
     .testTarget(
         name: "FaunaMacOSLibTests",
         dependencies: ["FaunaMacOSLib", "FaunaKit"],
@@ -175,9 +174,6 @@ let package = Package(
         // Linked by the `.xcodeproj` widget appex targets (macOS + iOS) —
         // deliberately the ONLY product they link (FFI-free).
         .library(name: "FaunaExtensionKit", targets: ["FaunaExtensionKit"]),
-    ],
-    dependencies: [
-        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0"),
     ],
     targets: targets
 )

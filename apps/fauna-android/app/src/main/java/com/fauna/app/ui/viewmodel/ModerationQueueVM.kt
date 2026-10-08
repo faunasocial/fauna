@@ -3,11 +3,16 @@ package com.fauna.app.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.ApiClient
+import com.fauna.app.core.ReportSheetStore
+import com.fauna.ffi.FfiReportLedgerRow
 import com.fauna.ffi.moderationQueue
+import com.fauna.ffi.reportWithdrawVerdict
+import com.fauna.ffi.shortId
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import uniffi.fauna_client_moderation.QueueRow
+import uniffi.fauna_core.LocalizedText
 import javax.inject.Inject
 
 /**
@@ -36,8 +41,48 @@ class ModerationQueueVM @Inject constructor(
     val isLoading = MutableStateFlow(false)
     val errorMessage = MutableStateFlow<String?>(null)
 
+    /** The reporter's own ledger — every abuse report this user filed, newest first
+     *  (`moderation-reports-section`; moderation.md § User-initiated reporting →
+     *  *What the reporter is told*), already worded by shared Rust. */
+    val reports = MutableStateFlow<List<FfiReportLedgerRow>>(emptyList())
+
+    /** Whether the ledger has been read at least once — the empty line paints only
+     *  off this bit, so a slow first read never claims "You have not reported
+     *  anything" (`ui/README.md` § List pages: loading is not empty). */
+    val reportsLoaded = MutableStateFlow(false)
+
+    /** The line the last withdraw painted (`null` before one). */
+    val reportStatus = MutableStateFlow<LocalizedText?>(null)
+
     init {
         load()
+    }
+
+    /** Read the reporter's ledger (`fauna.moderation.abuse_report.mine`). A failed
+     *  read never hides the queue rows beside it — it only keeps the loaded bit down. */
+    fun loadReports() {
+        viewModelScope.launch {
+            try {
+                reports.value = api.abuseReportMine()
+                reportsLoaded.value = true
+            } catch (e: Exception) {
+                errorMessage.value = e.message
+            }
+        }
+    }
+
+    /** Withdraw one open report, then re-read the ledger. The verdict line is the
+     *  shared fold's (success names what was deleted everywhere). */
+    fun withdrawReport(reportId: String) {
+        viewModelScope.launch {
+            reportStatus.value = try {
+                api.abuseReportWithdraw(reportId)
+                reportWithdrawVerdict(null)
+            } catch (e: Exception) {
+                reportWithdrawVerdict(e.message ?: e.toString())
+            }
+            loadReports()
+        }
     }
 
     /** Load the queue: fetch the server rows from `fauna.moderation.actions` (a
@@ -58,6 +103,9 @@ class ModerationQueueVM @Inject constructor(
                 // has not landed yet (NestClient::request_inner).
             }
             isLoading.value = false
+            // The reporter's ledger rides every Moderation entry beside the queue —
+            // its own failure never hides the queue rows above.
+            loadReports()
         }
     }
 
@@ -126,6 +174,19 @@ class ModerationQueueVM @Inject constructor(
     }
 
     companion object {
+        /**
+         * One ledger row's line — `reason · status · short subject id · outcome — where
+         * it went` (web's `ledgerLine`, tui's `ledger_elements`, apple's
+         * `ledgerLine`: the e2e reads this text on every app). [resolve] maps a shared
+         * [LocalizedText] to the user's words.
+         */
+        fun ledgerLine(row: FfiReportLedgerRow, resolve: (LocalizedText) -> String): String {
+            val parts = mutableListOf(resolve(row.reason), resolve(row.status))
+            ReportSheetStore.subjectId(row.subject)?.let { parts.add(shortId(it)) }
+            row.outcome?.let { parts.add(resolve(it)) }
+            return "${parts.joinToString(" · ")} — ${resolve(row.routedTo)}"
+        }
+
         /** Whole-percent confidence from the wire's per-mille `u16` (0–1000; the
          *  dag-cbor wire forbids floats), rounded half-up. Single-sourced in shared
          *  `fauna_core::format::confidence_percent` (value-formatting.md § Confidence
