@@ -214,7 +214,7 @@ def stage_bundle_with_instance_id(source: Path, dest_dir: Path, instance: str) -
 
     # NEVER `--deep`. Only the app's own Info.plist changed, so only the app's
     # signature was invalidated; the nested code (the bundled `fauna-sync-agent`,
-    # `Contents/PlugIns/*.appex`, `Sparkle.framework`) is untouched and keeps the
+    # `Contents/PlugIns/*.appex`) is untouched and keeps the
     # signature `mac-app` gave it, which is the whole point — those signatures
     # carry each nested bundle's OWN entitlements. `codesign --deep --entitlements`
     # re-stamps every nested Mach-O with the OUTER entitlements (measured
@@ -307,14 +307,12 @@ def apple_development_identity() -> str:
 
 
 def _photo_library_stamp(binary: Path) -> dict:
-    sparkle = binary.parent / "Sparkle.framework"
     def mark(p: Path):
         st = p.stat()
         return [st.st_size, st.st_mtime_ns]
     return {
         "binary": mark(binary),
         "info_plist": mark(_MACOS_INFO_PLIST),
-        "sparkle": mark(sparkle) if sparkle.exists() else None,
         "bundle_id": PHOTO_LIBRARY_BUNDLE_ID,
     }
 
@@ -323,8 +321,8 @@ def stage_photo_library_bundle(binary: Path, stage_dir: Path | None = None) -> P
     """Wrap the bare `FaunaMacOS` build in a minimal `.app` under
     `PHOTO_LIBRARY_BUNDLE_ID`, signed with the Apple Development identity.
 
-    Reused as-is while the binary, the Info.plist source and the embedded Sparkle
-    are unchanged (a stamp beside the bundle), because signing is the one step that
+    Reused as-is while the binary and the Info.plist source are unchanged (a
+    stamp beside the bundle), because signing is the one step that
     can stop for a human. The bundle is exactly what the bare launch runs — the same
     executable, no entitlements (the bare binary has none) — plus the three things a
     bundle adds: an Info.plist carrying `NSPhotoLibraryUsageDescription` (TCC
@@ -349,22 +347,9 @@ def stage_photo_library_bundle(binary: Path, stage_dir: Path | None = None) -> P
     if app.exists():
         shutil.rmtree(app)
     macos_dir = app / "Contents" / "MacOS"
-    frameworks = app / "Contents" / "Frameworks"
     macos_dir.mkdir(parents=True)
-    frameworks.mkdir(parents=True)
     exe = macos_dir / binary.name
     shutil.copy2(binary, exe)
-    # The bare binary finds Sparkle through `@loader_path` (it sits beside it in the
-    # build dir); inside a bundle the framework lives in `Contents/Frameworks`, so
-    # add the standard rpath. The signature this invalidates is replaced below.
-    sparkle = binary.parent / "Sparkle.framework"
-    if sparkle.exists():
-        subprocess.run(["cp", "-R", str(sparkle), str(frameworks)], check=True,
-                       capture_output=True)
-        subprocess.run(
-            ["install_name_tool", "-add_rpath", "@executable_path/../Frameworks", str(exe)],
-            check=True, capture_output=True,
-        )
 
     with open(_MACOS_INFO_PLIST, "rb") as fh:
         info = plistlib.load(fh)
@@ -373,9 +358,6 @@ def stage_photo_library_bundle(binary: Path, stage_dir: Path | None = None) -> P
         "CFBundleExecutable": binary.name,
         "CFBundleName": "Fauna E2E Photos",
         "CFBundleDisplayName": "Fauna E2E Photos",
-        # A test bundle must never check an appcast (the app already keeps the
-        # updater off in DEBUG; this is belt and braces for the bundle's own keys).
-        "SUEnableAutomaticChecks": False,
     })
     with open(app / "Contents" / "Info.plist", "wb") as fh:
         plistlib.dump(info, fh)

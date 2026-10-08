@@ -3745,6 +3745,8 @@ impl ConversationsManager {
                 // once the just-appended own message — which a sender can never
                 // MLS-decrypt off the log — is durably persisted.
                 self.persist_thread_history(&id).await;
+                // A list send's progress and today's meter moved with it.
+                self.refresh_list_send(Some(id)).await;
                 Ok(())
             }
             Err(e) => {
@@ -3753,6 +3755,9 @@ impl ConversationsManager {
                 // the raw error, diagnostics included, goes to the log here.
                 tracing::warn!("send failed: {e:?}");
                 self.set_send_state(&id, SendState::failed(e.user_detail()));
+                // An over-limit list send is explained beside the send it
+                // refused (`mail-mass-mailing.md` § The per-day per-account cap).
+                self.refresh_list_send(Some(id)).await;
                 Err(e)
             }
         }
@@ -5367,6 +5372,65 @@ impl ConversationsManager {
             }
         }
         ResolveResult::NotFound
+    }
+
+    /// Re-derive [`ComposeState::list_send`] for a compose — the thread `id`'s,
+    /// or the new-thread compose's when `None` — from the nest's current
+    /// figures (`mail-mass-mailing.md` § Composing a list message): set when
+    /// its one mail recipient is one of the account's own lists, cleared
+    /// otherwise. Apps call it when a recipient chip commits and when a thread
+    /// opens; [`Self::send`] calls it after every send. The rail answers
+    /// ([`RailBackend::list_send_view`]); only SMTP has lists.
+    pub async fn refresh_list_send(&self, id: Option<ThreadId>) {
+        let (rail, recipients) = match &id {
+            Some(id) => {
+                let Some(detail) = self.thread_detail(id.clone()) else {
+                    return;
+                };
+                let compose = self.drafts.get(id);
+                let recipients = if compose.reply_recipients.is_empty() {
+                    detail.participants
+                } else {
+                    compose.reply_recipients
+                };
+                (Some(detail.rail), recipients)
+            }
+            None => {
+                let Some(compose) = self.drafts.new_thread() else {
+                    return;
+                };
+                let chips = compose
+                    .recipient_picker
+                    .map(|p| p.chips)
+                    .unwrap_or_default();
+                (chips.first().and_then(TypedAddress::rail), chips)
+            }
+        };
+        let backend = rail.and_then(|rail| self.backends.read().unwrap().get(&rail).cloned());
+        let view = match backend {
+            Some(backend) => backend.list_send_view(&recipients).await,
+            None => None,
+        };
+        // Re-read after the await, so an edit made meanwhile is kept.
+        match id {
+            Some(id) => {
+                let mut compose = self.drafts.get(&id);
+                if compose.list_send != view {
+                    compose.list_send = view;
+                    self.drafts.set(id, compose);
+                    self.notify();
+                }
+            }
+            None => {
+                if let Some(mut compose) = self.drafts.new_thread()
+                    && compose.list_send != view
+                {
+                    compose.list_send = view;
+                    self.drafts.set_new_thread(Some(compose));
+                    self.notify();
+                }
+            }
+        }
     }
 
     fn set_send_state(&self, id: &ThreadId, state: SendState) {

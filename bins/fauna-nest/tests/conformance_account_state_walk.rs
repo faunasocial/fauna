@@ -2473,11 +2473,10 @@ async fn the_retained_bundle_bridges_the_unkeyed_window_and_drops_on_shred() {
     else {
         panic!("the mint is live before the shred");
     };
-    let shred = fauna_core::generation::GenerationMintRecord::Shredded {
-        core,
-        shredded_at_ms: 9_000,
-        shredded_by: writer_id(0x0A).0,
-    };
+    // Authored by A, a verified member — an unauthored shred drops no key
+    // (`account-data-taxonomy.md` § *Fleet-scope reclamation* → *the
+    // authored shred*; the plane's own tier_1 tests pin that half).
+    let shred = fauna_core::generation::sign_shred(&signing_key(0x0A), core, 9_000).unwrap();
     plane_fleet(&a, &rpc, &keys, &signing_key(0x0A))
         .put(
             &ItemId {
@@ -2509,10 +2508,18 @@ async fn the_retained_bundle_bridges_the_unkeyed_window_and_drops_on_shred() {
         .walk()
         .await
         .unwrap();
-    let opened =
-        generation_tip::generation_key_for(&c, &generation, &signing_key(0x0C), Some(&c_custody))
-            .await
-            .unwrap();
+    let view = fauna_sync_engine::fleet_removal::fleet_view(&c, &TRUST)
+        .await
+        .unwrap();
+    let opened = generation_tip::generation_key_for(
+        &c,
+        &generation,
+        &signing_key(0x0C),
+        Some(&c_custody),
+        Some(&view),
+    )
+    .await
+    .unwrap();
     assert!(
         opened.is_none(),
         "a shredded generation keys nothing, bundle or not"
@@ -5295,6 +5302,7 @@ async fn holds_generation_key(seat: &Seat, generation: &[u8; 32]) -> bool {
             generation,
             &seat.key,
             Some(&seat.custody),
+            None,
         )
         .await
         .unwrap()

@@ -98,10 +98,11 @@ pub(crate) fn map_content_api_err(e: fauna_nest_http::ApiError, action: &str) ->
         // (the reconnect supervisor stops on it, and `fauna-ffi`'s `stringify`
         // raises `FfiError::NestIdentityChanged`), so this just reports the
         // failure it saw with the nest named in it.
-        // The mid-session sign-in refusal is the same shape: its blocking
-        // route is the connection path too.
+        // The mid-session sign-in and succession refusals are the same shape:
+        // their blocking route is the connection path too.
         e @ (fauna_nest_http::ApiError::NestIdentityChanged { .. }
-        | fauna_nest_http::ApiError::SignInRefused) => MediaApiError::Transient {
+        | fauna_nest_http::ApiError::SignInRefused
+        | fauna_nest_http::ApiError::Superseded { .. }) => MediaApiError::Transient {
             detail: e.to_string(),
         },
     }

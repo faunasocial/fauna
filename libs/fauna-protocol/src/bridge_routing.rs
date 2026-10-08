@@ -591,6 +591,17 @@ pub struct ListAccountListsRequest {}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ListAccountListsReply {
     pub lists: Vec<MailListRow>,
+    /// Recipients the caller's list sends have reserved today (UTC) across all
+    /// their lists — the per-account meter the compose form shows as "Today's
+    /// quota: N / M" before a list send (`mail-mass-mailing.md` § Composing a
+    /// list message). Additive: an older nest omits it ⇒ 0.
+    #[serde(default)]
+    pub account_recipients_today: i64,
+    /// The effective per-account per-day list-recipient cap the next send is
+    /// checked against (§ The per-day per-account cap). Additive: an older
+    /// nest omits it ⇒ 0, which a reader treats as "cap unknown".
+    #[serde(default)]
+    pub account_recipients_per_day: i64,
 }
 
 /// `fauna.bridges.create_account_list` (User) — create one list owned by the

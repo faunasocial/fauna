@@ -629,6 +629,55 @@ fn a_refused_ledger_write_never_strands_a_deposit_the_log_cannot_name() {
     assert_eq!(third, GrantRemintOutcome::NothingToRemint);
 }
 
+/// **Record, publish, then deposit** (`ui/nests.md` § Trust facet — grants →
+/// *Record-then-deposit*, the published form). The intent write lands locally
+/// but the bound nest does not acknowledge it: no replacement is deposited — a
+/// sibling replica could not yet read the `Mint` its reconcile sweep judges
+/// the row by — and the next pass, the nest taking the publish, converges.
+#[test]
+fn an_unpublished_intent_write_deposits_nothing_and_the_next_pass_converges() {
+    let nest = Arc::new(FakeNest::default());
+    let ledger = successor_ledger(vec![master_mail_scope()], far_future());
+    *nest.roster.lock().unwrap() = vec![("mda-1".into(), "mda".into())];
+
+    ledger.publish_refuses(true);
+    let first = block_on(remint_capability_grants(
+        nest.clone(),
+        SUCCESSOR_SEED,
+        &ledger,
+        None,
+        &mail(),
+    ));
+    assert!(
+        first.is_err(),
+        "the pass reports the unacknowledged publish"
+    );
+    assert!(nest.held_blobs().is_empty(), "no replacement deposited");
+
+    ledger.publish_refuses(false);
+    let second = block_on(remint_capability_grants(
+        nest.clone(),
+        SUCCESSOR_SEED,
+        &ledger,
+        None,
+        &mail(),
+    ))
+    .expect("the retry pass runs");
+    assert_eq!(
+        second,
+        GrantRemintOutcome::Reminted {
+            reminted: 1,
+            owed: 0
+        }
+    );
+    assert_eq!(
+        nest.held_blobs().len(),
+        1,
+        "one replacement, once published"
+    );
+    assert_every_held_grant_is_named(&nest, &ledger);
+}
+
 /// **The retry the naive inversion would have destroyed.** A refused deposit
 /// must leave its candidate selectable — the old event stays
 /// latest-live-predecessor-signed until the replacement is known-deposited —

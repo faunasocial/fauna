@@ -72,7 +72,10 @@ class TestAgentConversationAttachTest {
     }
 
     private fun wireRealManagerHost(): ConversationsManagerHost =
-        ConversationsManagerHost(NotificationHelper(RuntimeEnvironment.getApplication()))
+        ConversationsManagerHost(
+            NotificationHelper(RuntimeEnvironment.getApplication()),
+            com.fauna.app.widget.WidgetUnreadPublisher(RuntimeEnvironment.getApplication()),
+        )
             .also { TestAgent.setConversationsManagerHostForTest(it) }
 
     @After

@@ -67,6 +67,6 @@ Stamped 2026-10-01 at d8cb0887cb.
 | 7 | app | `tests/e2e-unified/tests/test_feed_error.py::test_feed_error_surfaces_on_error_text` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 8 | app | (none) | — |
 | 9 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_an_ingested_notes_author_carries_the_bridged_face` | nest (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_blocking_an_author_hides_their_posts_until_unblocked` | web (linux): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_blocking_an_author_hides_their_posts_until_unblocked` | web (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | (none) | — |
 <!-- features-render:end -->

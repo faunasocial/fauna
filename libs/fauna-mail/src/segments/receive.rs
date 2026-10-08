@@ -158,6 +158,7 @@ pub fn open_inbound_record_epoch_hybrid(
     open_inbound_epoch_inner(
         outer_envelope_bytes,
         epoch_roots,
+        &[],
         record_unix_secs,
         |inner| {
             fauna_mls::wrapped_blob::unseal_mail_record_hybrid(
@@ -171,9 +172,11 @@ pub fn open_inbound_record_epoch_hybrid(
 }
 
 /// The client receive path's opener: [`open_inbound_record_epoch_hybrid`] with
-/// the **complete standing key set** — current generation plus the grace
-/// generations a rotation left in `MailConfig.prior_mseks` — instead of a
-/// single standing keypair. `standing` is
+/// the **complete standing key set** — current generation plus EVERY prior
+/// generation in `MailConfig.prior_mseks` — instead of a single standing
+/// keypair, trialed in the seal-time order `retired_at_unix` (aligned with
+/// `standing[1..]`, `MailConfig.prior_msek_retirements`) and
+/// `record_unix_secs` select (`fauna_mls::wrapped_blob::generation_trial_order`). `standing` is
 /// [`fauna_mls::wrapped_blob::derive_standing_mail_keypairs`] over the
 /// client's MSEK history, the exact set the MDA reads out of the snapshot and
 /// trials in `MailRecordOpener::open_mail`; the standing arm is the shared
@@ -182,8 +185,9 @@ pub fn open_inbound_record_epoch_hybrid(
 /// § Path B-sibling-2; `mail-app-surface.md` § Inbound client receive).
 ///
 /// A miss here is **deterministic** for this key set: the seal is either not
-/// addressed to any generation this client holds (a rotation past the grace
-/// window, a mailbox torn down and re-enabled under a fresh MSEK) or tampered.
+/// addressed to any generation this client holds (a mailbox torn down and
+/// re-enabled under a fresh MSEK — no rotation retires a generation out of
+/// the set) or tampered.
 /// Retrying with the same keys cannot change the answer, which is why the
 /// receive loop skips such a record rather than blocking on it.
 pub fn open_inbound_record_with_keys(
@@ -191,13 +195,28 @@ pub fn open_inbound_record_with_keys(
     epoch_roots: &[&[u8; 32]],
     record_unix_secs: u64,
     standing: &[fauna_mls::wrapped_blob::StandingMailKeypair],
+    retired_at_unix: &[u64],
 ) -> Result<Vec<u8>, InboundOpenError> {
     open_inbound_epoch_inner(
         outer_envelope_bytes,
         epoch_roots,
+        retired_at_unix,
         record_unix_secs,
-        |inner| fauna_mls::wrapped_blob::open_mail_record_standing(inner, standing),
+        |inner| {
+            fauna_mls::wrapped_blob::open_mail_record_standing(
+                inner,
+                standing,
+                retired_at_unix,
+                seal_basis(record_unix_secs),
+            )
+        },
     )
+}
+
+/// A record's seal basis for the generation trial: its seal instant, `0`
+/// meaning unknown (the whole ring walks newest first).
+fn seal_basis(record_unix_secs: u64) -> Option<u64> {
+    (record_unix_secs != 0).then_some(record_unix_secs)
 }
 
 /// The **bare-INNER** twin of [`open_inbound_record_with_keys`]: one HPKE
@@ -227,12 +246,24 @@ pub fn open_sealed_inner_record_with_keys(
     epoch_roots: &[&[u8; 32]],
     record_unix_secs: u64,
     standing: &[fauna_mls::wrapped_blob::StandingMailKeypair],
+    retired_at_unix: &[u64],
 ) -> Result<Vec<u8>, InboundOpenError> {
     let inner =
         fauna_mls::wrapped_blob::MailRecordEnvelope::from_canonical_bytes(inner_envelope_bytes)?;
-    fauna_mls::wrapped_blob::open_mail_epoch_chain(&inner, epoch_roots, record_unix_secs, |env| {
-        fauna_mls::wrapped_blob::open_mail_record_standing(env, standing)
-    })
+    fauna_mls::wrapped_blob::open_mail_epoch_chain(
+        &inner,
+        epoch_roots,
+        retired_at_unix,
+        record_unix_secs,
+        |env| {
+            fauna_mls::wrapped_blob::open_mail_record_standing(
+                env,
+                standing,
+                retired_at_unix,
+                seal_basis(record_unix_secs),
+            )
+        },
+    )
     .ok_or(InboundOpenError::InnerOpen(
         fauna_mls::wrapped_blob::UnwrapError::HpkeFailed,
     ))
@@ -252,6 +283,7 @@ pub fn open_inbound_record_epoch(
     open_inbound_epoch_inner(
         outer_envelope_bytes,
         epoch_roots,
+        &[],
         record_unix_secs,
         |inner| fauna_mls::wrapped_blob::unseal_mail_record(inner, standing_recipient_secret).ok(),
     )
@@ -265,16 +297,23 @@ pub fn open_inbound_record_epoch(
 fn open_inbound_epoch_inner(
     outer_envelope_bytes: &[u8],
     epoch_roots: &[&[u8; 32]],
+    retired_at_unix: &[u64],
     record_unix_secs: u64,
     standing: impl Fn(&fauna_mls::wrapped_blob::MailRecordEnvelope) -> Option<Vec<u8>>,
 ) -> Result<Vec<u8>, InboundOpenError> {
     let outer = MailRecordEnvelope::decode(outer_envelope_bytes)?;
     let inner =
         fauna_mls::wrapped_blob::MailRecordEnvelope::from_canonical_bytes(&outer.encrypted_body)?;
-    fauna_mls::wrapped_blob::open_mail_epoch_chain(&inner, epoch_roots, record_unix_secs, standing)
-        .ok_or(InboundOpenError::InnerOpen(
-            fauna_mls::wrapped_blob::UnwrapError::HpkeFailed,
-        ))
+    fauna_mls::wrapped_blob::open_mail_epoch_chain(
+        &inner,
+        epoch_roots,
+        retired_at_unix,
+        record_unix_secs,
+        standing,
+    )
+    .ok_or(InboundOpenError::InnerOpen(
+        fauna_mls::wrapped_blob::UnwrapError::HpkeFailed,
+    ))
 }
 
 #[cfg(test)]
@@ -386,7 +425,7 @@ mod tests {
         );
         let standing = fauna_mls::wrapped_blob::derive_standing_mail_keypairs(&[msek]);
         assert!(
-            open_inbound_record_with_keys(&outer, &[], 1_700_000_000, &standing).is_err(),
+            open_inbound_record_with_keys(&outer, &[], 1_700_000_000, &standing, &[]).is_err(),
             "the keyset opener refuses it too"
         );
     }
@@ -550,12 +589,14 @@ mod tests {
     /// record sealed to the OUTGOING generation's pubkey still opens under the
     /// complete set (current + grace, `derive_standing_mail_keypairs` over the
     /// MSEK history), and does NOT open under the current generation alone —
-    /// the drift this opener closes. Beyond the grace cap the record is gone
-    /// for good (`owner-key-material.md` § Path B-sibling-2, the 2-rotation
-    /// window), which is what makes a miss deterministic.
+    /// the drift this opener closes. And it STILL opens four rotations later:
+    /// every generation is carried (`owner-key-material.md` § Path
+    /// B-sibling-2 → *Pre-rotation mail at rest*) — the inversion of the
+    /// retired 2-rotation window's past-cap arm — with or without the
+    /// retirement instants that order the trial.
     #[test]
-    fn keyset_opener_reads_pre_rotation_standing_mail_within_the_grace_window() {
-        use fauna_mls::wrapped_blob::{SNAPSHOT_GRACE_KEYPAIRS, derive_standing_mail_keypairs};
+    fn keyset_opener_reads_pre_rotation_standing_mail_after_any_number_of_rotations() {
+        use fauna_mls::wrapped_blob::derive_standing_mail_keypairs;
         let msek_old = [0x5e; 32];
         let msek_new = [0x6f; 32];
         let (_, old_pubkey) = derive_recipient_hpke_keypair(&msek_old);
@@ -565,25 +606,29 @@ mod tests {
         // Current only — what the client used to hold: the pre-rotation
         // record is unopenable.
         let current_only = derive_standing_mail_keypairs(&[msek_new]);
-        let err = open_inbound_record_with_keys(&env, &[], 0, &current_only)
+        let err = open_inbound_record_with_keys(&env, &[], 0, &current_only, &[])
             .expect_err("the current generation alone cannot open pre-rotation mail");
         assert!(matches!(err, InboundOpenError::InnerOpen(_)));
 
         // Current + grace — the snapshot's set: it opens.
         let with_grace = derive_standing_mail_keypairs(&[msek_new, msek_old]);
         assert_eq!(with_grace.len(), 2);
-        let opened = open_inbound_record_with_keys(&env, &[], 0, &with_grace)
+        let opened = open_inbound_record_with_keys(&env, &[], 0, &with_grace, &[])
             .expect("the grace keypair opens a record sealed before the rotation");
         assert_eq!(opened.as_slice(), body);
 
-        // Past the cap the outgoing generation falls off the set, by design.
+        // Three more rotations: the outgoing generation is now the oldest of
+        // five, and still opens — sealed at 50, before every retirement.
         let mut history = vec![[0x70; 32], [0x71; 32], [0x72; 32]];
+        history.push(msek_new);
         history.push(msek_old);
-        assert!(history.len() > SNAPSHOT_GRACE_KEYPAIRS);
-        let past_grace = derive_standing_mail_keypairs(&history);
-        assert_eq!(past_grace.len(), SNAPSHOT_GRACE_KEYPAIRS);
-        open_inbound_record_with_keys(&env, &[], 0, &past_grace)
-            .expect_err("a generation past the grace window no longer opens its mail");
+        let ring = derive_standing_mail_keypairs(&history);
+        assert_eq!(ring.len(), 5, "uncapped");
+        for (instants, at) in [(&[400u64, 300, 200, 100][..], 50), (&[][..], 0)] {
+            let opened = open_inbound_record_with_keys(&env, &[], at, &ring, instants)
+                .expect("a generation four rotations old still opens its mail");
+            assert_eq!(opened.as_slice(), body);
+        }
     }
 
     /// The export down-leg's opener over the shape that leg actually returns:
@@ -614,13 +659,13 @@ mod tests {
         );
 
         let current_only = derive_standing_mail_keypairs(&[msek_new]);
-        let err = open_sealed_inner_record_with_keys(&inner, &[], 0, &current_only)
+        let err = open_sealed_inner_record_with_keys(&inner, &[], 0, &current_only, &[])
             .expect_err("the current generation alone cannot open pre-rotation mail");
         assert!(matches!(err, InboundOpenError::InnerOpen(_)));
 
         let with_grace = derive_standing_mail_keypairs(&[msek_new, msek_old]);
         assert_eq!(
-            open_sealed_inner_record_with_keys(&inner, &[], 0, &with_grace)
+            open_sealed_inner_record_with_keys(&inner, &[], 0, &with_grace, &[])
                 .expect("the grace keypair opens a record sealed before the rotation"),
             body
         );
@@ -647,19 +692,19 @@ mod tests {
 
         let standing = fauna_mls::wrapped_blob::derive_standing_mail_keypairs(&[msek]);
         assert_eq!(
-            open_sealed_inner_record_with_keys(&inner, &[&*root], at, &standing)
+            open_sealed_inner_record_with_keys(&inner, &[&*root], at, &standing, &[])
                 .expect("the epoch root opens an epoch-sealed record"),
             body
         );
         // Without the root the standing arm alone must miss — the epoch leg is
         // load-bearing here, not decoration.
-        assert!(open_sealed_inner_record_with_keys(&inner, &[], at, &standing).is_err());
+        assert!(open_sealed_inner_record_with_keys(&inner, &[], at, &standing, &[]).is_err());
 
         // An unsealed body is refused, never served verbatim.
         let raw: &[u8] = b"From: s@x.test\r\nSubject: raw\r\n\r\nnever sealed\r\n";
         assert!(
             matches!(
-                open_sealed_inner_record_with_keys(raw, &[], at, &standing),
+                open_sealed_inner_record_with_keys(raw, &[], at, &standing, &[]),
                 Err(InboundOpenError::InnerOpen(_))
             ),
             "a raw body must be refused"

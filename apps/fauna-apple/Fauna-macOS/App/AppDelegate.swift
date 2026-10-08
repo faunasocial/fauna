@@ -1,12 +1,10 @@
 import AppKit
 import SwiftUI
 import FaunaKit
-import Sparkle
 import UserNotifications
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     let menuBarController = MenuBarController()
-    let updaterController: SPUStandardUpdaterController
     var appState: MacAppState?
 
     /// Set by `FaunaMacApp.completeAuthenticatedLaunch` — the APNs callbacks
@@ -15,22 +13,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// delegate protocol differs (`NSApplicationDelegate` here,
     /// `UIApplicationDelegate` there).
     var pushManager: PushManager?
-
-    override init() {
-        // Don't start the updater in debug/E2E builds — there's no valid appcast URL yet,
-        // so Sparkle would show an "Unable to check for updates" alert on every launch.
-        #if DEBUG
-        let shouldStartUpdater = false
-        #else
-        let shouldStartUpdater = !FaunaE2E.isActive
-        #endif
-        updaterController = SPUStandardUpdaterController(
-            startingUpdater: shouldStartUpdater,
-            updaterDelegate: nil,
-            userDriverDelegate: nil
-        )
-        super.init()
-    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         menuBarController.setup()

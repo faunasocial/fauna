@@ -145,7 +145,7 @@ FFI_DYLIB="$TARGET_DIR/$MAIL_FFI_SLOT/libfauna_ffi.dylib"
 
 # The desktop app component. `just mac-app release "$PROFILE"` assembles the
 # build/Release/Fauna.app bundle from the swift-built FaunaMacOS executable
-# (Contents/{MacOS/Fauna, Info.plist, Frameworks/Sparkle.framework, ...}) — SwiftPM
+# (Contents/{MacOS/Fauna, Info.plist, PlugIns/*.appex, ...}) — SwiftPM
 # emits a bare Mach-O, so this recipe is what produces a real .app (justfile § mac-app).
 # The same signed bundle feeds both this all-in-one .pkg's app component AND the
 # app-only `.dmg` (just mac-dmg). The app installs to /Applications, not /usr/local
@@ -217,7 +217,7 @@ cp "$INSTALLER_DIR/fauna-uninstall" "$BUILD_DIR/payloads/bridge/"
 # so its payload root contains just the bundle (no /usr/local/bin binaries, no
 # uninstall script — the app is removed by `fauna-uninstall` shipped in the service
 # components, or by dragging it to the Trash for an app-only install). -R preserves
-# the bundle's symlinks (Sparkle.framework Versions) + the signature.
+# the bundle's symlinks + the signature.
 cp -R "$APP_BUNDLE" "$BUILD_DIR/payloads/app/"
 
 # --- Step 3a: Relocate the MDA's libfauna_ffi.dylib linkage ---

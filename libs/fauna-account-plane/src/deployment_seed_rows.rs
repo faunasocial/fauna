@@ -32,7 +32,7 @@
 use anyhow::{Context, Result};
 use fauna_account_store::backend::StoreBackend;
 use fauna_account_store::store::AccountStore;
-use fauna_account_store::types::{ItemRef, StateEntry};
+use fauna_account_store::types::StateEntry;
 use fauna_core::data::DeploymentSeedEntry;
 use fauna_core::deployment_seed_rows::{
     decode_deployment_seed_row, deployment_seed_rows, fold_deployment_seed_row,
@@ -117,33 +117,10 @@ where
         Some(stored) if !stored.tombstone => {}
         _ => return Ok(false),
     }
-    let writer = store.writer();
-    let mut after = store
-        .frontier(fleet.scope())
-        .await?
-        .into_iter()
-        .find(|(w, _)| *w == writer)
-        .map_or(0, |(_, seq)| seq);
-    loop {
-        let rows = store
-            .scope_rows(fleet.scope(), &writer, after, UNPUBLISHED_PAGE)
-            .await?;
-        let Some(last) = rows.last() else {
-            return Ok(true);
-        };
-        after = last.seq;
-        if rows.iter().any(|row| {
-            matches!(&row.item, ItemRef::StateKey { kind, key: k, .. }
-                if kind == KIND_DEPLOYMENT_SEEDS && *k == key)
-        }) {
-            return Ok(false);
-        }
-    }
+    Ok(!fleet
+        .owes_own_state(|kind, k| kind == KIND_DEPLOYMENT_SEEDS && k == key)
+        .await?)
 }
-
-/// The page [`deployment_seed_published`] walks this device's unpublished
-/// rows in — normally a handful, so one page.
-const UNPUBLISHED_PAGE: u32 = 256;
 
 /// Read `key`, join `entry` into it, and put the result when the join moved
 /// the stored bytes. Whether a put happened.

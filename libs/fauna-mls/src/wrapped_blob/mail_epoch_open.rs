@@ -85,9 +85,15 @@ pub fn unseal_mail_record_with_derived_key(
 ///
 /// `epoch_roots` are the mail-epoch roots newest-generation-first
 /// ([`super::derive_mail_epoch_root`] of the current MSEK, then one per prior
-/// grace generation — § 5 rotation grace). Empty ⇒ only `standing` runs, so the
-/// result is byte-identical to a standing-only open (the non-epoch opener path,
-/// e.g. a CalDAV/CardDAV session).
+/// generation — § 5 rotation grace, every generation carried), and
+/// `retired_at_unix` each prior generation's retirement instant aligned with
+/// `epoch_roots[1..]`: steps 1 and 3 walk the roots in
+/// [`super::generation_trial_order`] for `record_unix_secs` — the generation
+/// current at the seal instant first, then outward (`owner-key-material.md`
+/// § Path B-sibling-2 → *Pre-rotation mail at rest*); a `0` instant (unknown,
+/// a standing-sealed record) walks them newest first. Empty roots ⇒ only
+/// `standing` runs, so the result is byte-identical to a standing-only open
+/// (the non-epoch opener path, e.g. a CalDAV/CardDAV session).
 ///
 /// The back-scan is **always** attempted, never gated on "the record postdates
 /// the flip" — that is a nest-side constant no opener can observe. The only cost
@@ -98,13 +104,22 @@ pub fn unseal_mail_record_with_derived_key(
 pub fn open_mail_epoch_chain(
     envelope: &MailRecordEnvelope,
     epoch_roots: &[&[u8; 32]],
+    retired_at_unix: &[u64],
     record_unix_secs: u64,
     standing: impl Fn(&MailRecordEnvelope) -> Option<Vec<u8>>,
 ) -> Option<Vec<u8>> {
     let target = mail_sealing_epoch_of(record_unix_secs);
+    let roots: Vec<&[u8; 32]> = super::generation_trial_order(
+        epoch_roots.len(),
+        retired_at_unix,
+        (record_unix_secs != 0).then_some(record_unix_secs),
+    )
+    .into_iter()
+    .map(|i| epoch_roots[i])
+    .collect();
 
     // 1. Near pair (target, target-1), per generation root.
-    for &root in epoch_roots {
+    for &root in &roots {
         for e in [Some(target), target.checked_sub(1)].into_iter().flatten() {
             let secret = Zeroizing::new(derive_recipient_mail_epoch_capability_secret_from_root(
                 root, e,
@@ -122,7 +137,7 @@ pub fn open_mail_epoch_chain(
     }
 
     // 3. Bounded back-scan, per generation root.
-    for &root in epoch_roots {
+    for &root in &roots {
         for delta in 2..=MAIL_EPOCH_PUBLISH_HORIZON {
             let Some(e) = target.checked_sub(delta) else {
                 break;
@@ -169,7 +184,7 @@ mod tests {
         let body = b"From: a@x.test\r\nSubject: epoch body\r\n\r\nhello epoch\r\n";
         let env = sealed_under_epoch(&root, e, body);
 
-        let opened = open_mail_epoch_chain(&env, &[&root], instant_in_epoch(e), |_| None)
+        let opened = open_mail_epoch_chain(&env, &[&root], &[], instant_in_epoch(e), |_| None)
             .expect("holder opens the epoch record keyed off its seal instant");
         assert_eq!(opened.as_slice(), body);
     }
@@ -184,7 +199,7 @@ mod tests {
         let body = b"prior-epoch near-pair body";
         let env = sealed_under_epoch(&root, e - 1, body);
 
-        let opened = open_mail_epoch_chain(&env, &[&root], instant_in_epoch(e), |_| None)
+        let opened = open_mail_epoch_chain(&env, &[&root], &[], instant_in_epoch(e), |_| None)
             .expect("near pair covers epoch e-1");
         assert_eq!(opened.as_slice(), body);
     }
@@ -201,13 +216,15 @@ mod tests {
 
         // Current root alone cannot open it.
         assert!(
-            open_mail_epoch_chain(&env, &[&current], instant_in_epoch(e), |_| None).is_none(),
+            open_mail_epoch_chain(&env, &[&current], &[], instant_in_epoch(e), |_| None).is_none(),
             "current-generation root must not open a prior generation's epoch record"
         );
         // Adding the grace root does.
         let opened =
-            open_mail_epoch_chain(&env, &[&current, &grace], instant_in_epoch(e), |_| None)
-                .expect("grace root opens the rotated-away epoch record");
+            open_mail_epoch_chain(&env, &[&current, &grace], &[], instant_in_epoch(e), |_| {
+                None
+            })
+            .expect("grace root opens the rotated-away epoch record");
         assert_eq!(opened.as_slice(), body);
     }
 
@@ -221,7 +238,7 @@ mod tests {
         let body = b"stale-schedule back-scan body";
         let env = sealed_under_epoch(&root, sealed_at, body);
 
-        let opened = open_mail_epoch_chain(&env, &[&root], instant_in_epoch(e), |_| None)
+        let opened = open_mail_epoch_chain(&env, &[&root], &[], instant_in_epoch(e), |_| None)
             .expect("back-scan reaches a stale-schedule epoch within the horizon");
         assert_eq!(opened.as_slice(), body);
     }
@@ -236,7 +253,7 @@ mod tests {
         let env = sealed_under_epoch(&root, sealed_at, b"too old");
 
         assert!(
-            open_mail_epoch_chain(&env, &[&root], instant_in_epoch(e), |_| None).is_none(),
+            open_mail_epoch_chain(&env, &[&root], &[], instant_in_epoch(e), |_| None).is_none(),
             "a record older than the horizon must not open (fail-closed)"
         );
     }
@@ -251,7 +268,7 @@ mod tests {
         let body = b"post-quantum epoch body";
         let env = seal_to_recipient_xwing(body, &kp.public).expect("seal xwing epoch");
 
-        let opened = open_mail_epoch_chain(&env, &[&root], instant_in_epoch(e), |_| None)
+        let opened = open_mail_epoch_chain(&env, &[&root], &[], instant_in_epoch(e), |_| None)
             .expect("hybrid epoch record opens from one derived payload");
         assert_eq!(opened.as_slice(), body);
     }
@@ -269,7 +286,7 @@ mod tests {
 
         let standing = |env: &MailRecordEnvelope| unseal_mail_record(env, &standing_secret).ok();
         assert!(
-            open_mail_epoch_chain(&env, &[], instant_in_epoch(e), standing).is_none(),
+            open_mail_epoch_chain(&env, &[], &[], instant_in_epoch(e), standing).is_none(),
             "standing-only holder (no epoch roots) must AEAD-fail on epoch mail"
         );
     }
@@ -284,7 +301,7 @@ mod tests {
         let env = seal_to_recipient(body, &pk).expect("standing seal");
 
         let standing = |env: &MailRecordEnvelope| unseal_mail_record(env, &secret).ok();
-        let opened = open_mail_epoch_chain(&env, &[], 1_700_000_000, standing)
+        let opened = open_mail_epoch_chain(&env, &[], &[], 1_700_000_000, standing)
             .expect("standing chain opens a standing-sealed record");
         assert_eq!(opened.as_slice(), body);
     }
@@ -344,5 +361,33 @@ mod tests {
             unseal_mail_record_with_derived_key(&env, &payload).is_err(),
             "no chunk matches → AEAD-fail, never a false open"
         );
+    }
+
+    /// **Every generation's root is walked, the one current at the seal
+    /// instant first** (`owner-key-material.md` § Path B-sibling-2 →
+    /// *Pre-rotation mail at rest*): a record epoch-sealed under the OLDEST of
+    /// five generations, four rotations ago, opens through the chain given
+    /// the retirement instants — and with none too (the whole ring, newest
+    /// first).
+    #[test]
+    fn opens_a_record_sealed_four_rotations_ago_selecting_by_seal_time() {
+        let roots: Vec<Zeroizing<[u8; 32]>> = (1u8..=5)
+            .map(|g| derive_mail_epoch_root(&[g; 32]))
+            .collect();
+        let refs: Vec<&[u8; 32]> = roots.iter().map(|z| &**z).collect();
+        let e = 4_000;
+        let sealed_at = instant_in_epoch(e);
+        // Priors retired after the record was sealed, one epoch apart.
+        let retired: Vec<u64> = (1..=4u64)
+            .rev()
+            .map(|k| sealed_at + k * MAIL_SEALING_EPOCH_SECS)
+            .collect();
+        let body = b"sealed under the oldest generation";
+        let env = sealed_under_epoch(&roots[4], e, body);
+        for instants in [&retired[..], &[]] {
+            let opened = open_mail_epoch_chain(&env, &refs, instants, sealed_at, |_| None)
+                .expect("the oldest generation's root opens it");
+            assert_eq!(opened.as_slice(), body);
+        }
     }
 }

@@ -1,5 +1,5 @@
 //! End-to-end round-trip for the `fauna.bridges.provision_recipient_mls_pubkey`
-//! admin RPC (finding #2).
+//! admin RPC.
 //!
 //! Drives the production writer for `actor_mls_pubkeys` through the
 //! live `RpcRouter`: Admin actor calls `provision_recipient_mls_pubkey`
@@ -101,7 +101,7 @@ async fn admin_provision_recipient_mls_pubkey_round_trip() {
     // 2. MTA-class bridge fetches the pubkey through the existing read
     //    surface — the same wire path the MTA traverses on every inbound
     //    DATA to seal `encrypted_body`. This is the production data flow
-    //    that finding #2 unblocks.
+    //    that this RPC unblocks.
     let mta_actor = [0x11u8; 32];
     approve_mta(&state, mta_actor).await;
 

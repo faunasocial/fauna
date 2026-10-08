@@ -63,9 +63,9 @@ class SettingsActions:
     # ── About: the version, and the newer-version check ──────────────────────
     # (`docs/features/app-version-and-updates.md`; installers/README.md § Knowing
     # a newer version is out). Where the block sits is per-app: the Settings
-    # root on tui, the General page on linux/windows, the app menu on macOS —
-    # the ids are the same everywhere, and `navigate_to_about()` lands where
-    # they render.
+    # root on tui, the General page on linux/windows/macOS (macOS's app-menu
+    # item is a second door onto the same check) — the ids are the same
+    # everywhere, and `navigate_to_about()` lands where they render.
 
     def navigate_to_about(self) -> None:
         """Land where the About block renders: the Settings root on tui, the

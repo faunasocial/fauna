@@ -62,7 +62,7 @@ Stamped 2026-09-19 at 25eff180d4.
 |---|---|---|
 | web | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
 | linux | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| windows | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| windows | ✅ full | 0.1.2-dev+a1f84cc6 standalone |
 | macos | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
 | ios | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
 | android |  no run recorded | |
@@ -74,12 +74,12 @@ Stamped 2026-09-19 at 25eff180d4.
 | 1 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_full_share_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_member_role_and_cap_editing` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): failed, ios (macos): failed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_pending_share_accept_decline` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_folder_member_media_decrypt.py::test_member_decrypts_shared_set_content_through_their_own_media_page` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_folder_member_media_decrypt.py::test_member_re_ingests_custody_across_owner_rotation_and_decrypts_gen2` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_folder_member_media_decrypt.py::test_member_decrypts_shared_set_content_through_their_own_media_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_folder_member_media_decrypt.py::test_member_re_ingests_custody_across_owner_rotation_and_decrypts_gen2` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_folder_agent_content_sync.py::test_writer_member_decrypts_owner_upload` | linux (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_folder_agent_content_sync.py::test_macos_writer_member_decrypts_owner_upload` | — |
 | 3 | app | `tests/e2e-unified/tests/test_folder_agent_content_sync.py::test_windows_writer_member_decrypts_owner_upload` | windows (windows): passed, tui (windows): passed |
-| 4 | app | `tests/e2e-unified/tests/test_folder_cross_nest_foreign_row.py::test_cross_nest_shared_folder_renders_as_a_foreign_row` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_folder_cross_nest_foreign_row.py::test_cross_nest_shared_folder_renders_as_a_foreign_row` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_folder_webdav_toggle.py::test_folder_webdav_toggle_serves_and_unserves_a_sync_set` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed |
 | 5 | app | `tests/e2e-unified/tests/test_folder_webdav_toggle.py::test_folder_webdav_toggle_is_disabled_until_mail_is_set_up` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_pending_share_accept_decline` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
@@ -89,7 +89,7 @@ Stamped 2026-09-19 at 25eff180d4.
 | 10 | app | `tests/e2e-unified/tests/test_folder_member_media_decrypt.py::test_a_removed_member_cannot_open_what_is_added_afterwards` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 11 | app | `tests/e2e-unified/tests/test_folder_member_media_decrypt.py::test_a_second_share_keeps_the_first_members_access_and_everything_readable` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
 | 12 | app | `tests/e2e-unified/tests/test_folder_writer_revocation.py::test_a_demoted_writer_sees_the_folder_stop_syncing_and_keeps_their_files` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 13 | nest | `tests/e2e-unified/tests/api/test_shared_folder_member_cap.py::test_a_members_bytes_charge_the_owner_and_their_cap_refuses_them` | nest (linux): passed |
+| 13 | nest | `tests/e2e-unified/tests/api/test_shared_folder_member_cap.py::test_a_members_bytes_charge_the_owner_and_their_cap_refuses_them` | nest (linux): passed, nest (windows): passed |
 | 14 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_pending_share_accept_decline` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_owner_between_a_member_removals_stage_and_publish_relaunch_finishes_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

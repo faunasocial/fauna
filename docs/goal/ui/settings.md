@@ -202,9 +202,10 @@ the permission instead makes the off state unreachable on a device the OS
 still allows: a successful switch-off re-renders "on", and the user is never
 told their opt-out took.
 
-web, apple (both Apple targets via APNs, macOS since 2026-08-30) and tui (the
-`ws-device` transport, 2026-10-01) implement subscription —
-linux/windows/android have no push call-site yet (`../architecture/core-client-kind-catalog.md` § Push Notifications); that
+web, apple (both Apple targets via APNs, macOS since 2026-08-30), tui (the
+`ws-device` transport, 2026-10-01) and windows (`ws-device`, 2026-10-08, the
+control on its Account sub-page as on tui) implement subscription —
+linux/android have no push call-site yet (`../architecture/core-client-kind-catalog.md` § Push Notifications); that
 is the built state, not the target — the user ruled 2026-09-26 that all four
 gain push, and the same day's design pass ruled each transport in
 `../architecture/apps/common.md` § Push Notifications → *Transports* (the sync
@@ -223,8 +224,9 @@ is the specified behavior for "the platform's push APIs unavailable" above and
 the user's only witness that the gate is still shut — and a build with no
 notification centre at all (the bare debug binary the macOS e2e drives) renders
 the same toggle and the same line, never a control-less notice. The web control
-has no `ui.yaml` element IDs today (not yet drivable by cross-app e2e); tui's
-and apple's carry the family below (tui the control's first drivable leg, apple
+has no `ui.yaml` element IDs today (not yet drivable by cross-app e2e); tui's,
+windows' and apple's carry the family below (tui the control's first drivable
+leg, windows the same three journeys since 2026-10-08, apple
 since 2026-10-03 — its drivable journey is the gate-shut one: the toggle settles
 back off with the line). The ID family, rule-A signed off by the user 2026-09-26, in `ui.yaml` since 2026-10-01 (`optional_elements` until all seven carry it; tui renders it first): `push-notifications-section` (view, always present),
 `push-notifications-opt-in-toggle` (toggle; on = this install opted in — named
@@ -349,11 +351,8 @@ and on two of the four arms a false one. The landed arm renders nothing here (th
 persist-failure message below). **The undecided arm's *unsaved* half carries the seed and is parked
 exactly as the persist-failure message is** — it is the same only-copy situation; the outcome
 says which arm that is (`StolenOutcome::carries_the_only_seed`, carried on the FFI and wasm
-records), so no app reads the key to find out. **Per-app audit (2026-10-03):** ✅ tui, linux,
-web, macOS and iOS match the outcome, paint `message()` verbatim and park the unsaved arm. windows receives
-the typed record through an interim bridge in its client wrapper that surfaces every non-landed
-arm as the resolved sentence, unwrapped — but through its ordinary error path, so the unsaved arm
-is **not yet parked** there. android has no ceremony.
+records), so no app reads the key to find out. **Per-app audit (2026-10-08):** ✅ tui, linux,
+web, macOS, iOS and windows match the outcome, paint `message()` verbatim and park the unsaved arm. android has no ceremony.
 
 **The persist-failure message survives the page, not just the initial render (ratified
 2026-09-14, all apps).** A stolen-identity succession's persist-failure message is the sharpest
@@ -384,14 +383,19 @@ a port of the same hold in `FaunaApp.Core`, fed by the connection supervisor's s
 `session_ending_verdict` read on `Disconnected` — and by the TTL loop's refused refresh, and gating
 the Account page's one error funnel; the leave edge counts both the navigation and the visual-tree
 unload, since an outer Settings navigation unloads the inner-frame page with no navigated-from);
-**linux** and **web** escalate
-unconditionally and so drop the ceremony's result (linux shuts the client runtime down under the
-ceremony task; web navigates the document away);
+**linux** implements it (2026-10-08, `settings::stolen_hold`, past the fold alike, on the one
+`IdentitySuperseded` arm both the silent sign-in and the connection supervisor's stop feed; its
+leave edge reads the (content page, Settings sub-page) pair, because `settings-nav-back` moves only
+the outer stack and leaves the sub-page on Account);
+**web** implements it (2026-10-08, `$lib/own-supersession-hold`, a port of tui's hold consulted by
+the superseded arm of `$lib/post-auth-escalation` — so the bearer re-mint, the RPC client and the
+background silent refresh all defer alike — and discharged by the Settings page's nav edge away
+from Account, which counts the page's unmount too);
 **android** has no stolen-identity ceremony yet. The
 outcome-17 journey
 (`test_identity_succession_ceremony.py::test_a_key_this_device_cannot_store_stays_on_screen_until_you_leave`)
 asserts the whole rule — the key survives another writer, leaving Account discharges it, and the
-held-back escalation then lands the import route — and is green on tui, macOS, iOS and windows.
+held-back escalation then lands the import route — and is green on tui, macOS, iOS, windows, linux and web.
 
 This build defines the acknowledgment act as **leaving the Account sub-page** — no new element: a
 dedicated dismiss/copy affordance was considered and declined, because it would need its own

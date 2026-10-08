@@ -21,7 +21,7 @@ A SwiftUI iOS 17+ app that consumes the shared Rust core through `FaunaFFI.xcfra
 | Language | Swift 6.0 (strict concurrency) |
 | UI framework | SwiftUI |
 | Minimum deployment | iOS 17.0 |
-| Package manager | SPM — `Package.swift`, no external dependencies in the iOS app target (Sparkle is macOS-conditioned) |
+| Package manager | SPM — `Package.swift`, no external dependencies (the package pins no remote dependency at all) |
 | Persistence | SwiftData |
 | State management | `@Observable` / `@MainActor` ViewModels |
 | Credential storage | Keychain (§ Credential Storage below) |
@@ -247,6 +247,6 @@ iOS is tested through the unified e2e framework, driven **in-process** — the a
 | Push notifications | APNs via `PushManager` + NSE | Registration attempted through the same shared `PushManager` (`NSApplicationDelegate` token callbacks); the `aps-environment` entitlement and an AppKit analog of the NSE remain — owner `common.md` § Push Notifications |
 | Menu bar | No | Yes |
 | WebSocket lifetime | Paused in background | Persistent |
-| Updates | App Store | Sparkle |
+| Updates | App Store | notice-only check (you install the newer `.dmg`/`.pkg`) |
 
 **No in-app "a newer version is out" notice, by design** — the App Store delivers updates and owns the notice, so the check-for-updates door the desktops have is absent here as a behaviour, not a mechanism (owner [`../installers/README.md`](../installers/README.md) § Knowing a newer version is out; the catalog's `app-version-and-updates` outcome 2, user-approved absent 2026-09-26). The home-screen widget is the opposite case: iOS **owes** one, on WidgetKit — owner [`common.md`](common.md) § Home-screen widget.

@@ -56,9 +56,7 @@ struct Widgets {
     form_name: gtk::Entry,
     form_rank: gtk::Entry,
     form_description: gtk::Entry,
-    form_price_hint: gtk::Entry,
-    form_asking_price: gtk::Entry,
-    form_payment_url: gtk::Entry,
+    form_money: MoneyFields,
     form_auto_approve: gtk::Switch,
     form_save: gtk::Button,
     form_cancel: gtk::Button,
@@ -177,9 +175,7 @@ pub fn build_tiers_tab(
         form_name,
         form_rank,
         form_description,
-        form_price_hint,
-        form_asking_price,
-        form_payment_url,
+        form_money,
         form_auto_approve,
         form_save,
         form_cancel,
@@ -319,9 +315,7 @@ pub fn build_tiers_tab(
         form_name,
         form_rank,
         form_description,
-        form_price_hint,
-        form_asking_price,
-        form_payment_url,
+        form_money,
         form_auto_approve,
         form_save,
         form_cancel,
@@ -420,9 +414,7 @@ fn build_form() -> (
     gtk::Entry,
     gtk::Entry,
     gtk::Entry,
-    gtk::Entry,
-    gtk::Entry,
-    gtk::Entry,
+    MoneyFields,
     gtk::Switch,
     gtk::Button,
     gtk::Button,
@@ -444,19 +436,7 @@ fn build_form() -> (
     let description = entry(s::DESCRIPTION);
     set_test_id(&description, ids::SUBSCRIPTION_TIER_FORM_DESCRIPTION);
     form.append(&description);
-    let price_hint = entry(s::PRICE_HINT);
-    set_test_id(&price_hint, ids::SUBSCRIPTION_TIER_FORM_PRICE_HINT);
-    form.append(&price_hint);
-    // The machine-comparable price (`monetization.md` § The asking price) —
-    // independent of `price_hint` above; no parsing ever infers one from the
-    // other. Empty on create means unpriced; empty on an edit means "keep the
-    // current price" (`fauna.subscriptions.tiers.update`'s merge rule).
-    let asking_price = entry(s::ASKING_PRICE);
-    set_test_id(&asking_price, ids::SUBSCRIPTION_TIER_FORM_ASKING_PRICE);
-    form.append(&asking_price);
-    let payment_url = entry(s::PAYMENT_URL);
-    set_test_id(&payment_url, ids::SUBSCRIPTION_TIER_FORM_PAYMENT_URL);
-    form.append(&payment_url);
+    let money = MoneyFields::build(&form);
 
     let auto_row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -489,13 +469,116 @@ fn build_form() -> (
         name,
         rank,
         description,
-        price_hint,
-        asking_price,
-        payment_url,
+        money,
         auto_approve,
         save,
         cancel,
     )
+}
+
+/// The tier form's three money entries — price hint, asking price, payment
+/// URL. They exist only to state a price or a payment route, so they are the
+/// money plane's (`dynamic-features.md` § Platform-family surface excision →
+/// *The price-and-route class*): the store-safe flavor builds none of them,
+/// reads `None` for all three and leaves a tier's stored price alone (the
+/// update verb's `None` already means "keep").
+#[cfg(feature = "payments")]
+struct MoneyFields {
+    price_hint: gtk::Entry,
+    asking_price: gtk::Entry,
+    payment_url: gtk::Entry,
+}
+
+#[cfg(not(feature = "payments"))]
+struct MoneyFields;
+
+/// What the form's money entries read as: price hint, asking price (sats →
+/// wire), payment URL.
+type MoneyValues = (
+    Option<String>,
+    Option<fauna_protocol::subscriptions::TierAskingPrice>,
+    Option<String>,
+);
+
+#[cfg(feature = "payments")]
+impl MoneyFields {
+    /// Build and append the three entries in form order.
+    fn build(form: &gtk::Box) -> Self {
+        let price_hint = entry(s::PRICE_HINT);
+        set_test_id(&price_hint, ids::SUBSCRIPTION_TIER_FORM_PRICE_HINT);
+        form.append(&price_hint);
+        // The machine-comparable price (`monetization.md` § The asking price) —
+        // independent of `price_hint` above; no parsing ever infers one from the
+        // other. Empty on create means unpriced; empty on an edit means "keep the
+        // current price" (`fauna.subscriptions.tiers.update`'s merge rule).
+        let asking_price = entry(s::ASKING_PRICE);
+        set_test_id(&asking_price, ids::SUBSCRIPTION_TIER_FORM_ASKING_PRICE);
+        form.append(&asking_price);
+        let payment_url = entry(s::PAYMENT_URL);
+        set_test_id(&payment_url, ids::SUBSCRIPTION_TIER_FORM_PAYMENT_URL);
+        form.append(&payment_url);
+        Self {
+            price_hint,
+            asking_price,
+            payment_url,
+        }
+    }
+
+    fn clear(&self) {
+        self.price_hint.set_text("");
+        self.asking_price.set_text("");
+        self.payment_url.set_text("");
+    }
+
+    /// Pre-fill from the tier being edited.
+    fn fill(&self, tier: &TierItem) {
+        self.price_hint
+            .set_text(tier.price_hint.as_deref().unwrap_or(""));
+        // The reverse of `TierAskingPrice::from_sats` — pre-fill with the
+        // tier's current price in sats, or empty for an unpriced tier /
+        // a unit this build cannot interpret (fail-closed). An edit that
+        // saves without touching this field must keep the current price,
+        // never silently clear it (see `read`'s `None` handling).
+        self.asking_price.set_text(
+            &tier
+                .asking_price
+                .as_ref()
+                .and_then(|p| p.to_sats())
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+        );
+        self.payment_url
+            .set_text(tier.payment_url.as_deref().unwrap_or(""));
+    }
+
+    fn read(&self) -> MoneyValues {
+        let price_hint = opt(self.price_hint.text().trim());
+        // Same shape as the other form fields (and their shared,
+        // separately-tracked "no clear verb yet" gap — monetization.md § The
+        // asking price → Editability): a parsed sats value on the wire,
+        // `None` for empty OR unparseable. `TierAskingPrice::from_sats` owns
+        // the sats→msat arithmetic; no app writes the multiply itself.
+        let asking_price = opt(self.asking_price.text().trim())
+            .and_then(|s| s.parse::<u64>().ok())
+            .and_then(fauna_protocol::subscriptions::TierAskingPrice::from_sats);
+        let payment_url = opt(self.payment_url.text().trim());
+        (price_hint, asking_price, payment_url)
+    }
+}
+
+#[cfg(not(feature = "payments"))]
+impl MoneyFields {
+    fn build(_form: &gtk::Box) -> Self {
+        Self
+    }
+
+    fn clear(&self) {}
+
+    fn fill(&self, _tier: &TierItem) {}
+
+    fn read(&self) -> MoneyValues {
+        (None, None, None)
+    }
 }
 
 fn entry(placeholder: &str) -> gtk::Entry {
@@ -622,9 +705,7 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
             ctx.w.form_name.set_sensitive(true);
             ctx.w.form_rank.set_text("");
             ctx.w.form_description.set_text("");
-            ctx.w.form_price_hint.set_text("");
-            ctx.w.form_asking_price.set_text("");
-            ctx.w.form_payment_url.set_text("");
+            ctx.w.form_money.clear();
             ctx.w.form_auto_approve.set_active(false);
             clear_error(&ctx.w);
             ctx.w.form.set_visible(true);
@@ -783,16 +864,7 @@ fn submit_form(ctx: &Rc<Ctx>) {
     // blank/garbage falls to rank 0, matching every app's form.
     let rank: u32 = fauna_core::format::parse_count(&ctx.w.form_rank.text()).unwrap_or(0);
     let description = opt(ctx.w.form_description.text().trim());
-    let price_hint = opt(ctx.w.form_price_hint.text().trim());
-    // Same shape as the fields above (and their shared, separately-tracked
-    // "no clear verb yet" gap — monetization.md § The asking price →
-    // Editability): a parsed sats value on the wire, `None` for empty OR
-    // unparseable. `TierAskingPrice::from_sats` owns the sats→msat
-    // arithmetic; no app writes the multiply itself.
-    let asking_price = opt(ctx.w.form_asking_price.text().trim())
-        .and_then(|s| s.parse::<u64>().ok())
-        .and_then(fauna_protocol::subscriptions::TierAskingPrice::from_sats);
-    let payment_url = opt(ctx.w.form_payment_url.text().trim());
+    let (price_hint, asking_price, payment_url) = ctx.w.form_money.read();
     let auto_approve = ctx.w.form_auto_approve.is_active();
     let editing = ctx.editing.borrow().clone();
     let action = match editing {
@@ -1225,9 +1297,14 @@ fn build_tier_row(ctx: &Rc<Ctx>, tier: &TierItem) -> gtk::Box {
     set_test_id(&rank, ids::SUBSCRIPTION_TIER_RANK);
     row.append(&rank);
 
-    let price = gtk::Label::new(Some(tier.price_hint.as_deref().unwrap_or("")));
-    set_test_id(&price, ids::SUBSCRIPTION_TIER_PRICE);
-    row.append(&price);
+    // The tier's price display is the money plane's (`dynamic-features.md` §
+    // Platform-family surface excision → *The price-and-route class*).
+    #[cfg(feature = "payments")]
+    {
+        let price = gtk::Label::new(Some(tier.price_hint.as_deref().unwrap_or("")));
+        set_test_id(&price, ids::SUBSCRIPTION_TIER_PRICE);
+        row.append(&price);
+    }
 
     let edit = gtk::Button::with_label(s::EDIT);
     set_test_id(&edit, ids::SUBSCRIPTION_TIER_EDIT_BUTTON);
@@ -1243,25 +1320,7 @@ fn build_tier_row(ctx: &Rc<Ctx>, tier: &TierItem) -> gtk::Box {
             ctx.w
                 .form_description
                 .set_text(tier.description.as_deref().unwrap_or(""));
-            ctx.w
-                .form_price_hint
-                .set_text(tier.price_hint.as_deref().unwrap_or(""));
-            // The reverse of `TierAskingPrice::from_sats` — pre-fill with the
-            // tier's current price in sats, or empty for an unpriced tier /
-            // a unit this build cannot interpret (fail-closed). An edit that
-            // saves without touching this field must keep the current price,
-            // never silently clear it (see `submit_form`'s `None` handling).
-            ctx.w.form_asking_price.set_text(
-                &tier
-                    .asking_price
-                    .as_ref()
-                    .and_then(|p| p.to_sats())
-                    .map(|s| s.to_string())
-                    .unwrap_or_default(),
-            );
-            ctx.w
-                .form_payment_url
-                .set_text(tier.payment_url.as_deref().unwrap_or(""));
+            ctx.w.form_money.fill(&tier);
             ctx.w.form_auto_approve.set_active(tier.auto_approve);
             clear_error(&ctx.w);
             ctx.w.form.set_visible(true);

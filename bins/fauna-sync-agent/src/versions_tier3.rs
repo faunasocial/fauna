@@ -418,10 +418,16 @@ async fn restore_end_to_end_against_a_real_nest() {
     // is exactly what `sync_db_path_for_ref(FOLDER_REF)` resolves to. The restore
     // recorded as the dispatching actor, so the re-point stamps the head as signed
     // by it — production passes the capability's actor id the same way.
-    let repointed =
-        crate::pipe_server::repoint_entry(&state, FOLDER_REF, REL, &restored, Some(ACTOR))
-            .await
-            .expect("re-point the local row");
+    let repointed = crate::pipe_server::repoint_entry(
+        &state,
+        FOLDER_REF,
+        REL,
+        &restored,
+        Some(ACTOR),
+        fauna_core::data::Timestamp::now_secs_or_zero(),
+    )
+    .await
+    .expect("re-point the local row");
     assert!(repointed, "there was a local copy to re-point");
 
     let entry = SyncDb::open(&db_path)

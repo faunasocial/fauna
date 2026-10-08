@@ -15,11 +15,28 @@ import SwiftUI
 ///
 /// `content-policy-blocked-notice` is the one ui.yaml id this pillar renders
 /// (indexed, per card/bubble).
+///
+/// `reported` is the same notice for the viewer's OWN report
+/// (`moderation.md` § Corollary — block also hides): "You reported this" in
+/// place of the family words, `source="reported"` on the element, no body and no
+/// reveal. A personal filter, so it names the viewer's own act — not a policy.
 public struct ContentPolicyBlockedNotice: View {
-    public init() {}
+    private let reported: Bool
+
+    public init(reported: Bool = false) {
+        self.reported = reported
+    }
+
+    private var text: String {
+        reported ? L.moderation.report.hiddenPlaceholder : L.family.contentBlockedNotice
+    }
 
     public var body: some View {
-        automationText(Ids.contentPolicyBlockedNotice, L.family.contentBlockedNotice)
+        Text(text)
+            .accessibilityIdentifier(Ids.contentPolicyBlockedNotice)
+            .automationValue(
+                Ids.contentPolicyBlockedNotice, text: { text },
+                attributes: { ["source": reported ? "reported" : "policy"] })
             .font(.caption)
             .italic()
             .foregroundStyle(.secondary)

@@ -562,8 +562,8 @@ deleting it deletes it on the fediverse too — and your nest sends it to the
 person you answered as well as to your followers, so it shows up in their
 thread. A quote carries a link back to the post you quoted, which every
 fediverse app can open. If replying is not possible yet (for example, you have
-not turned the Fediverse on), the reply button tells you so and nothing is
-sent.
+not turned the Fediverse on), the reply shows an error and nothing is sent —
+turn the Fediverse on from the Bridges page and try again.
 
 **Direct messages.** When someone on the fediverse sends you a direct message
 — a post addressed to you alone, not to the public or to their followers — it

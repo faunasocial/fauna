@@ -77,6 +77,9 @@ SECOND_APP_FIXTURES = frozenset({
     "folder_share_stranger_app",
     # The Media read witnesses' member seat (tui external-open / web download).
     "media_member",
+    # The shared-and-served WebDAV journey's member seat
+    # (`test_webdav_shared_set.py`).
+    "served_share_member",
 })
 
 APP_LAUNCHING_FIXTURES = frozenset({

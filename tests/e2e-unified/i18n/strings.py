@@ -1330,6 +1330,21 @@ class _ConversationsUnified:
     @staticmethod
     def error_send(*, message: str) -> str:
         return f"Could not send this message: {message}"
+    @staticmethod
+    def list_send_warning(*, count: str, list: str, used: str, limit: str) -> str:
+        return f"This will send to {count} subscribed recipients on {list}. Today's quota: {used} / {limit}."
+    @staticmethod
+    def list_send_warning_no_limit(*, count: str, list: str) -> str:
+        return f"This will send to {count} subscribed recipients on {list}."
+    @staticmethod
+    def list_quota_approaching(*, remaining: str) -> str:
+        return f"Approaching daily limit — {remaining} more recipients today"
+    @staticmethod
+    def list_quota_over(*, count: str, limit: str, remaining: str) -> str:
+        return f"Sending to {count} recipients would pass today's limit of {limit} ({remaining} left). Try again tomorrow."
+    @staticmethod
+    def list_send_progress(*, list: str, delivered: str, count: str) -> str:
+        return f"Sent to {list}: {delivered} of {count} recipients delivered"
     error_attachment_no_composer = "Open a message composer before attaching a file."
     group_conversation_hint = "This will start a group conversation."
     recipient_picker_placeholder = "Type a handle, email, npub, DID, or @user@instance"
@@ -3588,7 +3603,6 @@ class _Settings:
     new_nest_url = "New Nest URL"
     new_nest_url_placeholder = "https://nest.fauna.social"
     update_button = "Update"
-    updates = "Updates"
     storage_desc = "Account storage usage."
     about = "About"
     about_name = "Fauna for Windows"
@@ -3598,9 +3612,6 @@ class _Settings:
     general = "General"
     appearance = "Appearance"
     show_in_dock = "Show in Dock"
-    auto_check_updates = "Automatically check for updates"
-    auto_download_updates = "Automatically download updates"
-    last_checked = "Last checked:"
     p2p_redirect = "Peer connections and bridges are managed on the Devices and Bridges pages."
     open_devices = "Open Devices"
     open_bridges = "Open Bridges"
@@ -3967,6 +3978,7 @@ class _Mail_lists:
     edit = "Edit"
     delete = "Delete"
     delete_confirm = "Delete the list and all its members?"
+    archive_off_server_confirm = "This archive link is not on your server and goes out with every message. Save anyway?"
     members = "Members"
     no_domain = "Add a mail domain before creating lists."
     members_title = "Members"
@@ -6195,6 +6207,22 @@ class _ErrorBridges:
     guardian_approval_required = "This account can only message approved contacts."
 
 
+class _ErrorActivitypub:
+    not_linked = "This post came from the fediverse, and ActivityPub isn't enabled for your account yet. Enable it on the Bridges page first."
+    switched_off = "Your ActivityPub federation is switched off, so this can't be sent to the fediverse. Turn it back on from the Bridges page."
+
+
+class _ErrorBluesky:
+    not_linked = "This post came from Bluesky, and no Bluesky account is linked for you. Link one on the AT Protocol page first."
+
+
+class _ErrorNostr:
+    not_linked = "This post came from Nostr, and no Nostr key is linked for you. Link one on the Nostr page first."
+    no_custodial_key = "Your nest doesn't hold your Nostr key, so it can't sign this for you. Switch to a generated or imported key on the Nostr page."
+    no_relays_configured = "You've removed every Nostr relay, so there is nowhere to publish this. Add a relay on the Nostr page first."
+    replies_off = "Replies to Nostr are switched off, so this wasn't sent. Turn on Publish replies on the Nostr page."
+
+
 class _ErrorNest:
     outdated = "This nest is running an outdated version and must be updated before you can connect."
     schema_mismatch = "This nest's database does not match its software version and must be updated."
@@ -6255,6 +6283,9 @@ class _Error:
     conversations = _ErrorConversations
     profile = _ErrorProfile
     bridges = _ErrorBridges
+    activitypub = _ErrorActivitypub
+    bluesky = _ErrorBluesky
+    nostr = _ErrorNostr
     nest = _ErrorNest
     federation = _ErrorFederation
     protocol = _ErrorProtocol

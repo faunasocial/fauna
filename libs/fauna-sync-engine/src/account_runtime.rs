@@ -77,8 +77,8 @@ use ed25519_dalek::SigningKey;
 use fauna_account_store::{
     backend::StoreBackend,
     locks::{
-        EngineLock, EngineLockOutcome, MigrationLock, MigrationLockOutcome, SeedLegLock,
-        SeedLegLockOutcome,
+        AgentPresence, EngineLock, EngineLockOutcome, MigrationLock, MigrationLockOutcome,
+        SeedLegLock, SeedLegLockOutcome,
     },
     sqlite::SqliteBackend,
     store::AccountStore,
@@ -93,7 +93,7 @@ use tokio::sync::{broadcast, oneshot, watch};
 use crate::attested_predecessors::AttestedPredecessors;
 use crate::peer_leg::PeerLegState;
 pub use crate::peer_leg::{
-    DialPass, PeerLegBinding, PeerLegFactoryInputs, PeerLegPass, PeerTransportFactory,
+    DialPass, PeerFileSync, PeerLegBinding, PeerLegFactoryInputs, PeerLegPass, PeerTransportFactory,
 };
 use crate::principal_bundle::PrincipalSlot;
 use crate::principal_succession::WriterKeyProvenance;
@@ -107,8 +107,8 @@ pub use fauna_account_plane::account_driver::{
     ENROLLMENT_RETIRE_BUDGET, ElectionOutcome, EngineElection, EngineRole, EnrollmentPass,
     EnrollmentRefusal, EnrollmentRetirement, FleetBootstrapRows, GroupCeremonyAuthority, HostLegs,
     LegsCtx, LegsOutput, LinkedNestConnector, MembershipSource, NoLegs, OwedDeliveries,
-    OwedNestDeliverer, PassTimings, PrincipalCustody, PumpCycles, PumpCyclesView, PumpReport,
-    RUNTIME_ABSENT, RuntimePrincipal, SIGN_OUT_PASS_GRACE, SeatAccountStore, ServeEnd,
+    OwedNestDeliverer, PassTimings, Presence, PrincipalCustody, PumpCycles, PumpCyclesView,
+    PumpReport, RUNTIME_ABSENT, RuntimePrincipal, SIGN_OUT_PASS_GRACE, SeatAccountStore, ServeEnd,
     TrustedHolderSource, elect_at_start, fixed_holders, fleet_bootstrap, fleet_bootstrap_rows,
     nudge_scope_for_push, push_step_error, r14_trust,
 };
@@ -141,6 +141,11 @@ pub use fauna_credential_store::ACCOUNT_STORE_NAMESPACE as CRED_NAMESPACE;
 /// three-arm statement the custodian store demands, re-exported because the
 /// account store is its second consumer ([`AccountRuntimeParams::store_backup_exclusion`]).
 pub use crate::custodian_store::CloudBackupExclusion;
+/// The agent presence lock — taken by the sync agent's mount around this
+/// runtime, never by the runtime itself (`account-runtime.md` § Multi-instance
+/// concurrency → *The agent holds the role when present*, part 1); re-exported
+/// so the agent's host reaches it where it reaches [`StoreRoot`].
+pub use fauna_account_store::locks::{AgentPresenceLock, AgentPresenceLockOutcome};
 /// The store's directory under the per-actor state dir — owned by the store
 /// crate's `root` module since W6 (placement is the store's own concern);
 /// re-exported so existing paths keep working.
@@ -854,12 +859,25 @@ where
             observed_endpoints,
         }
     }
+
+    /// The yield's legs half: the peer node shut down and awaited (its
+    /// listener gone), then its serve side, transport, sibling channels and
+    /// file-sync hooks; then the custodied stores this holder opened. Both
+    /// rebuild from scratch at this runtime's next pass as a holder.
+    async fn stand_down(&mut self) {
+        crate::peer_leg::stand_down(&mut self.peer).await;
+        self.custody.stand_down();
+    }
 }
 
 /// The native election ([`EngineElection`]): the kernel-arbitrated advisory
 /// lock on `<store dir>/engine.lock` (`fauna_account_store::locks::EngineLock`),
-/// and for the seed-leg role the one on `<store dir>/seed-legs.lock`
-/// (`SeedLegLock`).
+/// for the seed-leg role the one on `<store dir>/seed-legs.lock`
+/// (`SeedLegLock`), and for the agent's presence a probe of
+/// `<store dir>/agent.lock` (`AgentPresenceLock::is_present`). The probe is
+/// all this host does with that lock: a seedless runtime never takes it — the
+/// agent's mount does, around the runtime (`fauna-sync-agent`'s
+/// `account_host`).
 struct FileElection {
     store_dir: std::path::PathBuf,
 }
@@ -888,6 +906,14 @@ impl EngineElection for FileElection {
             SeedLegLockOutcome::Held(lock) => ElectionOutcome::Held(lock),
             SeedLegLockOutcome::Refused => ElectionOutcome::Refused,
             SeedLegLockOutcome::Degraded(e) => ElectionOutcome::Degraded(e.to_string()),
+        }
+    }
+
+    async fn agent_present(&self) -> Presence {
+        match AgentPresenceLock::is_present(&self.store_dir) {
+            AgentPresence::Present => Presence::Present,
+            AgentPresence::Absent => Presence::Absent,
+            AgentPresence::Degraded(e) => Presence::Degraded(e.to_string()),
         }
     }
 }
@@ -1221,7 +1247,7 @@ async fn worker<R>(
             // the role), inside the readiness barrier so the role is settled
             // before any command is served.
             let election = FileElection::new(store_dir.clone());
-            let role = elect_at_start(&election).await;
+            let role = elect_at_start(&election, &principal).await;
             anyhow::Ok(Some((
                 store,
                 writer_key,
@@ -6682,6 +6708,119 @@ mod tests {
             );
         }
         handle.shutdown().await;
+    }
+
+    /// Whether ANY open file description holds `agent.lock` on this store, in
+    /// either mode: an exclusive try wins only when nobody does.
+    fn agent_lock_held_by_anyone(store_dir: &std::path::Path) -> bool {
+        let file = fauna_core::fs_lock::open_lock_file(
+            &fauna_account_store::store::agent_lock_path(store_dir),
+        )
+        .expect("open agent.lock");
+        matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+    }
+
+    /// **The runtime never takes `agent.lock` — not as an app, not as the
+    /// agent** (`account-runtime.md` § Multi-instance concurrency → *The agent
+    /// holds the role when present*, part 1: a seed-holding runtime probes it
+    /// and never takes it; a seedless one leaves it to its host, the agent's
+    /// mount). A runtime that held it in any mode would read as an agent to
+    /// every app beside it, or block the real agent's acquire for good.
+    #[tokio::test]
+    async fn a_seed_holding_runtime_never_takes_the_agent_lock_and_a_seedless_one_leaves_it_to_its_host()
+     {
+        let fx = fixture();
+        let store_dir = fx
+            .params("a")
+            .store_root
+            .store_dir(&fx.actor_hex)
+            .expect("store dir");
+
+        let app = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("the app");
+        app.reconcile_now().await.expect("the app's pass");
+        assert!(app.is_engine_holder(), "alone, the app pumps");
+        assert!(
+            !agent_lock_held_by_anyone(&store_dir),
+            "a seed-holding runtime probes agent.lock and holds nothing after"
+        );
+        app.shutdown().await;
+
+        let agent = AccountStoreRuntime::start(AccountRuntimeParams {
+            principal: RuntimePrincipal::Seedless,
+            ..fx.params("a")
+        })
+        .await
+        .expect("the seedless runtime");
+        agent.reconcile_now().await.expect("the agent's pass");
+        assert!(
+            agent.is_engine_holder(),
+            "alone, the seedless runtime pumps"
+        );
+        assert!(
+            !agent_lock_held_by_anyone(&store_dir),
+            "a seedless runtime leaves agent.lock to its host"
+        );
+        agent.shutdown().await;
+    }
+
+    /// **A seed-holding holder hands the role to an agent that arrives, and a
+    /// `reconcile_now` says so** (`account-runtime.md` § Multi-instance
+    /// concurrency → *The agent holds the role when present*, parts 2 and 3):
+    /// with the presence lock taken beside it, the holder's next re-read stands
+    /// it down — `skipped_non_holder` and `yielded` on the report of the
+    /// `reconcile_now` that did it, the role fact flipped — and it does not
+    /// contend again while the agent stays.
+    ///
+    /// The yield is the `reconcile_now`'s unless the holder's own presence
+    /// poll got there in the instant between the lock and the command (the
+    /// poll is a sibling wake on the same loop, and is pinned on its own in
+    /// `conformance_account_runtime`'s agent case): the role read just before
+    /// the command is what tells the two apart, and the role answer is
+    /// asserted either way.
+    #[tokio::test]
+    async fn a_seed_holding_holder_yields_to_an_arriving_agent_and_reports_it() {
+        let fx = fixture();
+        let store_dir = fx
+            .params("a")
+            .store_root
+            .store_dir(&fx.actor_hex)
+            .expect("store dir");
+        let app = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("the app");
+        app.reconcile_now().await.expect("the app's pass");
+        assert!(app.is_engine_holder(), "alone, the app pumps");
+
+        let presence = match fauna_account_store::locks::AgentPresenceLock::acquire(&store_dir) {
+            fauna_account_store::locks::AgentPresenceLockOutcome::Held(lock) => lock,
+            other => panic!("the agent's lock: {other:?}"),
+        };
+        let held_before = app.is_engine_holder();
+        let report = app.reconcile_now().await.expect("the yielding command");
+        assert!(report.skipped_non_holder, "{report:?}");
+        assert!(!app.is_engine_holder(), "the role fact flipped");
+        if held_before {
+            assert!(
+                report.yielded,
+                "the command found the agent and handed it the role: {report:?}"
+            );
+        }
+        // Present → no try at all: a free engine.lock is not taken back.
+        let report = app.reconcile_now().await.expect("the role answer");
+        assert!(report.skipped_non_holder && !report.yielded, "{report:?}");
+        assert!(!app.is_engine_holder());
+        assert!(
+            matches!(
+                EngineLock::try_acquire(&store_dir),
+                EngineLockOutcome::Held(_)
+            ),
+            "the yielded role is free for the agent to take"
+        );
+
+        drop(presence);
+        app.shutdown().await;
     }
 
     /// **A machine deleted while its app sits beside a seedless engine holder

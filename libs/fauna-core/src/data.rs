@@ -4609,14 +4609,14 @@ pub struct MailConfig {
     /// the longest-lived MSEK carrier in the system: it **is** the at-rest
     /// record, and the in-memory mail record holds it for the whole session.
     pub msek: Option<SecretArray32>,
-    /// Prior MSEKs retained after a hard-revoke (rotate-mail-keys),
-    /// most-recent first, capped at 2. The read-side snapshot derives
-    /// a grace-decrypt recipient-mail keypair from each so in-flight
-    /// mail sealed to a now-rotated recipient pubkey still opens (per
-    /// `docs/goal/architecture/key-material-hierarchy.md` § Path
-    /// B-sibling-2 "current + last 2 rotations"). Empty until the
-    /// first rotation. `#[serde(default)]` so pre-existing
-    /// records (written before this field existed) parse unchanged.
+    /// **Every** MSEK ever retired by a hard-revoke (rotate-mail-keys), most
+    /// recently retired first — UNCAPPED. The READ fold fills it from the
+    /// plane's `generation/<fingerprint>` rows ([`crate::mail_rows`]); the
+    /// read-side snapshot derives a grace-decrypt recipient-mail keypair from
+    /// each, so mail sealed to any rotated-away recipient pubkey still opens,
+    /// for ever (`docs/goal/architecture/owner-key-material.md` § Path
+    /// B-sibling-2 → *Pre-rotation mail at rest*). Empty until the first
+    /// rotation.
     ///
     /// Each generation is held as [`SecretArray32`] for the same reason
     /// [`Self::msek`] is: a retired MSEK still opens mail (that is the entire
@@ -4665,11 +4665,10 @@ pub struct MailConfig {
     /// Retirement instants for the [`Self::prior_mseks`] generations, **keyed
     /// by the prior MSEK value itself — never positional**: the mail
     /// merge unions, dedups, and reorders `prior_mseks`, so a parallel vec
-    /// cannot stay aligned. Recorded by the rotate-mail-keys flow from the
-    /// content-sealing-epochs rotation-heal amendment (2026-07-19) on, in the
-    /// same write that retains the generation. Entries whose `msek` leaves
-    /// `prior_mseks` are pruned alongside, so no writer leaves a retained
-    /// prior without its instant. (The pre-amendment "legacy retention" — a
+    /// cannot stay aligned. Each generation row carries its MSEK and its
+    /// instant together, so the fold never yields a prior without one.
+    /// Recorded by the rotate-mail-keys finalize, in the write that retains
+    /// the generation. (The pre-amendment "legacy retention" — a
     /// prior with no entry, read as provably pre-flip — was retired 2026-09-24
     /// by the compat-remnant sweep, `version-compatibility.md` § Dimension 2,
     /// program 4; the bounded mint now treats an unrecorded prior as an
@@ -4750,6 +4749,20 @@ impl MailConfig {
             .find(|r| &r.msek == msek)
             .map(|r| r.retired_at_unix)
     }
+
+    /// The retirement instants aligned with [`Self::prior_mseks`] — what the
+    /// mail openers select a record's generation by
+    /// (`fauna_mls::wrapped_blob::generation_trial_order`). Stops at the first
+    /// prior with no recorded instant (an inconsistent composite the fold
+    /// never produces), so the alignment never breaks: a short list leaves
+    /// the older generations to the ring walk.
+    #[must_use]
+    pub fn prior_retired_at_unix(&self) -> Vec<u64> {
+        self.prior_mseks
+            .iter()
+            .map_while(|k| self.prior_msek_retired_at(k))
+            .collect()
+    }
 }
 
 /// **Named mutation M-241-custody** — revert any of these four fields to a bare
@@ -4777,10 +4790,9 @@ mod _msek_family_custody_pins {
     const _PRIOR: fn(&MailConfig) -> &Vec<SecretArray32> = |c| &c.prior_mseks;
     const _RETIREMENT: fn(&PriorMsekRetirement) -> &SecretArray32 = |r| &r.msek;
     const _PENDING: fn(&PendingRotation) -> &SecretArray32 = |p| &p.new_msek;
-    // The plane's copies of the same family (`crate::mail_rows`).
+    // The plane's copies of the same family (`crate::mail_rows`); a generation
+    // row's value IS a `PriorMsekRetirement` (`_RETIREMENT` above).
     const _ROW_CURRENT: fn(&crate::mail_rows::MailStateRow) -> &Option<SecretArray32> = |r| &r.msek;
-    const _ROW_PRIOR: fn(&crate::mail_rows::MailStateRow) -> &Vec<SecretArray32> =
-        |r| &r.prior_mseks;
     const _ROW_SENTINEL: fn(&crate::mail_rows::MailRotationSentinel) -> &SecretArray32 =
         |s| &s.new_msek;
 }
@@ -4823,7 +4835,7 @@ impl MailConfig {
     ///
     /// `self_at` / `other_at` are the instants the whole-record latest-wins
     /// decisions compare — each side's record stamp. The per-field rules (the MSEK present-wins, the
-    /// capped grace window with its retirements, the succession-burn min-union,
+    /// uncapped prior generations with their retirements, the succession-burn min-union,
     /// the recreatable five as ONE latest-wins record with `mail_enabled`
     /// present-wins beside the MSEK) are documented inline below.
     #[must_use]
@@ -4838,10 +4850,9 @@ impl MailConfig {
         //   multi-device case where a device that hasn't yet synced the MSEK bumps
         //   `updated_at` on an unrelated edit), with a differing-`Some` pair (a
         //   deliberate rotation) broken by newer-`updated_at`.
-        // * `prior_mseks` (the cap-2 grace-decrypt window — `MailConfig::prior_mseks`,
-        //   "current + last 2 rotations") is **unioned** (newer side first, dedup,
-        //   the winning `msek` excluded, capped at 2) so a peer's retained grace
-        //   key is never dropped.
+        // * `prior_mseks` (every retired generation — `MailConfig::prior_mseks`,
+        //   uncapped) is **unioned** (dedup, the winning `msek` excluded, ordered
+        //   by retirement) so a peer's retained generation is never dropped.
         // * The rest (`credentials`, `pending_rotation`, `mail_enabled`,
         //   `caldav_enabled`) is recreatable/idempotent, so it stays whole-record
         //   latest-wins from the side with the newer of `self_at` / `other_at` —
@@ -4854,8 +4865,8 @@ impl MailConfig {
         // differing-`msek` arm picks newer-`updated_at`. A rotate-mail-keys on one
         // device racing an unrelated edit (newer timestamp, pre-rotation `msek`) on
         // another can therefore pick the older `msek` as `current`. The displaced
-        // one is NOT unioned into the grace window — the window unions the two
-        // sides' `prior_mseks` only, and a just-rotated key is in neither — so the
+        // one is NOT unioned into the priors — the merge unions the two sides'
+        // `prior_mseks` only, and a just-rotated key is in neither — so the
         // record alone would lose it; safeguard (2) below is what keeps it
         // (`mail-credentials.md` § Cross-device finalize race says the same).
         //
@@ -4880,14 +4891,16 @@ impl MailConfig {
         // `libs/fauna-client-mail-settings/src/rotation.rs` step (f),
         // `mail-credentials.md` § Cross-device finalize race).
         //
-        // The MSEK, grace-window and burn halves are the three helpers below
-        // ([`merge_msek`], [`merge_grace_window`], [`merge_succession_burns`]) —
-        // ONE statement each, which the `fauna.state.mail` state row's arm
-        // ([`crate::mail_rows::MailStateRow::merge`]) calls too, over its own
-        // stamp (`config-dissolution.md` § Phases and gates → *Bounded rows* →
+        // The MSEK, prior-generation and burn halves are the three helpers
+        // below ([`merge_msek`], [`merge_prior_generations`],
+        // [`merge_succession_burns`]) — ONE statement each; the
+        // `fauna.state.mail` plane runs the MSEK and burn halves on its state
+        // row ([`crate::mail_rows::MailStateRow::merge`]) and the
+        // prior-generation half in its READ fold over the generation rows
+        // (`config-dissolution.md` § Phases and gates → *Bounded rows* →
         // *The mail plane*).
         let mail_msek = merge_msek(&self.msek, self_at, &other.msek, other_at);
-        let (mail_prior_mseks, mail_prior_retirements) = merge_grace_window(
+        let (mail_prior_mseks, mail_prior_retirements) = merge_prior_generations(
             mail_msek.as_ref(),
             (&self.prior_mseks, &self.prior_msek_retirements[..]),
             (&other.prior_mseks, &other.prior_msek_retirements[..]),
@@ -4959,7 +4972,7 @@ pub(crate) fn merge_msek(
         // A deliberate rotation: newer `updated_at` wins, and on a tie the
         // lexicographically smaller key — never "ours", which is the preference
         // two replicas cannot both hold. The displaced key is NOT carried into
-        // the grace window ([`merge_grace_window`] unions the priors only); the
+        // the priors ([`merge_prior_generations`] unions the priors only); the
         // rotation finalize's verify-and-re-drive keeps it (the residual on
         // [`MailConfig::merge`]).
         (Some(o), Some(t)) => Some(
@@ -4975,21 +4988,23 @@ pub(crate) fn merge_msek(
     }
 }
 
-/// **The grace-window half of the mail merge** — the cap-2 `prior_mseks`
-/// union with its retirement instants, the winning current `msek` excluded,
-/// ordered by content. Each side is `(prior_mseks, prior_msek_retirements)`.
-/// Shared by [`MailConfig::merge`] and
-/// [`crate::mail_rows::MailStateRow::merge`].
-pub(crate) fn merge_grace_window(
+/// **The prior-generation half of the mail merge** — the UNCAPPED
+/// `prior_mseks` union with its retirement instants, the winning current
+/// `msek` excluded, ordered by content (`owner-key-material.md` § Path
+/// B-sibling-2 → *Pre-rotation mail at rest*: every generation ever retired
+/// is kept). Each side is `(prior_mseks, prior_msek_retirements)`. Shared by
+/// [`MailConfig::merge`] and the plane's READ fold
+/// ([`crate::mail_rows::MailRows::config`]).
+pub(crate) fn merge_prior_generations(
     msek: Option<&SecretArray32>,
     ours: (&[SecretArray32], &[PriorMsekRetirement]),
     theirs: (&[SecretArray32], &[PriorMsekRetirement]),
 ) -> (Vec<SecretArray32>, Vec<PriorMsekRetirement>) {
-    // The retirement instants come FIRST because the grace window's order is
+    // The retirement instants come FIRST because the priors' order is
     // derived from them. Per prior-MSEK key the **later** instant wins: the
-    // instant gates grace decryption, so extending the window is the
+    // instant bounds the generation's seal interval, so extending it is the
     // no-data-loss direction, and `max` is symmetric where a side-preference
-    // is not.
+    // is not (`crate::mail_rows::merge_generation`, the plane row's join).
     // Keyed by the custody type itself (`SecretArray32: Ord`), not by a bare
     // `[u8; 32]` copied out of it — the map outlives every individual compare,
     // so a bare key would be a duplicate of the secret held for the whole merge.
@@ -5000,18 +5015,12 @@ pub(crate) fn merge_grace_window(
             .or_insert(r.retired_at_unix);
         *slot = (*slot).max(r.retired_at_unix);
     }
-    // Union the grace-decrypt window, deduped, the winning current `msek`
+    // Union every prior generation, deduped, the winning current `msek`
     // excluded (it belongs in `msek`, not `prior`), then ordered **by content**
     // — most recently retired first, an unrecorded retention (an inconsistent
-    // input) last, ties by key bytes — and capped at the cap-2 window
-    // (`MailConfig::prior_mseks`).
-    //
-    // The order used to be "the newer side's list first", and with a cap that
-    // is not merely a reordering: on an equal `updated_at` the two replicas
-    // disagree about which side is newer, so the truncation keeps *different
-    // keys* on each. A total order derived from the values themselves makes the
-    // capped set a join — `top2(top2(a ∪ b) ∪ b) == top2(a ∪ b)`, since the
-    // global top 2 are still present and still on top.
+    // input) last, ties by key bytes — a total order derived from the values
+    // themselves, so both replicas list the same set in the same order.
+    // UNCAPPED: the cap-2 window retired 2026-10-06 (`MailConfig::prior_mseks`).
     let mut prior_mseks: Vec<SecretArray32> = Vec::new();
     for k in ours.0.iter().chain(theirs.0.iter()) {
         if msek != Some(k) && !prior_mseks.contains(k) {
@@ -5028,11 +5037,9 @@ pub(crate) fn merge_grace_window(
         let rb = std::cmp::Reverse(retirement_by_msek.get(b).copied().unwrap_or(0));
         (ra, a).cmp(&(rb, b))
     });
-    prior_mseks.truncate(2);
-    // Retirement instants for the keys that made the window, keyed by the
-    // prior-MSEK value (never positional) and in the window's own order;
-    // entries whose msek fell out of the window are pruned with it
-    // (content-sealing-epochs amendment 2026-07-19).
+    // Retirement instants for the priors, keyed by the prior-MSEK value (never
+    // positional) and in the priors' own order; an entry naming the current
+    // `msek` is dropped with it.
     let retirements: Vec<PriorMsekRetirement> = prior_mseks
         .iter()
         .filter_map(|k| {
@@ -6605,8 +6612,8 @@ pub struct SubscriptionsConfig {
 
 /// The period-key history for one subscription tier. `current` is the active
 /// period the mint wraps to the live roster; `prior` retains every rotated-out
-/// period (most-recent first, **uncapped** — unlike `MailConfig::prior_mseks`'s
-/// cap-2 — because minting an archival blob for a new subscriber wanting the
+/// period (most-recent first, **uncapped** — like `MailConfig::prior_mseks` —
+/// because minting an archival blob for a new subscriber wanting the
 /// back-catalogue needs the full period history).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TierPeriodKeys {

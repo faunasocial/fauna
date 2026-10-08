@@ -699,6 +699,12 @@ def test_family_ward_feed_source_ask_redeems_once(app, bridges_nest, request):
     assert len(rows) == 1 and rows[0].strip(), (
         f"expected exactly this ward's ask, rendered non-blank, in a fresh guardian's queue: {rows!r}"
     )
+    # family-safety.md § Feed-source approvals — the card names what Approve
+    # grants (the bridge and the operation; a `link` has no target), never
+    # only the ward's display-only label.
+    assert AP_BRIDGE_ID in rows[0] and "link" in rows[0], (
+        f"the feed_source row does not name the grant's bridge and operation: {rows!r}"
+    )
     app.family.approve(0)
     with rpc_as(ward) as w:
         wait_until(

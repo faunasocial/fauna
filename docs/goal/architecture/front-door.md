@@ -24,8 +24,8 @@ exploits amortize across every deployment).
 
 fauna.social's public web surface is served by the smallest thing that can
 serve it well, treated as **release infrastructure, not a marketing box**: the
-apex will also serve the macOS Sparkle appcast (`fauna.social/appcast.xml` is
-already compiled into the app's `Info.plist` as `SUFeedURL`), so whoever
+apex serves the install guides and the official-apps page that tell users
+which download is genuine, so whoever
 controls the door influences what software users run. Everything below follows
 from that framing.
 
@@ -68,7 +68,7 @@ Rejected alternatives, and why (decision record):
 
 | Host | Serves | Miss behavior |
 |---|---|---|
-| `fauna.social` | the built site (`just site` output) — and, later, `appcast.xml` + release artifacts alongside it | `404.html` (burrow page), status 404 |
+| `fauna.social` | the built site (`just site` output) — and, later, release artifacts alongside it | `404.html` (burrow page), status 404 |
 | `www.fauna.social` | permanent redirect (308) to the same path on the apex | n/a |
 | `app.fauna.social` | the built SPA (canonical hosted origin — the name is baked into shipped code as the default CORS origin; never rename) | `index.html`, status 200 (SPA client routing); real asset misses under content-hashed paths still 404 |
 | `proxy.fauna.social` | reverse-proxy pass to `fauna-cors-proxy` on loopback (forwarding semantics owned by architecture/provisioning/registry.md) | upstream's answer; 502 with an empty body if the unit is down |
@@ -149,7 +149,7 @@ compromise and one more a user can be redirected to; none is planned.
 
 - **HTTP-01, never DNS-01 — no DNS API token exists on the box.** A
   zone-write token on a public web box is domain takeover: site, mail
-  interception, appcast redirect. The box's only secret is its cert keys
+  interception, download-link redirect. The box's only secret is its cert keys
   (plus the host SSH keys). This is the door's one non-negotiable.
 - One ACME account, one order covering the four public names as SANs;
   renewal with the same ~30-day lead the nest uses.
@@ -241,7 +241,7 @@ CORS proxy run as **two static Rust binaries under hardened systemd units**:
 - **architecture/build-system.md** owns building the site (§ Public website
   build) and the SPA; this doc owns serving what those builds produce.
 - **architecture/release-integrity.md** owns release trust; this doc's
-  appcast note is placement only.
+  release-infrastructure framing is placement only.
 
 ## Implementation status today
 

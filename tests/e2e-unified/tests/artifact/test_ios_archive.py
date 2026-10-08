@@ -12,22 +12,32 @@ device-only property — the iOS SDK and its arm64 slice, the Release compile, t
 into the app — is untested until this file runs. That is the same
 artifact-vs-binary gap the macOS modules here close, one platform over.
 
-**What is deliberately NOT asserted, and why it is a real user gate rather than
-a skipped test.** The target is configured `CODE_SIGN_STYLE = Manual` with
-`AD_HOC_CODE_SIGNING_ALLOWED = NO`, so a *signed* device archive cannot be
-produced without an Apple Developer identity and provisioning profile. The
-identity now exists — enrollment was approved 2026-08-13 and `Apple
-Distribution: Fauna Social (7457N3M72H)` has been live on macOS since
-2026-08-22 — so what is missing is narrower than it was: a **provisioning
-profile** for `social.fauna.fauna`, which is portal work the dev VM
-deliberately cannot do (the Apple account stays off it by user ruling).
-Building the archive with signing disabled is not a workaround for that; it is
-the honest split. It proves everything about the archive path that does not
-require the credential — the SDK, the arm64 compile, the packaging, the layout —
-and leaves the credentialed step (`-exportArchive` to a signed `.ipa`, then an
-install on a real device) as the one inch a human with the identity must do.
-That inch is captured as a `NEEDS FROM USER:` item,
-not improvised here.
+**Two legs: unsigned everywhere, signed where the credential lives.** The four
+iOS targets sign manually (`installers/ios.md` § Signing): their Release configs
+carry the `Apple Distribution` identity, team `7457N3M72H` and one App Store
+profile each, scoped `[sdk=iphoneos*]` so simulator and macOS builds keep the
+project's ad-hoc `-`. The **unsigned** leg archives with `CODE_SIGNING_ALLOWED=NO`
+and proves everything that needs no credential — the SDK, the arm64 compile,
+the packaging, the layout. The **signed** leg archives with signing on and
+`xcodebuild -exportArchive`s a signed `.ipa` through
+`apps/fauna-apple/ExportOptions-AppStore.plist` (to disk, never uploaded), then
+reads the signature, the embedded profiles and the entitlements back off it. The
+profiles are machine-local — portal work done from the host, since the Apple
+account stays off the dev VM — so a box without the identity or the four
+profiles skips the signed leg as an environment gap; a real signing or export
+error still fails.
+
+**Neither leg talks to Apple's servers.** No `-allowProvisioningUpdates`, no
+authentication-key flags, manual signing, `destination = export` and
+`manageAppVersionAndBuildNumber = false` — the shapes that would let `xcodebuild`
+reach the portal or App Store Connect are absent, and
+`test_apple_identifier_pins.py` pins the tracked half of that everywhere.
+
+**What the signed leg does not prove.** It signs the DEFAULT flavor. The archive
+a store upload ships is the store-safe flavor (`just apple-ios-store-safe-check`
+is its witness); signing it and the upload itself belong to the upload step, not
+here. Nor is an `.ipa` an install: the install outcome waits for a channel that
+serves the app.
 
 **Cost.** A cold Release archive is minutes, and it needs the **production**
 5-slice `FaunaFFI.xcframework` (`just apple-ffi`) — the host-only flavour left
@@ -40,11 +50,13 @@ and carries the same device slice), so this archive can never link the
 """
 
 import plistlib
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from common import get_repo_root
+from helpers.app_surface import skip_environment
 from helpers.macos_artifact import FFI_FLAVOR_MARKER_RELPATH, ffi_flavor_refusal, run
 
 pytestmark = [pytest.mark.tier_4, pytest.mark.ios]
@@ -214,3 +226,161 @@ def test_the_archive_declares_the_apps_entitlements(ios_archive):
         f"the iOS target declares no app group; the app and its File Provider "
         f"extension share state through it. Got: {sorted(ents)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The signed leg: archive with signing on, export a signed `.ipa`, read it back.
+# ---------------------------------------------------------------------------
+
+_TEAM_ID = "7457N3M72H"
+_DIST_IDENTITY = f"Apple Distribution: Fauna Social ({_TEAM_ID})"
+_APP_GROUP = "group.social.fauna.shared"
+#: Every bundle in the `.ipa`, by its path under `Payload/`, with its bundle id
+#: and whether its signature must claim the app group. The iOS File Provider UI
+#: extension declares no entitlements at all (it opens a `fauna://` URL and
+#: touches no shared state), so its signature carries no group.
+_SIGNED_BUNDLES = {
+    "Fauna-iOS.app": ("social.fauna.fauna", True),
+    "Fauna-iOS.app/PlugIns/Fauna-iOS-FileProvider.appex":
+        ("social.fauna.fauna.FileProvider", True),
+    "Fauna-iOS.app/PlugIns/Fauna-iOS-FileProviderUI.appex":
+        ("social.fauna.fauna.FileProviderUI", False),
+    "Fauna-iOS.app/PlugIns/Fauna-iOS-Widget.appex":
+        ("social.fauna.fauna.Widget", True),
+}
+_EXPORT_OPTIONS = Path("apps") / "fauna-apple" / "ExportOptions-AppStore.plist"
+
+
+def _profile_name(bundle_id: str) -> str:
+    return f"Fauna AppStore {bundle_id}"
+
+
+def _decode_profile(path: Path) -> dict:
+    return plistlib.loads(run("security", "cms", "-D", "-i", str(path)).stdout.encode())
+
+
+def _installed_profiles() -> dict[str, dict]:
+    """Every unexpired profile of this team installed for Xcode, by Name.
+
+    Matched by NAME, never UUID: a profile's UUID changes every time it is
+    regenerated (yearly, and whenever its App ID gains a capability), while the
+    name is what the project and the export options reference.
+    """
+    root = Path.home() / "Library" / "Developer" / "Xcode" / "UserData" / "Provisioning Profiles"
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    found: dict[str, list[dict]] = {}
+    for path in sorted(root.glob("*.mobileprovision")) if root.is_dir() else []:
+        prof = _decode_profile(path)
+        if _TEAM_ID in prof.get("TeamIdentifier", []) and prof["ExpirationDate"] > now:
+            found.setdefault(prof["Name"], []).append(prof)
+    dupes = {name: len(v) for name, v in found.items() if len(v) > 1}
+    if dupes:
+        pytest.fail(f"more than one unexpired profile per name: {dupes} — Xcode's "
+                    f"pick between them is undefined; remove the stale copies.",
+                    pytrace=False)
+    return {name: v[0] for name, v in found.items()}
+
+
+@pytest.fixture(scope="module")
+def signing_credentials() -> dict[str, dict]:
+    """The distribution identity and the four App Store profiles, or a skip."""
+    identities = run("security", "find-identity", "-v", "-p", "codesigning").stdout
+    if f'"{_DIST_IDENTITY}"' not in identities:
+        skip_environment(f"no {_DIST_IDENTITY!r} signing identity in this keychain")
+    profiles = _installed_profiles()
+    missing = sorted({_profile_name(b) for b, _ in _SIGNED_BUNDLES.values()} - set(profiles))
+    if missing:
+        skip_environment(f"App Store provisioning profiles not installed: {missing}")
+    return profiles
+
+
+@pytest.fixture(scope="module")
+def signed_ios_archive(ios_device_ffi, signing_credentials, artifact_scratch) -> Path:
+    """The Release device archive with signing ON — manual, profiles from disk.
+
+    Deliberately no `-allowProvisioningUpdates` and no authentication-key flags:
+    without them xcodebuild resolves the identity and the profiles locally and
+    treats a miss as an error, never as a reason to contact Apple.
+    """
+    archive = artifact_scratch / "Fauna-iOS-signed.xcarchive"
+    run("rm", "-rf", str(archive), check=False)
+    run("xcodebuild", "archive",
+        "-project", str(get_repo_root() / "apps" / "fauna-apple" / "Fauna.xcodeproj"),
+        "-scheme", _SCHEME,
+        "-configuration", "Release",
+        "-destination", "generic/platform=iOS",
+        "-archivePath", str(archive),
+        "-skipPackagePluginValidation", "-skipMacroValidation",
+        timeout=3600)
+    return archive
+
+
+@pytest.fixture(scope="module")
+def exported_ipa(signed_ios_archive, artifact_scratch) -> Path:
+    """`-exportArchive` to a signed `.ipa` on disk; returns its unzipped `Payload/`."""
+    out = artifact_scratch / "Fauna-iOS-export"
+    run("rm", "-rf", str(out), check=False)
+    run("xcodebuild", "-exportArchive",
+        "-archivePath", str(signed_ios_archive),
+        "-exportPath", str(out),
+        "-exportOptionsPlist", str(get_repo_root() / _EXPORT_OPTIONS),
+        timeout=1800)
+    ipas = sorted(out.glob("*.ipa"))
+    assert len(ipas) == 1, (
+        f"expected exactly one .ipa in {out}, got {sorted(p.name for p in out.iterdir())}"
+    )
+    unzipped = artifact_scratch / "Fauna-iOS-ipa"
+    run("rm", "-rf", str(unzipped), check=False)
+    run("ditto", "-x", "-k", str(ipas[0]), str(unzipped))
+    payload = unzipped / "Payload"
+    assert payload.is_dir(), f"{ipas[0]} has no Payload/"
+    return payload
+
+
+def _signed_entitlements(bundle: Path) -> dict:
+    out = run("codesign", "-d", "--entitlements", "-", "--xml", str(bundle)).stdout
+    return plistlib.loads(out.encode()) if out.strip() else {}
+
+
+def test_the_exported_ipa_is_signed_by_the_distribution_identity(exported_ipa):
+    """Every bundle in the `.ipa` verifies, signed by Apple Distribution for the team."""
+    run("codesign", "--verify", "--deep", "--strict", str(exported_ipa / "Fauna-iOS.app"))
+    for rel in _SIGNED_BUNDLES:
+        info = run("codesign", "-dvv", str(exported_ipa / rel)).stderr
+        assert f"Authority={_DIST_IDENTITY}" in info, (
+            f"{rel} is not signed by {_DIST_IDENTITY}:\n{info}"
+        )
+        assert f"TeamIdentifier={_TEAM_ID}" in info, f"{rel}:\n{info}"
+
+
+def test_every_bundle_embeds_its_app_store_profile(exported_ipa):
+    """Each bundle carries the App Store profile for its own bundle id — no device list."""
+    for rel, (bundle_id, _) in _SIGNED_BUNDLES.items():
+        embedded = exported_ipa / rel / "embedded.mobileprovision"
+        assert embedded.is_file(), f"{rel} embeds no provisioning profile"
+        prof = _decode_profile(embedded)
+        assert prof["Name"] == _profile_name(bundle_id), (rel, prof["Name"])
+        assert prof["TeamIdentifier"] == [_TEAM_ID], (rel, prof["TeamIdentifier"])
+        assert prof["Entitlements"]["application-identifier"] == f"{_TEAM_ID}.{bundle_id}", rel
+        assert "ProvisionedDevices" not in prof, (
+            f"{rel} embeds a device-list profile — not an App Store one"
+        )
+
+
+def test_the_signed_entitlements_carry_the_app_group(exported_ipa):
+    """The app group survives into the SIGNATURE, where the OS actually reads it.
+
+    The unsigned leg can only check the source file; this is the check that the
+    app and its File Provider extension will really share a container on device.
+    """
+    for rel, (bundle_id, wants_group) in _SIGNED_BUNDLES.items():
+        ents = _signed_entitlements(exported_ipa / rel)
+        assert ents.get("application-identifier") == f"{_TEAM_ID}.{bundle_id}", (rel, ents)
+        assert ents.get("get-task-allow") in (None, False), f"{rel} is debuggable: {ents}"
+        groups = ents.get("com.apple.security.application-groups", [])
+        if wants_group:
+            assert groups == [_APP_GROUP], f"{rel} signed groups {groups}, want [{_APP_GROUP!r}]"
+        else:
+            assert not groups, (
+                f"{rel} declares no entitlements, yet its signature claims {groups}"
+            )

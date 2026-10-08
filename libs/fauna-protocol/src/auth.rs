@@ -48,7 +48,7 @@ use crate::{ByteBuf, Value};
 /// signature: two clients of the same actor signing within the same millisecond
 /// (same `actor_id ‖ timestamp_be`) would otherwise produce a byte-identical
 /// signature and the nest's single-use replay guard would reject the second
-/// (`auth-handshake finding #1`). A fresh per-request nonce makes the two
+/// (the auth-handshake fix). A fresh per-request nonce makes the two
 /// signatures differ so both mint. The nonce is *inside* the signed message, so
 /// stripping or substituting it breaks verification — it adds signature
 /// uniqueness, not secrecy, and grants no downgrade.

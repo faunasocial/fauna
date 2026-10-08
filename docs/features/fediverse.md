@@ -16,14 +16,15 @@ one, reaches its author.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at 065ed2e2c2.
+Stamped 2026-10-08 at f7e52bc137.
 
 1. [app] Federation turns on from the app and your address resolves from the outside — `docs/goal/behavior/activitypub.md` § Architecture (current, shipped)
    - `tests/e2e-unified/tests/test_activitypub_live.py::test_activitypub_live_serving_surface`
 2. [app] A post travels from a private home nest through its public relay to a real fediverse server — `docs/goal/behavior/activitypub.md` § The produce direction
    - `tests/e2e-unified/tests/live/test_activitypub_federation_live.py::test_activitypub_federation_live_three_party`
 3. [app] Replying or quoting a fediverse post — `docs/goal/behavior/activitypub.md` § Implementation status today
-   - (none)
+   - `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_a_reply_to_a_fediverse_post_reaches_its_author`
+   - `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_a_quote_of_a_fediverse_post_reaches_its_author`
 4. [nest] A follow from the fediverse is accepted, your posts reach the follower, and a delete takes a post back — `docs/goal/behavior/activitypub.md` § The produce direction
    - `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_follow_is_auto_accepted_and_delivered`
    - `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_post_is_pushed_to_follower_then_chased_by_delete`
@@ -83,7 +84,7 @@ Stamped 2026-10-01 at 065ed2e2c2.
 26. [nest] Deleting a post after you turned federation off still takes it back from the followers who received it — `docs/goal/behavior/activitypub.md` § Post deletion
    - (none)
 27. [app] Replying to or quoting a fediverse post while your federation is off is refused with the reason, and nothing is posted — `docs/goal/behavior/activitypub.md` § Reply and quote
-   - (none)
+   - `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_replying_or_quoting_with_federation_off_is_refused_inline`
 28. [app] With follows no longer accepted by themselves, each fediverse follow request shows on the network's card, and you approve or refuse it there — `docs/goal/behavior/bridges.md` § Follow requests
    - (none)
 29. [nest] A follower you approve starts receiving your posts, and one you refuse is told no and receives nothing — `docs/goal/behavior/activitypub.md` § Follow requests
@@ -106,13 +107,14 @@ Stamped 2026-10-01 at 065ed2e2c2.
 | macos |  no run recorded | |
 | ios |  no run recorded | |
 | android |  no run recorded | |
-| tui |  no run recorded | |
+| tui | ⚠ partial | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_activitypub_live.py::test_activitypub_live_serving_surface` | linux (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/live/test_activitypub_federation_live.py::test_activitypub_federation_live_three_party` | linux (linux): passed |
-| 3 | app | (none) | — |
+| 3 | app | `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_a_reply_to_a_fediverse_post_reaches_its_author` | tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_a_quote_of_a_fediverse_post_reaches_its_author` | tui (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_follow_is_auto_accepted_and_delivered` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_post_is_pushed_to_follower_then_chased_by_delete` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_webfinger_discovery` | nest (linux): passed |
@@ -148,7 +150,7 @@ Stamped 2026-10-01 at 065ed2e2c2.
 | 24 | nest | (none) | — |
 | 25 | nest | (none) | — |
 | 26 | nest | (none) | — |
-| 27 | app | (none) | — |
+| 27 | app | `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_replying_or_quoting_with_federation_off_is_refused_inline` | tui (linux): failed |
 | 28 | app | (none) | — |
 | 29 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_approving_a_request_sends_accept_and_later_posts_reach_it` | nest (linux): passed |
 | 29 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_refusing_a_request_sends_reject_and_later_posts_do_not_reach_it` | nest (linux): passed |

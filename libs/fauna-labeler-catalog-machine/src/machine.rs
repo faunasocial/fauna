@@ -482,18 +482,20 @@ impl LabelerCatalogMachine {
             now,
         );
         let signed = seams.signer.sign_grant_event(unsigned)?;
-        // Record-then-deposit: the blob leaves only against the log the
-        // ledger write actually stored (`UndepositedGrant::release`).
-        let stored = seams
+        // Record, publish, then deposit: the blob leaves only against the log
+        // the ledger write actually stored and the bound nest acknowledged
+        // (`UndepositedGrant::release`).
+        let published = seams
             .ledger
-            .merge(
+            .merge_published(
                 fauna_core::succession_ledger::SuccessionLedger::events_replica(
                     ActorId(seams.actor_id),
                     vec![signed],
                 ),
             )
             .await?;
-        let blob_bytes = pending.release(&grant_log::RecordedGrants::from_stored(&stored))?;
+        let blob_bytes =
+            pending.release(&grant_log::PublishedGrants::from_published(&published))?;
         self.nest_api.mint_grant(blob_bytes).await?;
         Ok(MintOutcome::Minted { grant_id })
     }
@@ -835,6 +837,32 @@ mod tests {
         assert!(
             !m.snapshot().entries[0].subscribed,
             "no refresh happened on error"
+        );
+    }
+
+    /// **Record, publish, then deposit.** A `Mint` the bound nest did not
+    /// acknowledge deposits NOTHING and registers nothing: a sibling replica
+    /// could not yet read the event its reconcile sweep judges the row by.
+    #[tokio::test]
+    async fn an_unpublished_mint_deposits_nothing_and_fails_the_subscribe() {
+        let (m, api, store, _kp) = granting_machine();
+        api.set_entries(vec![mail_entry(0xAA, false)]);
+        api.set_holders(vec![mda_holder()]);
+        m.refresh().await;
+        store.publish_refuses(true);
+
+        m.subscribe(0).await;
+
+        assert_eq!(
+            api.calls(),
+            vec![crate::nest_api::FakeCall::ContentProcessorHolders],
+            "no deposit and no subscribe past an unpublished record"
+        );
+        assert_eq!(snapshot_key(&m).as_deref(), Some(SUBSCRIBE_ERROR_KEY));
+        assert_eq!(
+            store.current().grant_events.len(),
+            1,
+            "the Mint stays recorded locally"
         );
     }
 

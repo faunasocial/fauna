@@ -56,6 +56,10 @@ Two shape notes the apps share, both in `lists.rs` so no app re-derives them:
 
 **The import tally renders counts, not per-line reasons (2026-10-05).** `mail-list-members-import-result` (§ `mail-list-members` page) shows the shared `mail_lists.import_result` string — added / already subscribed / invalid — on tui, the lead app, witnessed by `test_mail_lists_controls.py::test_import_tally_says_how_many_were_skipped`; the other six render nothing yet (web keeps `last_import` and never paints it). **Gap:** the spec's "each skipped line's reason" is unbuilt everywhere, because `BatchImportListMembersReply` carries only the three counts — the aliases twin's per-line `outcomes` shape is the model, and it needs an additive wire field first. Blank lines are dropped client-side before the call and are never counted.
 
+**Sending to a list from the compose form landed on tui first (2026-10-08).** The list is addressed by typing its address into the conversations recipient picker; the shared SMTP rail (`fauna_conversations::backends::smtp`) sends a compose whose one mail recipient is one of the account's own lists through `OutboundMailSink::submit_to_list` → `fauna.bridges.send_list_message`, never as plain mail to the list address. The three compose-form texts are derived once in `fauna_conversations::list_send` onto `ComposeState::list_send` (refreshed by `ConversationsManager::refresh_list_send` when a chip commits, a thread opens and after every send), from `list_account_lists`' additive per-account meter (`account_recipients_today` / `account_recipients_per_day`) and the newest `list_list_send_history` row. The nest files ONE Sent copy of the client-composed message per send (best-effort, as `fauna.email.send` does), so the send is one entry in sent mail on every device. The native sink is `fauna_client_conversations::NestOutboundMailSink`; tui paints the three ids. **Gaps:** the other six apps paint nothing yet (linux, windows, apple and android share the sink and need only the render; web registers no SMTP sink at all); the per-account cap is the admin ceiling until the Tier-3 user knob lands (§ Implementation status, *Deferred*).
+
+
+**The off-server List-Archive confirm landed on tui first (2026-10-08).** § Don't do these's "warn them once" is the shared predicate `archive_url_needs_confirm` (`lists.rs`) plus tui's armed submit (`apps/fauna-tui/src/settings/mail_lists.rs`), witnessed by `test_mail_lists_controls.py::test_an_off_server_archive_link_asks_once_before_saving`. **Gap:** the other six apps save on the first press.
 ---
 
 ## Goal
@@ -359,7 +363,7 @@ The compose flow:
 2. Client warns: "This will send to <member_count> subscribed recipients on <list-name>. Today's quota: <recipients_today> / <recipients_per_day>. Proceed?"
 3. User clicks Send.
 4. Client calls `fauna.bridges.send_list_message(list_id, message)` — the **nest** validates ownership, reserves the per-list rate caps atomically, stamps each member's `List-*` headers, and enqueues one outbound message per subscribed member (`submit_outbound`); the nest DKIM-signs each at the outbound hand-out. A message carrying other than exactly one From field is refused `fauna.bridges.invalid_params` before any cap is reserved, since that DKIM key is picked by the From domain (`smtp-server.md` § Architectural rules → *Exactly one From field*).
-5. The client's sent-folder view shows one entry "Sent to <list-name> (<member_count> recipients)" — not one per recipient.
+5. The client's sent-folder view shows one entry "Sent to <list-name> (<member_count> recipients)" — not one per recipient: the nest files one Sent copy of the client-composed message per send, never the per-member stamped copies.
 
 The per-recipient delivery state (delivered / pending / unsubscribed-during-send) is queryable via the per-list-detail audit (`fauna.bridges.list_list_send_history(list_id)`); the UX renders it as one progress for the whole send on the compose form, `dm-compose-list-send-progress`; the one Sent entry reuses the existing thread row.
 
@@ -379,7 +383,7 @@ User-tier creation of an alias whose pattern matches `unsubscribe@` or `unsubscr
 
 | RPC | Caller | Purpose | Notes |
 |---|---|---|---|
-| `fauna.bridges.list_account_lists` | user client | enumerate own lists | `()` → list of `mail_lists` rows (own actor) |
+| `fauna.bridges.list_account_lists` | user client | enumerate own lists | `()` → list of `mail_lists` rows (own actor) + the caller's per-account meter for today (`account_recipients_today`, `account_recipients_per_day` — the compose form's quota; § Composing a list message) |
 | `fauna.bridges.create_account_list` | user client | create one list | `(local_part, local_domain, friendly_name, description?, list_help_url?, list_archive_url?, recipients_per_send?)` → `list_id` |
 | `fauna.bridges.update_account_list` | user client | edit metadata | `(list_id, partial_row)` → ok |
 | `fauna.bridges.delete_account_list` | user client | destructive remove (cascades members) | `(list_id)` → ok |
@@ -429,7 +433,7 @@ Wire-level shape lives in the nest implementation track (`docs/goal/architecture
 - **Don't surface the list-recipient delivery state on the user's UI as per-recipient detail.** The progress bar shows aggregate (`<N> of <M> delivered`); per-recipient delivery audit lives in the per-list send history with paginated detail (the user can drill into it but doesn't see it at compose time).
 - **Don't allow the user to disable RFC 8058 stamping on a per-list basis.** Stamping is mandatory; per-list disable would create non-compliant senders + degrade the deployment's reputation. The MTA stamps regardless.
 - **Don't run the unsubscribe HTTPS endpoint behind auth.** RFC 8058 §3.3 explicitly requires no-auth-needed for the One-Click form. Auth-gating would break the contract.
-- **Don't store List-Archive URLs that point off-deployment without user-confirm.** If the user sets `list_archive_url = https://archive.example.com/<list>` (off-deployment), warn them once + persist. Don't silently accept; the URL is published to recipients via the List-Archive header.
+- **Don't store List-Archive URLs that point off-deployment without user-confirm.** If the user sets `list_archive_url = https://archive.example.com/<list>` (off-deployment), warn them once + persist. Don't silently accept; the URL is published to recipients via the List-Archive header. **The warning is the add/edit sheet's own submit, armed** — `apps/common.md` § Two-click confirm's inline arm, reused here for a save that destroys nothing (the risk is publishing a link, not losing data), so it carries no new `ui.yaml` id: when the List-Archive URL's host is neither one of the user's own domains (the add-sheet picker's options) nor a subdomain of one, and differs from the URL the list already stores, the first press of `mail-lists-add-sheet-submit-button` saves nothing and relabels the button with this feature's descriptive confirm `mail_lists.archive_off_server_confirm` ("This archive link is not on your server and goes out with every message. Save anyway?"); a second press while armed saves. **Once** means per URL: re-saving the URL the list already stores never asks again, and changing the URL after arming disarms. The decision is shared Rust, written once — `fauna_client_mail_settings::archive_url_needs_confirm`.
 
 ---
 

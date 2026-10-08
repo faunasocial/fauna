@@ -26,7 +26,7 @@
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.2</string>
+  <string>0.1.3</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <!-- App icon (2026-07-20): Fauna's one brand mark (sites/fauna-social/public/
@@ -44,14 +44,6 @@
   <key>NSHighResolutionCapable</key>
   <true/>
 
-  <!-- Sparkle auto-update -->
-  <key>SUFeedURL</key>
-  <string>https://fauna.social/appcast.xml</string>
-  <key>SUPublicEDKey</key>
-  <string>6lnpmCLfr2Rl60Sf1VL8oIOn8Djl2gRw/Cwmh0wxP+s=</string>
-  <key>SUEnableAutomaticChecks</key>
-  <true/>
-
   <!-- Photo library access -->
   <key>NSPhotoLibraryUsageDescription</key>
   <string>Fauna backs up your photos and videos to your personal nest.</string>
@@ -63,7 +55,7 @@
        docs/goal/architecture/export-compliance.md § What each store form
        answers; effective-date stamp pending publication (§ Implementation
        status today). This app is not Mac-App-Store-distributed today
-       (Sparkle/DMG/pkg), so the key has no live ASC effect yet, but is set
+       (.dmg/.pkg), so the key has no live ASC effect yet, but is set
        here for documentary consistency should that ever change. -->
   <key>ITSAppUsesNonExemptEncryption</key>
   <true/>

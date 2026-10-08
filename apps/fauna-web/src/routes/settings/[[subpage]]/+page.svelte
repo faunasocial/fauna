@@ -94,9 +94,11 @@
   // The owed-kit slot's three faces. From `$lib/wasm`, not `$lib/rpc`, because
   // they are pure sessionStorage reads that need no connected client — see
   // their doc comments for why the sibling succession reads beside them do.
-  import { claimOwedSuccessionKit, rearmOwedSuccessionKit } from '$lib/wasm';
+  import { claimOwedSuccessionKit, rearmOwedSuccessionKit, dischargeOwedSuccessionSweep } from '$lib/wasm';
   import { dischargeOwedKit } from '$lib/succession-kit';
   import { RecoveryErrorGuard } from '$lib/recovery-error-guard';
+  import { ownSupersessionHold } from '$lib/own-supersession-hold';
+  import { performHeldBackSupersession } from '$lib/post-auth-escalation';
   import type { SweepCopy } from '$lib/rpc';
   import {
     keypackageCount as wsKeypackageCount,
@@ -130,7 +132,7 @@
   import { resolveLocalized, resolveLocalizedNested, cellValueText } from '$lib/i18n/localized';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { onStoreChange } from '$lib/store-change';
   // The already-built conversations manager, for the succession ceremony's
   // post-succession group sweep. Never builds one — see `doSucceedIdentity`.
@@ -574,11 +576,26 @@
   // the user is still on the page. This effect reads `current` only —
   // `$identity` stays untracked — so it fires exactly on the nav edge away
   // from `account`, never on an unrelated identity-store write.
+  //
+  // The same edge performs a supersession escalation held back for this
+  // device's own stolen-identity ceremony (`$lib/own-supersession-hold`, the
+  // same section's closing rule): the user has read the key, so the dead
+  // session it was parked over may now go the ordinary way.
   let wasOnAccountSubpage = current === 'account';
+  function leaveAccount() {
+    recoveryErrorGuard.discharge();
+    if (ownSupersessionHold.leftAccount()) performHeldBackSupersession();
+  }
   $effect(() => {
     const onAccount = current === 'account';
-    if (wasOnAccountSubpage && !onAccount) recoveryErrorGuard.discharge();
+    if (wasOnAccountSubpage && !onAccount) leaveAccount();
     wasOnAccountSubpage = onAccount;
+  });
+  // Leaving Settings altogether is the same edge, but no `current` change
+  // reaches the effect above — the component simply unmounts. The guard dies
+  // with the component; the hold is module state and must hear it.
+  onDestroy(() => {
+    if (wasOnAccountSubpage) leaveAccount();
   });
   // Discharge (and this time also CLEAR) a still-pending persist-failure
   // message when the SIGNED-IN IDENTITY changes — a multi-account switch that
@@ -669,6 +686,22 @@
     // identity change that flips it — so the obligation is discharged the
     // moment the session is real, and never before.
     if (!id.registered) return;
+    // A relaunch adoption also owes the group sweep its lost ceremony never ran
+    // (`succession-propagation.md` § Propagation → *Own device fleet*, the
+    // relaunch-adoption clause): an unbidden press of the sweep retry, ahead of
+    // the kit. It parks the report its answer chooses — re-read here so the
+    // sweep's lines and the retry button render — and says its answer as a
+    // press would. `null` on every session that adopted nothing.
+    try {
+      const sweepAnswer = await dischargeOwedSuccessionSweep(id.actorId);
+      if (sweepAnswer) {
+        console.info('[succession] discharged the owed group sweep for', id.actorId);
+        sweepCopy = await successionSweepCopy(id.secretHex);
+        recoveryError = recoveryErrorGuard.write(recoveryError, resolveLocalized(sweepAnswer));
+      }
+    } catch (e) {
+      console.warn('[succession] could not discharge the owed sweep:', e);
+    }
     // The order and the failure arm live in `$lib/succession-kit`, where they
     // are unit-tested; this supplies the effects. `recoveryBusy` is raised only
     // once the claim is won, so an ordinary sign-in never paints a spinner over
@@ -832,6 +865,9 @@
     }
     recoveryError = recoveryErrorGuard.write(recoveryError, '');
     recoveryBusy = true;
+    // From here the ceremony owns any supersession this session meets: it is
+    // what supersedes the identity (`$lib/own-supersession-hold`).
+    ownSupersessionHold.ceremonyStarted();
     try {
       // The LIVE manager only — `conversationsManagerIfReady()` never builds
       // one. A freshly built engine has no restored state, so sweeping it would
@@ -854,6 +890,7 @@
         recoveryError = outcome.carriesTheOnlySeed
           ? recoveryErrorGuard.park(message)
           : recoveryErrorGuard.write(recoveryError, message);
+        endStolenCeremony(outcome.carriesTheOnlySeed);
         return;
       }
       // Both secrets die here: the pasted kit outranks the seed, and the
@@ -876,6 +913,7 @@
         recoveryError = recoveryErrorGuard.park(
           t.settings.recovery_kit.stolen_persist_failed({ secret: landed.secretHex }),
         );
+        endStolenCeremony(true);
         return;
       }
       // The account is the successor's: re-launch as it. `false` because the
@@ -883,9 +921,25 @@
       // `add_account` entry never is), so the plain switch is the correct one —
       // the re-auth gate has exactly one call site and it is not this.
       await performSwitch(landed.newActorId, false);
+      // The switch is itself the full relaunch, so a held-back supersession
+      // escalation is spent, not performed. (A refused switch leaves the dead
+      // session in place; with nothing held, its next refusal escalates.)
+      ownSupersessionHold.adopted();
     } catch (e) {
       recoveryBusy = false;
       recoveryError = recoveryErrorGuard.write(recoveryError, e instanceof Error ? e.message : String(e));
+      endStolenCeremony(false);
+    }
+  }
+
+  /** The stolen-identity ceremony ended without adopting a successor. A
+   *  supersession it caused and that was held back is performed now only when
+   *  the user is off Account with nothing parked; otherwise the nav edge away
+   *  from Account performs it (`leaveAccount`). `parked`: this ending parked
+   *  the message carrying the seed's only copy. */
+  function endStolenCeremony(parked: boolean) {
+    if (ownSupersessionHold.ceremonyEnded({ onAccount: current === 'account', parked })) {
+      performHeldBackSupersession();
     }
   }
 

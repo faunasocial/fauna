@@ -63,15 +63,15 @@ pub use mls_snapshot_plaintext::{
     INDEX_SEGMENT_KEY_DERIVE_CONTEXT, LeafInitKeypair, MAIL_EPOCH_PUBLISH_HORIZON,
     MAIL_EPOCH_ROOT_DERIVE_CONTEXT, MAIL_EPOCH_SEALING_WRITE_DEFAULT, MAIL_SEALING_EPOCH_SECS,
     MlsSnapshotPlaintext, RECIPIENT_HPKE_DERIVE_CONTEXT, RECIPIENT_HPKE_EPOCH_DERIVE_CONTEXT,
-    RECIPIENT_MLKEM_DERIVE_CONTEXT, RECIPIENT_MLKEM_EPOCH_DERIVE_CONTEXT, SNAPSHOT_GRACE_KEYPAIRS,
+    RECIPIENT_MLKEM_DERIVE_CONTEXT, RECIPIENT_MLKEM_EPOCH_DERIVE_CONTEXT,
     SNAPSHOT_PLAINTEXT_VERSION, StandingMailKeypair, build_mls_snapshot_plaintext,
     derive_index_segment_key, derive_mail_epoch_root, derive_recipient_epoch_hpke_keypair,
     derive_recipient_epoch_hpke_keypair_from_root, derive_recipient_epoch_xwing_keypair,
     derive_recipient_epoch_xwing_keypair_from_root, derive_recipient_hpke_keypair,
     derive_recipient_mail_capability_secret, derive_recipient_mail_epoch_capability_secret,
     derive_recipient_mail_epoch_capability_secret_from_root, derive_recipient_xwing_keypair,
-    derive_standing_mail_keypairs, mail_epoch_range_for_window, mail_sealing_epoch_of,
-    open_mail_record_standing,
+    derive_standing_mail_keypairs, generation_trial_order, mail_epoch_range_for_window,
+    mail_sealing_epoch_of, open_mail_record_standing,
 };
 pub use service_user::{KEYFILE_FORMAT_VERSION, ServiceUserKeyfile};
 pub use submission_token::{SIGNATURE_LEN, SubmissionToken};
@@ -2913,7 +2913,7 @@ mod seal_tests {
             hpke: key_blob.hpke.clone(),
         };
         assert!(
-            open_mail_record_standing(&forged_record, &standing).is_none(),
+            open_mail_record_standing(&forged_record, &standing, &[], None).is_none(),
             "a session-key ciphertext must not open on the mail-record path"
         );
 

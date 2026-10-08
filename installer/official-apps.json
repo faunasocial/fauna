@@ -53,23 +53,6 @@
           "how_to_check": "Run `codesign -dv --verbose=2 /Applications/Fauna.app`: the TeamIdentifier line reads 7457N3M72H, and the Authority line names Developer ID Application: Fauna Social (7457N3M72H)."
         },
         {
-          "kind": "sparkle-ed25519-public-key",
-          "label": "Update-channel signing key (Sparkle, Ed25519, public half)",
-          "value": "6lnpmCLfr2Rl60Sf1VL8oIOn8Djl2gRw/Cwmh0wxP+s=",
-          "status": "live",
-          "source": "apps/fauna-apple/Fauna-macOS/Resources/Info.plist",
-          "how_to_check": "Open the app bundle's Info.plist: the SUPublicEDKey entry is this key. Every update the app installs is signed by the matching private key, which only the association holds."
-        },
-        {
-          "kind": "sparkle-feed-url",
-          "label": "Update feed address",
-          "value": "https://fauna.social/appcast.xml",
-          "status": "pending",
-          "pending": "No release has been published to the feed yet.",
-          "source": "apps/fauna-apple/Fauna-macOS/Resources/Info.plist",
-          "how_to_check": "Open the app bundle's Info.plist: the SUFeedURL entry is this address, and the feed itself is served from fauna.social."
-        },
-        {
           "kind": "github-attestation",
           "label": "Build attestation of the download",
           "value": "faunasocial/fauna",

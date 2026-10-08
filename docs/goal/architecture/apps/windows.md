@@ -646,9 +646,15 @@ where `FeedPage.xaml` painted the tip ids directly in the shared per-card
 shell, outside the excision mechanism) live as `UserControl`s under
 `Views/Payments/`, dropped from the store-safe csproj's `Page`/`Compile`
 items via a wildcard glob (`Views\Payments\**\*.xaml`/`**\*.cs`), so the count
-grows without a csproj edit — six today, joined 2026-09-06 by the tier/sell
-asking-price input (`AskingPriceInput`) and the Nostr zap-signer designation
-control (`NostrZapSignersSection`), both last-of-7-apps landings. Recipes: `just windows-ffi-store-safe`
+grows without a csproj edit — eleven today: the four above (the §§4–5 sections,
+the claim-redeem panel, the tip display and its list dialog), the Nostr zap-signer
+designation control (`NostrZapSignersSection`, 2026-09-06), and the six renders of
+the price-and-route class (2026-10-08; the class is owned by
+[`../dynamic-features.md`](../dynamic-features.md) § Platform-family surface
+excision → *The price-and-route class*) — the tier editor's money fields, the tier
+list's and the offer row's price, the offer's checkout link, the sell composer and
+the sold-post teaser, which together retired the single asking-price input
+(`AskingPriceInput`, 2026-09-06). Recipes: `just windows-ffi-store-safe`
 (the dll), `just windows-store-safe` (the app), `just windows-store-safe-check`
 (the two-column witness, scanning both the managed assembly and every compiled
 `.xbf`, since WinUI puts markup beside the assembly, not inside it).
@@ -679,9 +685,48 @@ Toast notifications via `NotificationService` (`AppNotificationManager`); OS
 notifications are fed by **WS-RPC push** (re-homed off the removed
 `WebSocketService`). With the app closed, the per-user sync agent posts the
 push toast instead — the `ws-device` transport ([`common.md`](common.md)
-§ Push Notifications → *Transports*, ruled 2026-09-26, unbuilt; WNS was
-considered and rejected there): the agent posts only while no app is attached
-over the IPC seam, so the two never both fire. System tray icon via Win32 `Shell_NotifyIconW`;
+§ Push Notifications → *Transports*, ruled 2026-09-26; WNS was considered and
+rejected there): the agent posts only while no app is attached over the IPC
+seam, so the two never both fire.
+
+**The app's half (built 2026-10-08).** The Settings → Account push toggle
+(`PushNotificationsViewModel` over the shared registration machine through
+`FfiPushRegistration`; `Core/Services/PushSession.cs` names the inputs — the
+install's derived device id for the actor and the install-scoped intent file
+`push-intent.cbor` in the data dir); every session start (`StartMainAppAsync`,
+and the e2e `session` login) announces the device and re-arms; a committed
+switch drops the outgoing actor's row inside `TearDownAndRelaunchAsync` and a
+sign-out drops it before the credential erase, each bounded at 3 s. From its
+first session the app holds the agent's attachment lease for the process's life
+(`FaunaFfiMethods.AttachToSyncAgent` — the shared `fauna_client_sync::attachment`,
+gated like the provision path), and the attach names **the AUMID its own toasts
+post under** (`NotificationService.Identity`): the package app's AUMID with
+package identity (the Store package, or the MSI's sparse identity), otherwise
+the unpackaged registration `AppNotificationManager.Register()` keeps under
+`HKCU\Software\Classes\AppUserModelId` (a key named for the exe's path whose
+`NotificationGUID` names the AUMID — the SDK's layout, measured 2026-10-08, not
+a documented contract, so a read that finds nothing sends no identity and the
+agent honestly reports no sink).
+
+**The agent's half (built 2026-10-08).** `bins/fauna-sync-agent/src/push_arm.rs`'s
+`toast` sink posts the frame's title and body as a WinRT toast under the
+identity the app named, which it keeps in a file under its flat base so a toast
+still finds it after an agent restart with the app closed. The toast is
+therefore the app's — its name, its icon, its group in the notification centre —
+and its registration's activator is what a tap would launch. The sink is
+available when the platform's own `ToastNotifier.Setting` reads enabled for that
+identity; an unpackaged identity the platform has not met yet (nothing posted
+under it) answers "not found" until its first toast, so there the documented
+unpackaged registration key decides (measured 2026-10-08: a packaged identity
+reads enabled from its registration on, and an unpackaged process posts under
+it). Pinned against the real notification platform by `push_arm.rs`'s
+`toast_tests` (a per-run registered identity; popup suppressed, the toast read
+back from the identity's history and removed).
+
+**Not yet witnessed:** a tap on an agent toast launching the app (the
+`common.md` status line's cross-platform "tapped banner" gap — the activator is
+the app's own registration's, untested here), and an end-to-end frame from a
+live nest reaching a toast through the agent process. System tray icon via Win32 `Shell_NotifyIconW`;
 window-close behavior follows the user's **Close to tray** setting (§ App
 Lifecycle). The notifications page reads `fauna.notifications.*`
 (`behavior/notifications.md`).

@@ -219,7 +219,28 @@ fn list_account_lists_handler() -> RpcHandler {
                 .await
                 .map_err(internal)?;
             let lists = records.into_iter().map(list_record_to_row).collect();
-            encode_reply(&ListAccountListsReply { lists })
+            // The per-account meter + the cap a send is checked against, for
+            // the compose form's pre-send "Today's quota: N / M" (§ Composing a
+            // list message). The cap is the same effective value
+            // `send_list_message` reserves under.
+            let account_recipients_today = state
+                .db
+                .account_list_recipients_today(&actor_id, now_epoch_millis())
+                .await
+                .map_err(internal)?;
+            let account_recipients_per_day = state
+                .db
+                .get_mass_mailing_policy()
+                .await
+                .map_err(internal)?
+                .effective()
+                .list_recipients_per_account_per_day_ceiling
+                as i64;
+            encode_reply(&ListAccountListsReply {
+                lists,
+                account_recipients_today,
+                account_recipients_per_day,
+            })
         })
     })
 }
@@ -638,6 +659,28 @@ fn send_list_message_handler() -> RpcHandler {
                 )
                 .await
                 .map_err(internal)?;
+
+            // ONE durable Sent copy for the whole send — the client-composed
+            // message, not the per-member stamped copies — so the owner's sent
+            // mail shows the send once, on every device (§ Composing a list
+            // message, step 5). The app's local echo dedups against it by the
+            // client's Message-ID, exactly as for `fauna.email.send`.
+            // Best-effort like that path: the fan-out is already queued, so a
+            // Sent-copy failure is logged, never a send failure (a failure here
+            // would invite a retry that double-sends to every member).
+            if let Err(e) = crate::bridge_routing_handlers::seal_and_store_sent_copy(
+                &state,
+                &actor_id,
+                &req.message,
+                &list.local_domain,
+            )
+            .await
+            {
+                tracing::warn!(
+                    error = %e.code,
+                    "storing server-side Sent copy for fauna.bridges.send_list_message failed"
+                );
+            }
 
             encode_reply(&SendListMessageReply {
                 queued_count: queued,

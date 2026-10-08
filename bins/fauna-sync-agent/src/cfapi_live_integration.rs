@@ -140,8 +140,9 @@ struct DbBackedHost {
     /// about to stat — the engine's own `watch_dir` is private.
     root: std::path::PathBuf,
     /// What the "nest" serves for each folder-relative path — the one thing a real
-    /// `download_file_bytes` would go over WS-RPC for.
-    blobs: HashMap<String, Vec<u8>>,
+    /// `download_file_bytes` would go over WS-RPC for. Shared, so a test can move the
+    /// "nest's" head under a running loop (another device's edit).
+    blobs: Arc<std::sync::Mutex<HashMap<String, Vec<u8>>>>,
     /// Kept alive (never dropped) so the loop's reconnect arm stays pending rather than
     /// erroring; no test drives a reconnect.
     reconnect: (watch::Sender<u64>, watch::Receiver<u64>),
@@ -156,6 +157,8 @@ struct DbBackedHost {
 impl FileHydrator for DbBackedHost {
     async fn download_file_bytes(&self, relative_path: &str) -> Result<Vec<u8>> {
         self.blobs
+            .lock()
+            .unwrap()
             .get(relative_path)
             .cloned()
             .ok_or_else(|| anyhow!("no seeded blob for {relative_path}"))
@@ -430,7 +433,7 @@ impl Harness {
         DbBackedHost {
             engine: self.engine(),
             root: self.root.clone(),
-            blobs,
+            blobs: Arc::new(std::sync::Mutex::new(blobs)),
             reconnect: watch::channel(0),
             fold_on_repull: Vec::new(),
         }
@@ -467,6 +470,15 @@ impl Harness {
             .get_entry(rel)
             .expect("get entry")
             .map(|e| e.state)
+    }
+
+    /// Re-read a row's recorded head size straight from the DB file.
+    fn db_size(&self, rel: &str) -> Option<i64> {
+        SyncDb::open(&self.db_path)
+            .expect("reopen db")
+            .get_entry(rel)
+            .expect("get entry")
+            .map(|e| e.size_bytes)
     }
 
     /// Re-read a row's seen mark (`delete-propagation.md` § *An offline placeholder
@@ -1628,6 +1640,9 @@ impl crate::bridge::PlaceholderInvalidator for SaveBeforeAssert {
     fn dehydrate(&self, abs_path: &std::path::Path) -> Result<()> {
         CfapiInvalidator.dehydrate(abs_path)
     }
+    fn supersede(&self, abs_path: &std::path::Path, size: u64, mtime: i64) -> Result<()> {
+        CfapiInvalidator.supersede(abs_path, size, mtime)
+    }
     fn pin_action(&self, abs_path: &std::path::Path) -> Option<crate::pin_reaction::PinAction> {
         CfapiInvalidator.pin_action(abs_path)
     }
@@ -2382,6 +2397,308 @@ async fn a_remote_create_into_a_browsed_directory_materializes() {
 
     drive_until_asserted(loop_fut, driver).await;
 }
+
+/// A nest `SyncChange` moving `rel`'s head to a new version of `size` bytes, made at
+/// `created_at_ms` — another device's edit, as `changes.list` carries it.
+fn remote_modify(
+    seq: i64,
+    rel: &str,
+    size: i64,
+    created_at_ms: i64,
+) -> fauna_protocol::sync::SyncChange {
+    fauna_protocol::sync::SyncChange {
+        change_type: "modify".to_string(),
+        // Unlike every seeded head, so the fold sees the head move.
+        manifest_hash: Some("5b".repeat(32)),
+        created_at: created_at_ms,
+        ..remote_create(seq, rel, size)
+    }
+}
+
+/// How this device holds the file when another device's edit lands.
+#[derive(Clone, Copy, Debug)]
+enum HeldAs {
+    /// Opened here before: a hydrated (`Synced`) copy, which the fold reports stale and
+    /// [`crate::bridge::apply_stale_hydrated`] invalidates.
+    Hydrated,
+    /// Listed but never opened: a cloud-only placeholder, whose row the fold re-points.
+    CloudOnly,
+}
+
+/// **Another device's edit reaches this one whole, whatever it did to the file's size**
+/// (`on-demand-files.md` § *Sync direction*: an on-demand root downloads remote edits like a
+/// full root; § On-Demand Files: a placeholder shows the right size and modification time).
+///
+/// The edit moves the head; the nest nudges the folder; the loop's re-pull folds the change.
+/// Before anything opens the file, its placeholder must already describe the NEW version —
+/// size and mtime — because cfapi asks the provider for exactly `[0, the placeholder's
+/// size)`. A placeholder left at the old size made the next open serve a PREFIX of a grown
+/// file, which the engine then recorded, read back as a local edit and uploaded over the
+/// real one: the 2026-10-08 native seat pair's lost update at `grow`. Then the file is
+/// opened from another process, and the reader must get the new version, every byte.
+async fn a_remote_edit_reaches_the_file_whole(held: HeldAs, old: &[u8], new: &[u8]) {
+    const REL: &str = "edit.txt";
+    const EDITED_AT_S: i64 = 1_700_000_100;
+
+    let h = harness(&[(REL, old.len() as i64)]).await;
+    let mut host = h.host(HashMap::from([(REL.to_string(), old.to_vec())]));
+    host.fold_on_repull = vec![remote_modify(10, REL, new.len() as i64, EDITED_AT_S * 1000)];
+    let nest_serves = Arc::clone(&host.blobs);
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(4);
+    let cancel = CancellationToken::new();
+    let _conn = crate::cfapi_host::register_and_connect(&h.root, cmd_tx).expect("connect");
+    let loop_fut = run_hydration_loop(
+        host,
+        CfapiInvalidator,
+        cmd_rx,
+        None,
+        h.root.clone(),
+        FOLDER.to_string(),
+        cancel.clone(),
+        Some(wake_rx),
+        None,
+    );
+
+    let abs = h.root.join(REL);
+    let placeholder = abs.to_string_lossy().to_string();
+    let measure = |when: &str| {
+        let len = std::fs::metadata(&abs).map(|m| m.len());
+        let state = fauna_cfapi::placeholder_state(&abs);
+        eprintln!("[measure] {held:?} {when}: len={len:?} state={state:x?}");
+    };
+    let driver = async {
+        let (root_str, p, dst) = (
+            h.root_str(),
+            placeholder.clone(),
+            h._tmp.path().join("before.bin"),
+        );
+        let before = tokio::task::spawn_blocking(move || {
+            dir_from_another_process(&root_str);
+            match held {
+                HeldAs::Hydrated => Some(read_from_another_process(&p, &dst)),
+                HeldAs::CloudOnly => None,
+            }
+        })
+        .await
+        .expect("browse");
+        if let Some(before) = before {
+            assert_eq!(
+                before, old,
+                "precondition: the first open serves the old version"
+            );
+            eventually(
+                || h.db_state(REL) == Some(SyncState::Synced),
+                Duration::from_secs(10),
+                "the first open's flip to Synced",
+            )
+            .await;
+        }
+        measure("before the edit");
+
+        // Another device's edit lands on the nest, and the nest nudges this folder.
+        nest_serves
+            .lock()
+            .unwrap()
+            .insert(REL.to_string(), new.to_vec());
+        wake_tx.send(()).await.expect("nudge the loop");
+        eventually(
+            || {
+                h.db_state(REL) == Some(SyncState::Placeholder)
+                    && h.db_size(REL) == Some(new.len() as i64)
+            },
+            Duration::from_secs(10),
+            "the re-pull to point the row at the new head",
+        )
+        .await;
+        eventually(
+            || std::fs::metadata(&abs).is_ok_and(|m| m.len() == new.len() as u64),
+            Duration::from_secs(5),
+            "the placeholder on disk to describe the new version's size — a placeholder left \
+             at the old size makes the next open serve [0, old size) of the new body",
+        )
+        .await;
+        measure("after the edit");
+        assert_eq!(
+            std::fs::metadata(&abs)
+                .and_then(|m| m.modified())
+                .expect("stat the placeholder"),
+            std::time::UNIX_EPOCH + Duration::from_secs(EDITED_AT_S as u64),
+            "the placeholder must carry the new version's modification time"
+        );
+
+        let (p, dst) = (placeholder.clone(), h._tmp.path().join("after.bin"));
+        let after = tokio::task::spawn_blocking(move || read_from_another_process(&p, &dst))
+            .await
+            .expect("open after the edit");
+        assert_eq!(
+            after,
+            new,
+            "the open after another device's edit must read the new version whole \
+             (got {} bytes of {})",
+            after.len(),
+            new.len()
+        );
+        measure("after the second open");
+        cancel.cancel();
+    };
+
+    drive_until_asserted(loop_fut, driver).await;
+}
+
+/// 6 B → 248 B on a copy opened here — the native seat pair's `grow` step.
+#[tokio::test]
+async fn a_remote_edit_that_grows_a_hydrated_file_reaches_it_whole() {
+    a_remote_edit_reaches_the_file_whole(HeldAs::Hydrated, b"short\n", &[b'g'; 248]).await;
+}
+
+/// 248 B → 6 B on a copy opened here — the seat pair's `shrink` step.
+#[tokio::test]
+async fn a_remote_edit_that_shrinks_a_hydrated_file_reaches_it_whole() {
+    a_remote_edit_reaches_the_file_whole(HeldAs::Hydrated, &[b's'; 248], b"short\n").await;
+}
+
+/// A copy opened here, emptied on another device.
+#[tokio::test]
+async fn a_remote_edit_that_empties_a_hydrated_file_reaches_it() {
+    a_remote_edit_reaches_the_file_whole(HeldAs::Hydrated, b"soon gone\n", b"").await;
+}
+
+/// 6 B → 248 B on a file this device listed but never opened.
+#[tokio::test]
+async fn a_remote_edit_that_grows_a_cloud_only_file_reaches_it_whole() {
+    a_remote_edit_reaches_the_file_whole(HeldAs::CloudOnly, b"short\n", &[b'g'; 248]).await;
+}
+
+/// **A remote edit never frees an unsynced local edit.** The invalidation of a superseded
+/// copy is gated by the platform's dirty-file refusal and by nothing else
+/// ([`crate::bridge::PlaceholderInvalidator::dehydrate`]'s contract): a file written since
+/// it was hydrated is not in sync, so the invalidation must be REFUSED, the row left `Synced`
+/// for the conflict path, and the local bytes left whole. Written in place (a replace-save
+/// would destroy the placeholder and refuse for an unrelated reason).
+#[tokio::test]
+async fn a_remote_edit_never_frees_an_unsynced_local_edit() {
+    const RECORDED: &[u8] = b"the version both devices hold";
+    // At least as long as RECORDED: the in-place write must replace every byte.
+    const LOCAL: &[u8] = b"edited here and not uploaded yet -- the only copy of it anywhere";
+
+    let h = harness(&[("notes.txt", RECORDED.len() as i64)]).await;
+    let _conn = hydrate_recorded_notes(&h, RECORDED).await;
+    let abs = h.root.join("notes.txt");
+    {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&abs)
+            .and_then(|mut f| f.write_all(LOCAL))
+            .expect("the in-place local edit");
+    }
+    let state = fauna_cfapi::placeholder_state(&abs).expect("read the placeholder state");
+    eprintln!("[measure] after the local edit: state=0x{state:x}");
+    assert_eq!(
+        state & CF_PLACEHOLDER_STATE_IN_SYNC,
+        0,
+        "precondition: the local edit cleared the in-sync bit"
+    );
+
+    let host = h.host(HashMap::new());
+    let superseded_by = StaleHydratedRow {
+        relative_path: "notes.txt".to_string(),
+        manifest_hash: ContentHash::of_raw(b"the other device's head"),
+        size_bytes: 300,
+        content_key_version: None,
+        remote_mtime: 1_700_000_100,
+        version_num: 1,
+    };
+    let invalidated = crate::bridge::apply_stale_hydrated(
+        &host,
+        &CfapiInvalidator,
+        &h.root,
+        &[superseded_by],
+        None,
+    )
+    .await;
+    assert_eq!(invalidated, 0, "the invalidation must be refused");
+    assert_eq!(
+        std::fs::read(&abs).expect("read the local edit back"),
+        LOCAL,
+        "the unsynced local edit must survive whole"
+    );
+    assert_eq!(
+        h.db_state("notes.txt"),
+        Some(SyncState::Synced),
+        "the row is left for the conflict path, not re-pointed"
+    );
+}
+
+/// **The primitive, on its own: `supersede_placeholder` frees a hydrated, in-sync file and
+/// leaves it describing the new version** — size, mtime, cloud-only, still in sync (so the
+/// next remote edit's update is not refused). The platform's answers, measured.
+#[tokio::test]
+async fn supersede_placeholder_redescribes_a_hydrated_file() {
+    const RECORDED: &[u8] = b"the version both devices hold";
+
+    let h = harness(&[("notes.txt", RECORDED.len() as i64)]).await;
+    let _conn = hydrate_recorded_notes(&h, RECORDED).await;
+    let abs = h.root.join("notes.txt");
+    eprintln!(
+        "[measure] hydrated: state={:x?}",
+        fauna_cfapi::placeholder_state(&abs)
+    );
+
+    let superseded = fauna_cfapi::supersede_placeholder(&abs, 300, 1_700_000_100);
+    let state = fauna_cfapi::placeholder_state(&abs);
+    eprintln!("[measure] supersede -> {superseded:?}; state={state:x?}");
+    superseded.expect("CfUpdatePlaceholder on a hydrated, in-sync file");
+
+    let meta = std::fs::metadata(&abs).expect("stat");
+    assert_eq!(meta.len(), 300, "the new version's size");
+    assert_eq!(
+        meta.modified().expect("mtime"),
+        std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_100),
+        "the new version's mtime"
+    );
+    assert!(
+        bytes_are_freed(&abs.to_string_lossy()),
+        "the old version's bytes are freed"
+    );
+    assert_ne!(
+        state.expect("state") & CF_PLACEHOLDER_STATE_IN_SYNC,
+        0,
+        "still in sync: the next remote edit's update must not be refused"
+    );
+}
+
+/// **A pinned file ("Always keep on this device") another device edited: what the platform
+/// answers.** Measurement only — the update dehydrates, and cfapi may refuse that on a pinned
+/// file; whether it does decides whether a pinned file ever receives a remote edit.
+#[tokio::test]
+#[ignore = "measurement probe; run with --ignored --nocapture"]
+async fn diag_supersede_a_pinned_file() {
+    const RECORDED: &[u8] = b"the version both devices hold";
+
+    let h = harness(&[("notes.txt", RECORDED.len() as i64)]).await;
+    let _conn = hydrate_recorded_notes(&h, RECORDED).await;
+    let abs = h.root.join("notes.txt");
+    fauna_cfapi::set_pin_state(&abs, true).expect("pin");
+    let attrs = |p: &std::path::Path| {
+        use std::os::windows::fs::MetadataExt;
+        std::fs::metadata(p).map(|m| format!("0x{:08x}", m.file_attributes()))
+    };
+    eprintln!("[measure] pinned: attrs={:?}", attrs(&abs));
+    let superseded = fauna_cfapi::supersede_placeholder(&abs, 300, 1_700_000_100);
+    eprintln!(
+        "[measure] supersede a pinned file -> {superseded:?}; attrs={:?} len={:?}",
+        attrs(&abs),
+        std::fs::metadata(&abs).map(|m| m.len())
+    );
+    let bare = fauna_cfapi::dehydrate_placeholder(&abs);
+    eprintln!("[measure] bare dehydrate of it -> {bare:?}");
+}
+
+/// `CF_PLACEHOLDER_STATE_IN_SYNC` — the bit `CF_INSYNC_POLICY_TRACK_ALL` clears on a local
+/// write.
+const CF_PLACEHOLDER_STATE_IN_SYNC: u32 = 0x8;
 
 /// **The live-box bridge: hold a real, served sync root open so Explorer (or a UIA script) has
 /// something to right-click.** It asserts nothing — it is the missing piece: every headless dehydrate trigger is measured
@@ -3942,5 +4259,75 @@ async fn uninstall_cleanup_removes_ghost_and_live_roots_alike() {
         live_dir.exists(),
         "the live folder itself (and any user files in it) must survive — only \
          the sync-root BINDING is removed at uninstall, never the folder"
+    );
+}
+
+/// Stage the root an engine RESTART leaves behind: registered, connected once for
+/// so short a time that nothing browsed it (its directory still asks the provider
+/// for its children), then disconnected with the registration kept — the old
+/// engine's connection dropping before the new engine's build. `before` runs on
+/// the plain directory first.
+fn root_disconnected_before_any_population(
+    tmp: &tempfile::TempDir,
+    before: impl FnOnce(&std::path::Path),
+) -> PathBuf {
+    let root = tmp.path().join("root");
+    std::fs::create_dir_all(&root).expect("create sync root");
+    before(&root);
+    let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+    let conn = crate::cfapi_host::register_and_connect(&root, cmd_tx).expect("connect");
+    conn.disconnect_keeping_registration();
+    root
+}
+
+/// Reconnect and drop gracefully, so the unregister lets the temp dir go.
+fn release_root(root: &std::path::Path) {
+    let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+    drop(crate::cfapi_host::register_and_connect(root, cmd_tx).expect("reconnect to release"));
+}
+
+/// The engine build after a restart must not die on the root the restart left
+/// unconnected. Its `.faunaignore` read is a name lookup in a directory that still
+/// asks the provider for its children, and with no provider connected the cloud
+/// filter answers `ERROR_FLT_INVALID_NAME_REQUEST` (0x801F0005, raw os error
+/// -2145452027) — outside the `ERROR_CLOUD_FILE_*` range the load reads as "no
+/// ignore file". Every rebuild was refused (`retry_in=60s`, the same answer each
+/// time), the folder stayed inert, and every write into it failed: the windows
+/// native seat pair's first write, 2026-10-08.
+#[test]
+fn the_ignore_file_loads_from_a_root_whose_provider_dropped_before_population() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = root_disconnected_before_any_population(&tmp, |_| {});
+
+    let loaded = fauna_sync_engine::ignore::IgnoreMatcher::load(&root);
+    release_root(&root);
+
+    let matcher = loaded.expect("a root with no provider connected has no .faunaignore to read");
+    assert!(
+        matcher.is_ignored("Thumbs.db"),
+        "the built-in defaults still apply"
+    );
+    assert!(!matcher.is_ignored("notes.txt"));
+}
+
+/// The premise that makes "the filter could not answer" mean "no ignore file":
+/// a `.faunaignore` that EXISTS is an ordinary local file (dotfiles never enter a
+/// folder, so it is never a placeholder), and the same disconnected root still
+/// opens it without a provider. Were this to fail, reading the filter's answer as
+/// absence would silently drop the user's ignore list and upload what it names.
+#[test]
+fn a_present_ignore_file_still_loads_from_a_root_whose_provider_dropped() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = root_disconnected_before_any_population(&tmp, |dir| {
+        std::fs::write(dir.join(".faunaignore"), "secret-*.txt\n").expect("write ignore file");
+    });
+
+    let loaded = fauna_sync_engine::ignore::IgnoreMatcher::load(&root);
+    release_root(&root);
+
+    let matcher = loaded.expect("a local .faunaignore opens without a provider");
+    assert!(
+        matcher.is_ignored("secret-plans.txt"),
+        "the user's own pattern must be read, never defaulted away"
     );
 }

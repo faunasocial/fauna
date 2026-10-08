@@ -250,28 +250,20 @@
                         <TextBox x:Name="FormDescriptionBox"
                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionTierFormDescription}"
                                  Header="{loc:Localize Key=subscriptions/description}" />
-                        <TextBox x:Name="FormPriceHintBox"
-                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionTierFormPriceHint}"
-                                 Header="{loc:Localize Key=subscriptions/price_hint}" />
-
-                        <!-- The gated asking-price field (dynamic-features.md section
-                             Platform-family surface excision, "A gated plane's user-facing
-                             INPUTS excise with it"): payments:AskingPriceInput lives in
-                             Views/Payments/ and is hosted through this ContentControl exactly
-                             like PaymentsSectionsHost below, so a store-safe build renders no
-                             price input at all, never a bare TextBox here. Its AutomationId
-                             is set in ProfilePage.xaml.cs's own #if PAYMENTS block, never
-                             spelled here: this comment's own text is compiled into the .xbf,
-                             XAML has no preprocessor to strip it, so the literal id itself
-                             must never appear outside the #if guarded C#, measured
-                             2026-09-06. -->
-                        <ContentControl x:Name="TierAskingPriceHost"
+                        <!-- The tier's money fields (dynamic-features.md section
+                             Platform-family surface excision, The price-and-route class):
+                             the price shown to subscribers, the asking price and the
+                             checkout URL live in Views/Payments/SubscriptionTierMoneyFields
+                             and are hosted through this ContentControl exactly like
+                             PaymentsSectionsHost below, so a store-safe build renders none of
+                             them, never a bare TextBox here. Their ids are spelled only in
+                             that file: this comment's own text is compiled into the .xbf,
+                             XAML has no preprocessor to strip it, so no id of the plane may
+                             appear in it, measured 2026-09-06. -->
+                        <ContentControl x:Name="TierMoneyFieldsHost"
                                         HorizontalAlignment="Stretch"
                                         HorizontalContentAlignment="Stretch" />
 
-                        <TextBox x:Name="FormPaymentUrlBox"
-                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionTierFormPaymentUrl}"
-                                 Header="{loc:Localize Key=subscriptions/payment_url}" />
                         <ToggleSwitch x:Name="FormAutoApproveToggle"
                                       AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionTierFormAutoApprove}"
                                       Header="{loc:Localize Key=subscriptions/auto_approve}" />
@@ -310,9 +302,11 @@
                                     <TextBlock Grid.Column="1" VerticalAlignment="Center"
                                                AutomationProperties.AutomationId="subscription-tier-rank"
                                                Text="{Binding Rank}" />
-                                    <TextBlock Grid.Column="2" VerticalAlignment="Center"
-                                               AutomationProperties.AutomationId="subscription-tier-price"
-                                               Text="{Binding PriceHint}" />
+                                    <!-- The price column: a payments render, filled per row
+                                         under #if PAYMENTS (TierPriceHost_Loaded), the
+                                         TierMoneyFieldsHost shape one level down. -->
+                                    <ContentControl Grid.Column="2" VerticalAlignment="Center"
+                                                    Loaded="TierPriceHost_Loaded" />
                                     <Button Grid.Column="3"
                                             AutomationProperties.AutomationId="subscription-tier-edit-button"
                                             Tag="{Binding}" Click="EditTier_Click"
@@ -471,16 +465,17 @@
                                     <StackPanel Grid.Column="0" VerticalAlignment="Center">
                                         <TextBlock AutomationProperties.AutomationId="subscription-offer-name"
                                                    Text="{Binding Name}" />
-                                        <TextBlock AutomationProperties.AutomationId="subscription-offer-price"
-                                                   Opacity="0.7" Text="{Binding PriceHint}" />
+                                        <!-- The price line and, in column 1, the checkout link:
+                                             payments renders, filled per row under #if PAYMENTS
+                                             (OfferPriceHost_Loaded / OfferPaymentLinkHost_Loaded),
+                                             so a store-safe build shows a priced tier as an
+                                             ordinary approval-gated one. -->
+                                        <ContentControl Loaded="OfferPriceHost_Loaded" />
                                         <TextBlock AutomationProperties.AutomationId="subscription-offer-description"
                                                    Opacity="0.7" TextWrapping="Wrap" Text="{Binding Description}" />
                                     </StackPanel>
-                                    <Button Grid.Column="1" VerticalAlignment="Center"
-                                            AutomationProperties.AutomationId="subscription-offer-payment-link"
-                                            Visibility="{Binding HasPaymentUrl, Converter={StaticResource BoolToVisibility}}"
-                                            Tag="{Binding}" Click="OfferPaymentLink_Click"
-                                            Content="{loc:Localize Key=subscriptions/payment_url}" />
+                                    <ContentControl Grid.Column="1" VerticalAlignment="Center"
+                                                    Loaded="OfferPaymentLinkHost_Loaded" />
                                     <TextBlock Grid.Column="2" VerticalAlignment="Center" Opacity="0.7"
                                                AutomationProperties.AutomationId="subscription-offer-status"
                                                Text="{Binding StatusLabel}" />

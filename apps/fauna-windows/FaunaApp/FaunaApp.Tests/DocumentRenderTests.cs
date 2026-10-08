@@ -437,6 +437,82 @@ public class DocumentRenderTests
         Assert.Null(DocumentRenderer.MediaVideoHash(Doc(P(T("body only")))));
     }
 
+    // ── D6c: a bridged post's nest-served picture / video (render-model.md § D6c) ──
+    // The proxied twins of the two extractor pairs above: a nest-relative path, never a
+    // hash, and taken only when the post carries no blob sibling — the precedence tui's
+    // `proxied_post_image` / `proxied_post_video` and apple's `documentPostImage` keep.
+
+    private const string ProxiedPicture =
+        "/api/v1/bluesky/media?url=https%3A%2F%2Fcdn.bsky.app%2Fimg%2Ffeed_fullsize%2Fplain%2Fa%40jpeg";
+    private const string ProxiedClip =
+        "/api/v1/media/proxy?url=https%3A%2F%2Fr.example%2Fclip.mp4";
+
+    // ProxiedImage / ProxiedVideo ctor order mirrors the Rust field order: path, alt.
+    private static RenderBlock PImg(string path) => new RenderBlock.ProxiedImage(path, "");
+    private static RenderBlock PVid(string path) => new RenderBlock.ProxiedVideo(path, "");
+
+    [Fact]
+    public void MediaProxiedPath_ExtractsTheFoldedProxiedImagePath()
+    {
+        Assert.Equal(ProxiedPicture, DocumentRenderer.MediaProxiedPath(Doc(
+            P(T("a bridged post")),
+            PImg(ProxiedPicture))));
+    }
+
+    [Fact]
+    public void MediaProxiedPath_NullWhenNoProxiedImageBlock()
+    {
+        Assert.Null(DocumentRenderer.MediaProxiedPath(Doc(P(T("body only")))));
+    }
+
+    [Fact]
+    public void MediaProxiedPath_NullWhenTheDocumentCarriesABlobImage()
+    {
+        // One `post-image` slot per post: the blob image wins it, so the proxied path
+        // must answer null rather than hand the slot a second source.
+        Assert.Null(DocumentRenderer.MediaProxiedPath(Doc(
+            P(T("mixed")),
+            Img("abc123"),
+            PImg(ProxiedPicture))));
+    }
+
+    [Fact]
+    public void MediaProxiedPath_NullForAProxiedVideo()
+    {
+        // The typed split: a video must never reach an image element (render-model.md
+        // § D6c → Proxied video, answer 1).
+        Assert.Null(DocumentRenderer.MediaProxiedPath(Doc(P(T("clip")), PVid(ProxiedClip))));
+    }
+
+    [Fact]
+    public void MediaProxiedVideoPath_ExtractsTheFoldedProxiedVideoPath()
+    {
+        Assert.Equal(ProxiedClip, DocumentRenderer.MediaProxiedVideoPath(Doc(
+            P(T("a bridged clip")),
+            PVid(ProxiedClip))));
+    }
+
+    [Fact]
+    public void MediaProxiedVideoPath_NullWhenNoProxiedVideoBlock()
+    {
+        Assert.Null(DocumentRenderer.MediaProxiedVideoPath(Doc(P(T("body only")))));
+    }
+
+    [Fact]
+    public void MediaProxiedVideoPath_NullWhenTheDocumentCarriesABlobVideo()
+    {
+        Assert.Null(DocumentRenderer.MediaProxiedVideoPath(Doc(
+            P(T("mixed")),
+            Vid("feedbeef"),
+            PVid(ProxiedClip))));
+    }
+
+    [Fact]
+    public void MediaProxiedVideoPath_NullForAProxiedImage()
+    {
+        Assert.Null(DocumentRenderer.MediaProxiedVideoPath(Doc(P(T("photo")), PImg(ProxiedPicture))));
+    }
+
     // ── The recursion the shared faces buy, invisible to every extractor test above ──
     // Both delegations replaced a top-level-only `doc.blocks.OfType<…>().FirstOrDefault()`
     // twin. These two FAIL against those twins, which is the point: a lift whose payoff no

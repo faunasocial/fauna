@@ -456,7 +456,7 @@ public struct FaunaMacApp: App {
             }
 
             CommandGroup(after: .appInfo) {
-                CheckForUpdatesView(updater: appDelegate.updaterController.updater)
+                CheckForUpdatesMenuItem(updates: appState.updates)
             }
 
             CommandGroup(replacing: .appSettings) {
@@ -1231,6 +1231,11 @@ public struct FaunaMacApp: App {
         // over an explicit or a Login Items opt-out, never under e2e.
         AutoStart.registerAtPostAuth()
 
+        // The once-per-sign-in newer-version look (`installers/README.md`
+        // § Knowing a newer version is out): notify-only, silent unless a newer
+        // release is out. `applySessionPatch` makes the same call.
+        appState.updates.lookOnceAtSignIn()
+
         // Push notifications (settings.md § Push notifications; common.md
         // § Push Notifications → Transports). The macOS twin of iOS's
         // `FaunaApp.swift` block: build the shared `PushManager`, hand it to the
@@ -1714,7 +1719,10 @@ public struct FaunaMacApp: App {
                 // feed from this state field; serialize the SAME painted text the
                 // element read returns (MacPostCardView's `renderDocumentToPlaintext`) so the state-read fallback matches every other app's
                 // element read (render-model.md § D6 / read-uniformity residual).
-                "body": renderDocumentToPlaintext(document: p.document),
+                // `""` for a post the viewer reported (the card paints "You
+                // reported this" and no body — `paintedBody` keeps this state
+                // read equal to every other app's element read).
+                "body": appState.contentPolicy.inputs.paintedBody(of: p),
                 "timestamp": p.timestamp,
                 "tags": p.tags,
                 "has_media": p.hasMedia,
@@ -2316,6 +2324,9 @@ public struct FaunaMacApp: App {
                 appDelegate.menuBarController.client = faunaClient
                 self.client = faunaClient
                 appState.liveClient = faunaClient
+                // This patch is a sign-in too: the same once-per-sign-in
+                // newer-version look `completeAuthenticatedLaunch` makes.
+                appState.updates.lookOnceAtSignIn()
                 let isE2E = FaunaE2E.isActive
                 if isE2E {
                     // Authenticate only — no WebSocket/sync/backup (too heavy for

@@ -19,7 +19,10 @@
 //! `account-runtime.md` § Multi-instance concurrency → *Election mechanics*).
 //! The seed-leg role sits on the same seam, behind a second lock with the
 //! same mechanics (`<store dir>/seed-legs.lock`, a second Web Locks name —
-//! same section → *The seed-leg role*).
+//! same section → *The seed-leg role*). So does the agent's presence, which
+//! a seed-holding runtime reads before it contends and while it holds
+//! (`<store dir>/agent.lock` natively; web has no agent — same section →
+//! *The agent holds the role when present*).
 
 use fauna_account_store::backend::StoreBackend;
 use fauna_account_store::store::AccountStore;
@@ -82,6 +85,21 @@ pub enum ElectionOutcome<H> {
     Degraded(String),
 }
 
+/// What a host's presence probe found ([`EngineElection::agent_present`]) —
+/// the store crate's `AgentPresence`, arm for arm.
+#[derive(Debug)]
+pub enum Presence {
+    /// The sync agent hosts this store: a seed-holding runtime does not
+    /// contend, and one that holds the role hands it over.
+    Present,
+    /// No agent hosts it — the first-come election stands.
+    Absent,
+    /// The probe could not ask. The driver owns what that means: `Absent`
+    /// before a try (degrade open — a lone app must pump), and a holder keeps
+    /// its role (a degrade is never a yield).
+    Degraded(String),
+}
+
 /// The engine-singleton election, as the host runs it: a **try**, never a
 /// wait, kernel-arbitrated (or lock-manager-arbitrated) so a crashed holder
 /// releases on its own. Natively `EngineLock::try_acquire(&store_dir)`; on
@@ -104,6 +122,13 @@ pub trait EngineElection {
     fn try_acquire_seed_legs(
         &self,
     ) -> impl std::future::Future<Output = ElectionOutcome<Self::SeedLegs>>;
+
+    /// Does the sync agent host this store (`account-runtime.md`
+    /// § Multi-instance concurrency → *The agent holds the role when
+    /// present*, part 1)? A momentary probe that holds nothing afterwards.
+    /// The driver asks only for a seed-holding runtime; a seedless one — the
+    /// agent itself — never probes.
+    fn agent_present(&self) -> impl std::future::Future<Output = Presence>;
 }
 
 /// What the pump's peer-leg ensure step concluded (the `PumpReport::peer_leg`

@@ -1270,3 +1270,32 @@ def test_two_folders_armed_at_different_cadences_both_surface():
 
 def test_no_armed_line_reads_as_no_cadence():
     assert sync_seats.adopted_rescan_ms(["INFO x: engine serving"]) == set()
+
+
+# ── the scenario plan's acts diagnose themselves ─────────────────────────────
+
+
+def test_a_seat_refusing_the_writers_act_fails_with_every_seats_diagnostics(tmp_path):
+    """An act the seat's own folder refuses (on windows, a cfapi root whose
+    provider never answered the create's placeholder fetch: `OSError` EINVAL) is
+    a failure of THAT seat, and it must carry what an unconverged await carries —
+    the step, the writer, the error and every seat's diagnostics with its agent
+    log (convention 6). Escaping as a bare `OSError` left the 2026-10-08 windows
+    native pair with nothing but a path to go on."""
+    from helpers import seat_scenarios
+
+    a, b = _FakeSeat("a", tmp_path / "a"), _FakeSeat("b", tmp_path / "b")
+
+    def refuse(root: Path) -> None:
+        raise OSError(22, "Invalid argument", str(root / ".x.tmp"))
+
+    step = seat_scenarios.Step("create", 0, refuse, expect={"x": b"x"})
+    note = lambda: "\n".join(s.diagnostics() for s in (a, b))  # noqa: E731
+
+    with pytest.raises(AssertionError) as raised:
+        seat_scenarios.run_step(step, [a, b], 0.0, note)
+
+    message = str(raised.value)
+    assert "[a] create: the act failed on this seat" in message
+    assert "Invalid argument" in message
+    assert "seat a: fake" in message and "seat b: fake" in message

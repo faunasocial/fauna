@@ -213,6 +213,9 @@ public struct RegionSubject {
 public struct RegionRenderDecision {
     public let verdict: String
     public let placeholder: FfiRegionPlaceholder?
+    /// The viewer's own report hid this item — paint "You reported this"
+    /// (`moderation.report.hidden_placeholder`) in place of the body.
+    public var reported: Bool = false
 
     /// The region placeholder this item paints now: a `block`, or a `collapse`
     /// not yet revealed (the reveal shares the family reveal state).

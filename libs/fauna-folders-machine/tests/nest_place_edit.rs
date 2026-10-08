@@ -181,6 +181,28 @@ fn a_negative_quiet_period_is_refused_client_side_rather_than_sent() {
     );
 }
 
+#[test]
+fn a_quiet_period_over_the_ceiling_is_refused_client_side_rather_than_sent() {
+    // The nest refuses a `quiet_secs` above `NestPlacePolicy::MAX_QUIET_SECS`
+    // the same way it refuses a negative one (§ 8b), so the editor reads it as
+    // unset too. The ceiling itself is a real choice and rides as typed.
+    let max = fauna_protocol::folders::NestPlacePolicy::MAX_QUIET_SECS;
+    assert_eq!(
+        nest_place_write(&edit(
+            NEST_SNAPSHOTS_DEFAULT,
+            &(max + 1).to_string(),
+            "",
+            ""
+        ))
+        .quiet_secs,
+        None
+    );
+    assert_eq!(
+        nest_place_write(&edit(NEST_SNAPSHOTS_DEFAULT, &max.to_string(), "", "")).quiet_secs,
+        Some(max)
+    );
+}
+
 // ── The round trip, which is what an app actually does ──────────────────────
 
 #[test]

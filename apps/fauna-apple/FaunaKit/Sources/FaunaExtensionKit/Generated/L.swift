@@ -2057,6 +2057,26 @@ public enum L {
                 "Could not send this message: \(message)"
             }
 
+            public static func listSendWarning(count: String, list: String, used: String, limit: String) -> String {
+                "This will send to \(count) subscribed recipients on \(list). Today's quota: \(used) / \(limit)."
+            }
+
+            public static func listSendWarningNoLimit(count: String, list: String) -> String {
+                "This will send to \(count) subscribed recipients on \(list)."
+            }
+
+            public static func listQuotaApproaching(remaining: String) -> String {
+                "Approaching daily limit — \(remaining) more recipients today"
+            }
+
+            public static func listQuotaOver(count: String, limit: String, remaining: String) -> String {
+                "Sending to \(count) recipients would pass today's limit of \(limit) (\(remaining) left). Try again tomorrow."
+            }
+
+            public static func listSendProgress(list: String, delivered: String, count: String) -> String {
+                "Sent to \(list): \(delivered) of \(count) recipients delivered"
+            }
+
             public static let errorAttachmentNoComposer = "Open a message composer before attaching a file."
 
             public static let groupConversationHint = "This will start a group conversation."
@@ -5694,8 +5714,6 @@ public enum L {
 
         public static let updateButton = "Update"
 
-        public static let updates = "Updates"
-
         public static let storageDesc = "Account storage usage."
 
         public static let about = "About"
@@ -5713,12 +5731,6 @@ public enum L {
         public static let appearance = "Appearance"
 
         public static let showInDock = "Show in Dock"
-
-        public static let autoCheckUpdates = "Automatically check for updates"
-
-        public static let autoDownloadUpdates = "Automatically download updates"
-
-        public static let lastChecked = "Last checked:"
 
         public static let p2pRedirect = "Peer connections and bridges are managed on the Devices and Bridges pages."
 
@@ -6349,6 +6361,8 @@ public enum L {
         public static let delete = "Delete"
 
         public static let deleteConfirm = "Delete the list and all its members?"
+
+        public static let archiveOffServerConfirm = "This archive link is not on your server and goes out with every message. Save anyway?"
 
         public static let members = "Members"
 
@@ -9910,6 +9924,26 @@ public enum L {
             public static let guardianApprovalRequired = "This account can only message approved contacts."
         }
 
+        public enum activitypub {
+            public static let notLinked = "This post came from the fediverse, and ActivityPub isn't enabled for your account yet. Enable it on the Bridges page first."
+
+            public static let switchedOff = "Your ActivityPub federation is switched off, so this can't be sent to the fediverse. Turn it back on from the Bridges page."
+        }
+
+        public enum bluesky {
+            public static let notLinked = "This post came from Bluesky, and no Bluesky account is linked for you. Link one on the AT Protocol page first."
+        }
+
+        public enum nostr {
+            public static let notLinked = "This post came from Nostr, and no Nostr key is linked for you. Link one on the Nostr page first."
+
+            public static let noCustodialKey = "Your nest doesn't hold your Nostr key, so it can't sign this for you. Switch to a generated or imported key on the Nostr page."
+
+            public static let noRelaysConfigured = "You've removed every Nostr relay, so there is nowhere to publish this. Add a relay on the Nostr page first."
+
+            public static let repliesOff = "Replies to Nostr are switched off, so this wasn't sent. Turn on Publish replies on the Nostr page."
+        }
+
         public enum nest {
             public static let outdated = "This nest is running an outdated version and must be updated before you can connect."
 
@@ -11957,6 +11991,11 @@ private enum _LFlat {
         "conversations.unified.group_conversation_hint": "This will start a group conversation.",
         "conversations.unified.guardian_state_blocked": "Blocked by your guardian",
         "conversations.unified.guardian_state_held": "Waiting for your guardian",
+        "conversations.unified.list_quota_approaching": "Approaching daily limit — {remaining} more recipients today",
+        "conversations.unified.list_quota_over": "Sending to {count} recipients would pass today's limit of {limit} ({remaining} left). Try again tomorrow.",
+        "conversations.unified.list_send_progress": "Sent to {list}: {delivered} of {count} recipients delivered",
+        "conversations.unified.list_send_warning": "This will send to {count} subscribed recipients on {list}. Today's quota: {used} / {limit}.",
+        "conversations.unified.list_send_warning_no_limit": "This will send to {count} subscribed recipients on {list}.",
         "conversations.unified.recipient_picker_bridges": "Also reaches people on: {bridges}",
         "conversations.unified.recipient_picker_placeholder": "Type a handle, email, npub, DID, or @user@instance",
         "conversations.unified.recipient_resolve_error": "Lookup failed — try again",
@@ -12334,7 +12373,10 @@ private enum _LFlat {
         "devices.writer_paywalled_warning": "This folder is sold to subscribers, so this member can change what they see.",
         "devices.writer_public_warning": "This folder is public, so this member can change what anyone can see.",
         "devices.writer_uncapped_warning": "Without a cap, this member can use your entire storage quota.",
+        "error.activitypub.not_linked": "This post came from the fediverse, and ActivityPub isn't enabled for your account yet. Enable it on the Bridges page first.",
+        "error.activitypub.switched_off": "Your ActivityPub federation is switched off, so this can't be sent to the fediverse. Turn it back on from the Bridges page.",
         "error.authorization": "You do not have permission to do this.",
+        "error.bluesky.not_linked": "This post came from Bluesky, and no Bluesky account is linked for you. Link one on the AT Protocol page first.",
         "error.bridges.address_refused": "None of your connected bridges can reach that address. Check how it is written.",
         "error.bridges.conversation_store_full": "This bridge has too many messages waiting, so this wasn't sent. Try again once it catches up.",
         "error.bridges.forward_target_on_local_domain": "That address is on your own server, so mail can't be forwarded to it. Add it as an alias instead.",
@@ -12350,6 +12392,10 @@ private enum _LFlat {
         "error.federation.peer_nest_outdated": "The other side's nest is running an outdated version and does not support this yet.",
         "error.nest.outdated": "This nest is running an outdated version and must be updated before you can connect.",
         "error.nest.schema_mismatch": "This nest's database does not match its software version and must be updated.",
+        "error.nostr.no_custodial_key": "Your nest doesn't hold your Nostr key, so it can't sign this for you. Switch to a generated or imported key on the Nostr page.",
+        "error.nostr.no_relays_configured": "You've removed every Nostr relay, so there is nowhere to publish this. Add a relay on the Nostr page first.",
+        "error.nostr.not_linked": "This post came from Nostr, and no Nostr key is linked for you. Link one on the Nostr page first.",
+        "error.nostr.replies_off": "Replies to Nostr are switched off, so this wasn't sent. Turn on Publish replies on the Nostr page.",
         "error.profile.handle_cooldown": "That handle was released recently and can't be taken yet. Choose a different one, or try again later.",
         "error.profile.handle_taken": "That handle already belongs to someone else on your nest. Choose a different one.",
         "error.protocol.cancelled": "The request was cancelled.",
@@ -13115,6 +13161,7 @@ private enum _LFlat {
         "mail_lists.add_member_cancel": "Cancel",
         "mail_lists.add_member_placeholder": "Email address",
         "mail_lists.add_member_submit": "Add",
+        "mail_lists.archive_off_server_confirm": "This archive link is not on your server and goes out with every message. Save anyway?",
         "mail_lists.backend_unbuilt": "Mailing lists are not available on this nest yet.",
         "mail_lists.cancel": "Cancel",
         "mail_lists.delete": "Delete",
@@ -14205,8 +14252,6 @@ private enum _LFlat {
         "settings.admin_page.overview": "Overview",
         "settings.admin_page.total": "Total",
         "settings.appearance": "Appearance",
-        "settings.auto_check_updates": "Automatically check for updates",
-        "settings.auto_download_updates": "Automatically download updates",
         "settings.autostart_header": "Start Fauna when you sign in",
         "settings.check_failed": "Check failed",
         "settings.check_for_updates": "Check for Updates",
@@ -14284,7 +14329,6 @@ private enum _LFlat {
         "settings.identity_export.title": "Export Identity",
         "settings.identity_export.warning": "Anyone who scans this QR code gets full access to your identity. Only show it in a trusted environment.",
         "settings.inbox_mode": "Inbox Mode",
-        "settings.last_checked": "Last checked:",
         "settings.mail.add_credential": "Add credential",
         "settings.mail.add_title": "Add mail credential",
         "settings.mail.autogenerate": "Auto-generate a strong password",
@@ -14548,7 +14592,6 @@ private enum _LFlat {
         "settings.up_to_date": "Up to date",
         "settings.update_available_notice": "Version {version} is available. Get it at {url}",
         "settings.update_button": "Update",
-        "settings.updates": "Updates",
         "setup.back": "Back",
         "setup.byo.title": "Run Fauna on your server",
         "setup.byo_status.title": "Connecting to your nest",

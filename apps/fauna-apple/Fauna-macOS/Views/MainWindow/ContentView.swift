@@ -299,6 +299,13 @@ struct MainWindowView: View {
                 SupervisedIndicatorBar(store: appState.familyStatus) {
                     appState.selectedSidebar = .family
                 }
+                // The shared report sheet + its acknowledgement
+                // (moderation.md § User-initiated reporting): ONE host over
+                // every page, because the three verbs (feed ⋯, message ⋯, an
+                // OTHER profile) live on different pages and a report filed from
+                // a card the reporter-side hide then replaces must still
+                // paint its `report-status` somewhere that survives it.
+                ReportHost()
             }
         }
         // .searchable(placement: .toolbar) crashes on macOS 26 during page

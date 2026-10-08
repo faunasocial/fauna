@@ -38,6 +38,7 @@ Stamped 2026-09-23 at 6605debcb9.
    - `tests/e2e-unified/tests/test_webdav_mount_behaviours.py::test_a_mounted_folder_behaves_like_a_network_drive`
 8. [app] Files written through the mount stay readable in your apps after you stop serving the folder — `docs/goal/behavior/webdav-server.md` § Key model
    - `tests/e2e-unified/tests/test_webdav_engine_cross_writer.py::test_mount_written_files_stay_readable_after_unserving`
+   - `tests/e2e-unified/tests/test_webdav_folder_view.py::test_a_mount_written_file_still_opens_in_the_app_after_unserving`
 9. [app] Serving a folder that already holds files makes them reachable through the mount, and nothing is lost on the way — `docs/goal/behavior/webdav-server.md` § Key model
    - `tests/e2e-unified/tests/test_webdav_engine_cross_writer.py::test_serving_a_folder_that_already_holds_files_reaches_them`
    - `tests/e2e-unified/tests/test_webdav_folder_view.py::test_serving_a_folder_the_app_already_filled_reaches_its_files`
@@ -66,7 +67,7 @@ Stamped 2026-09-23 at 6605debcb9.
 | web | ⚠ partial | 0.1.2-dev+2cb6e915.dirty standalone |
 | linux | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
 | windows | ⚠ partial | 0.1.2-dev+f29a951a standalone |
-| macos | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| macos | ✅ full | 0.1.2-dev+a1f84cc6 standalone |
 | ios | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
 | android |  no run recorded | |
 | tui | ⚠ partial | 0.1.2-dev+7663afa6 standalone |
@@ -79,13 +80,14 @@ Stamped 2026-09-23 at 6605debcb9.
 | 4 | app | `tests/e2e-unified/tests/test_webdav_engine_cross_writer.py::test_engine_and_webdav_mda_are_one_chunk_writer` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (windows): passed |
 | 4 | app | absent by design on web, ios, android | — |
 | 5 | app | `tests/e2e-unified/tests/test_webdav_engine_cross_writer.py::test_mount_delete_rename_move_and_copy_reach_the_folder` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (windows): passed |
-| 5 | app | `tests/e2e-unified/tests/test_webdav_folder_view.py::test_mount_edits_show_in_the_apps_folder_view` | — |
+| 5 | app | `tests/e2e-unified/tests/test_webdav_folder_view.py::test_mount_edits_show_in_the_apps_folder_view` | web (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_webdav_mount_behaviours.py::test_a_mounted_folder_behaves_like_a_network_drive` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_webdav_mount_behaviours.py::test_a_mounted_folder_behaves_like_a_network_drive` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_webdav_engine_cross_writer.py::test_mount_written_files_stay_readable_after_unserving` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (windows): passed |
+| 8 | app | `tests/e2e-unified/tests/test_webdav_folder_view.py::test_a_mount_written_file_still_opens_in_the_app_after_unserving` | web (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_webdav_engine_cross_writer.py::test_serving_a_folder_that_already_holds_files_reaches_them` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (windows): passed |
 | 9 | app | `tests/e2e-unified/tests/test_webdav_folder_view.py::test_serving_a_folder_the_app_already_filled_reaches_its_files` | — |
-| 10 | app | `tests/e2e-unified/tests/test_webdav_shared_set.py::test_a_shared_and_served_folder_shows_owner_mount_and_member_the_same_files` | tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_webdav_shared_set.py::test_a_shared_and_served_folder_shows_owner_mount_and_member_the_same_files` | macos (macos): passed, tui (linux): passed, tui (macos): passed |
 | 11 | app | `tests/e2e-unified/tests/test_webdav_mount_and_gate.py::test_webdav_mount_auth_and_served_set_gate` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_webdav_mount_behaviours.py::test_a_mounted_folder_behaves_like_a_network_drive` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_webdav_mount_behaviours.py::test_the_mount_reports_space_and_refuses_a_file_over_the_allowance` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |

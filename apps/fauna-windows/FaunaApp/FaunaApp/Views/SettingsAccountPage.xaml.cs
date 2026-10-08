@@ -61,6 +61,15 @@ public sealed partial class SettingsAccountPage : Page
     private FfiAccountRegistry? _switcherRegistry;
     private AccountSwitcherViewModel? _switcherViewModel;
 
+    /// <summary>The Push notifications section's VM (settings.md § Push notifications),
+    /// built per visit like the switcher: the registration it drives is the signed-in
+    /// actor's, so a build-once section would toggle the previous account's row.</summary>
+    private PushNotificationsViewModel? _push;
+
+    /// <summary>Set while <see cref="RenderPush"/> writes the toggle, so the write is not
+    /// read back as the user's click.</summary>
+    private bool _renderingPush;
+
     public SettingsAccountPage()
     {
         this.InitializeComponent();
@@ -102,6 +111,20 @@ public sealed partial class SettingsAccountPage : Page
                 _recoveryKit.PropertyChanged += RecoveryKit_PropertyChanged;
             }
         }
+
+        // Push notifications: the registration is built on demand, over this visit's
+        // session — the signed-in actor and the install's derived device id for it
+        // (PushSession) — and is null with no session, which the VM answers with its
+        // failure line (and, for a disable, by still clearing the bit).
+        var pushRpc = _rpc;
+        var pushActor = _sessionActorIdHex;
+        var pushDevice = (e.Parameter as ServiceClients)?.Account.DeviceId;
+        _push = new PushNotificationsViewModel(
+            buildRegistration: async () =>
+                pushRpc is null || string.IsNullOrEmpty(pushActor) || string.IsNullOrEmpty(pushDevice)
+                    ? null
+                    : await pushRpc.BuildPushRegistrationAsync(PushSession.IntentPath, pushActor, pushDevice),
+            agent: new AgentStatusProbe(() => App.CurrentSyncAgent?.Channel));
 
         // Build the switcher fresh on every visit. This page is frame-navigated, so
         // OnNavigatedTo re-runs per visit — which is exactly what the goal doc
@@ -156,6 +179,7 @@ public sealed partial class SettingsAccountPage : Page
         _switcherViewModel = null;
         _switcherRegistry?.Dispose();
         _switcherRegistry = null;
+        _push = null;
 
         // The minted secret must not survive the view that displayed it, and the two
         // typed buffers are a recovery phrase and a confirm token
@@ -244,6 +268,16 @@ public sealed partial class SettingsAccountPage : Page
         // nest-backed settings load fails or the session is offline.
         _switcherViewModel?.Refresh();
 
+        // The push toggle paints from the install's stored bit (local, like the
+        // switcher), and its line from the agent's current answer.
+        if (_push is { } push)
+        {
+            push.Load();
+            RenderPush();
+            await push.RefreshLineAsync();
+            RenderPush();
+        }
+
         if (_viewModel is null) return;
 
         await _viewModel.LoadCommand.ExecuteAsync(null);
@@ -262,6 +296,44 @@ public sealed partial class SettingsAccountPage : Page
         // Page_Loaded must not block returning (and stalling the rest of
         // this page's readiness) on it.
         _ = _viewModel.LoadPendingActionsCommand.ExecuteAsync(null);
+    }
+
+    // --- Push notifications (settings.md § Push notifications) ---
+
+    private async void PushOptInToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_renderingPush || _push is not { } push) return;
+        if (push.Busy || PushOptInToggle.IsOn == push.OptedIn)
+        {
+            // A click while a toggle is still in flight, or one that changes nothing:
+            // the stored bit is what the toggle shows.
+            RenderPush();
+            return;
+        }
+        await push.SetOptInAsync(PushOptInToggle.IsOn);
+        RenderPush();
+    }
+
+    /// <summary>Paint the toggle from the stored bit — its HelpText carries the same
+    /// answer for the e2e <c>state</c> read — and the line only when it has text.</summary>
+    private void RenderPush()
+    {
+        if (_push is not { } push) return;
+        _renderingPush = true;
+        try
+        {
+            PushOptInToggle.IsOn = push.OptedIn;
+        }
+        finally
+        {
+            _renderingPush = false;
+        }
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
+            PushOptInToggle, push.OptedIn ? "on" : "off");
+        PushNotificationsErrorText.Text = push.LineText ?? string.Empty;
+        PushNotificationsErrorText.Visibility = string.IsNullOrEmpty(push.LineText)
+            ? Visibility.Collapsed
+            : Visibility.Visible;
     }
 
     // --- Recovery kit (settings.md § Recovery kit) ---

@@ -14,7 +14,7 @@ android {
     // Deliberately decoupled from applicationId — renaming every source file
     // buys nothing, while the store identity below is permanent once published.
     namespace = "com.fauna.app"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         // The Play/store identity — on the org's own domain (fauna.social).
@@ -27,7 +27,7 @@ android {
         // Owner: docs/goal/architecture/installers/android.md § Store identity.
         applicationId = "social.fauna.fauna"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         // versionName is the product version — the ONLY number edited by hand.
         // versionCode is derived from it: major * 10000 + minor * 100 + patch,
         // so 0.1.0 -> 100 and 1.0.0 -> 10000. Play enforces versionCode alone
@@ -40,8 +40,8 @@ android {
         // Owner: docs/goal/architecture/installers/android.md § Versioning.
         // versionName must equal [workspace.package] version in the root
         // Cargo.toml (product-version.md; version-lockstep merge gate).
-        versionCode = 102
-        versionName = "0.1.2"
+        versionCode = 103
+        versionName = "0.1.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

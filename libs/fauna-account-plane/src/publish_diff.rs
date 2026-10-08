@@ -1026,11 +1026,9 @@ mod tests {
         let shred = machinery_row(
             KIND_GENERATION_MINT,
             fauna_core::hex32::encode(&g),
-            &fauna_core::generation::GenerationMintRecord::Shredded {
-                core,
-                shredded_at_ms: 9_000,
-                shredded_by: device_id_of(THEM),
-            },
+            // Authored by a verified member, so the generation IS dead —
+            // the pin is that its own mint row still is not.
+            &fauna_core::generation::sign_shred(&device_key(THEM), core, 9_000).unwrap(),
         );
         f.put(shred.clone()).await;
         let nest = PutNest::default();

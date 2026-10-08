@@ -53,6 +53,10 @@ use fauna_protocol::bridge_routing::{
     OutboundWarmupResetRequest, OutboundWarmupStatusReply, RunDeliverabilityDiagnosticsReply,
     RunDeliverabilityDiagnosticsRequest,
 };
+use fauna_protocol::bridge_routing::{
+    ListListSendHistoryReply, ListListSendHistoryRequest, ListSendHistoryRow, SendListMessageReply,
+    SendListMessageRequest,
+};
 // `AliasControls` + `AliasRow` come in via the `pub use` re-export below
 // (used internally here *and* re-exported as the crate's typed surface).
 use fauna_protocol::bridges_ui::{
@@ -2057,6 +2061,19 @@ impl<R: RpcRequester> MailAccountClient<R> {
         Ok(reply.lists)
     }
 
+    /// [`Self::list_account_lists`] with the per-account meter the reply also
+    /// carries (`account_recipients_today` / `account_recipients_per_day`) — the
+    /// compose form's "Today's quota: N / M" (`mail-mass-mailing.md`
+    /// § Composing a list message).
+    pub async fn list_account_lists_with_meter(&self) -> Result<ListAccountListsReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.bridges.list_account_lists",
+                ListAccountListsRequest {},
+            )
+            .await
+    }
+
     /// `fauna.bridges.create_account_list` — create one list owned by the caller;
     /// returns its new 16-byte UUID. The nest validates `local_part` (strict
     /// ASCII, ≤64, not a creation-reserved local-part per
@@ -2236,6 +2253,51 @@ impl<R: RpcRequester> MailAccountClient<R> {
             .await?;
         Ok(())
     }
+
+    /// `fauna.bridges.send_list_message` — the ONLY list-send path
+    /// (`mail-mass-mailing.md` § Composing a list message): the nest validates
+    /// ownership, reserves the per-send / per-account / per-deployment caps
+    /// atomically, stamps each member's `List-*` headers and enqueues one
+    /// outbound per subscribed member. `message` is the composed RFC 5322
+    /// bytes. Over a cap the nest refuses with the 552/452-class error the
+    /// compose form explains (§ Per-list rate accounting). Online-only: a
+    /// send never queues offline.
+    pub async fn send_list_message(
+        &self,
+        list_id: Vec<u8>,
+        message: Vec<u8>,
+    ) -> Result<SendListMessageReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.bridges.send_list_message",
+                SendListMessageRequest {
+                    list_id: ByteBuf::from(list_id),
+                    message: ByteBuf::from(message),
+                },
+            )
+            .await
+    }
+
+    /// `fauna.bridges.list_list_send_history` — a caller-owned list's send
+    /// audit, newest first (`limit` 0 ⇒ the nest's default page). The compose
+    /// form renders the newest row as the send's one whole-send progress.
+    pub async fn list_list_send_history(
+        &self,
+        list_id: Vec<u8>,
+        limit: u32,
+    ) -> Result<Vec<ListSendHistoryRow>, R::Error> {
+        let reply: ListListSendHistoryReply = self
+            .nest
+            .request(
+                "fauna.bridges.list_list_send_history",
+                ListListSendHistoryRequest {
+                    list_id: ByteBuf::from(list_id),
+                    limit,
+                },
+            )
+            .await?;
+        Ok(reply.sends)
+    }
 }
 
 /// Whether a `fauna.bridges.list` row belongs on the **unified** Bridges page
@@ -2388,6 +2450,8 @@ mod tests {
                         sends_today: 1,
                         recipients_today: 3,
                     }],
+                    account_recipients_today: 3,
+                    account_recipients_per_day: 20_000,
                 })
             }
             "fauna.bridges.create_account_list" => {
@@ -2439,6 +2503,22 @@ mod tests {
             }
             "fauna.bridges.resubscribe_list_member" => {
                 fauna_protocol::encode_canonical(&ResubscribeListMemberReply { ok: true })
+            }
+            "fauna.bridges.send_list_message" => {
+                fauna_protocol::encode_canonical(&SendListMessageReply {
+                    queued_count: 3,
+                    estimated_quota_remaining: 19_994,
+                })
+            }
+            "fauna.bridges.list_list_send_history" => {
+                fauna_protocol::encode_canonical(&ListListSendHistoryReply {
+                    sends: vec![ListSendHistoryRow {
+                        sent_at: 1_700_000_500_000,
+                        recipient_count: 3,
+                        delivered_count: 3,
+                        unsubscribed_during_send: 0,
+                    }],
+                })
             }
             "fauna.bridges.fetch_bridge_pubkey" => {
                 fauna_protocol::encode_canonical(&FetchBridgePubkeyReply {
@@ -3415,6 +3495,40 @@ mod tests {
     }
 
     // ── mail-lists / mail-list-members (mail-mass-mailing.md § Wire shapes) ──
+
+    #[test]
+    fn send_list_message_composes_kind_and_payload_and_surfaces_the_tally() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = MailAccountClient::new(rec.clone());
+        let msg = b"From: a@example.com\r\nSubject: Issue 1\r\n\r\nHi\r\n".to_vec();
+        let out = block_on(client.send_list_message(vec![0xa1u8; 16], msg.clone()))
+            .expect("infallible mock");
+        let (kind, payload) = last_call(&rec);
+        assert_eq!(kind, "fauna.bridges.send_list_message");
+        let req: SendListMessageRequest =
+            fauna_protocol::decode_strict(&payload).expect("decodes as request");
+        assert_eq!(req.list_id, vec![0xa1u8; 16]);
+        assert_eq!(req.message.as_slice(), msg.as_slice());
+        assert_eq!(out.queued_count, 3);
+        assert_eq!(out.estimated_quota_remaining, 19_994);
+    }
+
+    #[test]
+    fn list_list_send_history_composes_kind_and_payload_and_surfaces_rows() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = MailAccountClient::new(rec.clone());
+        let rows =
+            block_on(client.list_list_send_history(vec![0xa1u8; 16], 1)).expect("infallible mock");
+        let (kind, payload) = last_call(&rec);
+        assert_eq!(kind, "fauna.bridges.list_list_send_history");
+        let req: ListListSendHistoryRequest =
+            fauna_protocol::decode_strict(&payload).expect("decodes as request");
+        assert_eq!(req.list_id, vec![0xa1u8; 16]);
+        assert_eq!(req.limit, 1);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].recipient_count, 3);
+        assert_eq!(rows[0].delivered_count, 3);
+    }
 
     #[test]
     fn list_account_lists_composes_kind_and_surfaces_rows() {

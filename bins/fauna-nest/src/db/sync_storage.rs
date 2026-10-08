@@ -3476,8 +3476,14 @@ impl CacheDb {
 
         // IMPORTANT: sync_changes.created_at uses now_epoch_millis(), so we must
         // compare in milliseconds. Convert quiet_secs to millis for the comparison.
+        //
+        // Saturating, never plain: `quiet_secs` is an owner's own value read back
+        // from rest, and release builds check overflow, so `i64::MAX * 1000`
+        // here panicked the nest-wide scheduler task (2026-10-08). The
+        // handler bounds it now (`NestPlacePolicy::MAX_QUIET_SECS`), but a row
+        // resting past the ceiling must still read as "not yet quiet", not crash.
         let now_millis = now_epoch_millis();
-        let quiet_millis = quiet_secs * 1000;
+        let quiet_millis = quiet_secs.saturating_mul(1000);
 
         // Get max seq and latest change time from sync_changes
         let change_stats: Option<(i64, i64)> = conn.query_row(
@@ -3496,7 +3502,7 @@ impl CacheDb {
         };
 
         // Check quiet period (both values in milliseconds)
-        if now_millis - latest_change_time < quiet_millis {
+        if now_millis.saturating_sub(latest_change_time) < quiet_millis {
             return Ok(false);
         }
 

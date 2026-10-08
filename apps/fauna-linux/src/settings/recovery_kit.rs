@@ -201,8 +201,47 @@ pub(crate) fn rearm_succession_kit(successor_actor_hex: String) {
     owe_succession_kit(successor_actor_hex);
 }
 
-/// Forget the owed kit — sign-out and factory reset only, beside
-/// [`clear_succession_sweep`].
+/// The group sweep a **relaunch adoption** still owes the successor
+/// (`succession-propagation.md` § Propagation → *Own device fleet*, the
+/// relaunch-adoption clause). `Some(actor_hex)` names the successor that owes
+/// it; `None` is every ordinary session, and every ceremony that ran its own
+/// sweep.
+///
+/// The ceremony sweeps the retired leaf out of every group itself; an adoption
+/// at relaunch ([`crate::settings::adopt_held_successor`]) adopts a successor
+/// whose ceremony reply was lost, so nothing swept. The successor's first
+/// authenticated session discharges it as an unbidden press of
+/// `recovery-kit-sweep-retry-button` (`FaunaClient::discharge_owed_sweep`),
+/// ahead of the kit. Process-global and seat-bound for exactly
+/// [`SUCCESSION_KIT_OWED`]'s reasons — the obligation exists to cross the
+/// account switch, and only the successor can author the sweep. Twin of
+/// windows' `SuccessionHandoff.SweepOwedTo` and apple's `sweepOwedTo`.
+static SUCCESSION_SWEEP_OWED: Mutex<Option<String>> = Mutex::new(None);
+
+/// Record the sweep a relaunch adoption owes, immediately before the account
+/// switch adopts `successor_actor_hex`.
+pub(crate) fn owe_succession_sweep(successor_actor_hex: String) {
+    *SUCCESSION_SWEEP_OWED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(successor_actor_hex);
+}
+
+/// Claim the owed sweep for the session that really is the successor — once.
+/// The seat bind and the single claim guard what [`claim_succession_kit`]'s do,
+/// for the same reasons.
+pub(crate) fn claim_succession_sweep(actor_hex: &str) -> bool {
+    let mut owed = SUCCESSION_SWEEP_OWED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if owed.as_deref() != Some(actor_hex) {
+        return false;
+    }
+    *owed = None;
+    true
+}
+
+/// Forget the owed kit and the owed sweep — sign-out and factory reset only,
+/// beside [`clear_succession_sweep`].
 ///
 /// A plain account *switch* must never call this: crossing exactly one switch is
 /// the whole point. A reset destroys every identity on the box, so there is no
@@ -213,6 +252,9 @@ pub(crate) fn clear_succession_kit_debt() {
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = None;
     *KIT_DISCHARGE_IN_FLIGHT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+    *SUCCESSION_SWEEP_OWED
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = None;
 }
@@ -779,6 +821,9 @@ pub fn build_recovery_kit_group(error_label: &gtk::Label) -> (adw::PreferencesGr
             state.borrow_mut().busy = true;
             repaint(&state.borrow(), &widgets);
             if let Some(client) = crate::settings::get_client() {
+                // From here a supersession is this device's own doing, and the
+                // fold owns what happens next (`settings::stolen_hold`).
+                crate::settings::begin_stolen_ceremony();
                 client.succeed_identity(&phrase);
             }
         }
@@ -1927,6 +1972,39 @@ mod tests {
             );
 
             clear_succession_kit_debt();
+        });
+    }
+
+    /// The relaunch adoption's owed sweep: seat-bound and claimed once, exactly
+    /// like the kit, and cleared with it.
+    #[test]
+    fn only_the_successor_can_claim_the_owed_sweep_and_only_once() {
+        crate::testid::run_on_gtk_thread(|| {
+            const SUCCESSOR: &str = "aa11";
+            const PREDECESSOR: &str = "bb22";
+            clear_succession_kit_debt();
+
+            assert!(
+                !claim_succession_sweep(SUCCESSOR),
+                "a session that adopted nothing owes no sweep"
+            );
+            owe_succession_sweep(SUCCESSOR.to_string());
+            assert!(
+                !claim_succession_sweep(PREDECESSOR),
+                "only the successor can author the sweep"
+            );
+            assert!(claim_succession_sweep(SUCCESSOR), "the successor may");
+            assert!(
+                !claim_succession_sweep(SUCCESSOR),
+                "the sweep is pressed exactly once"
+            );
+
+            owe_succession_sweep(SUCCESSOR.to_string());
+            clear_succession_kit_debt();
+            assert!(
+                !claim_succession_sweep(SUCCESSOR),
+                "sign-out and reset forget the owed sweep with the owed kit"
+            );
         });
     }
 

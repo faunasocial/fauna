@@ -3,9 +3,13 @@
 A widget lives outside the app's automation surface (`apps/common.md`
 § Home-screen widget → *Witnessing it*), so its witness never asks the app what
 the widget shows: it reads the file the app publishes for the widget to render,
-off disk, where the driver told the app to write it (`driver.widget_dir()`,
-`FAUNA_E2E_WIDGET_DIR`). The file format is `UnreadSnapshotStore`'s
-(`apps/fauna-apple/FaunaKit/Sources/FaunaExtensionKit/Widget/UnreadSnapshot.swift`):
+from `driver.widget_dir()` — on apple the host directory the driver told the app
+to write into (`FAUNA_E2E_WIDGET_DIR`), on android a host mirror of the app's
+private `files/widget/` that the driver refreshes through adb on each call, which
+is why every read below calls it afresh. The file format is
+`UnreadSnapshotStore`'s on both
+(`apps/fauna-apple/FaunaKit/Sources/FaunaExtensionKit/Widget/UnreadSnapshot.swift`,
+`apps/fauna-android/app/src/main/java/com/fauna/app/widget/WidgetUnreadPublisher.kt`):
 `{"count": <int>, "updatedAt": "<iso8601>"}` in `unread.json`.
 """
 
@@ -88,7 +92,7 @@ def await_widget_converged(driver, conv, *, above: int) -> int:
 
 
 def widget_refresh_passes(driver) -> dict:
-    """The iOS widget-refresh pass counters (`fauna_e2e_agent::WIDGET_REFRESH_KEY`),
+    """The iOS / android widget-refresh pass counters (`fauna_e2e_agent::WIDGET_REFRESH_KEY`),
     asserted PRESENT: an app publishing none is refused, never read as "no pass"
     (convention 11) — every barrier on these counters would otherwise pass or
     fail vacuously."""

@@ -832,6 +832,11 @@ built on your own server.</value></data>
     <data name="conversations/unified/room_labeler_on" xml:space="preserve"><value>labels: on</value></data>
     <data name="conversations/unified/room_labeler_off" xml:space="preserve"><value>labels: off</value></data>
     <data name="conversations/unified/error_send" xml:space="preserve"><value>Could not send this message: {message}</value></data>
+    <data name="conversations/unified/list_send_warning" xml:space="preserve"><value>This will send to {count} subscribed recipients on {list}. Today's quota: {used} / {limit}.</value></data>
+    <data name="conversations/unified/list_send_warning_no_limit" xml:space="preserve"><value>This will send to {count} subscribed recipients on {list}.</value></data>
+    <data name="conversations/unified/list_quota_approaching" xml:space="preserve"><value>Approaching daily limit — {remaining} more recipients today</value></data>
+    <data name="conversations/unified/list_quota_over" xml:space="preserve"><value>Sending to {count} recipients would pass today's limit of {limit} ({remaining} left). Try again tomorrow.</value></data>
+    <data name="conversations/unified/list_send_progress" xml:space="preserve"><value>Sent to {list}: {delivered} of {count} recipients delivered</value></data>
     <data name="conversations/unified/error_attachment_no_composer" xml:space="preserve"><value>Open a message composer before attaching a file.</value></data>
     <data name="conversations/unified/group_conversation_hint" xml:space="preserve"><value>This will start a group conversation.</value></data>
     <data name="conversations/unified/recipient_picker_placeholder" xml:space="preserve"><value>Type a handle, email, npub, DID, or @user@instance</value></data>
@@ -2316,7 +2321,6 @@ built on your own server.</value></data>
     <data name="settings/new_nest_url" xml:space="preserve"><value>New Nest URL</value></data>
     <data name="settings/new_nest_url_placeholder" xml:space="preserve"><value>https://nest.fauna.social</value></data>
     <data name="settings/update_button" xml:space="preserve"><value>Update</value></data>
-    <data name="settings/updates" xml:space="preserve"><value>Updates</value></data>
     <data name="settings/storage_desc" xml:space="preserve"><value>Account storage usage.</value></data>
     <data name="settings/about" xml:space="preserve"><value>About</value></data>
     <data name="settings/about_name" xml:space="preserve"><value>Fauna for Windows</value></data>
@@ -2326,9 +2330,6 @@ built on your own server.</value></data>
     <data name="settings/general" xml:space="preserve"><value>General</value></data>
     <data name="settings/appearance" xml:space="preserve"><value>Appearance</value></data>
     <data name="settings/show_in_dock" xml:space="preserve"><value>Show in Dock</value></data>
-    <data name="settings/auto_check_updates" xml:space="preserve"><value>Automatically check for updates</value></data>
-    <data name="settings/auto_download_updates" xml:space="preserve"><value>Automatically download updates</value></data>
-    <data name="settings/last_checked" xml:space="preserve"><value>Last checked:</value></data>
     <data name="settings/p2p_redirect" xml:space="preserve"><value>Peer connections and bridges are managed on the Devices and Bridges pages.</value></data>
     <data name="settings/open_devices" xml:space="preserve"><value>Open Devices</value></data>
     <data name="settings/open_bridges" xml:space="preserve"><value>Open Bridges</value></data>
@@ -2600,6 +2601,7 @@ built on your own server.</value></data>
     <data name="mail_lists/edit" xml:space="preserve"><value>Edit</value></data>
     <data name="mail_lists/delete" xml:space="preserve"><value>Delete</value></data>
     <data name="mail_lists/delete_confirm" xml:space="preserve"><value>Delete the list and all its members?</value></data>
+    <data name="mail_lists/archive_off_server_confirm" xml:space="preserve"><value>This archive link is not on your server and goes out with every message. Save anyway?</value></data>
     <data name="mail_lists/members" xml:space="preserve"><value>Members</value></data>
     <data name="mail_lists/no_domain" xml:space="preserve"><value>Add a mail domain before creating lists.</value></data>
     <data name="mail_lists/members_title" xml:space="preserve"><value>Members</value></data>
@@ -4073,6 +4075,13 @@ built on your own server.</value></data>
     <data name="error/bridges/address_refused" xml:space="preserve"><value>None of your connected bridges can reach that address. Check how it is written.</value></data>
     <data name="error/bridges/conversation_store_full" xml:space="preserve"><value>This bridge has too many messages waiting, so this wasn't sent. Try again once it catches up.</value></data>
     <data name="error/bridges/guardian_approval_required" xml:space="preserve"><value>This account can only message approved contacts.</value></data>
+    <data name="error/activitypub/not_linked" xml:space="preserve"><value>This post came from the fediverse, and ActivityPub isn't enabled for your account yet. Enable it on the Bridges page first.</value></data>
+    <data name="error/activitypub/switched_off" xml:space="preserve"><value>Your ActivityPub federation is switched off, so this can't be sent to the fediverse. Turn it back on from the Bridges page.</value></data>
+    <data name="error/bluesky/not_linked" xml:space="preserve"><value>This post came from Bluesky, and no Bluesky account is linked for you. Link one on the AT Protocol page first.</value></data>
+    <data name="error/nostr/not_linked" xml:space="preserve"><value>This post came from Nostr, and no Nostr key is linked for you. Link one on the Nostr page first.</value></data>
+    <data name="error/nostr/no_custodial_key" xml:space="preserve"><value>Your nest doesn't hold your Nostr key, so it can't sign this for you. Switch to a generated or imported key on the Nostr page.</value></data>
+    <data name="error/nostr/no_relays_configured" xml:space="preserve"><value>You've removed every Nostr relay, so there is nowhere to publish this. Add a relay on the Nostr page first.</value></data>
+    <data name="error/nostr/replies_off" xml:space="preserve"><value>Replies to Nostr are switched off, so this wasn't sent. Turn on Publish replies on the Nostr page.</value></data>
     <data name="error/nest/outdated" xml:space="preserve"><value>This nest is running an outdated version and must be updated before you can connect.</value></data>
     <data name="error/nest/schema_mismatch" xml:space="preserve"><value>This nest's database does not match its software version and must be updated.</value></data>
     <data name="error/federation/peer_nest_outdated" xml:space="preserve"><value>The other side's nest is running an outdated version and does not support this yet.</value></data>

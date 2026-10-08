@@ -256,6 +256,17 @@ pub struct ComposeState {
     pub reply_recipients: Vec<TypedAddress>,
     pub recipient_picker: Option<RecipientPickerState>, // Some only for new_thread_compose
     pub send_state: SendState,
+    /// The list-send view when this compose's one mail recipient is one of the
+    /// account's own mailing lists (`mail-mass-mailing.md` § Composing a list
+    /// message) — `None` for every other compose. Derived by
+    /// [`crate::ConversationsManager::refresh_list_send`] from the nest's
+    /// figures, so it never rests with the draft (`store::drafts::persistable`
+    /// writes it `None`): a restored draft re-derives.
+    /// Defaulted for UniFFI so the shells' positional test constructors stay
+    /// valid as the record grows.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub list_send: Option<crate::list_send::ListSendView>,
 }
 
 /// What the compose bar's reply preview (`dm-reply-preview`) shows for the

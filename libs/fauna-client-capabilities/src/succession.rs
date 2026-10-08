@@ -65,7 +65,8 @@
 //!
 //! **Record-then-deposit, over the batch** (`ui/nests.md` § Trust facet —
 //! grants): the pass runs in
-//! three phases — record every replacement's `Mint` and save, deposit each
+//! three phases — record every replacement's `Mint` and save it through the
+//! grant-mint door (the bound nest acknowledges it), deposit each
 //! blob through [`grant_log::UndepositedGrant::release`], and only then
 //! record the old ids' revokes + carry the marks. Deferring the retirement is
 //! what keeps a failed deposit retryable: the candidate predicate keys on the
@@ -401,9 +402,10 @@ where
     let mut owed = 0usize;
 
     // Phase 1 — record intents. Every replacement's successor-signed `Mint`
-    // event is recorded BEFORE anything ships: record-then-deposit
+    // event is recorded BEFORE anything ships: record, publish, then deposit
     // (`ui/nests.md` § Trust facet — grants), whose invariant is that
-    // whatever the nest ends up holding, the durable log already names. The
+    // whatever the nest ends up holding, the durable log — and the nest's
+    // own copy of it — already names. The
     // old id's revoke and the mark carry are deliberately NOT here: the old
     // event staying latest-live-predecessor-signed is what keeps the
     // candidate selectable, so a failed deposit retries at the next
@@ -538,20 +540,18 @@ where
         return Ok(GrantRemintOutcome::Reminted { reminted: 0, owed });
     }
 
-    // The one durable write that must precede every deposit. `RecordedGrants`
+    // The one write that must precede every deposit — durable here and
+    // acknowledged by the bound nest (the grant-mint door). `PublishedGrants`
     // is read from what the seam answers the ledger now reads as, so a write
     // the READ fold does not admit is caught at release below rather than
     // becoming an orphan. When every replacement was already recorded by a
-    // prior pass, the loaded ledger IS stored state — nothing to write.
-    let stored = if intents.grant_events.is_empty() {
-        current.clone()
-    } else {
-        ledger
-            .merge(intents)
-            .await
-            .map_err(GrantRemintError::Save)?
-    };
-    let recorded = grant_log::RecordedGrants::from_stored(&stored);
+    // prior pass the join puts nothing, and the door still publishes: a prior
+    // pass's event the nest never acknowledged releases no blob until it has.
+    let published = ledger
+        .merge_published(intents)
+        .await
+        .map_err(GrantRemintError::Save)?;
+    let recorded = grant_log::PublishedGrants::from_published(&published);
 
     // Phase 2 — deposit. A refused deposit leaves a PHANTOM row: recorded,
     // visible on the Nests page, cleared by an idempotent revoke — and its
@@ -605,7 +605,7 @@ where
                 now,
             );
             retirement.unattested_grant_marks.extend(carried_marks(
-                &stored,
+                published.ledger(),
                 &h.old_grant_id,
                 h.new_id,
                 h.predecessor,

@@ -167,16 +167,16 @@ pub fn nest_place_write(edit: &NestPlaceEdit) -> NestPlaceWrite {
             NEST_SNAPSHOTS_OFF => Some(false),
             _ => None,
         },
-        // A negative quiet period is refused by the nest outright
-        // (`fauna.folders.bad_request`) and deliberately not clamped, so the
-        // editor must not walk the user into that refusal: it reads as unset,
-        // exactly like junk.
+        // A quiet period outside `0..=MAX_QUIET_SECS` is refused by the nest
+        // outright (`fauna.folders.bad_request`) and deliberately not clamped,
+        // so the editor must not walk the user into that refusal: it reads as
+        // unset, exactly like junk.
         quiet_secs: edit
             .quiet_secs
             .trim()
             .parse::<i64>()
             .ok()
-            .filter(|s| *s >= 0),
+            .filter(|s| (0..=fauna_protocol::folders::NestPlacePolicy::MAX_QUIET_SECS).contains(s)),
         retention: retention_from_inputs(&edit.retention_snapshots, &edit.retention_days),
     }
 }

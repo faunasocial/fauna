@@ -7,7 +7,8 @@ using uniffi.fauna_ffi;
 namespace FaunaApp.Helpers;
 
 /// <summary>
-/// Loads blob images via the authenticated nest API and caches them by hash.
+/// Loads blob images via the authenticated nest API and caches them by hash — and a
+/// bridged post's proxied picture by its nest-relative path (<see cref="LoadProxiedAsync"/>).
 /// WinUI BitmapImage doesn't support auth headers, so we download bytes first.
 /// <para><b>The client is resolved per call, never captured.</b> The pages that own a
 /// loader are long-lived (<c>FeedPage</c> holds it in a <c>static</c> so the XAML
@@ -19,11 +20,15 @@ namespace FaunaApp.Helpers;
 /// restart. Taking a resolver instead of a reference makes that staleness
 /// unrepresentable.</para>
 /// </summary>
-public sealed class BlobImageLoader : IHashImageLoader
+public sealed class BlobImageLoader : IHashImageLoader, IProxiedImageLoader
 {
     private readonly Func<INestHttpClient?> _nest;
     private readonly Func<IFfiFeedManager?>? _feedManager;
     private readonly Dictionary<string, (BitmapImage Image, bool HasC2pa)> _cache = new();
+
+    /// <summary>Decoded bridged-post pictures, keyed by their nest-relative path
+    /// (<see cref="LoadProxiedAsync"/>). Dropped with <see cref="_cache"/>.</summary>
+    private readonly Dictionary<string, BitmapImage> _proxiedCache = new();
 
     /// <summary>The manager the cached bitmaps were opened under — see the cache-reset
     /// note in <see cref="LoadWithC2paAsync"/>. Compared by reference, mirroring
@@ -70,11 +75,7 @@ public sealed class BlobImageLoader : IHashImageLoader
         // substance (they are unauthenticated by design and would re-fetch identically);
         // paying one re-fetch for them is cheaper than reasoning about which cached bitmap
         // came from which key.
-        if (!ReferenceEquals(manager, _cacheKeyedTo))
-        {
-            _cache.Clear();
-            _cacheKeyedTo = manager;
-        }
+        DropCachesOnManagerChange(manager);
 
         // Hash-keyed within one manager's lifetime: a blob hash is content-addressed, and
         // the cached value is an already-decoded bitmap.
@@ -108,6 +109,47 @@ public sealed class BlobImageLoader : IHashImageLoader
         }
     }
 
+    /// <summary>A bridged post's picture (render-model.md § D6c): its bytes, fetched from
+    /// the user's own nest by nest-relative <paramref name="path"/> with the session bearer
+    /// — the GET a blob takes, with a different argument — and decoded. No
+    /// <see cref="PostMediaOpen"/> step and no C2PA verdict: the nest proxies a third
+    /// party's public picture, so nothing is sealed and nothing is attested. A fetch that
+    /// fails or will not decode is not cached, so the next bind retries.</summary>
+    public async Task<BitmapImage?> LoadProxiedAsync(string path)
+    {
+        // The bearer belongs to the session that asked: a new manager is a new session.
+        DropCachesOnManagerChange(_feedManager?.Invoke());
+
+        if (_proxiedCache.TryGetValue(path, out var cached))
+            return cached;
+
+        var nest = _nest();
+        if (nest is null) return null;
+
+        try
+        {
+            var bytes = await nest.GetContentAsync(path);
+            var bmp = await BitmapFromBytesAsync(bytes);
+            if (bmp is null) return null;
+            _proxiedCache[path] = bmp;
+            return bmp;
+        }
+        catch (Exception ex)
+        {
+            // Swallow-and-skip, traced — as for a blob above. The placeholder stays.
+            System.Diagnostics.Debug.WriteLine($"BlobImageLoader: proxied picture {path} failed to load: {ex}");
+            return null;
+        }
+    }
+
+    private void DropCachesOnManagerChange(IFfiFeedManager? manager)
+    {
+        if (ReferenceEquals(manager, _cacheKeyedTo)) return;
+        _cache.Clear();
+        _proxiedCache.Clear();
+        _cacheKeyedTo = manager;
+    }
+
     /// <summary>
     /// Decode raw image bytes into a <see cref="BitmapImage"/> via an in-memory
     /// stream (WinUI's <c>BitmapImage</c> takes a stream, not a byte[]). Shared by
@@ -138,5 +180,9 @@ public sealed class BlobImageLoader : IHashImageLoader
         }
     }
 
-    public void Clear() => _cache.Clear();
+    public void Clear()
+    {
+        _cache.Clear();
+        _proxiedCache.Clear();
+    }
 }

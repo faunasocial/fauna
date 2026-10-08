@@ -285,6 +285,15 @@ pub enum RequestMethod {
         /// additively.
         #[serde(default)]
         app: Option<String>,
+        /// The platform identity the agent posts this app's banners under
+        /// while no app is attached — windows: the AUMID of the toast
+        /// registration the app itself carries, so an agent's toast is the
+        /// app's (its name, its icon, and a tap activates it). `None` where the
+        /// platform's sink needs no identity (linux) or the app has none. The
+        /// agent keeps the last one it was handed across its own restarts.
+        /// Additive (2026-10-08): an older agent ignores it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notification_identity: Option<String>,
     },
 
     /// Nudge the resident engine serving `folder` to pull remote changes
@@ -2207,7 +2216,10 @@ mod tests {
             RequestMethod::GetBackupStatus,
             RequestMethod::Pause,
             RequestMethod::Resume,
-            RequestMethod::AttachApp { app: None },
+            RequestMethod::AttachApp {
+                app: None,
+                notification_identity: None,
+            },
         ];
 
         for method in methods {

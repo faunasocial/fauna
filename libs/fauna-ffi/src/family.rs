@@ -551,8 +551,11 @@ pub fn approval_display_text(entry: FfiFamilyApprovalEntry) -> Option<String> {
         &entry.peer_address,
         &entry.peer_handle,
         &entry.summary,
+        &entry.bridge_id,
+        &entry.operation,
+        &entry.target,
     )
-    .map(str::to_string)
+    .map(std::borrow::Cow::into_owned)
 }
 
 // ── Screen-time faces (v1.x screen-time pillar, Slice E) ───────────────

@@ -521,8 +521,14 @@ pub fn scoped_store_dir(
 /// Nothing is carried in from `root`'s own flat entries: the pre-scoping flat
 /// layout predates the compat-remnant sweep, so no directory holding one
 /// exists (`../architecture/version-compatibility.md` § Dimension 2, program
-/// 4). A failure to create the scope is logged, never fatal: the store's own
-/// writes then fail as a cold cache would, which costs merges, never data.
+/// 4). A failure to create the scope is logged, never fatal — and it heals:
+/// every write of the store (and of the merge-base cache beside it) creates
+/// its directory again first, so the first write after the cause clears lands
+/// whole. The cause seen in the field is transient: an on-demand (cfapi) root
+/// that is registered but not connected — an engine rebuilt across the
+/// provider's reconnect — refuses every create inside it
+/// (`ERROR_FLT_INVALID_NAME_REQUEST`) until it is connected again. A failure
+/// that lasts surfaces at each write's own warning.
 pub fn open_scoped_store_dir(
     root: &std::path::Path,
     device_id_hex: &str,
@@ -538,10 +544,11 @@ fn create_scoped_store_dir(scoped: &std::path::Path) -> bool {
     match std::fs::create_dir_all(scoped) {
         Ok(()) => true,
         Err(e) => {
-            tracing::error!(
+            tracing::warn!(
                 dir = %fauna_core::log_redact::log_path(&scoped.to_string_lossy()),
                 error = %e,
-                "could not create the per-set state directory"
+                "could not create the per-set state directory yet; every write \
+                 creates it again first"
             );
             false
         }
@@ -1339,6 +1346,29 @@ impl CausalStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scope that could not be created when the engine was built (a cfapi root
+    /// between its provider's disconnect and reconnect refuses every create inside
+    /// it) costs nothing once the cause clears: the store's first write creates it.
+    /// Staged here with a FILE where the scope's parent must be.
+    #[test]
+    fn a_scope_that_could_not_be_created_at_open_heals_at_the_first_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".fauna-causal");
+        std::fs::write(&root, b"in the way").unwrap();
+
+        let scoped = open_scoped_store_dir(&root, &"ab".repeat(32), "docs");
+        assert!(!scoped.exists(), "precondition: the create failed at open");
+
+        std::fs::remove_file(&root).unwrap();
+        let store = CausalStore::new(scoped.clone());
+        store.advance_frontier("notes.txt", 7);
+        store.advance_edit_frontier("notes.txt", 7);
+
+        assert!(scoped.is_dir(), "the first write created the scope");
+        assert_eq!(store.frontier("notes.txt"), Some(7));
+        assert_eq!(store.edit_frontier("notes.txt"), Some(7));
+    }
 
     /// Frontier-only state, edit-frontier untracked — the shape of a path whose
     /// edit-frontier state was lost or never stamped.

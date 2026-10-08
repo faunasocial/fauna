@@ -20,7 +20,7 @@
 //! * the **driver** — [`drive_ceremonies`], the idempotent owed-action
 //!   executor an app (or the tier_3 rig) calls after conversation polls: it
 //!   re-posts unposted payloads, runs the interactive mint door in exactly
-//!   the `fauna-client-pair` record-then-deposit order, signs + posts the
+//!   the `fauna-client-pair` record, publish, then deposit order, signs + posts the
 //!   witness delivery, and writes both custody registry rows through its
 //!   caller-supplied seams.
 //!
@@ -60,7 +60,25 @@ use fauna_protocol::scope::is_co_authored_scope;
 use crate::custody_grants::{
     CustodyMintError, custody_event_scopes, custody_mint_blob, validate_custody_scope_set,
 };
-use crate::grant_log::{self, RecordedGrants};
+use crate::grant_log::{self, PublishedGrants};
+
+/// The most unanswered custody offers one owner may hold a slot for on this
+/// host at once (ceremony step 1's bound, `account-replica-posture.md`
+/// § Replica posture → *The ceremony*). An offer is unanswered while it is
+/// neither accepted, declined nor removed; it holds its slot until both its
+/// own term and [`HELD_OFFER_SLOT_FLOOR_SECS`] have passed. Four mirrors the
+/// offline-share ceremony's per-initiator invitation cap
+/// ([`crate::group_ceremony_peer::GROUP_CEREMONY_MAX_PENDING_INVITATIONS_PER_INITIATOR`]):
+/// an honest owner has one live offer to a host, a re-offer after decay a
+/// second.
+pub const MAX_PENDING_HELD_OFFERS_PER_OWNER: usize = 4;
+
+/// How long an unanswered offer holds its cap slot on the host's own clock,
+/// whatever term its owner chose — counted from the host's capture. Without
+/// it an owner-chosen one-second term would expire every offer at once and
+/// turn the cap into a revolving door; with it one owner adds at most
+/// [`MAX_PENDING_HELD_OFFERS_PER_OWNER`] records a week.
+pub const HELD_OFFER_SLOT_FLOOR_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// A ceremony transition was refused.
 #[derive(Debug, thiserror::Error)]
@@ -80,6 +98,19 @@ pub enum CustodyCeremonyError {
     /// A second accept tried to re-bind an already-bound ceremony.
     #[error("custody ceremony already bound a serving device for this grant id")]
     AlreadyBound,
+    /// The offer's owner already has [`MAX_PENDING_HELD_OFFERS_PER_OWNER`]
+    /// unanswered offers holding a slot on this host — the new one is
+    /// refused and never persisted.
+    #[error(
+        "custody offer refused: this owner already has {pending} unanswered offers \
+         pending here (the cap is {MAX_PENDING_HELD_OFFERS_PER_OWNER})"
+    )]
+    TooManyPendingOffers { pending: usize },
+    /// The offer's term (`offered_at + duration_secs`) has passed with no
+    /// accept — the owner's side has decayed it and re-offers under a fresh
+    /// grant id, so this side neither captures nor accepts it.
+    #[error("custody offer has expired unanswered")]
+    OfferExpired,
     /// A mint-side validation failed (scope strings, grant id length).
     #[error(transparent)]
     Mint(#[from] CustodyMintError),
@@ -283,6 +314,21 @@ pub fn ingest_payload(
                         "offer grant id already on record with different bytes".into(),
                     ))
                 };
+            }
+            // The held-offer bound (ceremony step 1): an offer already past
+            // its term is spent — a re-walk re-feeding old channel history
+            // must not capture it — and an owner past the cap is refused.
+            // Both refusals persist nothing.
+            if offer_term_passed(&offer, now) {
+                return Err(CustodyCeremonyError::OfferExpired);
+            }
+            let pending = cfg
+                .held
+                .iter()
+                .filter(|h| h.owner == offer.owner.0 && holds_offer_slot(h, now))
+                .count();
+            if pending >= MAX_PENDING_HELD_OFFERS_PER_OWNER {
+                return Err(CustodyCeremonyError::TooManyPendingOffers { pending });
             }
             cfg.held.push(HeldCustody {
                 grant_id: offer.grant_id.clone(),
@@ -537,6 +583,11 @@ fn build_accept_inner(
     let offer_env: EmbedAsBytes = fauna_core::encoding::canonical_decode(&record.offer)
         .map_err(|e| CustodyCeremonyError::Payload(format!("recorded offer: {e}")))?;
     let offer = decode_offer(&offer_env)?;
+    // The owner's side has decayed an offer past its term (`decayed_offers`):
+    // an accept now would bind a ceremony the owner already re-offered.
+    if offer_term_passed(&offer, now) {
+        return Err(CustodyCeremonyError::OfferExpired);
+    }
     effective_scope_set(&offer.scopes, narrowed_scopes.as_ref())?;
     // The custodian's own ingest door for the counterparty-URL dial
     // policy: an offer whose anchor this device would refuse to
@@ -579,7 +630,9 @@ fn build_accept_inner(
 /// Owner-side offers past their shelf life with no accept — T13's
 /// decay-to-re-offer, computed from state + `now` (never a timer). The
 /// caller re-offers with a fresh grant id; the decayed record stays as the
-/// audit trail.
+/// audit trail and is never reclaimed (ruled 2026-10-08,
+/// `account-replica-posture.md` § Replica posture → *The custody grant +
+/// ceremony*, step 1: the bounded capture rate stands on both sides).
 pub fn decayed_offers(custody: &CustodyConfig, now: Timestamp) -> Vec<Vec<u8>> {
     custody
         .granted
@@ -590,6 +643,44 @@ pub fn decayed_offers(custody: &CustodyConfig, now: Timestamp) -> Vec<Vec<u8>> {
         })
         .map(|g| g.grant_id.clone())
         .collect()
+}
+
+/// Has the offer's term passed? The host-side mirror of [`decayed_offers`]'
+/// owner-side test, to the microsecond, so both sides spend an unanswered
+/// offer at the same instant.
+fn offer_term_passed(offer: &CustodyOffer, now: Timestamp) -> bool {
+    now.0.saturating_sub(offer.offered_at.0) > offer.duration_secs.saturating_mul(1_000_000)
+}
+
+/// Is this held record an offer still awaiting the host's answer — neither
+/// accepted, declined nor removed?
+fn is_unanswered(h: &HeldCustody) -> bool {
+    h.accept.is_empty() && !h.declined && !h.removed
+}
+
+/// Host side: has this unanswered offer's term passed? A recorded offer this
+/// build cannot decode counts as spent — it could never render or accept.
+/// Answered records are never "expired" here: their lifetime is the
+/// witness's, not the offer's.
+pub fn held_offer_expired(h: &HeldCustody, now: Timestamp) -> bool {
+    if !is_unanswered(h) {
+        return false;
+    }
+    let Ok(env) = fauna_core::encoding::canonical_decode::<EmbedAsBytes>(&h.offer) else {
+        return true;
+    };
+    decode_offer(&env).map_or(true, |offer| offer_term_passed(&offer, now))
+}
+
+/// Does this record hold one of its owner's
+/// [`MAX_PENDING_HELD_OFFERS_PER_OWNER`] slots? While unanswered, until both
+/// its term and [`HELD_OFFER_SLOT_FLOOR_SECS`] from its capture (`updated_at`,
+/// the host's own clock — no answer has moved it) have passed.
+fn holds_offer_slot(h: &HeldCustody, now: Timestamp) -> bool {
+    is_unanswered(h)
+        && (!held_offer_expired(h, now)
+            || now.0.saturating_sub(h.updated_at.0)
+                <= HELD_OFFER_SLOT_FLOOR_SECS.saturating_mul(1_000_000))
 }
 
 /// The consent surface's DECLINE gesture (T16): mark a pending offer
@@ -1006,10 +1097,10 @@ where
             }
         }
         // (2) accept bound but not minted → the interactive mint door,
-        // exactly the record-then-deposit order (`pair/src/lib.rs` mint):
-        // the signed Mint event recorded on the ledger, then the record's
-        // `minted` mark on the config, then release-against-recorded +
-        // deposit.
+        // exactly the record, publish, then deposit order (`pair/src/lib.rs`
+        // mint): the signed Mint event recorded on the ledger and
+        // acknowledged by the bound nest, then the record's `minted` mark on
+        // the config, then release-against-published + deposit.
         if !g.accept.is_empty() && !g.minted {
             let accept_env: EmbedAsBytes = fauna_core::encoding::canonical_decode(&g.accept)
                 .map_err(|e| CustodyCeremonyError::Payload(format!("recorded accept: {e}")))?;
@@ -1031,12 +1122,14 @@ where
             let current = ledger.load().await.map_err(|e| {
                 CustodyCeremonyError::Payload(format!("reading the grant ledger: {e}"))
             })?;
-            let (window, stored) = match recorded_window(&current, &g.grant_id) {
-                Some((start, end)) => (GrantWindow(start, end), current),
+            // The recorded one still goes through the door with an empty
+            // replica: the interrupted drive may have recorded it without the
+            // nest ever acknowledging it.
+            let mut intent = SuccessionLedger::events_replica(owner_keypair.actor_id(), Vec::new());
+            let window = match recorded_window(&current, &g.grant_id) {
+                Some((start, end)) => GrantWindow(start, end),
                 None => {
                     let window = GrantWindow(now_secs, now_secs + offer.duration_secs);
-                    let mut intent =
-                        SuccessionLedger::events_replica(owner_keypair.actor_id(), Vec::new());
                     grant_log::record_mint(
                         &mut intent,
                         owner_keypair.signing_key(),
@@ -1050,15 +1143,17 @@ where
                     .map_err(|e| {
                         CustodyCeremonyError::Payload(format!("recording the Mint event: {e}"))
                     })?;
-                    match ledger.merge(intent).await {
-                        Ok(stored) => (window, stored),
-                        // The door refused (no tip yet, the store not up):
-                        // nothing recorded, so nothing may deposit — owed.
-                        Err(_) => {
-                            report.still_owed += 1;
-                            continue;
-                        }
-                    }
+                    window
+                }
+            };
+            let published = match ledger.merge_published(intent).await {
+                Ok(published) => published,
+                // The door refused (no tip yet, the store not up, the nest
+                // offline or refusing the publish): nothing the nest
+                // acknowledged, so nothing may deposit — owed.
+                Err(_) => {
+                    report.still_owed += 1;
+                    continue;
                 }
             };
             config
@@ -1075,7 +1170,7 @@ where
                 window,
                 &effective,
             )?;
-            match undeposited.release(&RecordedGrants::from_stored(&stored)) {
+            match undeposited.release(&PublishedGrants::from_published(&published)) {
                 Ok(blob_bytes) => {
                     if !depositor.deposit(blob_bytes).await {
                         // Deposit owed — the reconcile sweep and the next
@@ -1085,7 +1180,7 @@ where
                 }
                 Err(e) => {
                     return Err(CustodyCeremonyError::Payload(format!(
-                        "release against the just-stored mint failed: {e}"
+                        "release against the just-published mint failed: {e}"
                     )));
                 }
             }
@@ -1399,8 +1494,9 @@ pub enum CeremonySide {
 /// as the fold of its per-record rows and written as a join: a read snapshot,
 /// a read-modify-join update, and a per-record mark. The mint leg's signed
 /// event is the succession ledger's (the driver's `ledger` seam), recorded
-/// before the mark — the record-then-deposit order demands the event be
-/// durably stored before the blob releases.
+/// before the mark — the record, publish, then deposit order demands the event
+/// be durably stored, and acknowledged by the bound nest, before the blob
+/// releases.
 ///
 /// Every [`CustodyCeremonyStore`] is one (the account-store handle, the
 /// resolving and no-store stand-ins, the account port's forwarder, the
@@ -2714,6 +2810,116 @@ mod tests {
         (owner_cfg, o_kp, nest_kp)
     }
 
+    /// Record, publish, then deposit (`ui/nests.md` § Trust facet — grants →
+    /// *Record-then-deposit*, the published form): the custody grant's `Mint`
+    /// the bound nest did not acknowledge deposits no blob and stays owed; the
+    /// next drive, the nest taking the publish, deposits under the SAME
+    /// recorded `Mint` — never a second one.
+    #[test]
+    fn an_unpublished_custody_mint_deposits_nothing_and_stays_owed() {
+        block_on(async {
+            let (o_kp, h_kp) = (owner_kp(), host_kp());
+            let owner_cfg = MemConfig::new(o_kp.actor_id());
+            let host_cfg = MemConfig::new(h_kp.actor_id());
+            let now = Timestamp(1_000_000_000);
+            let nest_key = ActorKeypair::from_secret([0xAB; 32]).actor_id().0;
+
+            let offer_bytes = owner_cfg
+                .with(|c| {
+                    begin_offer(
+                        c,
+                        &o_kp,
+                        offer_params(h_kp.actor_id(), CustodyScopeSet::Account),
+                        now,
+                    )
+                })
+                .expect("offer");
+            host_cfg
+                .with(|c| {
+                    ingest_payload(
+                        c,
+                        &h_kp.actor_id(),
+                        &o_kp.actor_id(),
+                        &"aa".repeat(32),
+                        &offer_bytes,
+                        now,
+                    )
+                })
+                .expect("ingest offer");
+            let accept_bytes = host_cfg
+                .with(|c| {
+                    build_accept_nest(
+                        c,
+                        &h_kp,
+                        &[0x1D; 16],
+                        nest_key,
+                        "https://my-own-nest.example".into(),
+                        DEFAULT_RETAINED_BYTES_CAP,
+                        None,
+                        now,
+                    )
+                })
+                .expect("nest-form accept");
+            owner_cfg
+                .with(|c| {
+                    ingest_payload(
+                        c,
+                        &o_kp.actor_id(),
+                        &h_kp.actor_id(),
+                        &"aa".repeat(32),
+                        &accept_bytes,
+                        now,
+                    )
+                })
+                .expect("owner binds the accept");
+
+            let (poster, writer, depositor) = (
+                MemPoster::default(),
+                MemWriter::default(),
+                MemDepositor::default(),
+            );
+            owner_cfg.ledger().publish_refuses(true);
+            let report = drive_ceremonies(
+                &owner_cfg,
+                owner_cfg.ledger(),
+                &o_kp,
+                &poster,
+                &writer,
+                &depositor,
+                &MemHosting::default(),
+                now,
+            )
+            .await
+            .expect("an unpublished mint is owed, not an error");
+            assert!(report.still_owed >= 1, "the mint stays owed: {report:?}");
+            assert!(
+                depositor.blobs.lock().unwrap().is_empty(),
+                "no blob deposited behind an unpublished event"
+            );
+            assert_eq!(owner_cfg.ledger().current().grant_events.len(), 1);
+
+            owner_cfg.ledger().publish_refuses(false);
+            drive_ceremonies(
+                &owner_cfg,
+                owner_cfg.ledger(),
+                &o_kp,
+                &poster,
+                &writer,
+                &depositor,
+                &MemHosting::default(),
+                now,
+            )
+            .await
+            .expect("the next drive");
+            assert_eq!(depositor.blobs.lock().unwrap().len(), 1, "deposited once");
+            assert_eq!(
+                owner_cfg.ledger().current().grant_events.len(),
+                1,
+                "the recorded Mint is reused, never re-signed"
+            );
+        });
+    }
+
     /// The NEST-form ceremony end to end (the host-side choice): offer →
     /// `build_accept_nest` (pinned nest identity + URL, zero candidates) →
     /// owner binds + mints → deliver → the host drive routes arm (6) to the
@@ -3746,5 +3952,166 @@ mod tests {
                 );
             }
         });
+    }
+
+    // ── The held-offer bound ──
+
+    /// One owner's signed offer under grant id `[id; 16]`, offered at `at`
+    /// with a shelf life of `duration_secs` — the channel bytes the host
+    /// ingests.
+    fn held_bound_offer(
+        owner: &ActorKeypair,
+        host: ActorId,
+        id: u8,
+        duration_secs: u64,
+        at: Timestamp,
+    ) -> Vec<u8> {
+        let mut scratch = CustodyConfig::default();
+        let mut params = offer_params(host, CustodyScopeSet::Account);
+        params.grant_id = [id; CUSTODY_GRANT_ID_LEN];
+        params.duration_secs = duration_secs;
+        begin_offer(&mut scratch, owner, params, at).expect("begin the offer")
+    }
+
+    fn host_takes(
+        cfg: &MemConfig,
+        h: &ActorKeypair,
+        sender: &ActorKeypair,
+        bytes: &[u8],
+        now: Timestamp,
+    ) -> Result<IngestOutcome, CustodyCeremonyError> {
+        cfg.with(|c| {
+            ingest_payload(
+                c,
+                &h.actor_id(),
+                &sender.actor_id(),
+                &"aa".repeat(32),
+                bytes,
+                now,
+            )
+        })
+    }
+
+    /// A peer sharing a channel with the host cannot grow the host's
+    /// fleet-synced ceremony state and consent surface without bound: past
+    /// [`MAX_PENDING_HELD_OFFERS_PER_OWNER`] unanswered offers from ONE owner
+    /// the next is refused and nothing is persisted. The cap is per owner (a
+    /// second owner is untouched), a re-delivered offer stays `Duplicate` at
+    /// the cap, and the host's own decline frees the slot.
+    #[test]
+    fn unanswered_offers_past_the_per_owner_cap_are_refused_and_not_persisted() {
+        let (o, h) = (owner_kp(), host_kp());
+        let other = ActorKeypair::from_secret([11u8; 32]);
+        let now = Timestamp(1_000_000_000);
+        let host_cfg = MemConfig::new(h.actor_id());
+        let day = 24 * 3600;
+
+        let mut first = Vec::new();
+        for id in 1..=MAX_PENDING_HELD_OFFERS_PER_OWNER as u8 {
+            let bytes = held_bound_offer(&o, h.actor_id(), id, 30 * day, now);
+            let out = host_takes(&host_cfg, &h, &o, &bytes, now).expect("under the cap");
+            assert!(matches!(out, IngestOutcome::OfferPending { .. }));
+            if id == 1 {
+                first = bytes;
+            }
+        }
+        let before = host_cfg.0.current();
+        let over = held_bound_offer(&o, h.actor_id(), 0xEE, 30 * day, now);
+        let err = host_takes(&host_cfg, &h, &o, &over, now).expect_err("one past the cap");
+        assert!(
+            matches!(err, CustodyCeremonyError::TooManyPendingOffers { .. }),
+            "{err}"
+        );
+        assert_eq!(
+            host_cfg.0.current(),
+            before,
+            "a refused offer persists nothing"
+        );
+        assert_eq!(
+            crate::view_model::custody_offers(&host_cfg.0.current(), now.0).len(),
+            MAX_PENDING_HELD_OFFERS_PER_OWNER,
+            "the consent surface stays at the cap"
+        );
+
+        // A re-delivered offer at the cap is the same idempotent no-op.
+        assert_eq!(
+            host_takes(&host_cfg, &h, &o, &first, now).unwrap(),
+            IngestOutcome::Duplicate
+        );
+        // The cap is per owner: another account's offer still lands.
+        let theirs = held_bound_offer(&other, h.actor_id(), 0xDD, 30 * day, now);
+        assert!(matches!(
+            host_takes(&host_cfg, &h, &other, &theirs, now).unwrap(),
+            IngestOutcome::OfferPending { .. }
+        ));
+        // The host's decline answers the offer and frees its slot.
+        assert!(host_cfg.with(|c| decline_offer(c, &[1u8; CUSTODY_GRANT_ID_LEN], now)));
+        assert!(matches!(
+            host_takes(&host_cfg, &h, &o, &over, now).unwrap(),
+            IngestOutcome::OfferPending { .. }
+        ));
+    }
+
+    /// An offer whose term has passed with no answer is spent on the host
+    /// exactly as the owner's decay treats it: off the consent surface, no
+    /// longer acceptable, and its slot free — but only once the slot floor
+    /// [`HELD_OFFER_SLOT_FLOOR_SECS`] has also passed on the host's own
+    /// clock, so an owner-chosen tiny term cannot turn the cap into a
+    /// revolving door. An offer already expired when it arrives (a re-walk
+    /// re-feeding old channel history) is refused, never persisted.
+    #[test]
+    fn an_expired_unanswered_offer_leaves_the_consent_surface_and_frees_its_slot() {
+        let (o, h) = (owner_kp(), host_kp());
+        let t0 = Timestamp(1_000_000_000);
+        let secs = |s: u64| Timestamp(t0.0 + s * 1_000_000);
+        let host_cfg = MemConfig::new(h.actor_id());
+        let short = 60;
+
+        for id in 1..=MAX_PENDING_HELD_OFFERS_PER_OWNER as u8 {
+            let bytes = held_bound_offer(&o, h.actor_id(), id, short, t0);
+            host_takes(&host_cfg, &h, &o, &bytes, t0).expect("under the cap");
+        }
+        // Past every term: the consent surface is empty and none accepts.
+        let later = secs(short + 1);
+        assert!(crate::view_model::custody_offers(&host_cfg.0.current(), later.0).is_empty());
+        let mut state = host_cfg.0.current();
+        let err = build_accept(
+            &mut state,
+            &h,
+            &[1u8; CUSTODY_GRANT_ID_LEN],
+            [3u8; 32],
+            DeviceEndpoints {
+                node_id: [3u8; 32],
+                lan_addrs: Vec::new(),
+                public_addrs: Vec::new(),
+                relay_url: None,
+            },
+            DEFAULT_RETAINED_BYTES_CAP,
+            None,
+            later,
+        )
+        .expect_err("an expired offer cannot be accepted");
+        assert!(matches!(err, CustodyCeremonyError::OfferExpired), "{err}");
+
+        // Inside the slot floor the expired offers still hold their slots…
+        let fresh = held_bound_offer(&o, h.actor_id(), 0xEE, short, later);
+        assert!(matches!(
+            host_takes(&host_cfg, &h, &o, &fresh, later).expect_err("floor holds the slot"),
+            CustodyCeremonyError::TooManyPendingOffers { .. }
+        ));
+        // …and past it they free them.
+        let past_floor = secs(HELD_OFFER_SLOT_FLOOR_SECS + 1);
+        let fresh = held_bound_offer(&o, h.actor_id(), 0xEE, short, past_floor);
+        assert!(matches!(
+            host_takes(&host_cfg, &h, &o, &fresh, past_floor).unwrap(),
+            IngestOutcome::OfferPending { .. }
+        ));
+
+        // An offer already past its term on arrival is refused unpersisted.
+        let before = host_cfg.0.current();
+        let stale = held_bound_offer(&o, h.actor_id(), 0xEF, short, t0);
+        let err = host_takes(&host_cfg, &h, &o, &stale, past_floor).expect_err("stale on arrival");
+        assert!(matches!(err, CustodyCeremonyError::OfferExpired), "{err}");
+        assert_eq!(host_cfg.0.current(), before);
     }
 }

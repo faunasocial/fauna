@@ -142,6 +142,25 @@ pub struct MlsSnapshotPlaintext {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub index_seg_grace_keys: Vec<ByteBuf>,
+    /// The unix-seconds instant each **prior** MSEK generation was retired,
+    /// newest first — aligned with `leaf_init_keypairs[1..]` exactly like
+    /// [`Self::mail_epoch_grace_roots`] (the current generation has none: it
+    /// is not retired). What lets the MDA's opener trial the generation
+    /// current at a record's seal basis first, then outward, instead of
+    /// walking the whole ring per record ([`generation_trial_order`];
+    /// `owner-key-material.md` § Path B-sibling-2 → *Pre-rotation mail at
+    /// rest*). Public timing metadata, no key material.
+    ///
+    /// **Additive + omitted when empty** (`skip_serializing_if`): a
+    /// no-priors snapshot stays byte-identical and an older decoder ignores
+    /// the unknown key (the [`LeafInitKeypair::mlkem_dk`] shape); a reader
+    /// finding it empty or short walks the whole ring.
+    #[serde(
+        rename = "generation_retired_at_unix",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub generation_retired_at_unix: Vec<u64>,
 }
 
 impl Default for MlsSnapshotPlaintext {
@@ -155,6 +174,7 @@ impl Default for MlsSnapshotPlaintext {
             leaf_init_keypairs: Vec::new(),
             mail_epoch_grace_roots: Vec::new(),
             index_seg_grace_keys: Vec::new(),
+            generation_retired_at_unix: Vec::new(),
         }
     }
 }
@@ -226,6 +246,13 @@ impl MlsSnapshotPlaintext {
                 )));
             }
         }
+        let priors = snap.leaf_init_keypairs.len().saturating_sub(1);
+        if snap.generation_retired_at_unix.len() > priors {
+            return Err(UnwrapError::InvalidFormat(format!(
+                "generation_retired_at_unix carries {} instants for {priors} prior generations",
+                snap.generation_retired_at_unix.len()
+            )));
+        }
         Ok(snap)
     }
 }
@@ -236,12 +263,6 @@ impl MlsSnapshotPlaintext {
 /// derivation off a shared root uses a versioned, domain-separated
 /// context string).
 pub const RECIPIENT_HPKE_DERIVE_CONTEXT: &str = "fauna.mail.recipient-hpke.v1 2026-05-23";
-
-/// Maximum number of leaf-init keypairs carried in a v1 snapshot:
-/// the current one + the last 2 rotations for grace-decrypt of mail
-/// sealed to a now-rotated recipient pubkey (`MailConfig.prior_mseks`
-/// is capped to match).
-pub const SNAPSHOT_GRACE_KEYPAIRS: usize = 3;
 
 /// Derive the actor's standing recipient-mail HPKE keypair from MSEK.
 ///
@@ -618,9 +639,10 @@ impl std::fmt::Debug for StandingMailKeypair {
 }
 
 /// Derive the standing recipient-mail key set for an MSEK history —
-/// `mseks[0]` the current generation, then each prior grace generation,
-/// capped at [`SNAPSHOT_GRACE_KEYPAIRS`] — one [`StandingMailKeypair`] per
-/// generation, newest first. This is the ONE derivation of that set: the
+/// `mseks[0]` the current generation, then EVERY prior generation, uncapped
+/// (`owner-key-material.md` § Path B-sibling-2 → *Pre-rotation mail at
+/// rest*) — one [`StandingMailKeypair`] per generation, newest first. This
+/// is the ONE derivation of that set: the
 /// snapshot builder ([`build_mls_snapshot_plaintext`]) serializes its output
 /// for the MDA, and a client holds it directly for its own receive path, so a
 /// record the MDA can open is by construction one the owner's client can open
@@ -629,7 +651,6 @@ impl std::fmt::Debug for StandingMailKeypair {
 pub fn derive_standing_mail_keypairs(mseks: &[[u8; 32]]) -> Vec<StandingMailKeypair> {
     mseks
         .iter()
-        .take(SNAPSHOT_GRACE_KEYPAIRS)
         .map(|msek| {
             let (sk, _pk) = derive_recipient_hpke_keypair(msek);
             let xwing = derive_recipient_xwing_keypair(msek);
@@ -638,40 +659,95 @@ pub fn derive_standing_mail_keypairs(mseks: &[[u8; 32]]) -> Vec<StandingMailKeyp
         .collect()
 }
 
-/// The standing trial: open an inner sealed mail record under each keypair of
-/// a standing key set in order (current generation first, then grace), opening
-/// either suite per keypair (hybrid when the ML-KEM half is present, classical
-/// otherwise). `None` when every keypair misses — wrong recipient, a rotation
-/// past the grace window, or a tampered envelope. The standing arm of
-/// [`super::open_mail_epoch_chain`] on both the MDA and the client.
+/// **The seal-time trial order over a key set of `generations` generations**
+/// — index `0` the current generation, index `i ≥ 1` the prior one retired at
+/// `retired_at_unix[i - 1]` (newest first, the order every key set and the
+/// snapshot's aligned lists keep). The generation current at
+/// `seal_basis_unix` comes first — one step older per retirement after that
+/// instant — then its neighbours outward, the OLDER one first at each step
+/// (mail sealed to a just-rotated-away pubkey lands after the rotation), then
+/// the rest; every index exactly once, so a miss still tries the whole ring.
+/// An unknown basis (`None`), or instants missing for some generations, walk
+/// from the newest. The epoch opener's select-by-timestamp shape lifted to
+/// generations (`owner-key-material.md` § Path B-sibling-2 → *Pre-rotation
+/// mail at rest*): with every generation carried, a per-record walk of the
+/// whole ring would cost one AEAD failure per rotation ever made.
+#[must_use]
+pub fn generation_trial_order(
+    generations: usize,
+    retired_at_unix: &[u64],
+    seal_basis_unix: Option<u64>,
+) -> Vec<usize> {
+    let Some(t) = seal_basis_unix.filter(|_| generations > 0) else {
+        return (0..generations).collect();
+    };
+    let current_at_t = retired_at_unix
+        .iter()
+        .take(generations - 1)
+        .filter(|&&r| r > t)
+        .count();
+    let mut order = Vec::with_capacity(generations);
+    order.push(current_at_t);
+    for d in 1..generations {
+        if current_at_t + d < generations {
+            order.push(current_at_t + d);
+        }
+        if d <= current_at_t {
+            order.push(current_at_t - d);
+        }
+    }
+    order
+}
+
+/// The standing trial: open an inner sealed mail record under the keypairs of
+/// a standing key set (newest first, `retired_at_unix` aligned with
+/// `keypairs[1..]`) in [`generation_trial_order`] for its `seal_basis_unix`
+/// — the generation current at that instant first, then outward; the whole
+/// set newest first when the basis is unknown — opening either suite per
+/// keypair (hybrid when the ML-KEM half is present, classical otherwise).
+/// `None` when every keypair misses — wrong recipient or a tampered envelope
+/// (no rotation ever retires a generation out of the set). The standing arm
+/// of [`super::open_mail_epoch_chain`] on both the MDA and the client.
 #[must_use]
 pub fn open_mail_record_standing(
     envelope: &crate::wrapped_blob::MailRecordEnvelope,
     keypairs: &[StandingMailKeypair],
+    retired_at_unix: &[u64],
+    seal_basis_unix: Option<u64>,
 ) -> Option<Vec<u8>> {
-    keypairs.iter().find_map(|kp| {
-        match kp.mlkem_dk.as_deref() {
-            Some(dk) => {
-                crate::wrapped_blob::unseal_mail_record_hybrid(envelope, &kp.x25519_secret, dk)
+    generation_trial_order(keypairs.len(), retired_at_unix, seal_basis_unix)
+        .into_iter()
+        .find_map(|i| {
+            let kp = &keypairs[i];
+            match kp.mlkem_dk.as_deref() {
+                Some(dk) => {
+                    crate::wrapped_blob::unseal_mail_record_hybrid(envelope, &kp.x25519_secret, dk)
+                }
+                None => crate::wrapped_blob::unseal_mail_record(envelope, &kp.x25519_secret),
             }
-            None => crate::wrapped_blob::unseal_mail_record(envelope, &kp.x25519_secret),
-        }
-        .ok()
-    })
+            .ok()
+        })
 }
 
 /// Build the v1 read-side snapshot plaintext from the actor's MSEK
 /// history. `mseks[0]` is the current MSEK (its derived pubkey is the
-/// one registered with nest); any further entries are prior MSEKs
-/// retained for grace-decrypt of in-flight mail sealed to a rotated
-/// pubkey. Caps at [`SNAPSHOT_GRACE_KEYPAIRS`] (current + last 2).
+/// one registered with nest); every further entry is a prior MSEK,
+/// retained so mail sealed to any rotated-away pubkey still opens —
+/// UNCAPPED (`owner-key-material.md` § Path B-sibling-2 → *Pre-rotation
+/// mail at rest*). `retired_at_unix` is each prior generation's
+/// retirement instant, aligned with `mseks[1..]` (extra entries are
+/// ignored; a short list leaves the later generations without one, and
+/// their openers walk the ring).
 ///
 /// The v1 snapshot carries no OpenMLS provider state — it is fully
 /// derivable from MSEK, which is why the per-app `MlsSnapshotProvider`
 /// seam is unnecessary. When the snapshot later grows to carry genuine
 /// group/epoch state, that becomes a shared export over `MlsEngine`.
 #[must_use]
-pub fn build_mls_snapshot_plaintext(mseks: &[[u8; 32]]) -> MlsSnapshotPlaintext {
+pub fn build_mls_snapshot_plaintext(
+    mseks: &[[u8; 32]],
+    retired_at_unix: &[u64],
+) -> MlsSnapshotPlaintext {
     // The SAME set the owner's own clients open with
     // (`derive_standing_mail_keypairs`): the MDA reads it out of this snapshot,
     // a client derives it from its `fauna.state.mail` MSEK history, and both
@@ -697,30 +773,36 @@ pub fn build_mls_snapshot_plaintext(mseks: &[[u8; 32]]) -> MlsSnapshotPlaintext 
         .collect();
     // Mail-epoch grace roots for the PRIOR generations only (the current
     // generation's root re-derives from the session MSEK on demand) — the
-    // § 5 rotation-grace material for epoch-sealed mail, same cap and order
-    // as the leaf grace list.
+    // § 5 rotation-grace material for epoch-sealed mail, same order as the
+    // leaf list.
     let mail_epoch_grace_roots = mseks
         .iter()
-        .take(SNAPSHOT_GRACE_KEYPAIRS)
         .skip(1)
         .map(|msek| ByteBuf::from(derive_mail_epoch_root(msek).to_vec()))
         .collect();
     // Mail/calendar index-segment keys for the PRIOR generations only — same
-    // cap, same order, same skip-the-current rule as the mail-epoch roots
+    // order, same skip-the-current rule as the mail-epoch roots
     // above, so index i of both lists describes `leaf_init_keypairs[i + 1]`.
     // Rotation-grace material for the content index's mail/calendar slices
     // (`key-material-hierarchy.md` § Path B-sibling-4 → *Snapshot carriage*):
     // a segment the rotating client has not rewrapped yet still opens here.
     let index_seg_grace_keys = mseks
         .iter()
-        .take(SNAPSHOT_GRACE_KEYPAIRS)
         .skip(1)
         .map(|msek| ByteBuf::from(derive_index_segment_key(msek).to_vec()))
+        .collect();
+    // The prior generations' retirement instants, aligned the same way — the
+    // MDA opener's seal-time selection (`generation_trial_order`).
+    let generation_retired_at_unix = retired_at_unix
+        .iter()
+        .copied()
+        .take(mseks.len().saturating_sub(1))
         .collect();
     MlsSnapshotPlaintext {
         leaf_init_keypairs,
         mail_epoch_grace_roots,
         index_seg_grace_keys,
+        generation_retired_at_unix,
         ..Default::default()
     }
 }
@@ -878,7 +960,7 @@ mod tests {
     #[test]
     fn snapshot_pubkeys_match_per_msek_derivation() {
         let mseks = [[10u8; 32], [11u8; 32]];
-        let snap = build_mls_snapshot_plaintext(&mseks);
+        let snap = build_mls_snapshot_plaintext(&mseks, &[]);
         assert_eq!(snap.v, SNAPSHOT_PLAINTEXT_VERSION);
         assert_eq!(snap.leaf_init_keypairs.len(), 2);
         for (i, kp) in snap.leaf_init_keypairs.iter().enumerate() {
@@ -897,7 +979,7 @@ mod tests {
         // S3d: the builder populates the ML-KEM decaps half from the same MSEK
         // and it survives the canonical round-trip at the expected length.
         let mseks = [[10u8; 32], [11u8; 32]];
-        let snap = build_mls_snapshot_plaintext(&mseks);
+        let snap = build_mls_snapshot_plaintext(&mseks, &[]);
         let bytes = snap.to_canonical_bytes().unwrap();
         let decoded = MlsSnapshotPlaintext::from_canonical_bytes(&bytes).unwrap();
         for (i, kp) in decoded.leaf_init_keypairs.iter().enumerate() {
@@ -920,7 +1002,7 @@ mod tests {
         let xwing = derive_recipient_xwing_keypair(&msek);
         let envelope = seal_to_recipient_xwing(b"hybrid inbound bytes", &xwing.public).unwrap();
 
-        let snap = build_mls_snapshot_plaintext(&[msek]);
+        let snap = build_mls_snapshot_plaintext(&[msek], &[]);
         let kp = &snap.leaf_init_keypairs[0];
         let x25519_secret: [u8; 32] = kp.x25519_secret.as_slice().try_into().unwrap();
         let mdk: [u8; fauna_pq_kem::MLKEM768_DECAPS_KEY_LEN] =
@@ -977,12 +1059,109 @@ mod tests {
         assert!(matches!(err, UnwrapError::InvalidFormat(_)));
     }
 
+    /// **Every generation is carried, uncapped** (`owner-key-material.md`
+    /// § Path B-sibling-2 → *Pre-rotation mail at rest*) — the inversion of
+    /// the retired cap-3 pin: five MSEKs in history → five leaf keypairs,
+    /// and one epoch root, one index-segment key and one retirement instant
+    /// per PRIOR generation, all aligned newest first.
     #[test]
-    fn snapshot_caps_at_current_plus_last_two() {
-        // Four MSEKs in history → snapshot keeps only current + last 2.
-        let mseks = [[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]];
-        let snap = build_mls_snapshot_plaintext(&mseks);
-        assert_eq!(snap.leaf_init_keypairs.len(), SNAPSHOT_GRACE_KEYPAIRS);
+    fn snapshot_carries_every_generation_uncapped() {
+        let mseks = [[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [5u8; 32]];
+        let snap = build_mls_snapshot_plaintext(&mseks, &[400, 300, 200, 100]);
+        assert_eq!(snap.leaf_init_keypairs.len(), 5);
+        assert_eq!(snap.mail_epoch_grace_roots.len(), 4);
+        assert_eq!(snap.index_seg_grace_keys.len(), 4);
+        assert_eq!(snap.generation_retired_at_unix, [400, 300, 200, 100]);
+        assert_eq!(
+            snap.mail_epoch_grace_roots[3].as_slice(),
+            derive_mail_epoch_root(&[5u8; 32]).as_slice(),
+            "the oldest generation's root rides too"
+        );
+        // And the oldest generation's standing keypair opens mail sealed to it.
+        let (_, oldest_pk) = derive_recipient_hpke_keypair(&[5u8; 32]);
+        let sealed = seal_to_recipient(b"sealed four rotations ago", &oldest_pk).unwrap();
+        let ring = derive_standing_mail_keypairs(&mseks);
+        assert_eq!(
+            open_mail_record_standing(&sealed, &ring, &[400, 300, 200, 100], Some(50)).unwrap(),
+            b"sealed four rotations ago"
+        );
+        // Extra instants are ignored; a decoder refuses more instants than priors.
+        let extra = build_mls_snapshot_plaintext(&mseks[..2], &[9, 8, 7]);
+        assert_eq!(extra.generation_retired_at_unix, [9]);
+        let mut bad = extra.clone();
+        bad.generation_retired_at_unix = vec![9, 8];
+        let bytes = bad.to_canonical_bytes().unwrap();
+        assert!(matches!(
+            MlsSnapshotPlaintext::from_canonical_bytes(&bytes),
+            Err(UnwrapError::InvalidFormat(_))
+        ));
+    }
+
+    /// **The 5-generation golden pin**: the canonical bytes of a snapshot
+    /// carrying five generations with their retirement instants, hashed —
+    /// the wire shape the MDA reads (field names, order, the aligned prior
+    /// lists, the additive instants). Any change to the derivations or the
+    /// layout is a hard failure here.
+    #[test]
+    fn five_generation_snapshot_golden_bytes() {
+        let mseks = [[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [5u8; 32]];
+        let snap = build_mls_snapshot_plaintext(
+            &mseks,
+            &[1_800_000_400, 1_800_000_300, 1_800_000_200, 1_800_000_100],
+        );
+        let bytes = snap.to_canonical_bytes().unwrap();
+        // The full 32-byte hash, as bytes (a hex string literal reads as key
+        // material to the publish scan).
+        assert_eq!(
+            blake3::hash(&bytes).as_bytes(),
+            &[
+                0xf3, 0xb0, 0x78, 0x40, 0xc1, 0xeb, 0x51, 0x85, 0x33, 0x08, 0xa1, 0x3e, 0x5d, 0x4f,
+                0x77, 0xc3, 0x24, 0x5f, 0xaf, 0x9a, 0xd0, 0x3b, 0x68, 0x84, 0xaa, 0x1a, 0x3f, 0x5b,
+                0xca, 0x05, 0xf0, 0xb8,
+            ],
+        );
+        let needle = b"generation_retired_at_unix";
+        assert!(bytes.windows(needle.len()).any(|w| w == needle));
+        let decoded = MlsSnapshotPlaintext::from_canonical_bytes(&bytes).unwrap();
+        assert_eq!(decoded.generation_retired_at_unix.len(), 4);
+    }
+
+    /// The instants list is additive: omitted when empty, so a no-priors
+    /// snapshot — and every snapshot built without instants — keeps the
+    /// pre-carriage bytes.
+    #[test]
+    fn generation_instants_field_is_additive_on_the_wire() {
+        let needle = b"generation_retired_at_unix";
+        for snap in [
+            build_mls_snapshot_plaintext(&[[1u8; 32]], &[7]),
+            build_mls_snapshot_plaintext(&[[1u8; 32], [2u8; 32]], &[]),
+        ] {
+            let bytes = snap.to_canonical_bytes().unwrap();
+            assert!(
+                !bytes.windows(needle.len()).any(|w| w == needle),
+                "an empty instants list must omit the map key"
+            );
+        }
+    }
+
+    /// **The seal-time trial order**: the generation current at the basis
+    /// first (one step older per retirement after it), then outward, the
+    /// older neighbour first; every generation exactly once; an unknown basis
+    /// walks newest first.
+    #[test]
+    fn generation_trial_order_selects_by_seal_time() {
+        // Five generations: current, then priors retired at 400, 300, 200, 100.
+        let r = [400, 300, 200, 100];
+        assert_eq!(generation_trial_order(5, &r, None), [0, 1, 2, 3, 4]);
+        assert_eq!(generation_trial_order(5, &r, Some(500)), [0, 1, 2, 3, 4]);
+        assert_eq!(generation_trial_order(5, &r, Some(400)), [0, 1, 2, 3, 4]);
+        assert_eq!(generation_trial_order(5, &r, Some(399)), [1, 2, 0, 3, 4]);
+        assert_eq!(generation_trial_order(5, &r, Some(250)), [2, 3, 1, 4, 0]);
+        assert_eq!(generation_trial_order(5, &r, Some(50)), [4, 3, 2, 1, 0]);
+        // Missing instants: count only what is known, still a permutation.
+        assert_eq!(generation_trial_order(5, &[400], Some(50)), [1, 2, 0, 3, 4]);
+        assert_eq!(generation_trial_order(1, &[], Some(50)), [0]);
+        assert!(generation_trial_order(0, &r, Some(50)).is_empty());
     }
 
     #[test]
@@ -996,7 +1175,7 @@ mod tests {
         let in_flight = seal_to_recipient(b"sealed before rotation", &old_pk).unwrap();
 
         // Snapshot after hard-revoke: [new, old].
-        let snap = build_mls_snapshot_plaintext(&[new_msek, old_msek]);
+        let snap = build_mls_snapshot_plaintext(&[new_msek, old_msek], &[]);
         let grace_sk: [u8; 32] = snap.leaf_init_keypairs[1]
             .x25519_secret
             .as_slice()
@@ -1016,7 +1195,7 @@ mod tests {
 
     #[test]
     fn empty_history_yields_empty_snapshot() {
-        let snap = build_mls_snapshot_plaintext(&[]);
+        let snap = build_mls_snapshot_plaintext(&[], &[]);
         assert!(snap.leaf_init_keypairs.is_empty());
         assert!(snap.mail_epoch_grace_roots.is_empty());
         // generate_x25519_keypair is still exercised elsewhere; keep the
@@ -1031,13 +1210,10 @@ mod tests {
         // The current generation's root re-derives from the session MSEK on
         // demand and is never carried; each PRIOR grace generation carries
         // exactly its derived mail-epoch root (never the MSEK itself), in
-        // history order, capped like the leaf list.
+        // history order, every prior generation like the leaf list.
         let mseks = [[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]];
-        let snap = build_mls_snapshot_plaintext(&mseks);
-        assert_eq!(
-            snap.mail_epoch_grace_roots.len(),
-            SNAPSHOT_GRACE_KEYPAIRS - 1
-        );
+        let snap = build_mls_snapshot_plaintext(&mseks, &[]);
+        assert_eq!(snap.mail_epoch_grace_roots.len(), 3);
         assert_eq!(
             snap.mail_epoch_grace_roots[0].as_slice(),
             derive_mail_epoch_root(&[2u8; 32]).as_slice()
@@ -1047,7 +1223,7 @@ mod tests {
             derive_mail_epoch_root(&[3u8; 32]).as_slice()
         );
         // Single-generation history (enable-mail, no rotations yet) → none.
-        let single = build_mls_snapshot_plaintext(&[[1u8; 32]]);
+        let single = build_mls_snapshot_plaintext(&[[1u8; 32]], &[]);
         assert!(single.mail_epoch_grace_roots.is_empty());
 
         // The grace root really opens the old generation's epoch-sealed
@@ -1075,7 +1251,7 @@ mod tests {
         // Omitted-when-empty: a no-priors snapshot stays byte-identical to
         // the pre-epochs shape (no "mail_epoch_grace_roots" CBOR key), and
         // an old-shape encoding decodes with an empty vec.
-        let single = build_mls_snapshot_plaintext(&[[1u8; 32]]);
+        let single = build_mls_snapshot_plaintext(&[[1u8; 32]], &[]);
         let bytes = single.to_canonical_bytes().unwrap();
         let needle = b"mail_epoch_grace_roots";
         assert!(
@@ -1086,7 +1262,7 @@ mod tests {
         assert!(decoded.mail_epoch_grace_roots.is_empty());
 
         // Populated → round-trips.
-        let multi = build_mls_snapshot_plaintext(&[[1u8; 32], [2u8; 32]]);
+        let multi = build_mls_snapshot_plaintext(&[[1u8; 32], [2u8; 32]], &[]);
         let bytes = multi.to_canonical_bytes().unwrap();
         let decoded = MlsSnapshotPlaintext::from_canonical_bytes(&bytes).unwrap();
         assert_eq!(decoded.mail_epoch_grace_roots.len(), 1);
@@ -1098,7 +1274,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_epoch_grace_root_length() {
-        let mut snap = build_mls_snapshot_plaintext(&[[1u8; 32], [2u8; 32]]);
+        let mut snap = build_mls_snapshot_plaintext(&[[1u8; 32], [2u8; 32]], &[]);
         snap.mail_epoch_grace_roots[0] = ByteBuf::from(vec![0u8; 31]);
         let bytes = snap.to_canonical_bytes().unwrap();
         let err = MlsSnapshotPlaintext::from_canonical_bytes(&bytes).unwrap_err();
@@ -1115,11 +1291,11 @@ mod tests {
     #[test]
     fn snapshot_carries_index_seg_grace_keys_for_priors_only() {
         let mseks = [[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]];
-        let snap = build_mls_snapshot_plaintext(&mseks);
-        // Same cap and order as the two sibling grace lists, so index i of
-        // this list and of `mail_epoch_grace_roots` describe the same
-        // generation as `leaf_init_keypairs[i + 1]`.
-        assert_eq!(snap.index_seg_grace_keys.len(), SNAPSHOT_GRACE_KEYPAIRS - 1);
+        let snap = build_mls_snapshot_plaintext(&mseks, &[]);
+        // Same order as the sibling prior lists, so index i of this list and
+        // of `mail_epoch_grace_roots` describe the same generation as
+        // `leaf_init_keypairs[i + 1]`.
+        assert_eq!(snap.index_seg_grace_keys.len(), 3);
         assert_eq!(
             snap.index_seg_grace_keys.len(),
             snap.mail_epoch_grace_roots.len()
@@ -1145,7 +1321,7 @@ mod tests {
         );
 
         // Single-generation history (enable-mail, no rotations yet) → none.
-        let single = build_mls_snapshot_plaintext(&[[1u8; 32]]);
+        let single = build_mls_snapshot_plaintext(&[[1u8; 32]], &[]);
         assert!(single.index_seg_grace_keys.is_empty());
     }
 
@@ -1155,7 +1331,7 @@ mod tests {
         // the pre-S5 shape (no "index_seg_grace_keys" CBOR key), which is
         // what keeps an older decoder — and every snapshot already at rest —
         // reading unchanged.
-        let single = build_mls_snapshot_plaintext(&[[1u8; 32]]);
+        let single = build_mls_snapshot_plaintext(&[[1u8; 32]], &[]);
         let bytes = single.to_canonical_bytes().unwrap();
         let needle = b"index_seg_grace_keys";
         assert!(
@@ -1166,7 +1342,7 @@ mod tests {
         assert!(decoded.index_seg_grace_keys.is_empty());
 
         // Populated → round-trips.
-        let multi = build_mls_snapshot_plaintext(&[[1u8; 32], [2u8; 32]]);
+        let multi = build_mls_snapshot_plaintext(&[[1u8; 32], [2u8; 32]], &[]);
         let bytes = multi.to_canonical_bytes().unwrap();
         let decoded = MlsSnapshotPlaintext::from_canonical_bytes(&bytes).unwrap();
         assert_eq!(decoded.index_seg_grace_keys.len(), 1);
@@ -1178,7 +1354,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_index_seg_grace_key_length() {
-        let mut snap = build_mls_snapshot_plaintext(&[[1u8; 32], [2u8; 32]]);
+        let mut snap = build_mls_snapshot_plaintext(&[[1u8; 32], [2u8; 32]], &[]);
         snap.index_seg_grace_keys[0] = ByteBuf::from(vec![0u8; 31]);
         let bytes = snap.to_canonical_bytes().unwrap();
         let err = MlsSnapshotPlaintext::from_canonical_bytes(&bytes).unwrap_err();

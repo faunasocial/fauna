@@ -40,7 +40,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use fauna_core::chunker::MAX_STORED_CHUNK_BODY;
 use fauna_core::data::ContentHash;
 use fauna_core::file_download::TransferredBeforeFailure;
 use fauna_peer_channel::PeerChannel;
@@ -63,17 +62,7 @@ use serde_bytes::ByteBuf;
 
 use crate::admission::{SetMembership, evaluate_share_witness};
 use crate::provenance::{RowRefusal, screen_peer_row};
-
-/// The most pull rounds [`PeerShareBlobFetcher::fetch_chunks`] will run for one
-/// want list. Each round moves up to one reply's byte budget (~700 KiB) per
-/// call, and a chunk body caps at 8 MiB (`MAX_STORED_CHUNK_BODY`, which each
-/// slice's declared length is checked against), so
-/// a single body needs ~12 rounds and a batch of them proportionally more —
-/// hence a cap sized for a full want list rather than a single body. It exists
-/// only to stop a peer that never advances from wedging the puller; the
-/// no-progress bail below catches that case far sooner in practice. A Rust
-/// constant — never a knob.
-const MAX_ROUNDS: usize = 512;
+use fauna_peer_sync::ranged::{Missing, Round, Slice, assemble};
 
 /// What one share admission exchange yielded. Both halves are here because the
 /// seam's "sides admit independently" rule means neither implies the other.
@@ -369,9 +358,11 @@ where
         .map_err(|e| e.context(TransferredBeforeFailure(arrived)))
 }
 
-/// The round loop behind [`pull_chunk_bodies`]. `arrived` counts every body
-/// byte a reply carried, **before** that reply is validated — bytes a refused
-/// slice brought still crossed the wire.
+/// The round loop behind [`pull_chunk_bodies`] — the shared ranged
+/// assembler ([`fauna_peer_sync::ranged::assemble`]) over this plane's request
+/// kind, holding one member to the whole file ([`Missing::Fails`]). `arrived`
+/// counts every body byte a reply carried, **before** that reply is validated
+/// — bytes a refused slice brought still crossed the wire.
 async fn pull_rounds<R>(
     requester: &R,
     set: &[u8; 32],
@@ -383,182 +374,52 @@ where
     R: RpcRequester,
     R::Error: Into<anyhow::Error>,
 {
-    // Bodies keyed by store key, filled across deferral rounds, then
-    // re-ordered to match `store_keys` — the seam's contract is "parallel to
-    // store_keys", and a duplicate key in the want list must yield the same
-    // body twice rather than shifting the list.
-    // Per store key: the bytes assembled so far, and the body's total length
-    // once a slice has told us. Distinct keys only — a duplicate key in the
-    // want list is pulled once and handed back twice at the end (the seam's
-    // contract is "parallel to store_keys", not "one fetch per element").
-    struct Assembling {
-        bytes: Vec<u8>,
-        total_len: Option<u64>,
-    }
-    let mut building: std::collections::HashMap<ContentHash, Assembling> =
-        std::collections::HashMap::new();
-    let mut distinct: Vec<ContentHash> = Vec::new();
-    for key in store_keys {
-        if !distinct.contains(key) {
-            distinct.push(*key);
-            building.insert(
-                *key,
-                Assembling {
-                    bytes: Vec::new(),
-                    total_len: None,
-                },
-            );
-        }
-    }
-
-    // A body is whole when its assembled length reaches the served
-    // `total_len`; until then it is re-wanted from that length.
-    let incomplete = |building: &std::collections::HashMap<ContentHash, Assembling>| {
-        distinct
-            .iter()
-            .filter(|k| {
-                let a = &building[k];
-                a.total_len != Some(a.bytes.len() as u64)
+    let assembled = assemble(
+        store_keys,
+        relative_path,
+        Missing::Fails,
+        arrived,
+        |wants| async move {
+            let reply: PeerShareChunksPullReply = requester
+                .request(
+                    KIND_PEER_SHARE_CHUNKS_PULL,
+                    PeerShareChunksPullRequest {
+                        set: ByteBuf::from(set.to_vec()),
+                        wants: wants
+                            .iter()
+                            .map(|(k, offset)| PeerShareChunkWant {
+                                store_key: ByteBuf::from(k.digest().to_vec()),
+                                offset: *offset,
+                                extra: Default::default(),
+                            })
+                            .collect(),
+                        extra: Default::default(),
+                    },
+                )
+                .await
+                .map_err(Into::<anyhow::Error>::into)
+                .with_context(|| format!("peer-share chunks.pull for {relative_path}"))?;
+            Ok(Round {
+                slices: reply
+                    .chunks
+                    .into_iter()
+                    .map(|c| Slice {
+                        store_key: c.store_key.into_vec(),
+                        offset: c.offset,
+                        bytes: c.bytes.into_vec(),
+                        total_len: c.total_len,
+                    })
+                    .collect(),
+                missing: reply.missing.into_iter().map(ByteBuf::into_vec).collect(),
             })
-            .copied()
-            .collect::<Vec<_>>()
-    };
-
-    for _round in 0..MAX_ROUNDS {
-        let outstanding = incomplete(&building);
-        if outstanding.is_empty() {
-            break;
-        }
-        let reply: PeerShareChunksPullReply = requester
-            .request(
-                KIND_PEER_SHARE_CHUNKS_PULL,
-                PeerShareChunksPullRequest {
-                    set: ByteBuf::from(set.to_vec()),
-                    wants: outstanding
-                        .iter()
-                        .map(|k| PeerShareChunkWant {
-                            store_key: ByteBuf::from(k.digest().to_vec()),
-                            offset: building[k].bytes.len() as u64,
-                            extra: Default::default(),
-                        })
-                        .collect(),
-                    extra: Default::default(),
-                },
-            )
-            .await
-            .map_err(Into::<anyhow::Error>::into)
-            .with_context(|| format!("peer-share chunks.pull for {relative_path}"))?;
-        // Counted before any slice is judged: a slice refused below still
-        // crossed the wire, and the caller charges it.
-        *arrived = reply
-            .chunks
-            .iter()
-            .fold(*arrived, |acc, c| acc.saturating_add(c.bytes.len() as u64));
-
-        if let Some(missing) = reply.missing.first() {
-            bail!(
-                "the peer does not hold chunk {} of {relative_path}",
-                hex::encode(missing)
-            );
-        }
-        let mut advanced = 0usize;
-        for chunk in reply.chunks {
-            let claimed = <[u8; 32]>::try_from(chunk.store_key.as_ref())
-                .map_err(|_| anyhow::anyhow!("a store key must be exactly 32 bytes"))?;
-            let key = ContentHash::from_digest_raw(claimed);
-            let Some(slot) = building.get_mut(&key) else {
-                bail!(
-                    "the peer served chunk {} of {relative_path}, which was never wanted",
-                    hex::encode(claimed)
-                );
-            };
-            // A slice must continue exactly where this side left off.
-            // Anything else (a gap, a rewind, an overlap) would silently
-            // corrupt the assembled body, so it is refused rather than
-            // patched.
-            if chunk.offset != slot.bytes.len() as u64 {
-                bail!(
-                    "peer-served chunk {} of {relative_path} arrived at offset {} but this \
-                     side holds {} bytes — a non-contiguous slice",
-                    hex::encode(claimed),
-                    chunk.offset,
-                    slot.bytes.len()
-                );
-            }
-            // The declared length is the peer's word, and it decides how many
-            // rounds this side keeps buffering for. No honest body is longer
-            // than a sealed maximum-size chunk, so a longer claim is refused
-            // on the slice that makes it — before a byte of it is kept.
-            // Without this, a hostile member could declare an enormous length
-            // and feed one reply's budget per round for `MAX_ROUNDS` rounds,
-            // hundreds of MiB held here, then stall before the hash check at
-            // the end ever runs.
-            if chunk.total_len > MAX_STORED_CHUNK_BODY {
-                bail!(
-                    "peer-served chunk {} of {relative_path} declares a {}-byte body, over the \
-                     {MAX_STORED_CHUNK_BODY}-byte ceiling for any stored chunk",
-                    hex::encode(claimed),
-                    chunk.total_len
-                );
-            }
-            if let Some(known) = slot.total_len {
-                if known != chunk.total_len {
-                    bail!(
-                        "peer-served chunk {} of {relative_path} changed its total length \
-                         mid-transfer ({known} then {})",
-                        hex::encode(claimed),
-                        chunk.total_len
-                    );
-                }
-            } else {
-                slot.total_len = Some(chunk.total_len);
-            }
-            if slot.bytes.len() as u64 + chunk.bytes.len() as u64 > chunk.total_len {
-                bail!(
-                    "peer-served chunk {} of {relative_path} overran its declared length",
-                    hex::encode(claimed)
-                );
-            }
-            advanced += chunk.bytes.len();
-            slot.bytes.extend_from_slice(&chunk.bytes);
-        }
-        if advanced == 0 && !incomplete(&building).is_empty() {
-            // Nothing moved and something is still wanted: no later round
-            // can do better, so say so instead of spinning to the cap.
-            bail!(
-                "the peer served no bytes for the outstanding chunks of {relative_path} \
-                 — no progress is possible"
-            );
-        }
-    }
-    let stalled = incomplete(&building);
-    if !stalled.is_empty() {
-        bail!(
-            "{} chunk(s) of {relative_path} still incomplete after {MAX_ROUNDS} pull rounds",
-            stalled.len()
-        );
-    }
-
-    // Rule 4, on completion: the assembled body must hash to the key it was
-    // served under. A slice has no address of its own, so this is the first
-    // and only point the check is meaningful — and it happens before any
-    // body is handed to the walk.
-    for key in &distinct {
-        let assembled = &building[key].bytes;
-        let actual = ContentHash::of_raw(assembled);
-        if actual != *key {
-            bail!(
-                "peer-served chunk hash mismatch in {relative_path}: served under {}, \
-                 assembled bytes hash to {}",
-                hex::encode(key.digest()),
-                hex::encode(actual.digest())
-            );
-        }
-    }
-
+        },
+    )
+    .await?;
+    // The seam's contract is "parallel to store_keys": a key named twice is
+    // pulled once and handed back twice.
     Ok(store_keys
         .iter()
-        .map(|key| building[key].bytes.clone())
+        .map(|key| assembled.bodies[key].clone())
         .collect())
 }
 
@@ -566,13 +427,15 @@ where
 mod tests {
     use std::sync::Mutex;
 
+    use fauna_core::chunker::MAX_STORED_CHUNK_BODY;
     use fauna_core::file_download::bytes_transferred_before_failure;
     use fauna_protocol::peer_share::PeerShareChunk;
     use fauna_protocol::{decode_strict, encode_canonical};
 
     use super::*;
 
-    /// One reply's byte budget on the share plane (`MAX_ROUNDS`' doc): what a
+    /// One reply's byte budget on the share plane
+    /// (`fauna_peer_sync::ranged::MAX_ROUNDS`' doc): what a
     /// member can make this side hold per round. The 1 MiB frame is the
     /// transport's ceiling above it.
     const REPLY_BUDGET: usize = 700 * 1024;

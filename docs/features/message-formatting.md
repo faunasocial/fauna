@@ -40,7 +40,7 @@ Stamped 2026-09-19 at e9152e3330.
 |---|---|---|
 | web | ⚠ partial | |
 | linux | ✅ full | 0.1.2-dev+c4a95c20 standalone |
-| windows | ⚠ partial | |
+| windows | ✅ full | 0.1.3-dev+862c7d57 standalone |
 | macos | ⚠ partial | |
 | ios | ⚠ partial | |
 | android |  no run recorded | |
@@ -58,6 +58,6 @@ Stamped 2026-09-19 at e9152e3330.
 | 2 | app | `tests/e2e-unified/tests/test_conversations_markdown.py::test_detail_renders_markdown_on_select` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_capability_gating.py::test_fauna_oneonone_enables_all_compose_affordances` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_capability_gating.py::test_smtp_enables_markdown` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_capability_gating.py::test_bridged_thread_disables_attachment_and_topic` | linux (linux): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_compose_markdown_styling.py::test_compose_richeditbox_value_and_toolbar` | linux (linux): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_capability_gating.py::test_bridged_thread_disables_attachment_and_topic` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_compose_markdown_styling.py::test_compose_richeditbox_value_and_toolbar` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
 <!-- features-render:end -->

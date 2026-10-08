@@ -636,7 +636,7 @@ sheet reopens**, so a stale batch's summary never greets the next paste.
 `mail_aliases.import_invalid_line` i18n string — no app shows the bare
 counts summary anymore.
 
-`kind = 'exact'` storage ships in I4 (tracked internally — finding #1; the
+`kind = 'exact'` storage ships in I4 (tracked internally; the
 Admin-class write that shipped with it was removed 2026-10-03, § Cross-actor
 isolation). At that point:
 

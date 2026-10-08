@@ -258,9 +258,9 @@ ratified here at that finding's verify-back.
   infrastructure, and whatever it can rewrite ships to every user. **`services/` was added
   2026-09-19 on exactly that reasoning:**
   `services/fauna-front-door` and `services/fauna-cors-proxy` are attacker-exposed Rust binaries
-  serving the public web door, and the apex hosts the macOS Sparkle appcast the app compiles into
-  its `SUFeedURL` — so *"whoever controls the door influences what software users run"*
-  ([`front-door.md`](../front-door.md) § Goal). An attacker-facing binary on the software-update
+  serving the public web door, and the apex hosts the install guides and the official-apps page that
+  tell users which download is genuine — so *"whoever controls the door influences what software users run"*
+  ([`front-door.md`](../front-door.md) § Goal). An attacker-facing binary on the software-download
   channel that the standing review structurally never enumerates is the exact silent-coverage
   failure this charter exists to prevent; leaving it out had never been a reasoned ruling, only an
   artefact of the door being lifted into `services/` (2026-08-21) after the pathspec was first
@@ -583,8 +583,10 @@ dispositions before treating the base as honest. **Re-establishing them has two 
 the first is done.** Since 2026-09-19 every code-bearing commit from 2026-08-01 to the base is
 *named* by at least one record. But **naming is not marking**. Over a thousand commits in the
 2026-08-01 → 08-27 span are named only by rankings or enumerations and still carry no
-`DISPOSED:` line, so they are still in the window. **The span before 2026-08-01 is ruled owed and
-is not drained** (2026-09-20; the ruling is § Scope and process's *no span of history* bullet).
+`DISPOSED:` line, so they are still in the window. **The span before 2026-08-01 is ruled owed**
+(2026-09-20; the ruling is § Scope and process's *no span of history* bullet). **Its tranche from
+2026-06-23 to 2026-08-01 is drained in the marking sense (2026-10-08): RESIDUAL 0, all 2130
+commits marked; the span before 2026-06-23 is owed and unfunded.**
 Measured that day, default pathspec, `--until '2026-08-01 00:00:00'`:
 
 | from (`--since … 00:00:00`) | set | arm 1 | arm 2 | RESIDUAL | never-named | fix-closing, all UNOWNED |
@@ -600,8 +602,8 @@ first row's span on 2026-09-20 after that landing: set 5397, **arm 1 13**, arm 2
 5383, **never-named 4326**. Thirteen marks over 5397 commits is still nothing in the marking
 sense. It drains in the ruled order, and only as far as
 it is funded; until a tranche's RESIDUAL reads 0 no coverage claim reaches across it. So the base
-is honest *from 2026-08-01 forward, and only in the naming
-sense*.
+is honest *from 2026-08-01 forward in the naming sense, and from 2026-06-23 to 2026-08-01 in the
+marking sense*; nothing before 2026-06-23 is covered.
 
 That episode is also the sharpest evidence available on the "method, not mechanism" stance
 above, and it points at *which* half of a rule decays. Every reviewer in that span read the rule

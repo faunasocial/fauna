@@ -160,6 +160,7 @@ from helpers.app_surface import app_name, skip_environment, skip_unbuilt
 from common.launch_harness import make_launch_harness, reached_authenticated_app
 from i18n.strings import S
 from conftest import _trust_seeder, get_available_apps
+from helpers import budgets
 from helpers.waiting import await_account_runtime_assembled, wait_until
 
 pytestmark = [
@@ -1379,6 +1380,16 @@ def _own_session_ids_on_nest(nest_instance, harness_ids: set[str]) -> set[str]:
 
 
 def _launch_token(driver) -> dict:
+    # JSON `null` is the key's documented "cannot answer yet" (no bearer held
+    # while a mint is in flight, `fauna_e2e_agent::LAUNCH_TOKEN_KEY`), so wait on
+    # the state itself (convention 14) before judging that the app publishes none.
+    try:
+        wait_until(
+            lambda: isinstance(driver.get_state("launch_token"), dict),
+            budgets.RPC_ROUNDTRIP_S,
+        )
+    except AssertionError:
+        pass
     token = driver.get_state("launch_token")
     assert isinstance(token, dict), (
         f"the app publishes no `launch_token` state — an app under test that does not "

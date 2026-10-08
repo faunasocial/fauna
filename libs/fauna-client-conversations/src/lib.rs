@@ -117,8 +117,7 @@ use fauna_conversations::backend::InboxDrainSource;
 use fauna_core::data::{ArrivalDisposition, ContactStatus, contact_arrival_disposition};
 #[cfg(not(target_arch = "wasm32"))]
 use fauna_mls::wrapped_blob::{
-    SNAPSHOT_GRACE_KEYPAIRS, StandingMailKeypair, derive_mail_epoch_root,
-    derive_standing_mail_keypairs,
+    StandingMailKeypair, derive_mail_epoch_root, derive_standing_mail_keypairs,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -1454,15 +1453,81 @@ where
 /// to it (Send-ness inferred per concrete transport).
 pub struct NestOutboundMailSink<R: RpcRequester> {
     email: EmailClient<R>,
+    /// The account's own mailing lists — the list-send half of the sink
+    /// (`mail-mass-mailing.md` § Composing a list message).
+    lists: fauna_client_bridges::MailAccountClient<R>,
 }
 
-impl<R: RpcRequester> NestOutboundMailSink<R> {
+impl<R: RpcRequester + Clone> NestOutboundMailSink<R> {
     /// Build the send sink over `nest` — the same transport handle the rest of the
     /// conversations rails ride.
     pub fn new(nest: R) -> Self {
         Self {
-            email: EmailClient::new(nest),
+            email: EmailClient::new(nest.clone()),
+            lists: fauna_client_bridges::MailAccountClient::new(nest),
         }
+    }
+}
+
+impl<R: RpcRequester> NestOutboundMailSink<R> {
+    /// The account's lists + today's per-account meter, projected for the
+    /// compose form ([`fauna_conversations::list_send::OwnMailLists`]).
+    async fn own_lists_inner(
+        &self,
+    ) -> Result<fauna_conversations::list_send::OwnMailLists, String> {
+        let reply = self
+            .lists
+            .list_account_lists_with_meter()
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(fauna_conversations::list_send::OwnMailLists {
+            lists: reply
+                .lists
+                .into_iter()
+                .map(|row| {
+                    let address = format!("{}@{}", row.pattern, row.local_domain);
+                    fauna_conversations::list_send::OwnMailList {
+                        list_id_hex: hex::encode(&row.list_id),
+                        name: row
+                            .friendly_name
+                            .filter(|n| !n.trim().is_empty())
+                            .unwrap_or_else(|| address.clone()),
+                        address,
+                        member_count: row.member_count.max(0) as u64,
+                    }
+                })
+                .collect(),
+            recipients_today: reply.account_recipients_today.max(0) as u64,
+            recipients_per_day: reply.account_recipients_per_day.max(0) as u64,
+        })
+    }
+
+    async fn submit_to_list_inner(&self, list_id_hex: &str, raw: Vec<u8>) -> Result<(), String> {
+        let list_id = hex::decode(list_id_hex).map_err(|e| e.to_string())?;
+        self.lists
+            .send_list_message(list_id, raw)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn latest_list_send_inner(
+        &self,
+        list_id_hex: &str,
+    ) -> Result<Option<fauna_conversations::list_send::ListSendProgress>, String> {
+        let list_id = hex::decode(list_id_hex).map_err(|e| e.to_string())?;
+        let rows = self
+            .lists
+            .list_list_send_history(list_id, 1)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .map(|row| fauna_conversations::list_send::ListSendProgress {
+                recipient_count: row.recipient_count.max(0) as u64,
+                delivered_count: row.delivered_count.max(0) as u64,
+            }))
     }
 
     /// Submit a composed RFC 5322 message over `fauna.email.send`: map a transport
@@ -1494,6 +1559,21 @@ impl OutboundMailSink for NestOutboundMailSink<Arc<NestClient>> {
     async fn submit(&self, recipients: Vec<String>, raw_rfc5322: Vec<u8>) -> Result<(), String> {
         self.submit_inner(recipients, raw_rfc5322).await
     }
+
+    async fn own_lists(&self) -> Result<fauna_conversations::list_send::OwnMailLists, String> {
+        self.own_lists_inner().await
+    }
+
+    async fn submit_to_list(&self, list_id_hex: &str, raw_rfc5322: Vec<u8>) -> Result<(), String> {
+        self.submit_to_list_inner(list_id_hex, raw_rfc5322).await
+    }
+
+    async fn latest_list_send(
+        &self,
+        list_id_hex: &str,
+    ) -> Result<Option<fauna_conversations::list_send::ListSendProgress>, String> {
+        self.latest_list_send_inner(list_id_hex).await
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1501,6 +1581,21 @@ impl OutboundMailSink for NestOutboundMailSink<Arc<NestClient>> {
 impl OutboundMailSink for NestOutboundMailSink<fauna_rpc_wasm::WsRpcClient> {
     async fn submit(&self, recipients: Vec<String>, raw_rfc5322: Vec<u8>) -> Result<(), String> {
         self.submit_inner(recipients, raw_rfc5322).await
+    }
+
+    async fn own_lists(&self) -> Result<fauna_conversations::list_send::OwnMailLists, String> {
+        self.own_lists_inner().await
+    }
+
+    async fn submit_to_list(&self, list_id_hex: &str, raw_rfc5322: Vec<u8>) -> Result<(), String> {
+        self.submit_to_list_inner(list_id_hex, raw_rfc5322).await
+    }
+
+    async fn latest_list_send(
+        &self,
+        list_id_hex: &str,
+    ) -> Result<Option<fauna_conversations::list_send::ListSendProgress>, String> {
+        self.latest_list_send_inner(list_id_hex).await
     }
 }
 
@@ -3424,8 +3519,8 @@ impl fauna_conversations::backend::ConversationsPush for NestConversationsPush {
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct MailKeys {
     /// The account's complete **standing** recipient-mail key set — the
-    /// current MSEK's keypair first, then one per prior grace generation
-    /// (`MailConfig.prior_mseks`, cap-2 — [`SNAPSHOT_GRACE_KEYPAIRS`] total),
+    /// current MSEK's keypair first, then one per prior generation
+    /// (`MailConfig.prior_mseks`, every one ever retired — uncapped),
     /// from the ONE shared derivation the MDA's snapshot is built from
     /// (`derive_standing_mail_keypairs`; `owner-key-material.md` § Path
     /// B-sibling-2). Never empty once mail is enabled. `[0]` is also the key
@@ -3443,19 +3538,30 @@ pub struct MailKeys {
     /// with `standing`. The receive path passes them (as `&[&[u8; 32]]`) to the
     /// epoch opener. Only the current root is the common case (no rotation yet).
     epoch_roots: Vec<[u8; 32]>,
-    /// The prior grace MSEK generations (`MailConfig.prior_mseks`, newest first,
-    /// capped beside `standing`) — held so [`Self::index_ring`] can open a
+    /// The prior MSEK generations (`MailConfig.prior_mseks`, newest first,
+    /// aligned with `standing[1..]`) — held so [`Self::index_ring`] can open a
     /// mail/calendar index blob sealed before a rotation. Empty until the
     /// account first rotates.
     prior_mseks: Vec<[u8; 32]>,
+    /// Each prior generation's retirement instant, aligned with
+    /// `prior_mseks` (`MailConfig::prior_retired_at_unix`) — what the opener
+    /// selects a record's generation by, trialing the one current at its seal
+    /// instant first (`owner-key-material.md` § Path B-sibling-2 →
+    /// *Pre-rotation mail at rest*).
+    retired_at_unix: Vec<u64>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl MailKeys {
-    /// The key set from the account's mail custody: the live MSEK, then its
-    /// prior grace generations (already capped by the caller), every derived
-    /// key aligned with that one history.
-    fn from_custody(actor_id: [u8; 32], msek: &[u8; 32], prior_mseks: &[[u8; 32]]) -> Self {
+    /// The key set from the account's mail custody: the live MSEK, then every
+    /// prior generation with its retirement instant, every derived key
+    /// aligned with that one history.
+    fn from_custody(
+        actor_id: [u8; 32],
+        msek: &[u8; 32],
+        prior_mseks: &[[u8; 32]],
+        retired_at_unix: &[u64],
+    ) -> Self {
         let mseks: Vec<[u8; 32]> = std::iter::once(*msek)
             .chain(prior_mseks.iter().copied())
             .collect();
@@ -3469,6 +3575,7 @@ impl MailKeys {
             actor_id,
             epoch_roots,
             prior_mseks: prior_mseks.to_vec(),
+            retired_at_unix: retired_at_unix.to_vec(),
         }
     }
 
@@ -3483,8 +3590,9 @@ impl MailKeys {
 
     /// Open one `inbox.fetch` / `sent.fetch` record (both decrypt layers,
     /// either suite) under this key set: the epoch chain over the roots, then
-    /// the standing arm over the complete standing set — the one shared
-    /// opener (`fauna_mail::open_inbound_record_with_keys`) web uses too.
+    /// the standing arm over the complete standing set, both in the seal-time
+    /// generation order — the one shared opener
+    /// (`fauna_mail::open_inbound_record_with_keys`) web uses too.
     /// `seal_instant` is the record's `stored_at` (`0` when unknown), never
     /// `internal_date` nor a sender-supplied header.
     fn open_record(
@@ -3498,6 +3606,7 @@ impl MailKeys {
             &epoch_roots,
             seal_instant,
             &self.standing,
+            &self.retired_at_unix,
         )
     }
 }
@@ -4122,18 +4231,12 @@ async fn load_mail_keys(
 ) -> Option<MailKeys> {
     let actor_id = nest.auth().keypair()?.actor_id().0;
     let mail = mail.load().await.ok()?;
-    let msek = mail.msek?;
-    // The prior grace generations, capped so current + grace ==
-    // SNAPSHOT_GRACE_KEYPAIRS — the same history the snapshot builder takes, so
-    // the standing key set, the epoch roots and the index ring are exactly what
-    // the MDA opens with.
-    let mut prior_mseks: Vec<[u8; 32]> = mail
-        .prior_mseks
-        .iter()
-        .take(SNAPSHOT_GRACE_KEYPAIRS - 1)
-        .map(|prior| **prior)
-        .collect();
-    let keys = MailKeys::from_custody(actor_id, &msek, &prior_mseks);
+    let msek = mail.msek.clone()?;
+    // Every prior generation, uncapped — the same history the snapshot builder
+    // takes, so the standing key set, the epoch roots and the index ring are
+    // exactly what the MDA opens with.
+    let mut prior_mseks: Vec<[u8; 32]> = mail.prior_mseks.iter().map(|prior| **prior).collect();
+    let keys = MailKeys::from_custody(actor_id, &msek, &prior_mseks, &mail.prior_retired_at_unix());
     // The local copy is not zeroize-on-drop; `keys` now carries its own.
     prior_mseks.zeroize();
     Some(keys)
@@ -7346,13 +7449,13 @@ mod tests {
         .to_sealed_bytes_mailcal(&old_key)
         .expect("seal under the pre-rotation key");
 
-        let after_rotation = MailKeys::from_custody([7; 32], &NEW, &[OLD]);
+        let after_rotation = MailKeys::from_custody([7; 32], &NEW, &[OLD], &[]);
         after_rotation
             .index_ring()
             .open_manifest(&sealed)
             .expect("the rotated client opens its pre-rotation manifest");
 
-        let never_rotated = MailKeys::from_custody([7; 32], &NEW, &[]);
+        let never_rotated = MailKeys::from_custody([7; 32], &NEW, &[], &[]);
         assert!(
             never_rotated.index_ring().open_manifest(&sealed).is_err(),
             "a key the custody does not hold stays shut"
@@ -8261,6 +8364,7 @@ mod tests {
 
     /// A one-off mock answering `fauna.email.send` with a non-empty `remote_errors`
     /// list, to drive the sink's relay-error-join branch.
+    #[derive(Clone)]
     struct RemoteErrRequester;
 
     impl RpcRequester for RemoteErrRequester {

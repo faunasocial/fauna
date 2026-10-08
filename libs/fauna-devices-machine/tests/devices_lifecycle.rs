@@ -2091,6 +2091,77 @@ async fn a_scrubbed_folder_row_renders_its_sealed_name_by_hash() {
     assert!(snap.error.is_none());
 }
 
+/// A successor's Folders page lists the set it inherited. A succession
+/// re-points the set to the new owner and re-seals nothing, so an owner-only
+/// set's name still rests under the predecessor's owner root, which the
+/// successor's own root cannot open. The paired chain
+/// ([`DevicesMachine::set_predecessor_chain`], the UniFFI apps' door and the
+/// Media seam's own shape) offers the retired root as a read candidate, and the
+/// set lists again. Unwired, it drops: measured on windows on 2026-10-07, where
+/// the successor's Folders page listed nothing after the ceremony.
+#[tokio::test]
+async fn a_successors_inherited_set_lists_once_the_predecessor_chain_is_wired() {
+    let (m, nest, _) = setup();
+    let successor = fauna_core::crypto::BackupKey::from_bytes([3u8; 32]);
+    let predecessor = fauna_core::crypto::BackupKey::from_bytes([5u8; 32]);
+    let predecessor_id = [6u8; 32];
+    m.set_label_custody(fauna_core::label_custody::LabelCustody::new(
+        None,
+        Some(successor),
+    ));
+    let predecessor_root = fauna_core::path_crypto::LabelRoot::owner_of(&predecessor);
+    nest.set_folders(vec![WireFolderSummary {
+        id: 1,
+        name: String::new(),
+        name_hash: Some(fauna_protocol::ByteBuf::from(
+            fauna_core::path_crypto::set_name_hash("Inherited").to_vec(),
+        )),
+        name_sealed: Some(fauna_protocol::ByteBuf::from(
+            fauna_core::label_custody::seal_set_name(&predecessor_root, "Inherited")
+                .unwrap()
+                .unwrap(),
+        )),
+        ..folder("")
+    }]);
+
+    m.refresh().await;
+    assert!(
+        m.snapshot().folders.is_empty(),
+        "unwired, the successor's own root opens nothing its predecessor sealed"
+    );
+
+    m.set_predecessor_chain(
+        vec![predecessor_id.to_vec()],
+        vec![predecessor.to_bytes().to_vec()],
+    );
+    m.refresh().await;
+
+    let names: Vec<String> = m
+        .snapshot()
+        .folders
+        .iter()
+        .map(|f| f.name.clone())
+        .collect();
+    assert_eq!(names, vec!["Inherited".to_string()]);
+    assert_eq!(m.label_custody().predecessor_count(), 1);
+}
+
+/// A chain whose two halves differ in length pairs nothing — a positional slip
+/// would hand one identity another's root — and leaves the custody as it was.
+#[tokio::test]
+async fn a_predecessor_chain_of_unequal_halves_pairs_nothing() {
+    let (m, _, _) = setup();
+    m.set_label_custody(fauna_core::label_custody::LabelCustody::new(
+        None,
+        Some(fauna_core::crypto::BackupKey::from_bytes([3u8; 32])),
+    ));
+
+    m.set_predecessor_chain(vec![vec![6u8; 32], vec![7u8; 32]], vec![vec![5u8; 32]]);
+
+    assert_eq!(m.label_custody().predecessor_count(), 0);
+    assert!(m.label_custody().has_owner_key());
+}
+
 /// The expand-phase shape: rows still carry their plaintext, so every reader —
 /// custody or not — keeps seeing them. This is what makes the write half
 /// deployable ahead of the per-app render sweep.

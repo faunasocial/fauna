@@ -436,4 +436,14 @@ impl MailStore for AccountMailStore {
     async fn revoke(&self, credential_id: String) -> Result<bool, StoreError> {
         self.handle(false).await?.revoke(credential_id).await
     }
+
+    async fn retire_generation(
+        &self,
+        generation: fauna_core::data::PriorMsekRetirement,
+    ) -> Result<bool, StoreError> {
+        self.handle(false)
+            .await?
+            .retire_generation(generation)
+            .await
+    }
 }

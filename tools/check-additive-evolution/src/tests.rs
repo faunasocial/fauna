@@ -855,3 +855,25 @@ fn delete_and_revive_is_caught_by_the_monotonic_check_even_though_revival_alone_
     let monotonic_errs = check_ratified_breaks_monotonic(&allow_with_entry, &allow_without_entry);
     assert_eq!(monotonic_errs.len(), 1, "{monotonic_errs:?}");
 }
+
+/// The product version is read from `[workspace.package]` only — a member
+/// crate's own `version` key elsewhere in the file is not it.
+#[test]
+fn product_version_reads_the_workspace_package_section_only() {
+    let toml = "[package]\nversion = \"9.9.9\"\n\n[workspace.package]\nedition = \"2024\"\nversion = \"0.1.3\"\n\n[workspace.dependencies]\nversion = \"7\"\n";
+    assert_eq!(product_version(toml).as_deref(), Some("0.1.3"));
+    assert_eq!(product_version("[package]\nversion = \"1.0.0\"\n"), None);
+}
+
+/// Every 0.1.x is inside the compat-free window; 0.2.0 and every later
+/// version is outside it (version-compatibility.md § Dimension 2, the fifth
+/// ratified exception).
+#[test]
+fn the_compat_free_window_is_exactly_0_1_x() {
+    for v in ["0.1.0", "0.1.3", "0.1.99"] {
+        assert!(in_compat_free_window(v), "{v}");
+    }
+    for v in ["0.2.0", "0.10.0", "1.1.0", "0.0.9", "1.0.0"] {
+        assert!(!in_compat_free_window(v), "{v}");
+    }
+}

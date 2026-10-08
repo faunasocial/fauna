@@ -34,7 +34,7 @@ Stamped 2026-09-19 at e9152e3330.
 |---|---|---|
 | web | ⚠ partial | 0.1.2-dev+72d6a508 standalone |
 | linux | ✅ full | 0.1.2-dev+c4a95c20 standalone |
-| windows | ⚠ partial | |
+| windows | ⚠ partial | 0.1.3-dev+3a518178 standalone |
 | macos | ⚠ partial | |
 | ios | ⚠ partial | |
 | android |  no run recorded | |
@@ -47,6 +47,6 @@ Stamped 2026-09-19 at e9152e3330.
 | 1 | app | `tests/e2e-unified/tests/test_messaging.py::test_conversation_search_visible` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_conversations_search.py::test_search_finds_a_term_past_the_visible_snippet` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_messaging.py::test_conversation_sort_button_cycles_three_orders_without_error` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 3 | app | `tests/e2e-unified/tests/test_messaging.py::test_conversation_row_shows_unread_until_its_thread_is_opened` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 3 | app | `tests/e2e-unified/tests/test_messaging.py::test_conversation_row_shows_when_it_last_moved` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_messaging.py::test_conversation_row_shows_unread_until_its_thread_is_opened` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_messaging.py::test_conversation_row_shows_when_it_last_moved` | linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

@@ -1325,7 +1325,57 @@ is also the *discovery* seam (non-fleet peers cannot read the fleet-only
      duration, the owner's current dial candidates + advertised relay
      URL — delivered over an existing authenticated channel to the host
      *account* (the contact plane or an established conversation channel;
-     never the account plane, which the host cannot read).
+     never the account plane, which the host cannot read). **The host
+     bounds what it holds (ruled 2026-10-08):** any
+     peer sharing a channel can sign offers, and each captured one is a
+     fleet-synced record and a consent card, so an offer is captured only
+     while its owner has fewer than **4** unanswered offers (neither
+     accepted, declined nor removed) holding a slot on this host — the
+     offline-share ceremony's per-initiator cap. Past it the offer is
+     refused and nothing is persisted. An offer whose term
+     (`offered_at + duration`) has passed is spent on the host exactly as
+     the owner's decay spends it: never captured, never rendered, never
+     acceptable. An unanswered offer frees its slot only once both its
+     term and a 7-day floor from the host's capture have passed, so an
+     owner-chosen tiny term cannot cycle the cap — one owner adds at most
+     4 records a week; the host's decline frees it at once. The bound is
+     per owner with no global cap: the owners are the peers of channels
+     this account joined, and a global cap would let one channel's peers
+     starve every other owner's consent. Captured records stay (the
+     monotone-mark rule — a re-ingest must not resurrect a declined
+     card), so the bound caps the live consent surface and the growth
+     rate, not the record count. **Spent records are not reclaimed — the
+     bounded rate stands (ruled 2026-10-08).** A removal form is unavailable
+     by construction, not by omission: the kind is `CrdtPerField`, which
+     refuses tombstones (`MergePolicy::admits_tombstone` — degrading one
+     to a stamp comparison breaks convergence), and a published class-2
+     row its writer never supersedes is permanent per `(item_key,
+     writer)` at the nest, re-served by every full-state reconcile
+     ([`account-sync-plane.md`](account-sync-plane.md) § Merge-policy
+     seam), so a replica that dropped a row locally would get it back on
+     its next walk. The one convergent deletion a kind of this policy has
+     is an in-value absorbing phase (the generation-mint `Shredded`
+     pattern; *Bounded rows*' "monotone marker for what it dropped"): a
+     `spent` mark that empties the offer envelope and absorbs every
+     non-spent join. That shrinks a spent record from about 1 KB to its
+     key, owner, channel and marks — and never its count; the residual
+     that matters (one row per spent offer, listed by every pass) is
+     untouched, so it is not built. The residual is accepted on the
+     numbers: at most 4 records a week per owner, each the signed offer
+     of a peer the user admitted to a channel, never rendered, never
+     counted toward the cap again, on a kind whose row count was ruled to
+     grow with use ([`config-dissolution.md`](config-dissolution.md)
+     § Phases and gates → *Bounded rows*); an owner the user no longer
+     wants is cut at the channel, which stops the growth. The group-share
+     ceremony's invitations have the same shape under the same cap
+     (`GROUP_CEREMONY_MAX_PENDING_INVITATIONS_PER_INITIATOR`), so a
+     reclamation, if evidence ever calls for one (a real fleet carrying
+     hundreds of spent ceremony rows), is designed ONCE for both ceremony
+     kinds: the absorbing `spent` phase per kind, plus — the only thing
+     that sheds a row — a plane-level retirement of rows every writer
+     holds in a terminal phase, the per-field-deletion design slice
+     `merge_policy.rs` names; never a kind-local removal, never a
+     tombstone.
   2. **Accept (host):** the host's consent surface (T16) states the
      custody floor and the ask; accepting **binds the serving device** —
      the accept returns that device's principal pubkey (= NodeId), its

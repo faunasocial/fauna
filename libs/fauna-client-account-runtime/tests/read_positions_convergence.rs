@@ -122,6 +122,7 @@ fn mem_factory(listeners: &Listeners) -> PeerTransportFactory {
                     listeners,
                 }),
                 bound_addrs: vec!["203.0.113.9:4711".parse().unwrap()],
+                file_sync: None,
             })
         })
     })

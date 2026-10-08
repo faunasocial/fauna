@@ -303,6 +303,13 @@ getrandom.workspace = true
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
 
+# The windows push sink's tests read the toast they posted back out of the
+# notification centre's history (`ToastNotificationHistory::GetHistoryWithId`,
+# a collection view) — a feature flag on the existing dependency, test builds
+# only.
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = ["Foundation_Collections"] }
+
 # The `ws-device` push arm's linux sink (`push_arm.rs`; `common.md` § Push
 # Notifications → *Transports*): the freedesktop notification daemon. The same
 # crate fauna-linux and fauna-tui already link (approved by the user
@@ -335,4 +342,12 @@ windows = { workspace = true, features = [
     # CF_CONNECTION_KEY; CF_CALLBACK_INFO references CORRELATION_VECTOR.
     "Win32_Storage_CloudFilters",
     "Win32_System_CorrelationVector",
+    # The `ws-device` push arm's windows sink (push_arm.rs `toast`; `common.md`
+    # § Push Notifications → *Transports*): the WinRT toast and the XML
+    # document it is built from. Feature flags on this existing dependency —
+    # no new crate. The registry read answers whether an unpackaged app's toast
+    # identity is registered before the platform has met it.
+    "UI_Notifications",
+    "Data_Xml_Dom",
+    "Win32_System_Registry",
 ] }

@@ -50,17 +50,17 @@ Stamped 2026-09-23 at 039e9619ca.
 9. [app] When you paste many addresses, invalid ones are skipped and you are told how many — `docs/goal/behavior/mail-mass-mailing.md` § `mail-list-members` page
    - `tests/e2e-unified/tests/test_mail_lists_controls.py::test_import_tally_says_how_many_were_skipped`
 10. [app] You can send an issue to a list from the app — `docs/goal/behavior/mail-mass-mailing.md` § Composing a list message
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_list_compose.py::test_sending_to_a_list_from_the_app_warns_reaches_every_member_once_and_shows_one_sent_entry`
 11. [app] Before sending, you see how many subscribers it will reach and your allowance for today — `docs/goal/behavior/mail-mass-mailing.md` § Composing a list message
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_list_compose.py::test_sending_to_a_list_from_the_app_warns_reaches_every_member_once_and_shows_one_sent_entry`
 12. [app] A list send shows as one entry in your sent mail, not one per recipient — `docs/goal/behavior/mail-mass-mailing.md` § Composing a list message
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_list_compose.py::test_sending_to_a_list_from_the_app_warns_reaches_every_member_once_and_shows_one_sent_entry`
 13. [app] You see a send's delivery progress as a whole, not per recipient — `docs/goal/behavior/mail-mass-mailing.md` § Composing a list message
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_list_compose.py::test_sending_to_a_list_from_the_app_warns_reaches_every_member_once_and_shows_one_sent_entry`
 14. [app] You are warned when you are close to today's list-sending limit, and an over-limit send is explained where you composed it — `docs/goal/behavior/mail-mass-mailing.md` § The per-day per-account cap
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_list_compose.py::test_the_compose_form_warns_near_todays_list_limit_and_explains_an_over_limit_send`
 15. [app] Setting an archive link that points off your own server asks you once before saving — `docs/goal/behavior/mail-mass-mailing.md` § Don't do these
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_lists_controls.py::test_an_off_server_archive_link_asks_once_before_saving`
 16. [nest] Adding a member at one of your own domains is refused, and you are pointed to aliases instead — `docs/goal/behavior/mail-mass-mailing.md` § Don't do these
    - `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_member_on_local_domain_refused_pointing_at_aliases`
 17. [nest] A list address that is taken or reserved is refused — `docs/goal/behavior/mail-mass-mailing.md` § Reserved local-part: `unsubscribe@`
@@ -95,7 +95,7 @@ Stamped 2026-09-23 at 039e9619ca.
 | macos | ⚠ partial | 0.1.2-dev+73d24d4b standalone |
 | ios | ⚠ partial | 0.1.2-dev+73d24d4b standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+7663afa6 standalone |
+| tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -122,12 +122,12 @@ Stamped 2026-09-23 at 039e9619ca.
 | 7 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_add_and_unsubscribe_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_mail_lists_controls.py::test_resubscribe_from_the_members_page` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_mail_lists_controls.py::test_import_tally_says_how_many_were_skipped` | tui (linux): passed |
-| 10 | app | (none) | — |
-| 11 | app | (none) | — |
-| 12 | app | (none) | — |
-| 13 | app | (none) | — |
-| 14 | app | (none) | — |
-| 15 | app | (none) | — |
+| 10 | app | `tests/e2e-unified/tests/test_mail_list_compose.py::test_sending_to_a_list_from_the_app_warns_reaches_every_member_once_and_shows_one_sent_entry` | tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_mail_list_compose.py::test_sending_to_a_list_from_the_app_warns_reaches_every_member_once_and_shows_one_sent_entry` | tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_mail_list_compose.py::test_sending_to_a_list_from_the_app_warns_reaches_every_member_once_and_shows_one_sent_entry` | tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_mail_list_compose.py::test_sending_to_a_list_from_the_app_warns_reaches_every_member_once_and_shows_one_sent_entry` | tui (linux): passed |
+| 14 | app | `tests/e2e-unified/tests/test_mail_list_compose.py::test_the_compose_form_warns_near_todays_list_limit_and_explains_an_over_limit_send` | tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_mail_lists_controls.py::test_an_off_server_archive_link_asks_once_before_saving` | tui (linux): passed |
 | 16 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_member_on_local_domain_refused_pointing_at_aliases` | nest (linux): passed |
 | 17 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_address_taken_or_reserved_refused` | nest (linux): passed |
 | 18 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_mail_to_a_list_address_is_refused` | nest (linux): passed |

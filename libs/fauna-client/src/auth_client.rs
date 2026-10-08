@@ -116,11 +116,10 @@ pub struct AuthClient {
     /// a [`WsChallengeBearer`] (the FFI clients' path).
     ///
     /// `None` for [`with_bearer_source`](Self::with_bearer_source) callers: a
-    /// caller-supplied bearer mints somewhere this client cannot see — linux and
-    /// tui hand in a `LaunchMachineBearer`, whose own refusal path flattens a
-    /// supersession into a transport error inside `fauna-launch-machine`. Those
-    /// two apps therefore still cannot name the refusal; closing that is the
-    /// launch-machine half of this leg.
+    /// caller-supplied bearer mints somewhere this client cannot see. linux and
+    /// tui hand in a `LaunchMachineBearer`, which carries the refusal typed
+    /// instead (`ApiError::Superseded`, mapped to the wire refusal by
+    /// `map_api_err`), so their supervisors still stop on it by value.
     superseded: Option<SupersededLatch>,
     /// The locked-refusal channel of the bearer mint — same availability note
     /// as `superseded` above. linux and tui lose nothing by its absence: their
@@ -558,6 +557,28 @@ fn map_api_err(e: ApiError) -> NestClientError {
         // too (the supervisor reads it off `last_auth_refusal`), so both
         // bearer shapes end the supervisor as one typed `Refused`.
         ApiError::SignInRefused => NestClientError::Rpc(fauna_protocol::RpcError::not_registered()),
+        // And the succession refusal, as the wire refusal `WsChallengeBearer`'s
+        // latch carries — so a `LaunchMachineBearer` client (linux, tui) stops
+        // its supervisor as the same typed `Refused(superseded)` the FFI apps
+        // do, and `session_ending_verdict` names it.
+        ApiError::Superseded { new_actor_id_hex } => {
+            NestClientError::Rpc(superseded_refusal(&new_actor_id_hex))
+        }
+    }
+}
+
+/// The `fauna.auth.superseded` refusal naming `new_actor_id_hex` — the nest's
+/// own shape when the hex is a well-formed 32-byte id (the machine took it from
+/// that very reply), else the bare code: the verdict must survive a malformed
+/// claim, which the import flow verifies against the chain anyway.
+fn superseded_refusal(new_actor_id_hex: &str) -> fauna_protocol::RpcError {
+    use fauna_protocol::RpcError;
+    match hex::decode(new_actor_id_hex)
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+    {
+        Some(id) => RpcError::superseded(&id),
+        None => RpcError::new(RpcError::CODE_SUPERSEDED, "error.auth.superseded"),
     }
 }
 
@@ -585,6 +606,32 @@ mod tests {
         assert_eq!(
             seen_hex, None,
             "the withdrawn case must stay distinguishable"
+        );
+    }
+
+    /// The succession refusal survives the seam as the wire refusal the
+    /// supervisor stops on and `session_ending_verdict` names — a malformed
+    /// claim included.
+    #[test]
+    fn the_succession_refusal_does_not_join_the_couldnt_obtain_a_token_bucket() {
+        let successor = [0xab_u8; 32];
+        let e = map_api_err(ApiError::Superseded {
+            new_actor_id_hex: hex::encode(successor),
+        });
+        let NestClientError::Rpc(r) = &e else {
+            panic!("expected the verdict to survive, got {e:?}");
+        };
+        assert_eq!(r, &fauna_protocol::RpcError::superseded(&successor));
+        assert_eq!(
+            e.session_ending_verdict(),
+            Some(crate::SessionEndingVerdict::Superseded)
+        );
+        let malformed = map_api_err(ApiError::Superseded {
+            new_actor_id_hex: "not hex".into(),
+        });
+        assert_eq!(
+            malformed.session_ending_verdict(),
+            Some(crate::SessionEndingVerdict::Superseded)
         );
     }
 

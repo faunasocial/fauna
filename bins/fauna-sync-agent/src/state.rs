@@ -110,6 +110,10 @@ pub struct SyncServiceState {
     /// rescan tick is the backstop. Bounded capacity 1, so rapid saves coalesce
     /// to a single pending pull.
     pub wake_senders: Mutex<HashMap<String, mpsc::Sender<()>>>,
+    /// The same-account peer data plane's file halves on this host — the
+    /// sibling registry every engine asks before the nest, and the door the
+    /// peer leg serves a sibling's chunk want through ([`crate::peer_files`]).
+    pub peer_files: crate::peer_files::PeerFiles,
     /// Per-folder count of deletes the **mass-delete floor** held on that
     /// set's last reconcile pass (`file-sync.md` § Files Appear Automatically).
     /// Each running engine's progress drain writes its set's latest verdict
@@ -341,6 +345,7 @@ impl SyncServiceState {
         credentials: Option<Arc<fauna_credential_store::CredentialStore>>,
     ) -> Arc<Self> {
         let mounted_store = Arc::new(std::sync::Mutex::new(None));
+        let notification_sink = crate::push_arm::platform_sink(&paths.flat_base_dir());
         Arc::new(Self {
             config: RwLock::new(config),
             paths,
@@ -356,6 +361,7 @@ impl SyncServiceState {
             store_principal_actor: RwLock::new(None),
             nest_rpc: Mutex::new(None),
             wake_senders: Mutex::new(HashMap::new()),
+            peer_files: crate::peer_files::PeerFiles::new(),
             deletes_held: Mutex::new(HashMap::new()),
             deletes_skipped_unreadable: Mutex::new(HashMap::new()),
             public_audience: Mutex::new(HashMap::new()),
@@ -368,7 +374,7 @@ impl SyncServiceState {
             content_keys: RwLock::new(None),
             content_keys_wake: tokio::sync::Notify::new(),
             attached_apps: Arc::default(),
-            notification_sink: crate::push_arm::platform_sink(),
+            notification_sink,
             on_demand: std::sync::OnceLock::new(),
             on_demand_mount_errors: std::sync::Mutex::default(),
             folder_keys: Arc::new(fauna_account_seams::folder_keys::PlaneFolderKeys::new({

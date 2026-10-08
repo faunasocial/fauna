@@ -38,9 +38,18 @@ use fauna_core::obligation::RenderVerdict;
 use fauna_core::render::{AuthoringOriginStatus, VerificationStatus};
 use fauna_feed::{
     AttachedFile, FactorWeightInput, FeedManager, FeedSnapshot, FeedSnapshotObserver,
-    FilterRuleInput, PostSummary, ReplyAudience, SellComposeState, SourceKind, classify_sources,
+    FilterRuleInput, PostSummary, ReplyAudience, SourceKind, classify_sources,
 };
-use fauna_i18n::strings::{common, composer, conversations, family, feed, subscriptions};
+// Entering sell mode is the paywall-designation gesture, the money plane's
+// (`dynamic-features.md` § Platform-family surface excision → *The
+// price-and-route class*); only the `payments` flavor stages a sale.
+#[cfg(feature = "payments")]
+use fauna_feed::SellComposeState;
+use fauna_i18n::strings::{common, composer, conversations, family, feed};
+// The payment-link strings are read only by the money plane's two gated
+// arms (`OpenPaymentLink`, the sold-post teaser) — gated with them.
+#[cfg(feature = "payments")]
+use fauna_i18n::strings::subscriptions;
 // The post tip surface's strings (`monetization.md` § Tips). Aliased because
 // `tips` would collide with the `PostSummary.tips` field name at every use site
 // in this module, which is exactly where the strings are read.
@@ -135,7 +144,9 @@ pub enum Action {
     /// exclusive, which the shared setters enforce.
     SetGateTier(String),
     /// `compose-sell-subscribers-free` — the ratified rank knob
-    /// (`monetization.md:126`). Only reachable in sell mode.
+    /// (`monetization.md:126`). Only reachable in sell mode — the money
+    /// plane's, with the sell composer that paints it.
+    #[cfg(feature = "payments")]
     ToggleSellSubscribersFree,
     /// `compose-file-remove` — drop the composer's attached file: the local
     /// path and the manager's handle together, whether the handle came from a
@@ -192,13 +203,16 @@ pub enum Action {
     OpenPostDetail(String),
     /// `gated-post-buy-button` — the self-serve teaser purchase (gap (2c),
     /// `monetization.md` § Per-post pay-to-unlock): subscribe against the
-    /// resolved offer's tier, no claim code needed.
+    /// resolved offer's tier, no claim code needed. The money plane's buyer
+    /// half, with the teaser that paints it.
+    #[cfg(feature = "payments")]
     BuyUnlockOffer(String),
     /// `gated-post-payment-link` — open the offer's external `payment_url` via
     /// the OS default handler (`os_open`, the wizard's provider-link
     /// mechanism); refused for a non-`https` scheme (nest/author-supplied
     /// content — the same anti-phishing-redirect check web/android apply
     /// before opening a payment link).
+    #[cfg(feature = "payments")]
     OpenPaymentLink(String),
 
     // --- the create_feed sub-page ---
@@ -592,11 +606,14 @@ pub enum FeedField {
     /// is on); both gated submits validate it non-empty.
     ComposeGatePreview,
     /// `compose-sell-price` — free text, becomes the auto-minted unlock tier's
-    /// `price_hint` (`monetization.md` § Per-post pay-to-unlock).
+    /// `price_hint` (`monetization.md` § Per-post pay-to-unlock). The money
+    /// plane's, with the sell composer that paints it.
+    #[cfg(feature = "payments")]
     ComposeSellPrice,
     /// `compose-sell-asking-price` — the machine-comparable sats price for the
     /// auto-minted unlock tier, independent of `ComposeSellPrice`
     /// (`monetization.md` § The asking price).
+    #[cfg(feature = "payments")]
     ComposeSellAskingPrice,
     /// A **re-query**, not a local filter (`feed.md` § Anti-patterns) — writing
     /// it costs a round trip, which is why the write path can return work.
@@ -634,9 +651,11 @@ pub fn field(state: &FeedState, field: &FeedField) -> String {
         FeedField::ComposeGatePreview => {
             compose.map(|c| c.gate_preview.clone()).unwrap_or_default()
         }
+        #[cfg(feature = "payments")]
         FeedField::ComposeSellPrice => compose
             .and_then(|c| c.sell.as_ref().map(|s| s.price.clone()))
             .unwrap_or_default(),
+        #[cfg(feature = "payments")]
         FeedField::ComposeSellAskingPrice => compose
             .and_then(|c| c.sell.as_ref().map(|s| s.asking_price.clone()))
             .unwrap_or_default(),
@@ -706,6 +725,7 @@ pub fn set_field(state: &mut FeedState, field: FeedField, value: String) -> Opti
         FeedField::ComposeGatePreview => {
             state.manager.clone()?.update_compose_preview(value);
         }
+        #[cfg(feature = "payments")]
         FeedField::ComposeSellPrice => {
             let manager = state.manager.clone()?;
             let snap = manager.snapshot();
@@ -717,6 +737,7 @@ pub fn set_field(state: &mut FeedState, field: FeedField, value: String) -> Opti
             sell.price = value;
             manager.update_compose_sell(Some(sell), snap.compose.gate_preview);
         }
+        #[cfg(feature = "payments")]
         FeedField::ComposeSellAskingPrice => {
             let manager = state.manager.clone()?;
             let snap = manager.snapshot();
@@ -825,6 +846,7 @@ impl Action {
             // The self-serve teaser purchase — `subscribe_publishing_ek` over
             // `fauna.subscriptions.subscribe`. Online-only, so this is the
             // page's one gesture that desensitizes without a nest.
+            #[cfg(feature = "payments")]
             Action::BuyUnlockOffer(_) => Some("fauna.subscriptions.subscribe"),
             // The own-post web-publishing verbs. Publish/unpublish are
             // classified `OfflineSafe` (`offline_class`) — a publish row is
@@ -850,6 +872,10 @@ impl Action {
             //   * overlays, reveals and the create-feed / bridge-subscribe form
             //     buffers — snapshot or `App` writes only;
             //   * `OpenPaymentLink`, which hands a URL to the OS.
+            // The two money-plane gestures take their own arm so the flavor
+            // that has no such variants compiles the list unchanged.
+            #[cfg(feature = "payments")]
+            Action::ToggleSellSubscribersFree | Action::OpenPaymentLink(_) => None,
             Action::SelectFeed(_)
             | Action::SelectTrending
             | Action::ClearSearch
@@ -862,12 +888,10 @@ impl Action {
             | Action::ToggleReplyPublicConfirm
             | Action::OpenLightbox(_)
             | Action::SetGateTier(_)
-            | Action::ToggleSellSubscribersFree
             | Action::RemoveComposeAttachment
             | Action::RevealMuted(_)
             | Action::RevealContent(_)
             | Action::RevealRemoteImages(_)
-            | Action::OpenPaymentLink(_)
             // Purely local: the origin and the slug are both already resolved
             // on screen, so copying the public page URL costs no round trip.
             // Its sibling `CopyPaywallLink` is NOT here — that one mints.
@@ -1098,9 +1122,20 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::SetGateTier(label) => {
             let snap = manager.snapshot();
             let preview = snap.compose.gate_preview;
-            if label == feed::post::GATE_SELL {
+            // "Sell this post…" is the paywall-designation gesture — the money
+            // plane's author half (`dynamic-features.md` § Platform-family
+            // surface excision → *The price-and-route class*). A store-safe
+            // build never offers the answer (`compose_elements`) and never
+            // takes it: the label falls through to the tier arm, which is
+            // what an unknown select value already does.
+            #[cfg(feature = "payments")]
+            let is_sell = label == feed::post::GATE_SELL;
+            #[cfg(not(feature = "payments"))]
+            let is_sell = false;
+            if is_sell {
                 // Entering sell mode takes the defaults — notably
                 // `subscribers_get_it_free: true` (user-ratified 2026-07-29).
+                #[cfg(feature = "payments")]
                 manager.update_compose_sell(Some(SellComposeState::default()), preview);
             } else if label == feed::post::GATE_PUBLIC {
                 manager.update_compose_gate(None, preview);
@@ -1117,6 +1152,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             }
             None
         }
+        #[cfg(feature = "payments")]
         Action::ToggleSellSubscribersFree => {
             let snap = manager.snapshot();
             let mut sell = snap.compose.sell?;
@@ -1198,11 +1234,13 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
 
         // --- the self-serve teaser purchase (gap (2c)) ---
+        #[cfg(feature = "payments")]
         Action::BuyUnlockOffer(post_id) => Some(Op::BuyUnlockOffer { manager, post_id }),
         // --- local: hand the payment URL to the OS default handler
         // (`os_open`, the wizard's provider-link mechanism); refused for a
         // non-https scheme via the shared `fauna_core::subscription::
         // is_safe_payment_url` guard (F-CL2 anti-phishing-redirect class) ---
+        #[cfg(feature = "payments")]
         Action::OpenPaymentLink(url) => {
             if fauna_core::subscription::is_safe_payment_url(&url) {
                 crate::os_open::open(&url);
@@ -1529,6 +1567,7 @@ pub enum Op {
     /// `gated-post-buy-button` — the self-serve teaser purchase (gap (2c),
     /// `monetization.md` § Per-post pay-to-unlock): subscribe against the
     /// resolved offer's tier via the shared manager, no claim code needed.
+    #[cfg(feature = "payments")]
     BuyUnlockOffer {
         manager: Arc<CliFeedManager>,
         post_id: String,
@@ -1895,6 +1934,7 @@ impl Op {
                 }
                 Outcome::Done
             }
+            #[cfg(feature = "payments")]
             Op::BuyUnlockOffer { manager, post_id } => {
                 match manager.buy_unlock_offer(post_id).await {
                     // `None`: the offer isn't resolved (shouldn't happen — the
@@ -3332,8 +3372,19 @@ fn compose_elements(app: &App, snapshot: &FeedSnapshot) -> Vec<Element> {
             .iter()
             .map(|r| feed::post::gate_room(&r.label)),
     );
+    // "Sell this post…" is the paywall-designation gesture, the money plane's
+    // author half (`dynamic-features.md` § Platform-family surface excision →
+    // *The price-and-route class*): a store-safe build offers no sale and
+    // paints none of the sell controls below. A sale staged on a full client
+    // and synced in is not this build's to show — its select reads as the
+    // gated answer the shared state otherwise carries.
+    #[cfg(feature = "payments")]
     options.push(feed::post::GATE_SELL.to_string());
-    let selected = if compose.sell.is_some() {
+    #[cfg(feature = "payments")]
+    let selling = compose.sell.is_some();
+    #[cfg(not(feature = "payments"))]
+    let selling = false;
+    let selected = if selling {
         feed::post::GATE_SELL.to_string()
     } else if let Some(room) = compose.gate_room.as_deref().and_then(room_option) {
         room
@@ -3368,7 +3419,9 @@ fn compose_elements(app: &App, snapshot: &FeedSnapshot) -> Vec<Element> {
             .labelled(feed::post::GATE_PREVIEW_PLACEHOLDER),
         );
     }
-    // The two sell controls, visible only in sell mode.
+    // The sell controls, visible only in sell mode — the money plane's, with
+    // the answer that reveals them (above).
+    #[cfg(feature = "payments")]
     if let Some(sell) = &compose.sell {
         out.push(
             Element::input(
@@ -4006,6 +4059,13 @@ fn post_card(
     // both "not yet resolved" and "the nest answered no offer" (a failed
     // read included): both leave the priceless teaser, with
     // claim-code redemption (§5) as the fallback purchase path.
+    // The price, the external payment link and the buy affordance are the
+    // money plane's buyer half (`dynamic-features.md` § Platform-family
+    // surface excision → *The price-and-route class*): a store-safe build
+    // shows a sold post as an ordinary gated post — the badge and nothing
+    // more. The resolve that feeds this is an ungated `fauna.subscriptions.*`
+    // read, so the render carries its own gate (the inert-record trap).
+    #[cfg(feature = "payments")]
     if let Some(offer) = &post.unlock_offer {
         out.push(
             Element::label(
@@ -5217,6 +5277,7 @@ mod tests {
     /// offer resolves (gap (2c), `monetization.md` § Per-post pay-to-unlock →
     /// the buyer's price read is post-addressed) — the self-serve teaser
     /// purchase, no claim code needed.
+    #[cfg(feature = "payments")]
     #[test]
     fn a_sold_posts_card_shows_price_and_buy_button_once_the_offer_resolves() {
         let mut sold = post("teaser");
@@ -5258,6 +5319,7 @@ mod tests {
 
     /// A `payment_url` on the resolved offer renders the payment-link
     /// affordance too.
+    #[cfg(feature = "payments")]
     #[test]
     fn a_sold_posts_card_shows_a_payment_link_when_the_offer_carries_one() {
         let mut sold = post("teaser");
@@ -5285,6 +5347,7 @@ mod tests {
 
     /// The gate select offers Public, then the author's own tiers, then the
     /// sell option — the one control answering "who can read this?".
+    #[cfg(feature = "payments")]
     #[test]
     fn the_gate_select_offers_public_the_own_tiers_and_sell() {
         let app = feed_app(vec![post("hello")]);
@@ -5313,6 +5376,7 @@ mod tests {
 
     /// Selecting "Sell this post…" reveals the teaser **and** both sell
     /// controls, with the rank knob defaulting on (user-ratified 2026-07-29).
+    #[cfg(feature = "payments")]
     #[test]
     fn selecting_sell_reveals_the_price_and_the_rank_knob_checked() {
         let mut app = feed_app(vec![post("hello")]);
@@ -5340,6 +5404,7 @@ mod tests {
     /// `compose-sell-asking-price` is independent of `compose-sell-price` — the
     /// row's own non-obvious rule (`monetization.md` § The asking price): no
     /// parsing infers one field from the other, and each holds its own buffer.
+    #[cfg(feature = "payments")]
     #[test]
     fn the_asking_price_field_is_independent_of_the_price_hint_field() {
         let mut app = feed_app(vec![post("hello")]);
@@ -5361,6 +5426,7 @@ mod tests {
     }
 
     /// The rank knob is a real toggle, not a painted constant.
+    #[cfg(feature = "payments")]
     #[test]
     fn the_rank_knob_toggles() {
         let mut app = feed_app(vec![post("hello")]);
@@ -5510,6 +5576,7 @@ mod tests {
 
     /// Choosing sell after a tier drops the tier's controls — the answers are
     /// mutually exclusive, and the UI must not keep painting the losing one.
+    #[cfg(feature = "payments")]
     #[test]
     fn choosing_sell_after_a_tier_replaces_it() {
         let mut app = feed_app(vec![post("hello")]);
@@ -5523,6 +5590,7 @@ mod tests {
     }
 
     /// Back to Public: every gated control disappears.
+    #[cfg(feature = "payments")]
     #[test]
     fn choosing_public_clears_every_gated_control() {
         let mut app = feed_app(vec![post("hello")]);
@@ -5540,6 +5608,7 @@ mod tests {
 
     /// The teaser routes through whichever mode is selected — writing it must
     /// never silently flip the author's gate choice.
+    #[cfg(feature = "payments")]
     #[test]
     fn writing_the_teaser_preserves_the_selected_mode() {
         let mut app = feed_app(vec![post("hello")]);

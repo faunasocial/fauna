@@ -1213,7 +1213,7 @@ mod tests {
         );
     }
 
-    /// Finding 4, slice-3 half: a device that was
+    /// The theirs-wins premise, slice-3 half: a device that was
     /// **removed** while the group concurrently advanced must stay unusable —
     /// its transient/resurrected local state can never land a commit past its
     /// MLS removal. The rebase makes this structural: the stale rejection

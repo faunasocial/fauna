@@ -1266,6 +1266,23 @@ pub struct App {
     /// critical alert on their own remediation. Mint **and show**, therefore, or
     /// not at all.
     pub succession_kit_owed: bool,
+    /// The successor still owes its groups the sweep a lost ceremony never ran
+    /// — set by a **relaunch adoption** ([`Self::adopt_held_successor`]),
+    /// consumed by the successor's post-auth hook as an unbidden press of the
+    /// sweep retry, ahead of the kit (`succession-propagation.md`
+    /// § Propagation → *Own device fleet*, the relaunch-adoption clause).
+    ///
+    /// ⚠ **The third field [`Self::drop_authenticated_state`] deliberately does
+    /// NOT drop**, for [`Self::succession_kit_owed`]'s reason: the retry signs
+    /// as the successor, whose session exists only on the far side of the
+    /// switch. Dropping it there leaves the retired leaf seated in every group
+    /// this device shares, with nothing on screen saying so. Cleared by the
+    /// discharge and by a full [`Self::reset`].
+    ///
+    /// Never set by the ceremony's own fold: a ceremony that reached its switch
+    /// ran its sweep before it, and parked the result in
+    /// [`Self::succession_sweep`].
+    pub succession_sweep_owed: bool,
     /// The 64-hex actor id of the identity the succession just retired — set
     /// beside [`Self::succession_kit_owed`] and crossing the same switch, for
     /// the same reason.
@@ -1571,6 +1588,7 @@ impl App {
             succession_sweep: None,
             succession_review_deferred: false,
             succession_kit_owed: false,
+            succession_sweep_owed: false,
             succession_predecessor: None,
             aftermath: AftermathProgress::default(),
             member_reviews: Vec::new(),
@@ -2805,6 +2823,7 @@ impl App {
         // box, so there is no successor left to owe a kit to — and no
         // predecessor seed left in the registry for that kit to have sealed.
         self.succession_kit_owed = false;
+        self.succession_sweep_owed = false;
         self.succession_predecessor = None;
         // Everything below waits for the account runtime's stop: the erase
         // must never meet a store still open, and the wizard must not come up
@@ -2981,16 +3000,21 @@ impl App {
     /// `AccountRegistry::adopt_held_successor`, the one decision every app's
     /// launch route calls.
     ///
-    /// What stays here is the obligation the ceremony never reached: the
-    /// successor is owed its recovery kit — the old kit retired with the old
-    /// identity, so without it the account would stay kitless. The group sweep
-    /// is NOT re-run: it needs the old identity's engine, which a refused
-    /// launch never opens.
+    /// What stays here is the obligations the ceremony never reached, both
+    /// discharged by the successor's post-auth hook: the group sweep — the
+    /// retired leaf still sits in every group this device shares — and the
+    /// recovery kit, since the old kit retired with the old identity. The
+    /// sweep is the shared retry ceremony, not the ceremony's pre-switch
+    /// `sweep_after_succession`: no old engine exists at relaunch, and the
+    /// retry rebuilds the sweep off the retired identity's store and seed,
+    /// both of which survive on this device by construction
+    /// (`succession-propagation.md` § Propagation → *Own device fleet*).
     fn adopt_held_successor(&mut self, predecessor: &str, successor: &str) -> bool {
         if !crate::session::registry(self).adopt_held_successor(predecessor, successor) {
             return false;
         }
         self.succession_predecessor = Some(predecessor.to_string());
+        self.succession_sweep_owed = true;
         self.succession_kit_owed = true;
         match self.switch_account(successor, false) {
             Ok(()) => true,
@@ -3102,15 +3126,17 @@ impl App {
         // function, by `begin_identity_teardown` — it is owed by every teardown,
         // not just this one.)
         //
-        // ⚠ `succession_sweep`, `succession_kit_owed` and `succession_predecessor`
-        // are deliberately NOT cleared here, and
+        // ⚠ `succession_sweep`, `succession_kit_owed`, `succession_sweep_owed`
+        // and `succession_predecessor` are deliberately NOT cleared here, and
         // they are the only authenticated-state fields that aren't. Every drop above exists so one identity's state cannot paint
         // under the next one; the succession fields are the inverse — they
         // belong to the *outgoing* identity's ceremony, and this very teardown
         // is that ceremony's closing act. The sweep is its result (rendered
         // after the switch); the owed kit is its last step (performed after the
         // switch, because only the successor's own session can mint it); the
-        // predecessor id is what that mint must seal, and also the raising event
+        // owed sweep is a relaunch adoption's re-run of the result its lost
+        // ceremony never produced (performed after the switch for the kit's
+        // reason); the predecessor id is what that mint must seal, and also the raising event
         // the succession fold parks for the review raises. See their
         // declarations. Do not "fix" this by adding them to the list.
         //
@@ -4265,6 +4291,16 @@ impl App {
         {
             self.spawn_page_op(PageOp::Contacts(op));
         }
+        // Page-gated like address_book — see `StaleSurfaces::mail_spam`: a third-
+        // party mail app's batch Junk move is one push per lesson, and a visit
+        // re-reads the list anyway. What the flag buys is the undo or reset made
+        // on another device landing in the list open here.
+        if r.mail_spam
+            && self.page == Page::Settings
+            && let Some(op) = crate::settings::mail_spam_resync_op(&self.settings)
+        {
+            self.spawn_page_op(PageOp::Settings(op));
+        }
         // Page-gated, unlike every arm above — see `StaleSurfaces::media`. `Media` is
         // a cross-*set* aggregate whose nav-enter read already covers the
         // arrive-while-elsewhere case, so the flag buys exactly one thing: the
@@ -4910,6 +4946,31 @@ pub(crate) mod tests {
         );
     }
 
+    /// **The owed sweep crosses the switch too — the kit's exception, for the
+    /// kit's reason.** Only the successor's session can press the retry (it
+    /// signs as the successor), and that session is on the far side of this
+    /// teardown; dropping the flag here would silently cancel the re-point.
+    ///
+    /// Red-verify by clearing the flag in `drop_authenticated_state`.
+    #[tokio::test]
+    async fn the_owed_sweep_outlives_the_switch_but_not_a_reset() {
+        let mut app = authed_app();
+        app.succession_sweep_owed = true;
+
+        app.drop_authenticated_state(fauna_client_account_runtime::StopReason::AccountSwitch);
+        assert!(
+            app.succession_sweep_owed,
+            "only the successor's own session can run the sweep — dropping the \
+             obligation at the switch leaves the retired leaf seated in every group"
+        );
+
+        app.reset();
+        assert!(
+            !app.succession_sweep_owed,
+            "a reset destroys every identity, so there is no group left to re-point"
+        );
+    }
+
     /// **No page may push an `error-message` element of its own.**
     ///
     /// The id belongs to exactly one producer — `crate::ui::register_frame`,
@@ -5206,6 +5267,40 @@ pub(crate) mod tests {
         assert!(
             app.succession_kit_owed,
             "the successor never got its kit from the ceremony; it is still owed one"
+        );
+    }
+
+    /// **A relaunch adoption owes the group sweep exactly as it owes the kit**
+    /// (`succession-propagation.md` § Propagation → *Own device fleet*, the
+    /// relaunch-adoption clause). The lost ceremony died before its sweep, so
+    /// the retired leaf still sits in every group this device shares; without
+    /// the flag nothing re-points them and nothing on screen says so.
+    ///
+    /// Red-verify by dropping the flag's set in `adopt_held_successor`.
+    #[tokio::test]
+    async fn a_relaunch_adoption_owes_the_sweep() {
+        let mut app = test_app();
+        let registry = crate::session::registry(&app);
+        let predecessor = registry
+            .add_account(&hex::encode([7u8; 32]), Some("http://127.0.0.1:1"), None)
+            .expect("seeding the refused identity");
+        registry.set_active(&predecessor).expect("activating it");
+        let successor = registry
+            .add_account(&hex::encode([9u8; 32]), Some("http://127.0.0.1:1"), None)
+            .expect("seeding the successor the ceremony persisted");
+        app.wizard.machine.begin_import_identity_with_reason(
+            fauna_i18n::strings::onboarding::launch::IDENTITY_SUPERSEDED.to_string(),
+        );
+        assert!(!app.succession_sweep_owed, "precondition: nothing owed yet");
+
+        app.handle_message(UiMessage::Data(DataMessage::IdentitySupersededVerified {
+            successor,
+            predecessor,
+        }));
+
+        assert!(
+            app.succession_sweep_owed,
+            "the adoption must owe the sweep its lost ceremony never ran"
         );
     }
 

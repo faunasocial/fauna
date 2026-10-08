@@ -152,6 +152,7 @@ e2e-agent = [
     # behind `fauna_e2e_agent::RECONNECT_BACKOFF`). A debug build reaches both
     # through `debug_assertions`; these forwards keep a RELEASE-profile e2e build
     # able to drive them (convention 15).
+    "fauna-client-accounts/test-helpers",
     "fauna-client-alert-sweep/test-helpers",
     "fauna-client/e2e-agent",
     "fauna-client-sync/test-helpers",

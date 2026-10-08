@@ -336,7 +336,8 @@ pub enum NatModeError {
 // `ApiError::SignInRefused` is the same kind of bearer-path artifact — a held
 // identity the nest stopped signing in, raised only by `LaunchMachineBearer` —
 // and unreachable on these pre-identity endpoints; each enum takes it as it
-// takes a 403, the refusal it is.
+// takes a 403, the refusal it is. `ApiError::Superseded` (the held identity
+// was succeeded) is the same artifact and is taken the same way.
 // ---------------------------------------------------------------------------
 
 fn status_msg(code: u16, message: &str) -> String {
@@ -353,7 +354,7 @@ impl From<ApiError> for ProbeError {
             e @ ApiError::NestIdentityChanged { .. } => ProbeError::IdentityMismatch {
                 reason: e.to_string(),
             },
-            e @ ApiError::SignInRefused => ProbeError::Transient {
+            e @ (ApiError::SignInRefused | ApiError::Superseded { .. }) => ProbeError::Transient {
                 reason: e.to_string(),
             },
         }
@@ -373,9 +374,11 @@ impl From<ApiError> for ClaimAdminError {
             e @ ApiError::NestIdentityChanged { .. } => ClaimAdminError::IdentityMismatch {
                 reason: e.to_string(),
             },
-            e @ ApiError::SignInRefused => ClaimAdminError::Invalid {
-                reason: e.to_string(),
-            },
+            e @ (ApiError::SignInRefused | ApiError::Superseded { .. }) => {
+                ClaimAdminError::Invalid {
+                    reason: e.to_string(),
+                }
+            }
         }
     }
 }
@@ -397,9 +400,11 @@ impl From<ApiError> for InviteRequestError {
             e @ ApiError::NestIdentityChanged { .. } => InviteRequestError::IdentityMismatch {
                 reason: e.to_string(),
             },
-            e @ ApiError::SignInRefused => InviteRequestError::Closed {
-                cause: e.to_string(),
-            },
+            e @ (ApiError::SignInRefused | ApiError::Superseded { .. }) => {
+                InviteRequestError::Closed {
+                    cause: e.to_string(),
+                }
+            }
         }
     }
 }
@@ -412,9 +417,11 @@ impl From<ApiError> for InviteCodeError {
             e @ ApiError::NestIdentityChanged { .. } => InviteCodeError::IdentityMismatch {
                 reason: e.to_string(),
             },
-            e @ ApiError::SignInRefused => InviteCodeError::Invalid {
-                reason: e.to_string(),
-            },
+            e @ (ApiError::SignInRefused | ApiError::Superseded { .. }) => {
+                InviteCodeError::Invalid {
+                    reason: e.to_string(),
+                }
+            }
         }
     }
 }
@@ -429,7 +436,7 @@ impl From<ApiError> for RegisterError {
             e @ ApiError::NestIdentityChanged { .. } => RegisterError::IdentityMismatch {
                 reason: e.to_string(),
             },
-            e @ ApiError::SignInRefused => RegisterError::Failed {
+            e @ (ApiError::SignInRefused | ApiError::Superseded { .. }) => RegisterError::Failed {
                 cause: e.to_string(),
             },
         }
@@ -449,7 +456,7 @@ impl From<ApiError> for NatModeError {
             e @ ApiError::NestIdentityChanged { .. } => NatModeError::IdentityMismatch {
                 reason: e.to_string(),
             },
-            e @ ApiError::SignInRefused => NatModeError::Invalid {
+            e @ (ApiError::SignInRefused | ApiError::Superseded { .. }) => NatModeError::Invalid {
                 reason: e.to_string(),
             },
         }

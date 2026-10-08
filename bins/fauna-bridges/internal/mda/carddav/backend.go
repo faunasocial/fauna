@@ -12,8 +12,8 @@ import (
 
 	"github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/carddav"
-	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mda/dav"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mda/davauth"
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mda/undecryptable"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/wsrpc"
 	"lukechampine.com/blake3"
 )
@@ -54,7 +54,7 @@ type Backend struct {
 	logger *slog.Logger
 	// undecryptableWarn collapses the per-PROPFIND "undecryptable metadata"
 	// WARN to once per address book. Zero value ready; see the CalDAV twin.
-	undecryptableWarn dav.UndecryptableWarnDedup
+	undecryptableWarn undecryptable.WarnDedup
 }
 
 // NewBackend returns the production CardDAV backend. Passing a nil logger falls

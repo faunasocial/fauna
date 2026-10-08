@@ -1,7 +1,6 @@
 #!/bin/bash
-# Sign Fauna.app INSIDE-OUT — the bundled agent, then every app extension, then
-# third-party frameworks, each with ITS OWN entitlements, and only then the app;
-# never `--deep` on the app.
+# Sign Fauna.app INSIDE-OUT — the bundled agent, then every app extension, each
+# with ITS OWN entitlements, and only then the app; never `--deep` on the app.
 #
 # Usage:
 #   ./installer/macos/sign-app-bundle.sh <path/to/Fauna.app> <identity>
@@ -74,16 +73,7 @@ for APPEX in "$APP"/Contents/PlugIns/*.appex; do
     codesign "${FLAGS[@]}" --entitlements "$APPEX_ENTITLEMENTS" "$APPEX"
 done
 
-# 3. Third-party frameworks. Nothing inside Sparkle carries a Fauna claim, so
-#    `--deep` is correct HERE (it signs the Updater.app / XPC services / Autoupdate
-#    helpers Sparkle nests) — the footgun is `--deep` on a bundle whose nested
-#    code has entitlements of its own.
-SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
-if [ -d "$SPARKLE" ]; then
-    codesign "${FLAGS[@]}" --deep "$SPARKLE"
-fi
-
-# 4. The app itself — no --deep. Nested code is already sealed with the
+# 3. The app itself — no --deep. Nested code is already sealed with the
 #    signature it should carry; the app's signature seals THOSE signatures.
 codesign "${FLAGS[@]}" --entitlements "$APP_ENTITLEMENTS" "$APP"
 codesign --verify --deep --strict "$APP"

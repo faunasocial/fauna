@@ -171,6 +171,7 @@ where
             &generation_id,
             writer_key,
             fleet.generation_custody(),
+            Some(&view),
         )
         .await?
         .is_some();

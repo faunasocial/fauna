@@ -832,14 +832,20 @@ fn disarm_the_retired_identitys_scheduled_actions(
     tx: &rusqlite::Transaction<'_>,
     old: &[u8],
 ) -> Result<usize> {
-    // The predicate is (this actor AND still pending) — never status alone,
+    // The predicate is (this actor AND still armed) — never status alone,
     // which would re-write history, and never actor alone, which would
-    // re-cancel rows already terminal.
+    // re-cancel rows already terminal. Armed is `pending` or `executing`: a
+    // row the executor has claimed is mid-run, and the disarm cannot recall
+    // that run, but it cancels the row so a run that fails is never re-armed
+    // (the executor's release moves only an `executing` row). A run that
+    // completes anyway is audited `pending_action.executed_after_disarm`
+    // (`nest/common.md` § Pending Actions System → *The executor claims
+    // before it acts*).
     let armed: Vec<(i64, String, Option<String>, Option<String>)> = tx
         .prepare(
             "SELECT id, action_type, target, payload
                FROM pending_actions
-              WHERE actor_id = ?1 AND status = 'pending'",
+              WHERE actor_id = ?1 AND status IN ('pending', 'executing')",
         )
         .context("prepare armed scheduled actions")?
         .query_map(rusqlite::params![old], |r| {
@@ -880,7 +886,7 @@ fn disarm_the_retired_identitys_scheduled_actions(
         tx.execute(
             "UPDATE pending_actions
                 SET status = 'cancelled', cancelled_at = ?2
-              WHERE id = ?1 AND status = 'pending'",
+              WHERE id = ?1 AND status IN ('pending', 'executing')",
             rusqlite::params![id, now],
         )
         .context("disarm scheduled action at succession")?;
@@ -4437,7 +4443,7 @@ mod tests {
     /// The ten MUA-facing collection tables land on the successor, asserted on
     /// the doors an MUA actually opens rather than on row counts.
     ///
-    /// Written for the direction NOT chosen (finding 1): every assert
+    /// Written for the direction NOT chosen: every assert
     /// below reds under a `Stay`, and the structural gates would not — the
     /// registry-driven loop reads the declaration, so a demotion stops the move
     /// *and* says it should, which is all either data-driven sweep checks.
@@ -4500,7 +4506,7 @@ mod tests {
             db.list_bridge_imap_expunged_since(&NEW, "INBOX", 0)
                 .await
                 .unwrap(),
-            vec![7],
+            Some(vec![7]),
             "the VANISHED log is the half whose `Stay` RESURRECTS deleted mail: \
              the messages move, so an MUA syncing from its stored modseq is told \
              about no removals and re-shows everything the account deleted"
@@ -4781,7 +4787,7 @@ mod tests {
     /// each read through the consumer that actually honours the row rather than
     /// through a row count. The registry's data-driven sweep already witnesses
     /// that the declared moves execute; what it cannot witness is whether the
-    /// declaration is *right*, which is the whole of finding 1 (a
+    /// declaration is *right*, which is the whole point (a
     /// verdict-to-verdict flip leaves both sweeps green because agreement is all
     /// they check).
     #[tokio::test]
@@ -7422,7 +7428,7 @@ mod tests {
     /// **The curation pass's product-observable pin: a successor OWNS the
     /// feeds and curation settings the retired identity created.**
     ///
-    /// Written the way finding 1 demands — on what a user can see, and for
+    /// Written the way the agreement-only lesson demands — on what a user can see, and for
     /// the direction NOT chosen. Both data-driven sweeps assert only that the
     /// executor agrees with the declaration, so flipping any of these three
     /// tables back to `Stay`/`Unruled` leaves them green; what reds is this. The
@@ -9197,6 +9203,32 @@ mod tests {
             "the ceremony left a due `account.delete` armed: the 60 s executor \
              tick authenticates nobody, so a seed thief's queued deletion fires \
              against the account the ceremony just rescued"
+        );
+    }
+
+    /// **A row the executor has already claimed is disarmed too, and a run
+    /// that then fails never re-arms it.** The disarm cannot recall a run
+    /// under way, but if that run fails the executor's release must find the
+    /// row cancelled, not hand the thief's action back to the queue.
+    #[tokio::test]
+    async fn a_succession_disarms_a_claimed_action_so_a_failed_run_never_rearms_it() {
+        let db = CacheDb::open_in_memory().unwrap();
+        seed_account(&db, &OLD, "alice").await;
+        let claimed = queue_due_action(&db, &OLD, "account.delete", None).await;
+        assert!(db.claim_pending_action(claimed).await.unwrap().is_some());
+
+        db.record_succession(&OLD, &NEW, b"s", 1)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The run fails; the executor hands its claim back.
+        db.release_pending_action_claim(claimed).await.unwrap();
+        let row = db.get_pending_action(claimed).await.unwrap().unwrap();
+        assert_eq!(row.status, "cancelled", "the disarm holds over the claim");
+        assert!(
+            !db.mark_pending_action_executed(claimed).await.unwrap(),
+            "a completed run must not overwrite the disarm's cancel"
         );
     }
 

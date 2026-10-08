@@ -10,6 +10,7 @@ import (
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/authlock"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/byteplane"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mailfauna"
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mda/undecryptable"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/wsrpc"
 )
 
@@ -43,6 +44,9 @@ type backend struct {
 	logger *slog.Logger
 	cache  *bodyStructureCache
 	router *notificationRouter
+	// undecryptableWarn dedups the FETCH path's "record could not be
+	// opened" WARN to once per record across every Session.
+	undecryptableWarn undecryptable.WarnDedup
 	// plane is the nest's bulk-byte-plane client, off which an
 	// oversized sealed body is fetched by reference (SealedBodyOf).
 	// Snapshotted into every Session at NewSession. nil on a box with no
@@ -225,18 +229,19 @@ func (b *backend) NewSession(c *imapserver.Conn) imapserver.Session {
 		}
 	}
 	return &Session{
-		conn:          c,
-		client:        b.client,
-		logger:        b.logger,
-		sourceIP:      sourceIP,
-		lockout:       b.authLockout.Load(),
-		primaryDomain: b.currentPrimaryDomain(),
-		cache:         b.cache,
-		router:        b.router,
-		plane:         b.plane,
-		idleTimeout:   time.Duration(b.idleTimeoutNanos.Load()),
-		spamPolicy:    b.currentSpamPolicy(),
-		bayesianKnobs: b.currentBayesianKnobs(),
+		conn:              c,
+		client:            b.client,
+		logger:            b.logger,
+		sourceIP:          sourceIP,
+		lockout:           b.authLockout.Load(),
+		primaryDomain:     b.currentPrimaryDomain(),
+		cache:             b.cache,
+		undecryptableWarn: &b.undecryptableWarn,
+		router:            b.router,
+		plane:             b.plane,
+		idleTimeout:       time.Duration(b.idleTimeoutNanos.Load()),
+		spamPolicy:        b.currentSpamPolicy(),
+		bayesianKnobs:     b.currentBayesianKnobs(),
 	}
 }
 

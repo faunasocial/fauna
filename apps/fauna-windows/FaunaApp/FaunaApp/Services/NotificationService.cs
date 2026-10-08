@@ -10,6 +10,17 @@ public static class NotificationService
 {
     private static bool _initialized;
 
+    /// <summary>
+    /// The AUMID this process's toasts are posted under, once <see cref="Initialize"/>
+    /// registered — what the app hands the sync agent when it attaches, so the agent's
+    /// <c>ws-device</c> push toast, posted while the app is closed, is this app's: its
+    /// name and icon, its group in the notification centre, and a tap that activates it
+    /// (<c>common.md</c> § Push Notifications → <i>Transports</i>; <c>windows.md</c>
+    /// § Notifications). <c>null</c> when toasts are unavailable or the identity cannot
+    /// be read — the agent then reports no sink, which the push control says.
+    /// </summary>
+    public static string? Identity { get; private set; }
+
     public static void Initialize()
     {
         if (_initialized) return;
@@ -17,6 +28,7 @@ public static class NotificationService
         {
             AppNotificationManager.Default.Register();
             _initialized = true;
+            Identity = ResolveIdentity();
         }
         catch (Exception ex)
         {
@@ -26,6 +38,43 @@ public static class NotificationService
             // failure message folds every "banner" line of the app log in (`_why`).
             ShellLog.Warn("NotificationService",
                 $"[banner] toasts unavailable: AppNotificationManager.Register() threw {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Where the registration <see cref="Initialize"/> made lives. With package identity
+    /// (the Store package, or the MSI's sparse identity) toasts post under the package
+    /// app's AUMID. Without it, <c>AppNotificationManager.Register()</c> keeps a per-user
+    /// registration under <c>HKCU\Software\Classes\AppUserModelId</c>: a key named for
+    /// this exe's path (lowercased, <c>\</c> → <c>.</c>) whose <c>NotificationGUID</c>
+    /// value names the AUMID it posts under, itself a key carrying the display name, icon
+    /// and the COM activator that launches this exe on a tap (measured on <c>win</c>
+    /// 2026-10-08). That layout is the SDK's, not a documented contract: a read that finds
+    /// nothing returns <c>null</c>, and the agent then honestly reports no sink.
+    /// </summary>
+    private static string? ResolveIdentity()
+    {
+        try
+        {
+            return Windows.ApplicationModel.AppInfo.Current.AppUserModelId;
+        }
+        catch (Exception)
+        {
+            // No package identity — the unpackaged registration below.
+        }
+        try
+        {
+            var exe = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(exe)) return null;
+            var keyName = exe.ToLowerInvariant().Replace('\\', '.');
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                $@"Software\Classes\AppUserModelId\{keyName}");
+            return key?.GetValue("NotificationGUID") as string;
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("NotificationService", $"[banner] toast identity unreadable: {ex.Message}");
+            return null;
         }
     }
 

@@ -57,7 +57,10 @@ pub async fn handle_request(req: &Request, state: &Arc<SyncServiceState>) -> Res
         RequestMethod::ProvisionCapability(cap) => handle_provision_capability(state, cap).await,
         RequestMethod::RefreshBearer(bearer) => handle_refresh_bearer(state, bearer).await,
         RequestMethod::UnprovisionCapability => handle_unprovision_capability(state).await,
-        RequestMethod::AttachApp { app } => handle_attach_app(state, app.as_deref()),
+        RequestMethod::AttachApp {
+            app,
+            notification_identity,
+        } => handle_attach_app(state, app.as_deref(), notification_identity.clone()).await,
         RequestMethod::Shutdown => handle_shutdown(state).await,
         RequestMethod::ListEngines => handle_list_engines(state).await,
         RequestMethod::GetBackupStatus => handle_get_backup_status(state).await,
@@ -268,17 +271,26 @@ async fn handle_get_service_status(
 /// [`RequestMethod::AttachApp`] — the calling app is open for as long as this
 /// connection is: the lease is held in the connection's scope and ends when
 /// the app closes it (or dies), which is what the push arm reads
-/// ([`crate::push_arm`]).
-fn handle_attach_app(
+/// ([`crate::push_arm`]). A named notification identity is handed to the sink
+/// before the reply, so an app that reads the status after attaching sees the
+/// sink that identity gives.
+async fn handle_attach_app(
     state: &Arc<SyncServiceState>,
     app: Option<&str>,
+    notification_identity: Option<String>,
 ) -> Result<ResponsePayload, String> {
-    if fauna_ipc::conn_scope::hold_for_connection(state.attached_apps.attach()) {
-        tracing::debug!(app = app.unwrap_or("?"), "an app attached");
-        Ok(ResponsePayload::Empty)
-    } else {
-        Err("AttachApp must arrive on a served connection".into())
+    if !fauna_ipc::conn_scope::hold_for_connection(state.attached_apps.attach()) {
+        return Err("AttachApp must arrive on a served connection".into());
     }
+    tracing::debug!(app = app.unwrap_or("?"), "an app attached");
+    if let Some(identity) = notification_identity {
+        let sink = Arc::clone(&state.notification_sink);
+        // May block: a platform probe and a small file write.
+        if let Err(e) = tokio::task::spawn_blocking(move || sink.adopt_identity(&identity)).await {
+            tracing::warn!("push arm: adopting the app's notification identity failed: {e}");
+        }
+    }
+    Ok(ResponsePayload::Empty)
 }
 
 // ── Sync status ──
@@ -2089,7 +2101,8 @@ async fn handle_restore_file_version(
 /// by `recorded_as`, the identity the restore recorded as
 /// (`writer-signed-change-records.md` ruling (11)(d)): an entry with no signer recorded
 /// opens under no owner root, so a re-point that named none would strand the restored
-/// bytes.
+/// bytes. `remote_mtime` (Unix seconds) is the restore record's time, which the caller
+/// also gives the placeholder ([`apply_restore_locally`]).
 ///
 /// `Ok(false)` = there is no local copy to re-point (the folder is bound but not yet
 /// served, or the path has no row): per § Restore, a client with no local file has
@@ -2105,6 +2118,7 @@ pub(crate) async fn repoint_entry(
     rel: &str,
     restored: &crate::versions::RestoredVersion,
     recorded_as: Option<[u8; 32]>,
+    remote_mtime: i64,
 ) -> Result<bool, String> {
     let db_path = state.paths.sync_db_path_for_ref(folder_ref);
     if !db_path.exists() {
@@ -2114,7 +2128,6 @@ pub(crate) async fn repoint_entry(
     let Some(entry) = db.get_entry(rel).map_err(|e| format!("db error: {e}"))? else {
         return Ok(false);
     };
-    let now = fauna_core::data::Timestamp::now_secs_or_zero();
     db.upsert_entry(
         rel,
         None, // local_hash: the bytes are about to be freed
@@ -2123,8 +2136,8 @@ pub(crate) async fn repoint_entry(
             restored.manifest_hash,
         )),
         fauna_sync_engine::db::SyncState::Placeholder,
-        0,   // local_mtime: nothing on disk once dehydrated
-        now, // remote_mtime: the restore record is the new head, recorded just now
+        0,            // local_mtime: nothing on disk once dehydrated
+        remote_mtime, // the restore record is the new head, recorded just now
         restored.size_bytes,
         // The legacy local counter `GetFileVersions` reports. The real, retroactive
         // history is nest-side (`ListFileVersions`), so leave it undisturbed.
@@ -2152,15 +2165,18 @@ pub(crate) async fn repoint_entry(
 ///
 /// * row first — `SyncEngine::download_file_bytes` resolves the hydration manifest from
 ///   it, so once re-pointed every later fetch serves the restored bytes;
-/// * `dehydrate_placeholder` second — it frees the stale bytes, turning the next open
-///   into a cfapi `FETCH_DATA` against the re-pointed row.
+/// * `supersede_placeholder` second — it frees the stale bytes and leaves the placeholder
+///   describing the restored version (its size above all: cfapi asks for exactly
+///   `[0, the placeholder's size)`, so a bare dehydrate that kept the current size served
+///   a restore to a longer version truncated), turning the next open into a cfapi
+///   `FETCH_DATA` against the re-pointed row.
 ///
-/// A failed dehydrate therefore leaves a *correct* row and a stale cache: the user's own
-/// **Free up space**, or any later eviction, completes the restore. The reverse order
+/// A failed supersede therefore leaves a *correct* row and a stale cache, the edit that
+/// refused it uploading on its own (a conflict with the restore). The reverse order
 /// would leave a placeholder-on-disk pointing at the **old** manifest — actively
 /// re-materializing the pre-restore bytes, which is strictly worse.
 ///
-/// A failed re-point skips the dehydrate for the same reason: dehydrating against a
+/// A failed re-point skips the supersede for the same reason: freeing against a
 /// stale row re-downloads the pre-restore content.
 #[cfg(windows)]
 async fn apply_restore_locally(
@@ -2171,7 +2187,8 @@ async fn apply_restore_locally(
     restored: &crate::versions::RestoredVersion,
     recorded_as: Option<[u8; 32]>,
 ) {
-    match repoint_entry(state, folder_ref, rel, restored, recorded_as).await {
+    let now = fauna_core::data::Timestamp::now_secs_or_zero();
+    match repoint_entry(state, folder_ref, rel, restored, recorded_as, now).await {
         Ok(true) => {}
         Ok(false) => {
             tracing::debug!(path = abs_path, "no local copy to re-point after restore");
@@ -2186,8 +2203,12 @@ async fn apply_restore_locally(
         }
     }
 
-    if let Err(e) = fauna_cfapi::dehydrate_placeholder(std::path::Path::new(abs_path)) {
-        tracing::warn!(path = abs_path, error = %e, "dehydrating restored file failed");
+    if let Err(e) = fauna_cfapi::supersede_placeholder(
+        std::path::Path::new(abs_path),
+        u64::try_from(restored.size_bytes).unwrap_or(0),
+        now,
+    ) {
+        tracing::warn!(path = abs_path, error = %e, "freeing the pre-restore bytes failed");
         return;
     }
 
@@ -4724,6 +4745,7 @@ mod tests {
             "sub/a.txt",
             &restored,
             Some([0x5C; 32]),
+            1_700_000_100,
         )
         .await
         .expect("repoint_entry");
@@ -4955,6 +4977,7 @@ mod attach_tests {
                 id: 1,
                 method: RequestMethod::AttachApp {
                     app: Some("tui".into()),
+                    notification_identity: None,
                 },
             })
             .unwrap();

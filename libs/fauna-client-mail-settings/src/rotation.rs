@@ -127,22 +127,30 @@ async fn drive_rotation_loop(
     // replace on nest; if a crash occurred before (d) we still need to
     // do it, if after the replay is free.
     //
-    // The snapshot's grace list is [new, old, …prior] (capped to 3 by
-    // the builder): the new MSEK-derived recipient keypair plus the
-    // outgoing one(s), so in-flight mail sealed to the pre-rotation
-    // pubkey still opens. `mail.msek` is usually still the OLD MSEK
+    // The snapshot's key list is [new, old, …prior] — every generation, the
+    // builder caps nothing (`owner-key-material.md` § Path B-sibling-2 →
+    // *Pre-rotation mail at rest*): the new MSEK-derived recipient keypair
+    // plus every outgoing one, so mail sealed to any pre-rotation pubkey
+    // still opens. `mail.msek` is usually still the OLD MSEK
     // here (finalize at step (f) is what swaps it). One narrow exception:
     // a *resume* that runs after finalize already committed the swap but
     // before it cleared the sentinel sees `mail.msek == new_msek` — the
     // shared recipe's dedup (`provision_snapshot_for`) collapses that
-    // genuine duplicate so a still-needed prior key is not pushed out of
-    // the grace window. (Distinct rotations have distinct random MSEKs.)
+    // genuine duplicate. (Distinct rotations have distinct random MSEKs.)
+    // The outgoing generation is retired NOW as far as the snapshot is
+    // concerned (its pubkey stops being published at step d); finalize records
+    // its own instant, and the post-finalize `refresh_snapshot` re-carries it.
     let mut mseks = vec![new_msek.to_array()];
-    if let Some(old) = mail.msek.as_ref() {
+    let mut retired_at_unix = Vec::new();
+    if let Some(old) = mail.msek.as_ref().filter(|old| **old != new_msek) {
         mseks.push(old.to_array());
+        retired_at_unix.push(Timestamp::now_secs().max(0) as u64);
     }
     mseks.extend(mail.prior_mseks.iter().map(SecretArray32::to_array));
-    machine.provision_snapshot_for(&mseks).await?;
+    retired_at_unix.extend(mail.prior_retired_at_unix());
+    machine
+        .provision_snapshot_for(&mseks, &retired_at_unix)
+        .await?;
 
     // Publish the post-quantum ML-KEM ek alongside the new X25519 pubkey, and
     // the content-sealing-epoch schedule rederived from the new MSEK (design
@@ -224,8 +232,9 @@ async fn drive_rotation_loop(
     // `mail-credentials.md` § Cross-device finalize race) lets a concurrent
     // peer device whose state row carries the pre-rotation `msek` under a
     // newer stamp **revert our swap** when the walk merges it in — and the
-    // displaced MSEK is NOT unioned into the grace window (the window unions
-    // the two sides' `prior_mseks` only), so `new_msek` would be absent from
+    // displaced MSEK is NOT unioned into the priors (the join never unions a
+    // displaced key — a generation row is written only by a finalize, for the
+    // key it retires), so `new_msek` would be absent from
     // `msek`, `prior_mseks` and (once cleared) the sentinel, with NO
     // client-side flow to recover it from the nest wrapped blobs (only the
     // mail bridge unwraps them, session-local). The next rotation's grace list
@@ -277,32 +286,38 @@ async fn drive_rotation_loop(
             break;
         }
 
-        // Not yet swapped. Retain the outgoing MSEK in the grace window (the
-        // window's join keeps the cap-2 newest by retirement), set MSEK :=
-        // new, record the retirement instant keyed by the retired MSEK (the
-        // bounded-mail mint's generation seal intervals — content-sealing-
-        // epochs amendment 2026-07-19; idempotent across re-drives: an
-        // existing entry for `old` keeps its first-recorded instant), and KEEP
+        // Not yet swapped. FIRST retain the outgoing MSEK as its own
+        // `generation/<fingerprint>` row — every generation is kept, uncapped
+        // (`owner-key-material.md` § Path B-sibling-2 → *Pre-rotation mail at
+        // rest*) — with its retirement instant (the bounded-mail mint's
+        // generation seal intervals and the openers' seal-time selection;
+        // idempotent across re-drives and resumes: a row already recorded for
+        // `old` keeps its first-recorded instant). Written BEFORE the swap, so
+        // no crash between the two can leave the outgoing generation in
+        // neither `msek` nor a generation row. THEN set MSEK := new and KEEP
         // the sentinel carrying `new_msek` so it stays recoverable until
         // confirmed.
-        let mut prior_mseks = Vec::new();
-        let mut prior_msek_retirements = Vec::new();
         if let Some(old) = mail.msek.clone() {
-            let retired_at_unix = mail
-                .prior_msek_retired_at(&old)
-                .unwrap_or_else(|| Timestamp::now_secs().max(0) as u64);
-            prior_msek_retirements.push(PriorMsekRetirement {
-                msek: old.clone(),
-                retired_at_unix,
-            });
-            prior_mseks.push(old);
+            let recorded = machine
+                .mail_store()
+                .load_rows()
+                .await?
+                .generations
+                .get(&MsekFingerprint::of(&old))
+                .map(|g| g.retired_at_unix);
+            let retired_at_unix = recorded.unwrap_or_else(|| Timestamp::now_secs().max(0) as u64);
+            machine
+                .mail_store()
+                .retire_generation(PriorMsekRetirement {
+                    msek: old,
+                    retired_at_unix,
+                })
+                .await?;
         }
         machine
             .mail_store()
             .write_state(MailStateRow {
                 msek: Some(new_msek.clone()),
-                prior_mseks,
-                prior_msek_retirements,
                 pending_rotation: Some(MailRotationSentinel {
                     new_msek: new_msek.clone(),
                 }),

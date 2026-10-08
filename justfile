@@ -4963,8 +4963,8 @@ _mac-app-impl:
     # Registering nothing is what this recipe did before it moved to xcodebuild,
     # and what it should keep doing: the bundle users get is registered by the
     # installer, not by a build. `-u` is reversible and does not touch the bundle;
-    # `-R` matches the recursive `-f -R` xcodebuild registered with, so Sparkle's
-    # nested `Updater.app` comes out too rather than lingering as build output in
+    # `-R` matches the recursive `-f -R` xcodebuild registered with, so the
+    # nested `.appex` bundles come out too rather than lingering as build output in
     # the LaunchServices database. It prints a benign `failed to scan …: -10814
     # from spotlight` — that line is a Spotlight scan, not the unregister.
     #
@@ -4993,13 +4993,12 @@ _mac-app-impl:
 
     # What xcodebuild owes us, asserted rather than assumed: a silent regression
     # in any of these ships an app that launches but has no extension, no
-    # auto-update, no auto-start at sign-in (the `SMAppService.agent` plist —
+    # auto-start at sign-in (the `SMAppService.agent` plist —
     # apps/macos.md § App Lifecycle), or the wrong version.
     for want in Contents/MacOS/Fauna Contents/Info.plist Contents/PkgInfo \
                 Contents/Library/LaunchAgents/social.fauna.FaunaMacOS.plist \
                 Contents/PlugIns/Fauna-FileProvider.appex \
-                Contents/PlugIns/Fauna-FileProviderUI.appex \
-                Contents/Frameworks/Sparkle.framework; do
+                Contents/PlugIns/Fauna-FileProviderUI.appex; do
         [ -e "$APP/$want" ] || { echo "assembled bundle is missing $want" >&2; exit 1; }
     done
 
@@ -5033,7 +5032,7 @@ _mac-app-impl:
        "$APP/Contents/MacOS/fauna-sync-agent"
 
     # Ad-hoc sign LAST, inside-out: the bundled agent with ITS entitlements, each
-    # .appex with ITS OWN, Sparkle, then the app — never `--deep` on the app,
+    # .appex with ITS OWN, then the app — never `--deep` on the app,
     # which re-stamps nested code with the app's claims
     # (installer/macos/sign-app-bundle.sh has the measurement). mac-dmg /
     # build.sh --sign re-sign with the Developer ID cert through the same script.
@@ -5049,8 +5048,7 @@ mac-dmg profile="": (mac-app "release" profile)
     just mac-dmg-package
 
 # Sign, notarize and staple an ALREADY-BUILT build/Release/Fauna.app into
-# build/Fauna-<version>.dmg (+ .sha256) and the Sparkle payload
-# build/Fauna-<version>.app.zip. Split from `mac-dmg` so the release workflow
+# build/Fauna-<version>.dmg (+ .sha256). Split from `mac-dmg` so the release workflow
 # can build the bundle in a credential-free job and sign it in a separate,
 # Environment-gated one (installers/macos.md § Build Pipeline → The `.dmg`
 # release pipeline). Requires a Developer ID Application identity in a
@@ -5085,7 +5083,6 @@ mac-dmg-package:
     VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
     APP_PATH="build/Release/Fauna.app"
     DMG_PATH="build/Fauna-${VERSION}.dmg"
-    ZIP_PATH="build/Fauna-${VERSION}.app.zip"
     [ -d "$APP_PATH" ] || { echo "$APP_PATH not found — run \`just mac-app release\` first (or \`just mac-dmg\`)" >&2; exit 1; }
 
     echo "==> Signing Fauna.app (inside-out — installer/macos/sign-app-bundle.sh)..."
@@ -5106,14 +5103,12 @@ mac-dmg-package:
     echo "==> Stapling..."
     xcrun stapler staple "$DMG_PATH"
     # The app inside was notarized as part of the .dmg submission (one ticket per
-    # cdhash), so its own ticket exists and staples onto the bundle — which is
-    # what the Sparkle payload needs, since an in-place update never sees the .dmg.
+    # cdhash), so its own ticket exists and staples onto the bundle — a copy
+    # dragged out of the .dmg then passes Gatekeeper offline too.
     xcrun stapler staple "$APP_PATH"
-    rm -f "$ZIP_PATH"
-    ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
 
     shasum -a 256 "$DMG_PATH" > "${DMG_PATH}.sha256"
-    echo "==> Done! DMG: $DMG_PATH  Sparkle payload: $ZIP_PATH"
+    echo "==> Done! DMG: $DMG_PATH"
 
 # Sign, notarize and tar ONE of the terminal app's macOS archives
 # (installers/tui.md § The ratified channel, decision 2: Developer ID-signed and
@@ -5172,29 +5167,6 @@ mac-tui-archive suffix dir:
     tar -C build -czf "$TAR" "$NAME"
     shasum -a 256 "$TAR" > "${TAR}.sha256"
     echo "==> Done! Archive: $TAR"
-
-# Generate Sparkle appcast from DMGs in build/releases/
-# Requires: Sparkle's generate_appcast tool and FAUNA_SPARKLE_KEY (EdDSA private key)
-# Usage: place signed DMGs in build/releases/, run `just appcast`
-appcast:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    : "${FAUNA_SPARKLE_KEY:?Set FAUNA_SPARKLE_KEY (EdDSA private key from generate_keys)}"
-    RELEASES_DIR="build/releases"
-    APPCAST_PATH="build/appcast.xml"
-    mkdir -p "$RELEASES_DIR"
-    # Copy latest DMG to releases dir if not already there
-    LATEST_DMG=$(ls -t build/Fauna-*.dmg 2>/dev/null | head -1 || true)
-    if [ -n "$LATEST_DMG" ] && [ ! -f "$RELEASES_DIR/$(basename "$LATEST_DMG")" ]; then
-        cp "$LATEST_DMG" "$RELEASES_DIR/"
-    fi
-    echo "==> Generating appcast from $RELEASES_DIR..."
-    generate_appcast "$RELEASES_DIR" \
-        --ed-key-file <(echo "$FAUNA_SPARKLE_KEY") \
-        --download-url-prefix "https://github.com/faunasocial/fauna/releases/download/" \
-        -o "$APPCAST_PATH"
-    echo "==> Appcast written to $APPCAST_PATH"
-    echo "Upload this file to https://fauna.social/appcast.xml"
 
 # Build fauna-ffi for Windows ARM64 and generate C# bindings.
 # Uses the in-tree uniffi-bindgen-cs (libs/uniffi-bindgen-cs/, vendored from
@@ -6238,7 +6210,19 @@ _ffi-store-safe-check-impl:
     #     a §4 provider id; `provider_status_label`'s docs describe the badge
     #     without spelling it.
     # It joins the day a doc comment here names it.
-    PAY_ID_PATS=('subscription-claim-' 'post-tip-')
+    # `compose-sell-asking-price` is a FULL id, and the first of the price-and-route
+    # class's doc-comment carriers in this graph to be watched here
+    # (`dynamic-features.md` § Platform-family surface excision → *The
+    # price-and-route class*): `fauna-feed`'s `SellComposeState::asking_price`
+    # field doc spells it, a `payments`-gated doc line since 2026-10-07 — and it
+    # had been riding every store-safe FFI artifact unmeasured since the id was
+    # catalogued on 2026-08-22. Its five sibling carriers (`compose-sell-price`,
+    # `compose-sell-subscribers-free`, `gated-post-price`, `gated-post-payment-link`,
+    # `gated-post-buy-button` — the same record docs plus `FfiFeedManager`'s method
+    # docs, gated the same day) join this array the day the catalog carries them:
+    # the spine pin holds this array to the payments catalog, and that entry lands
+    # with the last family's gates (the ruling's *Catalog shape and sequencing*).
+    PAY_ID_PATS=('subscription-claim-' 'post-tip-' 'compose-sell-asking-price')
     # The `p2p-share` member, its own axis (2026-09-28): the ceremony half
     # (`offline-share`) left `store-safe` for `p2p-share`, the plane half
     # (`share_plane`) was never in it. All FOUR catalog prefixes are live here —
@@ -6547,7 +6531,14 @@ _tui-store-safe-check-impl:
     # --- column 1: the store-safe tui carries neither the UI nor the wire -----
     {{slot_build}} cargo build --locked -p fauna-tui --bin fauna-tui --no-default-features --features store-safe
     built "$BIN"
-    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'fauna\.tips\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'fauna\.peer\.share\.' 'nostr-zap-signer-'; do
+    # The twelve FULL ids after the prefixes are the price-and-route class
+    # (dynamic-features.md § Platform-family surface excision → *The
+    # price-and-route class*): listed whole because their natural prefixes
+    # (`subscription-offer-`, `subscription-tier-`, `gated-post-`,
+    # `compose-sell-`) also cover ids outside the plane. Hand-listed here until
+    # the catalog entry lands with the last family's gates (that section says why
+    # the entry comes last).
+    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'fauna\.tips\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'fauna\.peer\.share\.' 'nostr-zap-signer-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button'; do
         n="$(strings -a "$BIN" | grep -c "$pat" || true)"
         if [ "$n" != "0" ]; then
             echo "ERROR: the store-safe fauna-tui flavor still carries $n '$pat' occurrence(s)." >&2
@@ -6585,7 +6576,7 @@ _tui-store-safe-check-impl:
     # match nothing — a renamed id would read as a successful excision.
     {{slot_build}} cargo build --locked -p fauna-tui --bin fauna-tui
     built "$BIN"
-    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'fauna\.peer\.share\.' 'nostr-zap-signer-'; do
+    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'fauna\.peer\.share\.' 'nostr-zap-signer-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button'; do
         n="$(strings -a "$BIN" | grep -c "$pat" || true)"
         if [ "$n" = "0" ]; then
             echo "ERROR: the DEFAULT fauna-tui flavor carries no '$pat' — the store-safe" >&2
@@ -6661,7 +6652,14 @@ _linux-store-safe-check-impl:
     # tui's recipe already had them.
     {{slot_build}} cargo build --locked -p fauna-linux --bin fauna-desktop --no-default-features --features store-safe
     built "$BIN"
-    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'fauna\.tips\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-'; do
+    # The twelve FULL ids after the prefixes are the price-and-route class
+    # (dynamic-features.md § Platform-family surface excision → *The
+    # price-and-route class*): listed whole because their natural prefixes
+    # (`subscription-offer-`, `subscription-tier-`, `gated-post-`,
+    # `compose-sell-`) also cover ids outside the plane. Hand-listed here until
+    # the catalog entry lands with the last family's gates (that section says why
+    # the entry comes last).
+    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'fauna\.tips\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button'; do
         n="$(strings -a "$BIN" | grep -c "$pat" || true)"
         if [ "$n" != "0" ]; then
             echo "ERROR: the store-safe fauna-desktop flavor still carries $n '$pat' occurrence(s)." >&2
@@ -6682,7 +6680,7 @@ _linux-store-safe-check-impl:
     # match nothing — a renamed id would read as a successful excision.
     {{slot_build}} cargo build --locked -p fauna-linux --bin fauna-desktop
     built "$BIN"
-    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-'; do
+    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button'; do
         n="$(strings -a "$BIN" | grep -c "$pat" || true)"
         if [ "$n" = "0" ]; then
             echo "ERROR: the DEFAULT fauna-desktop flavor carries no '$pat' — the store-safe" >&2
@@ -6721,6 +6719,105 @@ windows-store-safe: windows-ffi-store-safe i18n-generate providers-generate
         apps/fauna-windows/FaunaApp/FaunaApp/FaunaApp.csproj \
         "-restore" "//p:Platform=ARM64" "//p:Configuration=Release" \
         "//p:FaunaStoreSafe=true" "//verbosity:minimal"
+
+# Build the Microsoft Store package — the full MSIX a Partner Center upload
+# carries (installers/windows.md § Store distribution): the shipped-flavour
+# payload, built and staged here, then packed by scripts/build-store-package.py.
+# An upload is built from a clean public clone at the recorded commit
+# (release-integrity.md § Release signing → *A store upload is built from a
+# recorded public commit*), with the reserved identity:
+#
+#   just windows-store-package arm64 full FaunaSocial.FaunaSocial "CN=E8868D60-047A-46A3-B608-0D4CA88AB791"
+#
+# Empty identity/publisher → the packer's dev placeholders (a local check, never
+# an upload). `flavor` is `full` or `store-safe` (the escape hatch:
+# dynamic-features.md § The App-Store escape hatch).
+#
+# Why a recipe of its own and not the MSI helper's stage: the only other local
+# payload builder, test_installer.py::_build_msi, compiles the e2e automation
+# surface in ON PURPOSE (`-p:FaunaE2eAgent=true` over `windows-ffi-test`), because
+# the installed-MSI journeys drive the app through it. That is right for those
+# tests and fatal for an upload (convention 15), so this recipe never touches
+# build/installer/stage/ and stages into build/installer/store-payload/<arch>/,
+# the packer's default payload root. The packer then refuses any payload that
+# still shows the surface. Pinned by test_store_package_build.py.
+#
+# ONE build slot for the whole recipe (`slot_build_body` re-runs this script under
+# it unless the caller already holds one): the FFI, the two cargo builds, the
+# publish and the pack are one produce->consume chain, and the nested
+# `just windows-ffi` finds the slot held. Deliberately NOT build-if-stale gated,
+# like `windows-store-safe`: a flavour flip touches no source file.
+windows-store-package arch="arm64" flavor="full" identity_name="" publisher="": i18n-generate providers-generate
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{slot_build_body}}
+    # Artifact build: per-invocation feature resolution, never workspace-unified
+    # (.cargo/config.toml § feature unification) — same as `_windows-ffi-flavor`.
+    export CARGO_RESOLVER_FEATURE_UNIFICATION=selected
+    ARCH="{{arch}}"
+    FLAVOR="{{flavor}}"
+    # Installer artifacts build at the size-optimised `dist` profile; `release` is
+    # the dev/test inner loop (installers/windows.md § Size & build profile).
+    case "$ARCH" in
+        arm64) TARGET="";                     RID=win-arm64; CARGO_WIN_ARCH=arm64; CARGO_OUT=target/dist ;;
+        x64)   TARGET=x86_64-pc-windows-msvc; RID=win-x64;   CARGO_WIN_ARCH=x64;   CARGO_OUT=target/x86_64-pc-windows-msvc/dist ;;
+        *) echo "windows-store-package: arch must be arm64 or x64, got '$ARCH'" >&2; exit 2 ;;
+    esac
+    case "$FLAVOR" in
+        full|store-safe) ;;
+        *) echo "windows-store-package: flavor must be full or store-safe, got '$FLAVOR'" >&2; exit 2 ;;
+    esac
+    # cargo-win.cmd selects the matching cl/link/lib environment from this.
+    export CARGO_WIN_ARCH
+    TARGET_ARG="${TARGET:+--target $TARGET}"
+    APP=apps/fauna-windows/FaunaApp/FaunaApp
+    CORE=apps/fauna-windows/FaunaApp/FaunaApp.Core
+
+    # 1. The PRODUCTION FFI: stages runtimes/<rid>/native/fauna_ffi.dll and the
+    #    generated C# bindings the publish compiles against. Never the -test flavour.
+    if [ "$FLAVOR" = store-safe ]; then
+        just windows-ffi-store-safe dist "$TARGET"
+        AGENT_FEATURES="--no-default-features"   # drops p2p-share, the agent's only default
+        PUBLISH_FLAVOR="-p:FaunaStoreSafe=true"
+    else
+        just windows-ffi dist "$TARGET"
+        AGENT_FEATURES=""
+        PUBLISH_FLAVOR=""
+    fi
+
+    # 2. The two Rust binaries the package carries, each in its OWN invocation:
+    #    one naming several packages unifies their features (release.yml's rule).
+    cmd //c "scripts\\cargo-win.cmd build --profile dist --locked -p fauna-sync-agent $AGENT_FEATURES $TARGET_ARG"
+    cmd //c "scripts\\cargo-win.cmd build --profile dist --locked -p fauna-shell-ext $TARGET_ARG"
+
+    # 3. The app, self-contained Release. bin/ + obj/ are wiped first: a flavour
+    #    flip touches no source, and _build_msi publishes its e2e-agent build into
+    #    this very same bin/Release/<tfm>/<rid>/publish directory, so an
+    #    incremental publish could hand that assembly back (the trap
+    #    `windows-store-safe-check` measured).
+    rm -rf "$APP/bin" "$APP/obj" "$CORE/bin" "$CORE/obj"
+    "{{msbuild_exe}}" "$APP/FaunaApp.csproj" -restore -t:Publish \
+        -p:Configuration=Release -p:RuntimeIdentifier=$RID \
+        -p:SelfContained=true -p:WindowsAppSDKSelfContained=true \
+        $PUBLISH_FLAVOR -verbosity:minimal
+    PUBLISH_DIR="$APP/bin/Release/net10.0-windows10.0.26100/$RID/publish"
+    [ -f "$PUBLISH_DIR/FaunaApp.exe" ] || {
+        echo "windows-store-package: no FaunaApp.exe under $PUBLISH_DIR after the publish" >&2; exit 1; }
+
+    # 4. Stage exactly the payload the manifest references.
+    STAGE="build/installer/store-payload/$ARCH"
+    rm -rf "$STAGE"
+    mkdir -p "$STAGE/App"
+    cp -r "$PUBLISH_DIR/." "$STAGE/App/"
+    cp "$CARGO_OUT/fauna-sync-agent.exe" "$STAGE/"
+    cp "$CARGO_OUT/fauna_shell.dll" "$STAGE/"
+
+    # 5. Pack. The packer refuses a payload missing its native core or carrying
+    #    the automation surface; this recipe never opts out of either.
+    PACK=(--arch "$ARCH" --payload-root "$STAGE")
+    [ -n "{{identity_name}}" ] && PACK+=(--identity-name "{{identity_name}}")
+    [ -n "{{publisher}}" ] && PACK+=(--publisher "{{publisher}}")
+    {{py}} scripts/build-store-package.py "${PACK[@]}"
 
 # The windows APP-SHELL column of the store-safe family — the SIXTH, closing the
 # app-shell half (`dynamic-features.md` § The feature-matrix test story). See
@@ -6812,6 +6909,25 @@ _windows-store-safe-check-impl:
     # `_APPLE_ID_PREFIXES`.
     PAY_ID_PATS=('subscription-provider-' 'subscription-claim-' 'post-tip-' 'nostr-zap-signer-' \
         'subscription-tier-form-asking-price' 'compose-sell-asking-price')
+    # The price-and-route class (dynamic-features.md § Platform-family surface
+    # excision → The price-and-route class): the ten ids the catalog does not list
+    # yet, hand-listed as FULL ids, since each natural prefix also covers ids
+    # outside the plane. They are not in PAY_ID_PATS because they cannot read 0
+    # here yet: until the catalog row moves them into Generated/UiIds.cs's
+    # `#if PAYMENTS` half, each one's `const string` sits in the store-safe
+    # assembly's metadata whether or not anything reads it (the C# row of § Which
+    # element IDs belong to a gated feature) — one occurrence, the table's. A
+    # render adds a second: an x:Bind or C# reference compiles to an `ldstr` in
+    # the IL, a literal AutomationId lands in a .xbf. So store-safe must read
+    # EXACTLY 1 (the table and nothing else) and default AT LEAST 2 (the table
+    # and a render). A 0 check scoped to the .xbf set would be vacuous: the
+    # class's renders use x:Bind, which compiles into IL, not the .xbf (measured
+    # 2026-10-08). When the catalog lands the store-safe reading drops to 0 and
+    # table_only goes red on purpose: move these into PAY_ID_PATS then.
+    PAY_CLASS_IDS=('subscription-tier-form-price-hint' 'subscription-tier-form-payment-url' \
+        'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' \
+        'compose-sell-price' 'compose-sell-subscribers-free' \
+        'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button')
     # The UniFFI faces the shell would call — the C# twin of web's wasm exports.
     PAY_FACE_PATS=('FfiPaymentsClient' 'PaymentsKnownKinds' 'PaymentsWebhookUrl' 'FfiNostrZapSignerClient' 'FfiZapSignerEntry')
     # Criterion 2 — kind strings, which live in the native cdylib, never in the C#.
@@ -6896,6 +7012,51 @@ _windows-store-safe-check-impl:
         done
     }
 
+    # The price-and-route class's store-safe reading: the generated table's one
+    # line per id and nothing else (PAY_CLASS_IDS says why it is not 0 yet).
+    table_only() {
+        local label="$1"; shift
+        local dump; dump="$(scan)"
+        local pat n
+        for pat in "$@"; do
+            n="$(printf '%s\n' "$dump" | grep -c "$pat" || true)"
+            echo "  store-safe $label: $pat = $n (the generated table's line only)"
+            [ "$n" = "1" ] && continue
+            if [ "$n" = "0" ]; then
+                echo "ERROR: the store-safe windows $label carries no '$pat' at all, not even" >&2
+                echo "  the generated table's line. The catalog row has most likely landed and" >&2
+                echo "  moved it behind '#if PAYMENTS': move it from PAY_CLASS_IDS into" >&2
+                echo "  PAY_ID_PATS, which asserts 0 here." >&2
+            else
+                echo "ERROR: the store-safe windows $label carries $n '$pat' occurrences. One" >&2
+                echo "  is the generated table's const; every other one is a RENDER (an x:Bind" >&2
+                echo "  or C# reference compiles to an ldstr, a literal sits in a .xbf). Every" >&2
+                echo "  render of the price-and-route class lives in Views\\Payments\\ and is" >&2
+                echo "  hosted under '#if PAYMENTS' (dynamic-features.md § Platform-family" >&2
+                echo "  surface excision → The price-and-route class)." >&2
+            fi
+            exit 1
+        done
+    }
+
+    # …and its default reading: the table's line plus at least one render.
+    rendered() {
+        local label="$1"; shift
+        local dump; dump="$(scan)"
+        local pat n
+        for pat in "$@"; do
+            n="$(printf '%s\n' "$dump" | grep -c "$pat" || true)"
+            echo "  default    $label: $pat = $n (the generated table's line + renders)"
+            if [ "$n" -lt 2 ]; then
+                echo "ERROR: the DEFAULT windows $label carries $n '$pat', so no render" >&2
+                echo "  paints it and the store-safe reading of 1 above says nothing about the" >&2
+                echo "  render gate. Either the render left the default build or the id was" >&2
+                echo "  renamed and PAY_CLASS_IDS needs updating." >&2
+                exit 1
+            fi
+        done
+    }
+
     # Criterion 1's artifact set, and getting this wrong is a SILENT FALSE GREEN —
     # measured 2026-08-24, by the mutant that found it. The WinUI XAML compiler does
     # NOT put compiled markup inside FaunaApp.dll: it emits a `.xbf` per page beside
@@ -6948,6 +7109,7 @@ _windows-store-safe-check-impl:
     built "$OUT/fauna_ffi.dll"
     collect_id_artifacts
     SCAN_FILES=("${ID_FILES[@]}");            absent "assembly + compiled XAML" "${PAY_ID_PATS[@]}" "${P2P_ID_PATS[@]}"
+    SCAN_FILES=("${ID_FILES[@]}");            table_only "assembly + compiled XAML" "${PAY_CLASS_IDS[@]}"
     SCAN_FILES=("$OUT/FaunaApp.Core.dll");    absent "core assembly" "${PAY_FACE_PATS[@]}" "${P2P_FACE_PATS[@]}"
     SCAN_FILES=("$OUT/fauna_ffi.dll");        absent "native cdylib" "${PAY_KIND_PATS[@]}" "${P2P_NATIVE_PATS[@]}"
     # The renders' own .xbf files must be GONE, not merely id-free: they are the
@@ -6972,11 +7134,14 @@ _windows-store-safe-check-impl:
     built "$OUT/fauna_ffi.dll"
     collect_id_artifacts
     SCAN_FILES=("${ID_FILES[@]}");            present "assembly + compiled XAML" "${PAY_ID_PATS[@]}" "${P2P_ID_PATS[@]}"
+    SCAN_FILES=("${ID_FILES[@]}");            rendered "assembly + compiled XAML" "${PAY_CLASS_IDS[@]}"
     SCAN_FILES=("$OUT/FaunaApp.Core.dll");    present "core assembly" "${PAY_FACE_PATS[@]}" "${P2P_FACE_PATS[@]}"
     SCAN_FILES=("$OUT/fauna_ffi.dll");        present "native cdylib" "${PAY_KIND_PATS[@]}" "${P2P_NATIVE_PATS[@]}"
     # …and the renders' .xbf files must EXIST here, or column 1's absence of them
     # proves nothing about the item-removal.
-    for pat in PaymentsAuthorSections ClaimRedeemPanel PostTipDisplay PostTipListDialog NostrZapSignersSection; do
+    for pat in PaymentsAuthorSections ClaimRedeemPanel PostTipDisplay PostTipListDialog NostrZapSignersSection \
+        SubscriptionTierMoneyFields SubscriptionTierPriceText SubscriptionOfferPriceText \
+        SubscriptionOfferPaymentLink SellComposeFields SoldPostTeaser; do
         if [ ! -s "$OUT/Views/Payments/$pat.xbf" ]; then
             echo "ERROR: the DEFAULT build emitted no $pat.xbf, so column 1's check that" >&2
             echo "  the store-safe build lacks it is vacuous. Either the render moved or" >&2
@@ -6991,7 +7156,7 @@ _windows-store-safe-check-impl:
         exit 1
     fi
 
-    echo "windows-store-safe-check: OK — payments + p2p-share element ids, UniFFI faces and native strings present in default, absent in store-safe"
+    echo "windows-store-safe-check: OK — payments + p2p-share element ids, UniFFI faces and native strings present in default, absent in store-safe; the price-and-route class rendered in default, table-only in store-safe"
 
 # The android APP-SHELL column of the store-safe family — the FOURTH app-shell
 # witness (after tui, linux and apple) and the second over a non-Rust shell.
@@ -7396,6 +7561,15 @@ _apple-store-safe-check-impl:
     just apple-ffi-host-store-safe release
     {{slot_build}} swift build --package-path apps/fauna-apple --product FaunaMacOS -c release -Xswiftc -DFAUNA_EXCISE_PAYMENTS -Xswiftc -DFAUNA_EXCISE_P2P_SHARE
     {{slot_build}} swift build --package-path apps/fauna-apple --target FaunaiOS -c release -Xswiftc -DFAUNA_EXCISE_PAYMENTS -Xswiftc -DFAUNA_EXCISE_P2P_SHARE
+    # The price-and-route class (dynamic-features.md § Platform-family surface
+    # excision → *The price-and-route class*) is NOT in this list yet, on purpose:
+    # on apple the generated `Ids` table is itself a carrier (the Swift row of
+    # § Which element IDs belong to a gated feature) and gates an id only once the
+    # catalog lists it — measured 2026-10-08 on this store-safe artifact with every
+    # render already gated: each of the class's ten uncatalogued ids read exactly 1
+    # (the table's line), its two catalogued twins 0. The twelve full ids join both
+    # columns here and in the iOS archive witness below with the catalog row's
+    # apple re-run.
     for pat in 'subscription-provider-' 'subscription-claim-' 'fauna\.payments\.' 'fauna\.tips\.' 'post-tip-' 'share-transfer-' 'share-serve-' 'offline-share-' 'offline-receive-'; do
         n="$(strings -a "$BIN" | grep -c "$pat" || true)"
         if [ "$n" != "0" ]; then
@@ -7568,6 +7742,13 @@ apple-ios-store-safe-check: i18n-generate providers-generate
     # and the archive then dies on "no library for this platform".
     just apple-ffi-store-safe
     archive store-safe OTHER_SWIFT_FLAGS='$(inherited) -D FAUNA_EXCISE_PAYMENTS -D FAUNA_EXCISE_P2P_SHARE'
+    # The price-and-route class (dynamic-features.md § Platform-family surface
+    # excision → *The price-and-route class*) — the class this witness's first
+    # run surfaced — is NOT in this list yet: the generated `Ids` table carries
+    # every uncatalogued id into the apple artifacts (the macOS witness above says
+    # how that was measured), so the twelve full ids join both columns with the
+    # catalog row's apple re-run —
+    # the run that proves the archive clean of the class.
     for pat in 'subscription-provider-' 'subscription-claim-' 'fauna\.payments\.' 'fauna\.tips\.' 'post-tip-' 'share-transfer-' 'share-serve-' 'offline-share-' 'offline-receive-'; do
         n="$(grep -c "$pat" "$SCRATCH/store-safe.strings" || true)"
         if [ "$n" != "0" ]; then
@@ -7703,6 +7884,16 @@ _wasm-store-safe-check-impl:
     # no doc comment in fauna-wasm's graph spells a §4 provider id — and the
     # `p2p-share` pair is 0 for the structural reason that fauna-wasm has no
     # `p2p` feature. Either joins the day a doc comment here names it.
+    # The price-and-route class (`dynamic-features.md` § Platform-family surface
+    # excision → *The price-and-route class*) has five doc-comment carriers in
+    # this graph — the `updateComposeSell`, `resolvePostUnlockOffer` and
+    # `buyUnlockOffer` exports' docs spell `compose-sell-price`,
+    # `compose-sell-subscribers-free`, `gated-post-price`, `gated-post-payment-link`
+    # and `gated-post-buy-button` — each a `payments`-gated doc line since
+    # 2026-10-07. They join this array (as FULL ids: the natural prefixes also
+    # cover ids outside the plane) with the catalog row that lands the class:
+    # this witness compiles for wasm32, which the ruling pass's machine could
+    # not do, so the measurement is that row's.
     PAY_ID_PATS=('subscription-claim-' 'post-tip-')
 
     absent() {  # absent <flavor-label> <pattern>...
@@ -8661,6 +8852,7 @@ windows-debug: (windows-ffi-test "dev") i18n-generate providers-generate
         --target apps/fauna-windows/FaunaApp/FaunaApp/bin/ARM64/Debug/net10.0-windows10.0.26100/FaunaApp.exe \
         --source apps/fauna-windows/FaunaApp \
         --source apps/fauna-windows/installer/PackageIdentity.props \
+        --source Directory.Build.props --source global.json \
         --exclude '*/bin/*' --exclude '*/obj/*' \
         -- {{slot_build}} "{{msbuild_exe}}" \
             apps/fauna-windows/FaunaApp/FaunaApp/FaunaApp.csproj \
@@ -8727,6 +8919,7 @@ windows-release: windows-ffi i18n-generate providers-generate
         --target apps/fauna-windows/FaunaApp/FaunaApp/bin/ARM64/Release/net10.0-windows10.0.26100/FaunaApp.exe \
         --source apps/fauna-windows/FaunaApp \
         --source apps/fauna-windows/installer/PackageIdentity.props \
+        --source Directory.Build.props --source global.json \
         --exclude '*/bin/*' --exclude '*/obj/*' \
         -- {{slot_build}} "{{msbuild_exe}}" \
             apps/fauna-windows/FaunaApp/FaunaApp/FaunaApp.csproj \
@@ -8789,6 +8982,8 @@ windows-flaui-bridge:
         --target tests/e2e-unified/flaui-bridge/bin/Debug/net10.0-windows/FauiBridge.exe \
         $(printf -- '--source %s ' tests/e2e-unified/flaui-bridge/*.cs) \
         --source tests/e2e-unified/flaui-bridge/FauiBridge.csproj \
+        --source tests/e2e-unified/flaui-bridge/packages.lock.json \
+        --source Directory.Build.props --source global.json \
         -- {{slot_build}} dotnet build tests/e2e-unified/flaui-bridge -c Debug
 
 # Build fauna-linux debug binary

@@ -2182,13 +2182,14 @@ fn approvals_elements(st: &FamilyState, out: &mut Vec<Element>) {
         return;
     }
     for (i, entry) in st.approvals.iter().enumerate() {
-        // A `mail_hold` row shows `peer_address` and every other kind its
-        // `summary` — the rule itself is shared
+        // Which field(s) each kind shows — `peer_address` for a hold, the
+        // grant's key for a `feed_source` — is the shared rule
         // (`fauna_core::format::approval_display_text`, reached through
         // `FamilyApprovalEntry::display_text`); a truthfully-empty null-path
         // sender falls back to the localized no-sender label rather than
         // rendering blank beside live Approve/Deny buttons.
-        let text = entry.display_text().unwrap_or(t::APPROVAL_NO_SENDER);
+        let text = entry.display_text();
+        let text = text.as_deref().unwrap_or(t::APPROVAL_NO_SENDER);
         out.push(Element::label(ids::FAMILY_APPROVAL_ITEM, text));
         out.push(
             Element::gesture_button(
@@ -3371,7 +3372,12 @@ mod tests {
             .collect();
         assert_eq!(texts[0], "alice");
         assert_eq!(texts[1], "npub1stranger");
-        assert_eq!(texts[2], "a science feed");
+        // A `feed_source` names the grant's key, the ward's label only quoted
+        // after it (family-safety.md § Feed-source approvals).
+        assert_eq!(
+            texts[2],
+            "bluesky · follow · did:plc:example — “a science feed”"
+        );
         assert_eq!(texts[3], t::APPROVAL_NO_SENDER, "never a blank row");
 
         // Deciding a `dm_hold` carries the `(bridge_id, peer_address)` key the

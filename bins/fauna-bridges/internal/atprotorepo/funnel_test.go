@@ -738,11 +738,11 @@ func TestCASIsEnforcedAgainstTheHeadTheCommitChainsOnto(t *testing.T) {
 // (repo_write.go's applyRecordWrite). In between, nothing holds the per-DID
 // lock, so the projection loop's own 30s pass can see the same unmapped
 // Fauna post and commit it FIRST — at the identical deterministic rkey
-// (D1/finding 2) the write path's own commit will target next, with the
+// (D1) the write path's own commit will target next, with the
 // SAME FaunaPostID.
 //
 // Two DESIGNED properties are what keep the second, later commit from
-// erroring or losing data (finding 26's "do not simplify either"): the rkey
+// erroring or losing data (the review's "do not simplify either"): the rkey
 // is deterministic, so both writers land at the same path rather than the
 // second creating a duplicate record at a second key; and post_map is an
 // UPSERT keyed on (did, fauna_post_id) — funnel.go's `ON CONFLICT(did,
@@ -811,7 +811,7 @@ func TestASecondCommitAtAnOccupiedDeterministicRkeyConvergesRatherThanCollides(t
 
 	// post_map converges rather than colliding: it names the CALLER's record
 	// CID, not the projection's stale one — exactly the property a bare
-	// INSERT (instead of the upsert) would break, per finding 26.
+	// INSERT (instead of the upsert) would break.
 	wantCID, err := RecordCID(callers)
 	if err != nil {
 		t.Fatal(err)

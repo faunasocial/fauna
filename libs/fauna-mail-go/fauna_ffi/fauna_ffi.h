@@ -2745,6 +2745,11 @@ void uniffi_fauna_ffi_fn_func_push_clear_opt_in(RustBuffer intent_path, RustCall
 RustBuffer uniffi_fauna_ffi_fn_func_push_intent(RustBuffer intent_path, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_PUSH_STANDING_FAILURE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_PUSH_STANDING_FAILURE
+RustBuffer uniffi_fauna_ffi_fn_func_push_standing_failure(int8_t opted_in, int8_t agent_running, RustBuffer notification_sink, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_CALENDAR_IS_DISPLAYED
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_CALENDAR_IS_DISPLAYED
 int8_t uniffi_fauna_ffi_fn_func_calendar_is_displayed(RustBuffer selected, RustBuffer existing_ids, RustBuffer visible_calendars, RustBuffer calendar_id, RustCallStatus *out_status
@@ -3993,6 +3998,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_push_clear_opt_in(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_PUSH_INTENT
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_PUSH_INTENT
 uint16_t uniffi_fauna_ffi_checksum_func_push_intent(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_PUSH_STANDING_FAILURE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_PUSH_STANDING_FAILURE
+uint16_t uniffi_fauna_ffi_checksum_func_push_standing_failure(void
     
 );
 #endif

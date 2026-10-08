@@ -1304,6 +1304,18 @@ fn update_handler() -> RpcHandler {
                             "nest_place.quiet_secs must not be negative",
                         ));
                     }
+                    // Bounded above too: an owner's own value reaches the
+                    // nest-wide scheduler, and an unbounded one panicked it for
+                    // every folder (2026-10-08).
+                    if place.quiet_secs.is_some_and(|q| {
+                        q > fauna_protocol::folders::NestPlacePolicy::MAX_QUIET_SECS
+                    }) {
+                        return Err(coded(
+                            FS,
+                            "bad_request",
+                            "nest_place.quiet_secs must not exceed seven days",
+                        ));
+                    }
                     (Some(place.snapshots), Some(place.quiet_secs))
                 }
                 None => (None, None),

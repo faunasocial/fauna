@@ -92,11 +92,11 @@ Stamped 2026-09-23 at 207d96534d.
 | 3 | app | `tests/e2e-unified/tests/test_trust_prompt.py::test_the_claim_offers_the_one_tap_trust_before_the_app` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_trust_prompt.py::test_declining_the_offer_leaves_everything_as_today` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_trust_prompt.py::test_accepting_the_offer_also_reaches_the_app` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_trust_prompt.py::test_the_manual_dns_resume_offers_the_trust_and_survives_a_crash_on_it` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_trust_prompt.py::test_the_manual_dns_resume_offers_the_trust_and_survives_a_crash_on_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_mail_enable_at_admin_claim.py::test_admin_claim_with_real_domain_handle_auto_enables_mail` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_mail_enable_at_admin_claim.py::test_admin_claim_with_loopback_handle_derives_mail_disabled` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_mail_enable_at_admin_claim.py::test_a_returning_admin_sign_in_issues_no_deployment_enable` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_admin_auth.py::test_claim_admin` | nest (linux): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_admin_auth.py::test_claim_admin` | nest (linux): passed, nest (windows): passed |
 | 5 | nest | `tests/e2e-unified/tests/platform/docker/test_cloud_init_claim_code_mount.py::test_mounted_claim_code_box_boots_and_is_claimable` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/platform/docker/test_cloud_init_claim_code_mount.py::test_lingering_claim_code_cannot_create_second_admin` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/platform/docker/test_nest.py::test_docker_nest_claim_admin` | nest (linux): passed |
@@ -105,11 +105,11 @@ Stamped 2026-09-23 at 207d96534d.
 | 8 | app | `tests/e2e-unified/tests/test_claim_code_unclaimed_nest.py::test_claim_code_uri_paste_reaches_the_machine_intact` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_web_claim_pin_wasm_witness.py::test_wasm_claim_pin_same_root_preserves_rotation_seq` | web (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_web_claim_pin_wasm_witness.py::test_wasm_claim_pin_differing_root_overwrites` | web (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_claim_link_nest_pin.py::test_a_claim_link_naming_another_nest_is_refused` | web (linux): skipped, linux (linux): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_claim_link_nest_pin.py::test_a_claim_link_naming_this_nest_claims_it_and_pins_that_identity` | web (linux): skipped, linux (linux): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_claim_link_nest_pin.py::test_a_claim_link_naming_another_nest_is_refused` | web (linux): skipped, linux (linux): passed, windows (windows): skipped, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_claim_link_nest_pin.py::test_a_claim_link_naming_this_nest_claims_it_and_pins_that_identity` | web (linux): skipped, linux (linux): passed, windows (windows): skipped, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_mail_enable_at_admin_claim.py::test_admin_claim_with_real_domain_handle_auto_enables_mail` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_mail_enable_at_admin_claim.py::test_marking_the_box_private_at_claim_leaves_all_four_serving_off` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 12 | nest | `tests/e2e-unified/tests/api/test_admin_auth.py::test_claim_admin` | nest (linux): passed |
+| 12 | nest | `tests/e2e-unified/tests/api/test_admin_auth.py::test_claim_admin` | nest (linux): passed, nest (windows): passed |
 | 12 | nest | `tests/e2e-unified/tests/platform/docker/test_cloud_init_claim_code_mount.py::test_mounted_claim_code_box_boots_and_is_claimable` | nest (linux): passed |
 | 12 | nest | `tests/e2e-unified/tests/platform/docker/test_nest.py::test_docker_nest_claim_admin` | nest (linux): passed |
 <!-- features-render:end -->

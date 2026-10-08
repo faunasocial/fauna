@@ -755,13 +755,17 @@ impl FamilyApprovalEntry {
     /// when the caller should render its own localized no-sender placeholder.
     ///
     /// A thin forward to [`fauna_core::format::approval_display_text`], which
-    /// lives a crate below and so cannot name `FamilyApprovalEntry`.
-    pub fn display_text(&self) -> Option<&str> {
+    /// lives a crate below and so cannot name `FamilyApprovalEntry`. Owned for
+    /// a `feed_source` row, whose text is composed from the grant's key.
+    pub fn display_text(&self) -> Option<std::borrow::Cow<'_, str>> {
         fauna_core::format::approval_display_text(
             &self.kind,
             &self.peer_address,
             &self.peer_handle,
             &self.summary,
+            &self.bridge_id,
+            &self.operation,
+            &self.target,
         )
     }
 }

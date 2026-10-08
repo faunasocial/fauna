@@ -133,9 +133,19 @@ steps for pre-sweep shapes, older-peer wire arms — is *removed*, not migrated:
 there is nothing to migrate and no deletion to approve. Scope, what stays, and
 the per-program record:
 [`architecture/version-compatibility.md`](architecture/version-compatibility.md)
-§ Dimension 2, the fourth ratified exception. **It ends at the 2026-10
-baseline**: from that commit on this section applies in full and
-unchanged, and the alpha carve-out above is the only remaining latitude.
+§ Dimension 2, the fourth ratified exception.
+
+**The 0.1.x compat-free window (2026-10-08, user-ruled) extends that reset
+through every 0.1.x product version.** Nothing had been released or installed
+anywhere when the user ruled it, so while the product version is 0.1.x no
+wire, IPC or at-rest backwards compatibility is owed: an alpha tester's 0.1.x
+install may need a fresh start after any 0.1.x upgrade, and that is no
+deletion needing the carve-out's per-case approval. **The window closes at
+0.2.0**: from the commit raising the product version to 0.2.0 this section
+applies in full and unchanged, and the alpha carve-out above is the only
+remaining latitude. Scope, what stays and the gates' mechanism:
+[`architecture/version-compatibility.md`](architecture/version-compatibility.md)
+§ Dimension 2, the fifth ratified exception.
 
 ### Client-recoverable nest state
 

@@ -13,8 +13,13 @@
 //!    folder; the seat hands it to that folder's engine and to no other. An ask
 //!    for a folder this process did not announce is ignored.
 //! 3. **Answer.** [`ServeInbox::serve`] runs beside the engine's own loop and
-//!    answers each ask through [`SyncEngine::answer_relay_ask`] — the bytes on
+//!    answers each ask through [`SyncEngine::answer_serve_ask`] — the bytes on
 //!    the bulk rail, or a decline — at most [`SERVE_CONCURRENCY`] at a time.
+//!
+//! **A sibling's want rides the same queue.** The same-account peer leg's
+//! chunk door ([`RelaySeat::serve_peer`]) hands a want to the folder's engine
+//! exactly as the nest's ask is handed; only where the answer goes differs
+//! ([`AskRoute`]). One serve core, one concurrency bound, every consumer.
 //!
 //! **Beside the loop, never inside it.** The seat that *asks* for a chunk is
 //! itself an announced seat of the folder, so the nest asks it too — while its
@@ -62,13 +67,30 @@ const ASK_QUEUE: usize = 32;
 /// registered yet.
 const ANNOUNCE_RETRY: Duration = Duration::from_secs(60);
 
+/// How long a sibling's want waits for the folder's engine to answer before
+/// the serve side reports the chunk missing (the puller then asks the nest).
+/// Covers a full queue's worth of serves ahead of it.
+const PEER_SERVE_DEADLINE: Duration = Duration::from_secs(30);
+
 /// One ask, as the seat hands it to the folder's engine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct ServeAsk {
-    /// The nest's handle for the ask — the answer route's path segment.
-    pub request_id: u64,
     /// The store key of the wanted chunk.
     pub store_key: [u8; 32],
+    /// Where the answer goes.
+    pub route: AskRoute,
+}
+
+/// Who asked, and so where the engine's answer goes. The serve itself is the
+/// same for both — [`SyncEngine::serve_chunk`], the one serve core.
+#[derive(Debug)]
+pub enum AskRoute {
+    /// The nest's relay (`fauna.sync.chunk.wanted`): the answer is posted back
+    /// on the bulk rail under the nest's handle for the ask.
+    Relay { request_id: u64 },
+    /// A sibling device over the peer leg (`fauna.peer.sync.chunks.pull`): the
+    /// answer goes back to the peer serve side waiting on it.
+    Peer(tokio::sync::oneshot::Sender<Option<Vec<u8>>>),
 }
 
 /// One registered run of a folder's engine: its registration id and the
@@ -183,10 +205,36 @@ impl RelaySeat {
             return false;
         };
         tx.try_send(ServeAsk {
-            request_id: ask.request_id,
             store_key,
+            route: AskRoute::Relay {
+                request_id: ask.request_id,
+            },
         })
         .is_ok()
+    }
+
+    /// Serve one stored chunk of `folder` (its `FolderRef` wire string) to a
+    /// sibling device — the peer leg's door into the one serve core
+    /// (`file-sync.md` § Relay serving: the same-account peer leg is that
+    /// core's further consumer). The want joins the folder's engine's queue
+    /// like a relay ask and is answered by the same serve. `None` — never an
+    /// error — for a folder no engine here runs, a full queue, an engine that
+    /// holds no body, or no answer within [`PEER_SERVE_DEADLINE`].
+    pub async fn serve_peer(&self, folder: &str, store_key: [u8; 32]) -> Option<Vec<u8>> {
+        let (answer, answered) = tokio::sync::oneshot::channel();
+        {
+            let folders = self.folders.lock().expect("relay seat registry");
+            let (_, tx) = folders.get(folder).and_then(|runs| runs.last())?;
+            tx.try_send(ServeAsk {
+                store_key,
+                route: AskRoute::Peer(answer),
+            })
+            .ok()?;
+        }
+        tokio::time::timeout(PEER_SERVE_DEADLINE, answered)
+            .await
+            .ok()?
+            .ok()?
     }
 
     /// Announce and route until the connection's push stream ends. `nest` is
@@ -293,7 +341,7 @@ impl ServeInbox {
     /// polls it — beside the engine's own loop, on the same task (the engine
     /// is `!Sync`), never as an arm of it. Never returns on its own.
     pub async fn serve(&mut self, engine: &SyncEngine) {
-        self.serve_with(|ask| engine.answer_relay_ask(ask)).await;
+        self.serve_with(|ask| engine.answer_serve_ask(ask)).await;
     }
 
     /// [`Self::serve`] over any answerer — the seam a host whose engine sits
@@ -378,17 +426,43 @@ mod tests {
 
         let key = "ab".repeat(32);
         assert!(seat.route(&ask(&a, 1, &key)));
-        assert_eq!(
-            inbox_a.rx.try_recv().unwrap(),
-            ServeAsk {
-                request_id: 1,
-                store_key: [0xab; 32]
-            }
-        );
+        let routed = inbox_a.rx.try_recv().unwrap();
+        assert_eq!(routed.store_key, [0xab; 32]);
+        assert!(matches!(routed.route, AskRoute::Relay { request_id: 1 }));
         assert!(inbox_b.rx.try_recv().is_err(), "b was not asked");
         assert!(
             !seat.route(&ask(&FolderRef::Local(8), 2, &key)),
             "a folder this process did not announce is ignored"
+        );
+    }
+
+    /// A sibling's want rides the folder's own serve queue and comes back on
+    /// the peer route; a folder no engine here runs answers nothing.
+    #[tokio::test]
+    async fn a_sibling_want_is_served_through_the_folders_queue() {
+        let seat = RelaySeat::new();
+        let folder = FolderRef::Local(7);
+        let mut inbox = seat.register(&folder);
+        tokio::spawn(async move {
+            inbox
+                .serve_with(|ask: ServeAsk| async move {
+                    match ask.route {
+                        AskRoute::Peer(answer) => {
+                            let _ = answer.send(Some(ask.store_key.to_vec()));
+                        }
+                        AskRoute::Relay { .. } => panic!("a sibling's want is not a relay ask"),
+                    }
+                })
+                .await
+        });
+        assert_eq!(
+            seat.serve_peer(&folder.to_wire(), [0x5a; 32]).await,
+            Some(vec![0x5a; 32])
+        );
+        assert_eq!(
+            seat.serve_peer(&FolderRef::Local(8).to_wire(), [0x5a; 32])
+                .await,
+            None
         );
     }
 

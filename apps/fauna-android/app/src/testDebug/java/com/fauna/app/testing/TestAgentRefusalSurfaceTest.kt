@@ -443,7 +443,10 @@ class TestAgentRefusalSurfaceTest {
     // refusals are pinned here, their wire halves on the host emulator.
 
     private fun wireRealManagerHost(): ConversationsManagerHost =
-        ConversationsManagerHost(NotificationHelper(RuntimeEnvironment.getApplication()))
+        ConversationsManagerHost(
+            NotificationHelper(RuntimeEnvironment.getApplication()),
+            com.fauna.app.widget.WidgetUnreadPublisher(RuntimeEnvironment.getApplication()),
+        )
             .also { TestAgent.setConversationsManagerHostForTest(it) }
 
     @After
