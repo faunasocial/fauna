@@ -73,7 +73,9 @@
   import { reportActorTarget, type ReportTarget } from '$lib/wasm';
   import ProviderSection from '$lib/components/payments/ProviderSection.svelte';
   import ClaimSection from '$lib/components/payments/ClaimSection.svelte';
-  import AskingPriceInput from '$lib/components/payments/AskingPriceInput.svelte';
+  import TierMoneyFields from '$lib/components/payments/TierMoneyFields.svelte';
+  import TierPrice from '$lib/components/payments/TierPrice.svelte';
+  import OfferPaymentLink from '$lib/components/payments/OfferPaymentLink.svelte';
   import { t } from '$lib/i18n/strings';
   import { isSafeNavUrl } from '$lib/safe-url';
   import { bestEffortCopyToClipboard } from '$lib/web-publish';
@@ -91,12 +93,12 @@
     type KnockSendResult,
   } from '$lib/ward-asks';
   import { wardAsks, refreshWardAsks, rereadAfterAsk } from '$lib/wardAsks.svelte';
-  // subscription-tier-form-asking-price moved into the gated payments id table
-  // (dynamic-features.md § A gated plane's user-facing INPUTS excise with it;
-  // ui.yaml's gated_features.payments.id_prefixes, added 2026-09-06). The
-  // render lives in its own `payments/` component, imported only behind
-  // `__FAUNA_PAYMENTS__` below, matching ProviderSection/ClaimSection's own
-  // isolation (dynamic-features.md § Platform-family surface excision).
+  // The price-and-route class — the tier editor's three money fields, the
+  // tier list's and offer row's price text, the offer's payment link — is
+  // inside the `payments` plane (dynamic-features.md § Platform-family surface
+  // excision → *The price-and-route class*). Each render lives in its own
+  // `payments/` component, imported only behind `__FAUNA_PAYMENTS__` below,
+  // matching ProviderSection/ClaimSection's own isolation.
 
   type Tab = 'posts' | 'tiers';
 
@@ -1048,22 +1050,13 @@
               class="input" type="text" placeholder={t.subscriptions.description}
               data-testid={IDS.SUBSCRIPTION_TIER_FORM_DESCRIPTION} bind:value={formDescription}
             />
-            <input
-              class="input" type="text" placeholder={t.subscriptions.price_hint}
-              data-testid={IDS.SUBSCRIPTION_TIER_FORM_PRICE_HINT} bind:value={formPriceHint}
-            />
             {#if __FAUNA_PAYMENTS__}
-              <AskingPriceInput
-                variant="subscription-tier-form"
-                placeholder={t.subscriptions.asking_price}
-                value={formAskingPrice}
-                onvaluechange={(v) => { formAskingPrice = v; }}
+              <TierMoneyFields
+                bind:priceHint={formPriceHint}
+                bind:askingPrice={formAskingPrice}
+                bind:paymentUrl={formPaymentUrl}
               />
             {/if}
-            <input
-              class="input" type="text" placeholder={t.subscriptions.payment_url}
-              data-testid={IDS.SUBSCRIPTION_TIER_FORM_PAYMENT_URL} bind:value={formPaymentUrl}
-            />
             <label class="switch-row">
               <span>{t.subscriptions.auto_approve}</span>
               <input
@@ -1087,7 +1080,9 @@
             <div class="row" data-testid={IDS.SUBSCRIPTION_TIER_ROW}>
               <span class="grow" data-testid={IDS.SUBSCRIPTION_TIER_NAME}>{tier.name}</span>
               <span data-testid={IDS.SUBSCRIPTION_TIER_RANK}>{tier.rank}</span>
-              <span data-testid={IDS.SUBSCRIPTION_TIER_PRICE}>{tier.price_hint ?? ''}</span>
+              {#if __FAUNA_PAYMENTS__}
+                <TierPrice variant="tier" priceHint={tier.price_hint} />
+              {/if}
               <button class="btn" data-testid={IDS.SUBSCRIPTION_TIER_EDIT_BUTTON} onclick={() => openEdit(tier)}>
                 {t.subscriptions.edit}
               </button>
@@ -1202,13 +1197,12 @@
           {#each offers as offer (offer.name)}
             <div class="row" data-testid={IDS.SUBSCRIPTION_OFFER_ROW}>
               <span class="grow" data-testid={IDS.SUBSCRIPTION_OFFER_NAME}>{offer.name}</span>
-              <span data-testid={IDS.SUBSCRIPTION_OFFER_PRICE}>{offer.price_hint ?? ''}</span>
+              {#if __FAUNA_PAYMENTS__}
+                <TierPrice variant="offer" priceHint={offer.price_hint} />
+              {/if}
               <span class="muted small" data-testid={IDS.SUBSCRIPTION_OFFER_DESCRIPTION}>{offer.description ?? ''}</span>
-              {#if offer.payment_url}
-                <button
-                  class="btn" data-testid={IDS.SUBSCRIPTION_OFFER_PAYMENT_LINK}
-                  onclick={() => openPayment(offer.payment_url!)}
-                >{t.subscriptions.payment_url}</button>
+              {#if __FAUNA_PAYMENTS__ && offer.payment_url}
+                <OfferPaymentLink onopen={() => openPayment(offer.payment_url!)} />
               {/if}
               <span data-testid={IDS.SUBSCRIPTION_OFFER_STATUS}>{offerStatusLabel(offer)}</span>
               <button

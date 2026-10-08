@@ -57,7 +57,10 @@ pub async fn handle_request(req: &Request, state: &Arc<SyncServiceState>) -> Res
         RequestMethod::ProvisionCapability(cap) => handle_provision_capability(state, cap).await,
         RequestMethod::RefreshBearer(bearer) => handle_refresh_bearer(state, bearer).await,
         RequestMethod::UnprovisionCapability => handle_unprovision_capability(state).await,
-        RequestMethod::AttachApp { app } => handle_attach_app(state, app.as_deref()),
+        RequestMethod::AttachApp {
+            app,
+            notification_identity,
+        } => handle_attach_app(state, app.as_deref(), notification_identity.clone()).await,
         RequestMethod::Shutdown => handle_shutdown(state).await,
         RequestMethod::ListEngines => handle_list_engines(state).await,
         RequestMethod::GetBackupStatus => handle_get_backup_status(state).await,
@@ -268,17 +271,26 @@ async fn handle_get_service_status(
 /// [`RequestMethod::AttachApp`] — the calling app is open for as long as this
 /// connection is: the lease is held in the connection's scope and ends when
 /// the app closes it (or dies), which is what the push arm reads
-/// ([`crate::push_arm`]).
-fn handle_attach_app(
+/// ([`crate::push_arm`]). A named notification identity is handed to the sink
+/// before the reply, so an app that reads the status after attaching sees the
+/// sink that identity gives.
+async fn handle_attach_app(
     state: &Arc<SyncServiceState>,
     app: Option<&str>,
+    notification_identity: Option<String>,
 ) -> Result<ResponsePayload, String> {
-    if fauna_ipc::conn_scope::hold_for_connection(state.attached_apps.attach()) {
-        tracing::debug!(app = app.unwrap_or("?"), "an app attached");
-        Ok(ResponsePayload::Empty)
-    } else {
-        Err("AttachApp must arrive on a served connection".into())
+    if !fauna_ipc::conn_scope::hold_for_connection(state.attached_apps.attach()) {
+        return Err("AttachApp must arrive on a served connection".into());
     }
+    tracing::debug!(app = app.unwrap_or("?"), "an app attached");
+    if let Some(identity) = notification_identity {
+        let sink = Arc::clone(&state.notification_sink);
+        // May block: a platform probe and a small file write.
+        if let Err(e) = tokio::task::spawn_blocking(move || sink.adopt_identity(&identity)).await {
+            tracing::warn!("push arm: adopting the app's notification identity failed: {e}");
+        }
+    }
+    Ok(ResponsePayload::Empty)
 }
 
 // ── Sync status ──
@@ -4955,6 +4967,7 @@ mod attach_tests {
                 id: 1,
                 method: RequestMethod::AttachApp {
                     app: Some("tui".into()),
+                    notification_identity: None,
                 },
             })
             .unwrap();

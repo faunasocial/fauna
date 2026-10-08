@@ -1139,6 +1139,40 @@ impl DevicesMachine {
         *self.this_device_row.lock().unwrap() = row.filter(|r| !r.is_empty());
     }
 
+    /// Wire the account's retired owner `BackupKey`s, **paired with the
+    /// identities they belong to**, nearest hop first (`actor_ids[i]` owns
+    /// `keys[i]`, as `AccountRegistry::predecessor_chain` yields them) — the
+    /// UniFFI apps' twin of tui's and linux's `LabelCustody::with_predecessors`
+    /// at their own build, and the Media seam's own shape
+    /// (`MediaMachine::set_predecessor_chain`).
+    ///
+    /// A succession re-points an owned set to the successor and re-seals
+    /// nothing, so an owner-only set's name still rests under the predecessor's
+    /// root: without these read candidates the successor's Folders page drops
+    /// every set it inherited (`succession-aftermath.md` § Re-key scope, the
+    /// `BackupKey` corpus row). Never a seal root — the custody keeps sealing
+    /// under the current owner key.
+    ///
+    /// Widens the custody the build glue wired, so call it after that
+    /// (`fauna-ffi`'s `build_devices_machine` wires it before handing the
+    /// machine out); a later [`Self::set_label_custody`] replaces the custody
+    /// whole, chain included. Halves of different lengths pair nothing.
+    pub fn set_predecessor_chain(&self, actor_ids: Vec<Vec<u8>>, keys: Vec<Vec<u8>>) {
+        let Some(chain) =
+            fauna_core::file_download::PredecessorSealKey::chain_from_wire(&actor_ids, &keys)
+        else {
+            tracing::warn!(
+                target: "fauna_devices",
+                ids = actor_ids.len(),
+                keys = keys.len(),
+                "predecessor chain: ids and keys differ in length; pairing nothing"
+            );
+            return;
+        };
+        let mut custody = self.label_custody.lock().unwrap();
+        *custody = custody.clone().with_predecessor_keys(chain);
+    }
+
     // ── Read surface ────────────────────────────────────────────────────
 
     /// The whole renderable Devices page in one record.

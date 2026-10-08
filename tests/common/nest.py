@@ -1424,13 +1424,4 @@ def build_macos_app() -> str:
         exe_link.unlink()
     exe_link.symlink_to(exe)
 
-    # Copy Sparkle framework
-    sparkle_src = exe.parent / "Sparkle.framework"
-    frameworks_dir = contents / "Frameworks"
-    sparkle_dst = frameworks_dir / "Sparkle.framework"
-    if sparkle_src.exists() and not sparkle_dst.exists():
-        frameworks_dir.mkdir(parents=True, exist_ok=True)
-        import shutil
-        shutil.copytree(sparkle_src, sparkle_dst, symlinks=True)
-
     return str(app_bundle)

@@ -65,7 +65,7 @@ Stamped 2026-09-19 at e9152e3330.
 |---|---|---|
 | web | ⚠ partial | |
 | linux | ✅ full | 0.1.2-dev+c4a95c20 standalone |
-| windows | ⚠ partial | |
+| windows | ✅ full | |
 | macos | ⚠ partial | |
 | ios | ⚠ partial | |
 | android |  no run recorded | |
@@ -94,8 +94,8 @@ Stamped 2026-09-19 at e9152e3330.
 | 5 | app | `tests/e2e-unified/tests/test_conversations_attachments_outbound.py::test_macos_conversation_attachment_survives_a_blob_gc_sweep` | macos (macos): passed |
 | 5 | app | `tests/e2e-unified/tests/test_conversations_attachments_outbound.py::test_ios_conversation_attachment_survives_a_blob_gc_sweep` | ios (macos): passed |
 | 5 | app | `tests/e2e-unified/tests/test_conversations_attachments_outbound.py::test_android_conversation_attachment_survives_a_blob_gc_sweep` | — |
-| 6 | app | `tests/e2e-unified/tests/test_capability_gating.py::test_bridged_thread_disables_attachment_and_topic` | linux (linux): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_capability_gating.py::test_fauna_oneonone_enables_all_compose_affordances` | linux (linux): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_capability_gating.py::test_bridged_thread_disables_attachment_and_topic` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_capability_gating.py::test_fauna_oneonone_enables_all_compose_affordances` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_conversations_mail_attachments.py::test_a_file_sent_to_an_outside_address_arrives_as_an_ordinary_attachment` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_conversations_mail_attachments.py::test_a_file_on_mail_from_outside_shows_in_the_bubble` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_conversations_attachment_retention.py::test_an_attachment_this_device_dropped_is_fetched_again` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |

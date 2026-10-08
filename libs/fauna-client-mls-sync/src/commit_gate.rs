@@ -778,7 +778,7 @@ mod tests {
         );
     }
 
-    /// Finding 4 (theirs-wins premise): a device on a stale epoch **rebases** — it
+    /// The theirs-wins premise: a device on a stale epoch **rebases** — it
     /// never force-merges its own commit onto the other device's epoch, so the
     /// same-key `provider` conflict path is never taken in the happy path. Proven
     /// by: the accepted commit's epoch is strictly the post-foreign-commit epoch

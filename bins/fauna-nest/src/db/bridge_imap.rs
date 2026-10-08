@@ -1822,16 +1822,35 @@ impl CacheDb {
     }
 
     /// Return UIDs of messages expunged from `(actor, mailbox)` after
-    /// `since_modseq`, ordered by modseq ascending.
+    /// `since_modseq`, ordered by modseq ascending — or `None` when
+    /// `since_modseq` is below the mailbox's prune floor
+    /// (`bridge_imap_mailbox_state.pruned_modseq`, set by a restore from a
+    /// retention-pruned placement manifest): the log is then missing at
+    /// least one expunge after `since_modseq`, and a partial list would tell
+    /// a QRESYNC client a deleted message still exists (`imap-server.md`
+    /// § QRESYNC — no VANISHED, `OK [HIGHESTMODSEQ]` only).
     pub async fn list_bridge_imap_expunged_since(
         &self,
         actor: &[u8; 32],
         mailbox: &str,
         since_modseq: i64,
-    ) -> Result<Vec<u32>> {
+    ) -> Result<Option<Vec<u32>>> {
         let actor = *actor;
         let mailbox = mailbox.to_string();
         let conn = self.conn.lock().await;
+        let floor: i64 = conn
+            .query_row(
+                "SELECT pruned_modseq FROM bridge_imap_mailbox_state \
+                     WHERE actor_id = ?1 AND mailbox = ?2",
+                rusqlite::params![&actor[..], &mailbox],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("read bridge_imap_mailbox_state.pruned_modseq")?
+            .unwrap_or(0);
+        if since_modseq < floor {
+            return Ok(None);
+        }
         let mut stmt = conn
             .prepare(
                 "SELECT uid FROM bridge_imap_expunged \
@@ -1847,7 +1866,7 @@ impl CacheDb {
             .context("query list_bridge_imap_expunged_since")?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collect list_bridge_imap_expunged_since")?;
-        Ok(uids)
+        Ok(Some(uids))
     }
 
     /// Query `bridge_imap_messages JOIN segment_records` for the given
@@ -3844,19 +3863,42 @@ mod tests {
             .list_bridge_imap_expunged_since(&actor, "INBOX", 8)
             .await
             .unwrap();
-        assert_eq!(uids, vec![5, 7], "modseq 10 and 12 both > 8");
+        assert_eq!(uids, Some(vec![5, 7]), "modseq 10 and 12 both > 8");
 
         let uids2 = db
             .list_bridge_imap_expunged_since(&actor, "INBOX", 11)
             .await
             .unwrap();
-        assert_eq!(uids2, vec![7], "only modseq 12 > 11");
+        assert_eq!(uids2, Some(vec![7]), "only modseq 12 > 11");
 
         let uids3 = db
             .list_bridge_imap_expunged_since(&actor, "INBOX", 12)
             .await
             .unwrap();
-        assert!(uids3.is_empty(), "modseq 12 is not > 12");
+        assert_eq!(uids3, Some(vec![]), "modseq 12 is not > 12");
+
+        // A restore from a retention-pruned manifest set a prune floor of 9:
+        // an expunge with modseq 9 is gone from the log, so the list since 8
+        // is incomplete and refused; since 9 and later stay complete.
+        db.ensure_bridge_imap_mailboxes(&actor).await.unwrap();
+        db.conn()
+            .await
+            .execute(
+                "UPDATE bridge_imap_mailbox_state SET pruned_modseq = 9 \
+                 WHERE actor_id = ?1 AND mailbox = 'INBOX'",
+                rusqlite::params![&actor[..]],
+            )
+            .unwrap();
+        let below = db
+            .list_bridge_imap_expunged_since(&actor, "INBOX", 8)
+            .await
+            .unwrap();
+        assert_eq!(below, None, "below the prune floor the log is incomplete");
+        let at = db
+            .list_bridge_imap_expunged_since(&actor, "INBOX", 9)
+            .await
+            .unwrap();
+        assert_eq!(at, Some(vec![5, 7]), "at the floor the log is complete");
     }
 
     // ── C.3 DB tests ──────────────────────────────────────────────────────────

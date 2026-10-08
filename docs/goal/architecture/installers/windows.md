@@ -636,6 +636,17 @@ public submission, not with the private one ([`../release-integrity.md`](../rele
 only — never in a file. Which commit the uploaded package is built from → the same section's *A store
 upload is built from a recorded public commit*.
 
+**Flavour — the full build (user-ruled 2026-10-07).** The Store package carries the full
+default-feature app, payments and peer-to-peer sharing included — the same app as the direct-download
+MSI, and the same choice as Play's release AAB ([`android.md`](android.md)), not Apple's store-safe
+archive ([`ios.md`](ios.md)). Microsoft Store Policies 10.8 let a non-game PC app take payment through
+its own secure third-party purchase API, provided it names the provider, authenticates the user and
+confirms each transaction, and the submission declares that API in Partner Center. The store-safe
+flavour ([`../dynamic-features.md`](../dynamic-features.md) § The App-Store escape hatch) stays the
+answer if certification objects: switching is the `store-safe` argument to `just
+windows-store-package`, and it ships as a reship of the Windows package alone
+([`../product-version.md`](../product-version.md) § Reships).
+
 ### Feature subset — what the Store package carries
 
 Verified per-component against the packaged-app constraint set (2026-08-10):
@@ -770,7 +781,7 @@ badges. Self-hosting stays a direct-download MSI decision.
 ### Build & packaging shape
 
 - **The store-package build script** — sibling of the sparse-package build script, same conventions:
-  reads version out of `Package.wxs` (4-part), stages a full layout (the MSI's staged app publish
+  reads version out of `Package.wxs` (4-part), stages a full layout (the shipped-flavour app publish
   output + `fauna-sync-agent.exe` + `fauna_shell.dll` + Assets), substitutes
   `apps/fauna-windows/installer/store/AppxManifest.xml.in`, `makeappx pack` (no `/nv` — content is
   internal, path validation SHOULD run), per arch: **x64 + ARM64**, two `.msix` files per release.
@@ -778,9 +789,31 @@ badges. Self-hosting stays a direct-download MSI decision.
     **`@@ProcessorArchitecture@@`** — a full MSIX carries native binaries, so each of the two
     packages must declare the arch it carries; one `neutral` package would claim to run everywhere
     while shipping one arch's code.
-  - **`--payload-root`** selects the staged payload (default `build/installer/stage/<arch>/`, the
-    MSI's own staging layout). It is what lets the packaging mechanism be tested headlessly in
-    seconds against stub payload files, instead of behind a ~30-minute self-contained publish.
+  - **`--payload-root`** selects the staged payload (default `build/installer/store-payload/<arch>/`).
+    It is what lets the packaging mechanism be tested headlessly in seconds against stub payload
+    files, instead of behind a ~30-minute self-contained publish.
+  - **The payload an upload carries is built by `just windows-store-package <arch> [full|store-safe]
+    [<identity-name> <publisher>]` (2026-10-07)** — the production FFI (`windows-ffi dist`, never
+    `windows-ffi-test`), `fauna-sync-agent` and `fauna-shell-ext` as two `--profile dist --locked`
+    builds (§ Size & build profile), a self-contained Release publish of the app with `bin/`+`obj/` wiped first, staged
+    into that default root, then packed; both arches. It is a recipe of its own because the only
+    other local payload builder, the MSI test helper (`test_installer.py::_build_msi`, staging
+    `build/installer/stage/<arch>/`), compiles the e2e automation surface in on purpose.
+  - **The packer refuses a payload that would ship broken or test-flavoured**: one without
+    `App/FaunaApp.exe` or `App/fauna_ffi.dll` (the csproj includes the native core only if it
+    exists, so a publish that ran before the FFI was staged succeeds and ships an app that dies at
+    its first P/Invoke), and one whose own binaries show the automation surface — the gated
+    `FaunaApp.Testing` namespace in `App/FaunaApp.dll`, an export named `*for_test*` in
+    `App/fauna_ffi.dll`, read from the export table (convention 15's strings witness,
+    [`../e2e-automation-surface-gating.md`](../e2e-automation-surface-gating.md)). Both markers
+    were graded on real builds on Windows 2026-10-07: present in a Debug assembly and a
+    `windows-ffi-test` dll (135 seam exports), absent from a Release publish and a production dll
+    (0) — and absent from the 2026-08-22 staged Store payload, so no earlier package carried the
+    agent. Raw bytes would not do: the production dll holds seam *names* as data, and the
+    production assembly an ungated member named `StageImageFromTestAgent`. A dev
+    or test package that really wants the surface (the registration and taskbar-badge witnesses
+    stage the MSI helper's or the Debug build's payload) passes `--allow-test-surface`; the recipe
+    never does.
   - Brand assets have one generator and one home — the packer reuses `installer/sparse/Assets`
     (the same dedicated appx-logo renderer) rather than forking a second copy of the mark.
 - **Store submission uploads are unsigned** — the Store signs. The local dev loop self-signs
@@ -815,7 +848,8 @@ internally).
 | `CleanSyncRoots` self-heal verified live | **GREEN on Windows 2026-08-22** — `cfapi_live_integration::uninstall_cleanup_is_self_healed_by_the_next_product_registration`; the CA's fallback (scope by Store PFN) is not needed. Cross-identity inch open (§ Data continuity) |
 | Partner Center enrollment (company account, org verification) | **DONE 2026-08-22** — verified; publisher display name "Fauna Social" |
 | App name reserved + identity captured | **DONE 2026-08-22** — `FaunaSocial.FaunaSocial` / `CN=E8868D60-…`; § Identity & coexistence holds the values |
-| First Store submission | **Not done** — needs a real staged payload built on Windows; no longer blocked on identity |
+| The shipped-flavour payload build (`just windows-store-package`) + the packer's refusal of a test-flavoured or incomplete payload | **Built 2026-10-07** — recipe-shape, packer and pack tests green on Windows (`test_store_package_build.py`); **first end-to-end run green on Windows 2026-10-07** (arm64, private tree, launched before the switch to `dist` so built at `release`; 22 min on a part-warm cargo cache): `Fauna-Store-arm64.msix` 140.8 MiB, 500 entries, identity `FaunaSocial.FaunaSocial` `0.1.3.0` arm64, `App/fauna_ffi.dll` inside, no automation surface (0 of 8488 FFI exports `for_test`), no `.pdb`. The first `dist`-profile run is the upload build itself. The packer and its tests ship in the public repository, so the upload can be built from a public clone. The upload carries the `full` flavour (ruled 2026-10-07, § Store distribution), the recipe's default |
+| First Store submission | **Not done** — needs the payload built by `just windows-store-package` from a clean public clone at the recorded commit (release-integrity.md § Release signing → *A store upload is built from a recorded public commit*); no longer blocked on identity |
 | Alpha visibility (private audience, the known-user group) | **Ruled 2026-10-07**, the group not yet created — § Store distribution's alpha paragraph; the submission that creates it is the first one |
 
 **Deployment paths — which one a local verification may use (learned 2026-08-11).** Three exist and

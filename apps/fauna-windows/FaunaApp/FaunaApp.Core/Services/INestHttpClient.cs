@@ -15,7 +15,9 @@ namespace FaunaApp.Core.Services;
 /// <para>
 /// What actually crosses the wire as HTTP here: the <b>health ping</b>
 /// (IsAvailableAsync / GetServiceStatusAsync) and the <b>blob byte plane</b>
-/// (UploadBlobAsync / GetBlobAsync / GetBlobWithC2paAsync — i.e. all media).
+/// (UploadBlobAsync / GetBlobAsync / GetBlobWithC2paAsync — i.e. all media — plus
+/// GetContentAsync, the same bearer GET by nest-relative path, for a bridged post's
+/// proxied picture).
 /// Two members are on this interface but are NOT HTTP: GetAuthTokenAsync mints
 /// its bearer over WS-RPC (`fauna.auth.handshake`, via the shared-Rust
 /// MintBearer), and ConfigureAsync is a local base-URL setter.
@@ -208,6 +210,15 @@ public interface INestHttpClient : IAsyncDisposable
 
     Task<byte[]> GetBlobAsync(string hash, CancellationToken ct = default);
     Task<(byte[] Data, bool HasC2pa)> GetBlobWithC2paAsync(string hash, CancellationToken ct = default);
+
+    /// <summary>GET a nest-relative content path from the user's own nest with the session
+    /// bearer and return its bytes — the by-path sibling of <see cref="GetBlobAsync"/>
+    /// (render-model.md § D6c: an app fetches a bridged post's proxied picture exactly as it
+    /// fetches <c>/api/v1/blob/&lt;hash&gt;</c>, with a different argument). The bytes are a
+    /// third party's public media the nest proxies, so there is nothing to open and no C2PA
+    /// header to read. Throws <see cref="System.ArgumentException"/> for a path that is not
+    /// nest-relative (<see cref="NestContentPath"/>) — the bearer never leaves the nest.</summary>
+    Task<byte[]> GetContentAsync(string path, CancellationToken ct = default);
 
     // Email Filters (`fauna.email.filters.*`, INestRpcClient) — the HTTP twins
     // were deleted nest-side.

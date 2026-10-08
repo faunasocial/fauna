@@ -1501,6 +1501,34 @@ class BackupsActions:
                 )
             time.sleep(0.5)
 
+    def revisit_folders(self, settle: float = FOLDER_CREATE_WAIT_S) -> list[str]:
+        """Leave the Folders page, enter it again, and return the rows this
+        visit paints — as soon as it paints one, or whatever it shows at
+        ``settle`` (an empty list included).
+
+        The Folders twin of ``MutedWordsActions.revisit``, for the same reason:
+        on an app that does not consume the store-change notice yet (windows,
+        macOS, iOS; a web tab that hosts no runtime —
+        ``account-runtime.md`` § Implementation status today) the page renders
+        its sets once per visit, through folder-key custody. A set whose
+        custody lands under an open page — a successor's carry of its
+        predecessor's folder keys, finished after the actor id switched — stays
+        omitted from that visit's paint and reaches the screen at the next
+        visit. A caller that must hold on every app polls THIS, never
+        ``folder_count()`` on a page it entered once.
+
+        Leaves through the feed, so the visit is a real nav edge, and gives the
+        visit's own read ``settle`` to paint before handing back, so the
+        caller's next poll does not tear an in-flight refresh down."""
+        self.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+        self.navigate_folders()
+        deadline = time.monotonic() + settle
+        while True:
+            titles = self.folder_titles()
+            if titles or time.monotonic() >= deadline:
+                return titles
+            time.sleep(0.5)
+
     def _folder_page_diagnosis(self) -> str:
         """What the Folders page is painting instead of the row (convention 6).
 

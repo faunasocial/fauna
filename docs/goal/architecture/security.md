@@ -420,7 +420,7 @@ RFC 5929 `tls-unique` in spirit:
    `handshake_signed_message(actor_id, timestamp, client_nonce)` — so two
    legitimate same-actor clients signing in the same millisecond don't collide
    on the nest's deterministic-signature replay guard; `login.md` § direct auth,
-   auth-handshake finding #1. One field, two uses.)
+   the auth-handshake fix. One field, two uses.)
    The nest signs `(SPKI_fp_of_the_cert_the_nest_itself_serves ‖
    client_nonce)` with its `nest_signing_key` (the stable Ed25519
    deployment-identity key, which survives a factory reset so the pinned

@@ -1120,6 +1120,7 @@ pub fn establish(
                             Ok(fauna_sync_engine::account_runtime::PeerLegBinding {
                                 transport,
                                 bound_addrs,
+                                file_sync: None,
                             })
                         })
                     },

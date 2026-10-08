@@ -822,7 +822,12 @@ public final class FeedVM {
     /// device can no longer resolve (a lost seat) falls back the same way tui
     /// does, to `composeGateTier` / Public.
     public var composeGateSelection: String {
+        // A sale staged on a full client and synced in is not a store-safe
+        // build's to show (the Sell answer is excised, `gateOptions`): its
+        // select reads as the gated answer the shared state otherwise carries.
+        #if !FAUNA_EXCISE_PAYMENTS
         if composeSell != nil { return L.feed.post.gateSell }
+        #endif
         if let room = composeGateRoom, let match = ownRooms.first(where: { $0.room == room }) {
             return L.feed.post.gateRoom(room: match.label)
         }
@@ -840,10 +845,17 @@ public final class FeedVM {
     /// currently-staged teaser (`composeGatePreview`), which every gated
     /// answer shares.
     public func setComposeGateSelection(_ tier: String) {
+        // "Sell this post…" is the paywall-designation gesture — the money
+        // plane's author half (dynamic-features.md § Platform-family surface
+        // excision → *The price-and-route class*). A store-safe build never
+        // offers the answer (`gateOptions`) and never takes it: the label
+        // falls through to the tier arm, as any unknown value does.
+        #if !FAUNA_EXCISE_PAYMENTS
         if tier == L.feed.post.gateSell {
             setComposeSell(price: composeSellPrice, subscribersGetItFree: composeSellSubscribersFree)
             return
         }
+        #endif
         if tier == L.feed.post.gatePublic {
             setComposeGate(tier: nil, preview: composeGatePreview)
             return
@@ -861,9 +873,13 @@ public final class FeedVM {
     /// composer views' `automationSelect(options:)`, which duplicated this
     /// list verbatim before extraction.
     public var gateOptions: [String] {
-        [L.feed.post.gatePublic] + ownTiers.map(\.name)
+        let options = [L.feed.post.gatePublic] + ownTiers.map(\.name)
             + ownRooms.map { L.feed.post.gateRoom(room: $0.label) }
-            + [L.feed.post.gateSell]
+        #if !FAUNA_EXCISE_PAYMENTS
+        return options + [L.feed.post.gateSell]
+        #else
+        return options
+        #endif
     }
 
     /// The sold post's machine-comparable asking price in sats. Empty OR

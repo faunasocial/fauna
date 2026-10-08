@@ -664,6 +664,26 @@ impl RpcError {
             "fauna.bridges.forward_target_on_local_domain" => {
                 error::bridges::FORWARD_TARGET_ON_LOCAL_DOMAIN
             }
+            // The bridged reply/quote doors (`feed.md` § Interaction bar →
+            // *Reply and quote on a bridged post*, ratified 2026-10-08): a
+            // refusal is the affordance's inline failure, and the reason only
+            // the nest knows — which account is missing, which toggle is off,
+            // which page fixes it — must survive the last hop. One code per
+            // remedy, a remedy being what to change AND on which page (the
+            // three bridges link from three pages), rendered as a static
+            // string; an app older than a code renders the generic fallback
+            // and composes nothing, the same inline failure as before the
+            // codes existed. All stay `Rejected` in `action()`.
+            "fauna.activitypub.not_linked" => error::activitypub::NOT_LINKED,
+            "fauna.activitypub.switched_off" => error::activitypub::SWITCHED_OFF,
+            "fauna.bluesky.not_linked" => error::bluesky::NOT_LINKED,
+            "fauna.nostr.not_linked" => error::nostr::NOT_LINKED,
+            "fauna.nostr.no_custodial_key" => error::nostr::NO_CUSTODIAL_KEY,
+            // Also minted by `nostr.events.publish_signed` and a Nostr
+            // conversation leg's send (the never-default rule, `nostr.md`
+            // § Errors & edge cases): one arm covers every caller.
+            "fauna.nostr.no_relays_configured" => error::nostr::NO_RELAYS_CONFIGURED,
+            "fauna.nostr.replies_off" => error::nostr::REPLIES_OFF,
             // Tier 2: the namespaced families. Never widen this into a
             // `_ => lookup(&self.message.key)`; see this method's doc comment.
             _ => self.localized_family(),
@@ -1410,5 +1430,69 @@ mod tests {
         // a `details` payload to log something useful.
         let err = RpcError::new("fauna.protocol.timeout", "error.protocol.timeout");
         err.log_operator_details("fauna.drafts.put");
+    }
+
+    /// The bridged reply/quote doors' refusals (`feed.md` § Interaction bar →
+    /// *Reply and quote on a bridged post*): each code renders its own
+    /// remedy — never the generic fallback — names the page that fixes it,
+    /// and stays `Rejected` (a definite refusal, no auto-retry). The page
+    /// assertion is what the lead app's witness reads off `error-message`
+    /// (`test_feed_fediverse_reply.py`: the refusal must name the Bridges
+    /// page), pinned here so a reworded string cannot silently drop it.
+    #[test]
+    fn bridge_door_refusals_name_their_page_and_stay_rejected() {
+        use fauna_i18n::strings::error;
+        let cases = [
+            (
+                "fauna.activitypub.not_linked",
+                error::activitypub::NOT_LINKED,
+                "Bridges page",
+            ),
+            (
+                "fauna.activitypub.switched_off",
+                error::activitypub::SWITCHED_OFF,
+                "Bridges page",
+            ),
+            (
+                "fauna.bluesky.not_linked",
+                error::bluesky::NOT_LINKED,
+                "AT Protocol page",
+            ),
+            (
+                "fauna.nostr.not_linked",
+                error::nostr::NOT_LINKED,
+                "Nostr page",
+            ),
+            (
+                "fauna.nostr.no_custodial_key",
+                error::nostr::NO_CUSTODIAL_KEY,
+                "Nostr page",
+            ),
+            (
+                "fauna.nostr.no_relays_configured",
+                error::nostr::NO_RELAYS_CONFIGURED,
+                "Nostr page",
+            ),
+            (
+                "fauna.nostr.replies_off",
+                error::nostr::REPLIES_OFF,
+                "Nostr page",
+            ),
+        ];
+        for (code, expected, page) in cases {
+            let err = RpcError::new(code, "error.x");
+            assert_eq!(err.localized(), expected, "{code}");
+            assert_ne!(
+                err.localized(),
+                error::UNEXPECTED,
+                "{code} must not fall through to the generic string"
+            );
+            assert!(
+                err.localized().contains(page),
+                "{code} must name its page: {}",
+                err.localized()
+            );
+            assert_eq!(err.action(), RpcErrorAction::Rejected, "{code}");
+        }
     }
 }

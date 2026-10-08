@@ -212,8 +212,9 @@ impl<R: RpcRequester> ColdFleetReplica<R> {
     /// The device arm: every live mint keyed as this device keys it — custody
     /// first, then the inline wrap for this device id, then every merged
     /// top-up row ([`generation_key_for`], which records what it unwraps into
-    /// the custody and drops a shredded generation's key from it).
+    /// the custody and drops an authored-shredded generation's key from it).
     async fn key_as_device(&self, writer_key: &SigningKey) -> Result<usize> {
+        let view = crate::fleet_removal::fleet_view(&self.store, &self.trust).await?;
         let mut keyed = 0;
         for entry in live_rows(&self.store, KIND_GENERATION_MINT).await? {
             let Ok(generation_id) = fauna_core::hex32::decode(&entry.key) else {
@@ -222,9 +223,14 @@ impl<R: RpcRequester> ColdFleetReplica<R> {
             if self.keys.holds(&generation_id) {
                 continue;
             }
-            if let Some(key) =
-                generation_key_for(&self.store, &generation_id, writer_key, Some(&self.keys))
-                    .await?
+            if let Some(key) = generation_key_for(
+                &self.store,
+                &generation_id,
+                writer_key,
+                Some(&self.keys),
+                Some(&view),
+            )
+            .await?
             {
                 self.keys.record_generation_key(&generation_id, &key);
                 keyed += 1;

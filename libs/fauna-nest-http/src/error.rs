@@ -1,7 +1,7 @@
 //! The canonical error taxonomy for native Rust nest-HTTP calls.
 //!
-//! Four variants: the two failure channels every consumer already
-//! distinguishes, plus the two verdicts that must never be retried.
+//! Five variants: the two failure channels every consumer already
+//! distinguishes, plus the three verdicts that must never be retried.
 //!
 //! - [`ApiError::Status`] — the nest answered with a non-2xx. `message` is
 //!   the nest's structured `{"error": "<msg>"}` text (every nest handler
@@ -20,6 +20,9 @@
 //! - [`ApiError::SignInRefused`] — the nest stopped signing a held identity in
 //!   mid-session (suspended or removed). Never a retry: consumers route to the
 //!   launch surface's previously-signed-in row.
+//! - [`ApiError::Superseded`] — the held identity was succeeded: the account
+//!   belongs to another keypair now. Never a retry: consumers route to the
+//!   identity import.
 //!
 //! Lifted verbatim from `apps/fauna-linux/src/nest_content_api/types.rs`. The onboarding wizard's `nest_api` keeps its richer
 //! per-endpoint error enums (each carries semantics the wizard needs —
@@ -62,11 +65,10 @@ pub enum ApiError {
     /// evidence is deliberately *not* here: it has a home already, the launch
     /// machine's `LaunchSnapshot::identity_fork`, and the apps read it there.
     ///
-    /// Contrast the supersession refusal, which rides a side channel
-    /// (`SupersededLatch`) instead of widening this taxonomy: that one carries a
-    /// whole wire `RpcError` whose `details` the import flow parses. Three owned
-    /// strings describing the transport-trust verdict this taxonomy already sits
-    /// in front of is a different weight class.
+    /// Contrast the supersession refusal on the `WsChallengeBearer` path, which
+    /// rides a side channel (`SupersededLatch`) instead: that one carries a
+    /// whole wire `RpcError` whose `details` the import flow parses. A bearer
+    /// with no such channel carries it as [`Self::Superseded`].
     NestIdentityChanged {
         host: String,
         pinned_hex: String,
@@ -84,6 +86,18 @@ pub enum ApiError {
     /// every seam). Raised by a bearer source that can tell a refusal from a
     /// fault — `LaunchMachineBearer`, off the machine's own verdict.
     SignInRefused,
+    /// The held identity was **succeeded** (`fauna.auth.superseded`): the
+    /// account now belongs to `new_actor_id_hex`, so no bearer this source can
+    /// mint will be accepted again (`identity-succession.md` § Propagation →
+    /// *Own device fleet*).
+    ///
+    /// Its own variant for the reason [`Self::SignInRefused`] has one: as
+    /// [`Self::Transport`] a reconnect supervisor reads it as "couldn't obtain
+    /// a token" and the app never learns it must route to the identity import.
+    /// Raised by `LaunchMachineBearer`, off the machine's own
+    /// `superseded_successor`. The successor is **claimed, not proven** — the
+    /// consumer verifies it against the registration chain before naming it.
+    Superseded { new_actor_id_hex: String },
 }
 
 impl fmt::Display for ApiError {
@@ -98,6 +112,10 @@ impl fmt::Display for ApiError {
             ),
             ApiError::SignInRefused => {
                 f.write_str(fauna_i18n::strings::onboarding::launch::SIGN_IN_REFUSED)
+            }
+            // The unverified sentence: the claimed successor is not named.
+            ApiError::Superseded { .. } => {
+                f.write_str(fauna_i18n::strings::onboarding::launch::IDENTITY_SUPERSEDED)
             }
         }
     }
@@ -121,7 +139,9 @@ impl ApiError {
         match self {
             ApiError::Transport(_) => true,
             ApiError::Status { code, .. } => matches!(code, 408 | 429 | 500..=599),
-            ApiError::NestIdentityChanged { .. } | ApiError::SignInRefused => false,
+            ApiError::NestIdentityChanged { .. }
+            | ApiError::SignInRefused
+            | ApiError::Superseded { .. } => false,
         }
     }
 }

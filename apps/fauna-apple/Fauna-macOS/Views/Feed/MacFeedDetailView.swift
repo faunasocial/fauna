@@ -97,7 +97,12 @@ struct MacFeedDetailView: View {
                     ForEach(vm.ownRooms, id: \.room) { room in
                         Text(L.feed.post.gateRoom(room: room.label)).tag(L.feed.post.gateRoom(room: room.label))
                     }
+                    #if !FAUNA_EXCISE_PAYMENTS
+                    // The paywall-designation gesture — the money plane's author
+                    // half (dynamic-features.md § Platform-family surface excision
+                    // → *The price-and-route class*), with the sell controls below.
                     Text(L.feed.post.gateSell).tag(L.feed.post.gateSell)
+                    #endif
                 }
                 .labelsHidden()
                 .controlSize(.small)
@@ -118,22 +123,24 @@ struct MacFeedDetailView: View {
                 }
                 // "Sell this post…" controls (monetization.md § Per-post
                 // pay-to-unlock; IDs user-approved 2026-07-29) — visible only
-                // while Sell is the select's current answer.
+                // while Sell is the select's current answer. The whole sale is
+                // the money plane's compose-side half, excised with the Sell
+                // answer above and the tier form's money fields
+                // (ProfileView.swift).
+                #if !FAUNA_EXCISE_PAYMENTS
                 if vm.composeSell != nil {
                     TextField(L.feed.post.sellPricePlaceholder, text: sellPrice)
                         .textFieldStyle(.roundedBorder)
                         .font(.caption)
                         .accessibilityIdentifier(Ids.composeSellPrice)
                         .automationField(Ids.composeSellPrice, text: sellPrice)
-                    #if !FAUNA_EXCISE_PAYMENTS
-                    // The money plane's compose-side half, excised with the
-                    // tier form's own asking-price input (ProfileView.swift).
+                    // The machine-comparable threshold (monetization.md § The
+                    // asking price) — independent of the price above.
                     TextField(L.feed.post.sellAskingPricePlaceholder, text: sellAskingPrice)
                         .textFieldStyle(.roundedBorder)
                         .font(.caption)
                         .accessibilityIdentifier(Ids.composeSellAskingPrice)
                         .automationField(Ids.composeSellAskingPrice, text: sellAskingPrice)
-                    #endif
                     HStack {
                         Text(L.feed.post.sellSubscribersFree)
                             .font(.caption)
@@ -154,6 +161,7 @@ struct MacFeedDetailView: View {
                         }
                     }
                 }
+                #endif
 
                 if let composeError = vm.composeError {
                     Text(composeError)

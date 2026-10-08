@@ -109,7 +109,7 @@ pub use lists::{
     ImportResult, ListDraft, ListMembers, ListView, ListsStatus, MailListMembersAction,
     MailListMembersMachine, MailListMembersNest, MailListMembersSnapshot, MailListsAction,
     MailListsMachine, MailListsNest, MailListsSnapshot, MemberStatus, MemberView,
-    member_status_label,
+    archive_url_needs_confirm, member_status_label,
 };
 pub use local_domains::{
     DEFAULT_CERT_MODE, DomainDmarcPolicy, LocalDomainAction, LocalDomainMachine, LocalDomainNest,

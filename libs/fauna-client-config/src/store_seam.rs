@@ -101,6 +101,34 @@ pub trait SuccessionLedgerStore: MaybeSendSync {
     /// (offline, no escrow target yet) — as [`StoreError::Save`]; the caller's
     /// leg stays owed and re-runs.
     async fn merge(&self, replica: SuccessionLedger) -> Result<SuccessionLedger, StoreError>;
+    /// Publish this runtime's unsent ledger rows to the bound nest and wait
+    /// for its acknowledgement — the account runtime's own publish step, run
+    /// now rather than at the local-write wake. `Ok(())` only when no ledger
+    /// row this device wrote stays unsent; offline, a push the nest refused,
+    /// or a runtime that cannot publish answer [`StoreError::Save`]. The one
+    /// caller is [`Self::merge_published`].
+    async fn publish_ledger(&self) -> Result<(), StoreError>;
+    /// **The grant-mint door** — join `replica` as [`Self::merge`] does, then
+    /// publish the result to the bound nest's acknowledgement
+    /// ([`Self::publish_ledger`]). The answer is a [`PublishedLedger`], the one
+    /// value a grant blob is released against
+    /// (`fauna_client_capabilities::grant_log::PublishedGrants`), so no mint
+    /// deposits a blob whose `Mint` event the nest does not already hold
+    /// (`ui/nests.md` § Trust facet — grants → *Record-then-deposit*, the
+    /// published form). A refused publish leaves the event recorded locally —
+    /// the recoverable phantom-row direction — and answers
+    /// [`StoreError::Save`] before any deposit.
+    ///
+    /// Provided, never overridden: it is the only constructor of
+    /// [`PublishedLedger`], which is what makes the ordering a type.
+    async fn merge_published(
+        &self,
+        replica: SuccessionLedger,
+    ) -> Result<PublishedLedger, StoreError> {
+        let stored = self.merge(replica).await?;
+        self.publish_ledger().await?;
+        Ok(PublishedLedger(stored))
+    }
     /// **The succession write** — re-point the ledger's chain from the
     /// ATTESTED `retired` identity (a predecessor whose key this runtime
     /// holds, never an id a row asserts) to this runtime's own. `Ok(false)`
@@ -114,6 +142,32 @@ pub trait SuccessionLedgerStore: MaybeSendSync {
     /// `predecessor` signed. Idempotent by key: a decided mark keeps its
     /// verdict. `Ok(false)` when every mark already rests.
     async fn raise_grant_marks(&self, predecessor: ActorId) -> Result<bool, StoreError>;
+}
+
+/// A succession ledger the bound nest has **acknowledged** — the answer of
+/// [`SuccessionLedgerStore::merge_published`], and the only one: no other
+/// code can build it, so holding one proves the join was stored and every
+/// ledger row this device wrote reached the nest's state plane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedLedger(SuccessionLedger);
+
+impl PublishedLedger {
+    /// The ledger as it read after the join.
+    pub fn ledger(&self) -> &SuccessionLedger {
+        &self.0
+    }
+
+    /// The ledger, for a caller that keeps working on it.
+    pub fn into_ledger(self) -> SuccessionLedger {
+        self.0
+    }
+
+    /// A ledger a test's fake nest acknowledged — the test-helpers twin of
+    /// the door, for a unit test that exercises a release and not the door.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn acknowledged_for_test(ledger: SuccessionLedger) -> Self {
+        Self(ledger)
+    }
 }
 
 /// The **deployment-seed custody** persistence seam —
@@ -406,6 +460,10 @@ where
         self.current(true).await?.merge(replica).await
     }
 
+    async fn publish_ledger(&self) -> Result<(), StoreError> {
+        self.current(true).await?.publish_ledger().await
+    }
+
     async fn repoint(&self, retired: ActorId) -> Result<bool, StoreError> {
         self.current(true).await?.repoint(retired).await
     }
@@ -585,6 +643,10 @@ impl SuccessionLedgerStore for NoLedgerStore {
         Err(StoreError::Save(LEDGER_NOT_READY.into()))
     }
 
+    async fn publish_ledger(&self) -> Result<(), StoreError> {
+        Err(StoreError::Save(LEDGER_NOT_READY.into()))
+    }
+
     async fn repoint(&self, _retired: ActorId) -> Result<bool, StoreError> {
         Err(StoreError::Save(LEDGER_NOT_READY.into()))
     }
@@ -677,6 +739,14 @@ pub trait MailStore: MaybeSendSync {
     /// Soft-revoke `credential_id`: the marker, the generation cleared and the
     /// secret emptied together; the id stays spent.
     async fn revoke(&self, credential_id: String) -> Result<bool, StoreError>;
+    /// Record a retired MSEK generation at its own `generation/<fingerprint>`
+    /// row, joined into what is stored (a row already there keeps the later
+    /// instant); a generation is never dropped (`owner-key-material.md`
+    /// § Path B-sibling-2 → *Pre-rotation mail at rest*).
+    async fn retire_generation(
+        &self,
+        generation: fauna_core::data::PriorMsekRetirement,
+    ) -> Result<bool, StoreError>;
 }
 
 /// The **kind-manifest** seam — `fauna.state.kind-manifest`, one row per

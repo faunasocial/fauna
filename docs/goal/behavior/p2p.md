@@ -6,17 +6,7 @@ Authority: the P2P optimization layer — the substrate-agnostic fauna-transport
 
 ## Implementation status today
 
-**The SAME-ACCOUNT peer data plane is dormant fleet-wide** — read this
-paragraph's scope carefully, because the paragraph below it is the opposite.
-**Dormant is the built state, not the target (user ruling 2026-09-26): the
-plane is to be built, shared Rust first then tui, witnessing the three § Goal
-promises the `device-to-device-file-transfer` catalog page holds as
-outcomes.**
-Same-account file-sync is 100% nest-mediated (`SyncClient` → nest; the peer
-link carries no chunk/manifest transfer); the native consumers only start/stop
-a peer node and never make calls through it. That substrate is foundational for
-future P2P features, not a live traffic path — so changes to *it* are
-pre-production internal work, not a compat-surface concern. **The CROSS-USER
+**The SAME-ACCOUNT peer data plane carries file bodies since 2026-10-08 — built in shared Rust and the per-user sync agent, not yet witnessed by an app-level journey** — read this paragraph's scope carefully, because the paragraph below it is about the other plane. The user ruled 2026-09-26 that it be built rather than left dormant, shared Rust first then tui, witnessing the three § Goal promises the `device-to-device-file-transfer` catalog page holds as outcomes. **Built:** a file-sync download in the agent asks this account's other devices for its chunk bodies before the nest, over the channels the same-account peer leg's dial pass admitted (`fauna.peer.sync.chunks.pull`, answered through the serving seat's one serve core — [`file-sync.md`](file-sync.md) § Relay serving), and fetches from the nest only what no sibling served; a sibling that is off, refuses, misbehaves or is reachable only over a relay while the nest answers moves no byte, and the bodies a sibling did serve are kept (`fauna_sync_engine::sibling_source::sibling_first`). Manifests and the change feed stay nest-mediated: the plane takes the nest out of the BYTE path, not the control path. **Not yet:** no app-level journey witnesses outcomes 1–3, and on a tui seat whose own in-process runtime holds the engine-singleton role the leg binds without the agent's engines, so that seat neither serves nor asks a sibling — which process speaks for a desktop machine was settled 2026-10-08: the agent, by the presence lock and the yield ([`../architecture/account-runtime.md`](../architecture/account-runtime.md) § Multi-instance concurrency → *The agent holds the role when present*; its build rows gate the witnesses). **The CROSS-USER
 share plane is a different story and is live**: on tui (2026-08-19) and linux
 (2026-08-20/21) real user bytes move peer-to-peer, proven by an app-level
 two-actor journey with the nest down (§ Cross-user shared-set transfer). A
@@ -2090,7 +2080,9 @@ leg's owner:
       `PeerNode::dial` gains its production consumer there) — **the dormant
       posture was NOT re-ratified (user ruling 2026-09-26): build it**, tui
       first; the `device-to-device-file-transfer`
-      catalog page holds the three § Goal promises as its outcomes.
+      catalog page holds the three § Goal promises as its outcomes. The
+      shared-Rust and agent halves are built (2026-10-08, § Implementation
+      status today); the box ticks when the tui journey witnesses them.
 - [x] `FallbackPolicy` enum + config shape deleted (2026-07-12).
 - [ ] `tests/e2e-unified/ui-actual-<app>.yaml`'s `p2p` block refreshed;
       `ui-actual-lint` introduces no new errors.

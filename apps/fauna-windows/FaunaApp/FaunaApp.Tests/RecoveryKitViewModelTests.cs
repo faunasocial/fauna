@@ -58,6 +58,17 @@ public class RecoveryKitViewModelTests : IDisposable
                 "There are {count} other members this cannot confirm you added yourself.",
             ["settings/recovery_kit/sweep_retry_no_old_state"] =
                 "This device does not have the conversation history from your previous identity.",
+            // The stolen ceremony's three unlanded arms (settings.md § Recovery kit →
+            // The ceremony's outcome is headlined by its arm) — the real templates,
+            // so "verbatim, wrapping nothing" is asserted on the whole sentence.
+            ["settings/recovery_kit/stolen_ceremony_failed"] =
+                "Couldn't recover your account: {message}",
+            ["settings/recovery_kit/stolen_outcome_unknown_saved"] =
+                "Couldn't confirm whether your account was recovered ({cause}). Your new identity is saved on this device — reopen the app to sign in with it. Details: {reported}",
+            ["settings/recovery_kit/stolen_outcome_unknown_unsaved"] =
+                "Couldn't confirm whether your account was recovered ({cause}), and this device couldn't save your new identity. Write down this secret key now and import it — it is the only way back into your account: {secret}. Details: {reported}",
+            ["settings/recovery_kit/stolen_landed_for_another"] =
+                "Your account has already been moved to a different identity ({actor}) — another device with the same recovery kit got there first. Import that identity to get back into your account.",
         }));
     }
 
@@ -343,8 +354,8 @@ public class RecoveryKitViewModelTests : IDisposable
     {
         var rpc = new MockNestRpcClient
         {
-            NextLandedSuccession = MockNestRpcClient.MakeLandedSuccession(
-                newActorIdHex: Successor, persisted: true, sweepStateJson: "{\"kind\":\"ran\"}"),
+            NextStolenOutcome = MockNestRpcClient.MakeStolenLanded(MockNestRpcClient.MakeLandedSuccession(
+                newActorIdHex: Successor, persisted: true, sweepStateJson: "{\"kind\":\"ran\"}")),
         };
         var vm = new RecoveryKitViewModel(rpc)
         {
@@ -381,9 +392,9 @@ public class RecoveryKitViewModelTests : IDisposable
     {
         var rpc = new MockNestRpcClient
         {
-            NextLandedSuccession = MockNestRpcClient.MakeLandedSuccession(
+            NextStolenOutcome = MockNestRpcClient.MakeStolenLanded(MockNestRpcClient.MakeLandedSuccession(
                 successorSecretHex: new string('9', 64), newActorIdHex: Successor,
-                persisted: false),
+                persisted: false)),
         };
         var vm = new RecoveryKitViewModel(rpc)
         {
@@ -404,8 +415,10 @@ public class RecoveryKitViewModelTests : IDisposable
         Assert.True(vm.StolenPersistFailurePending);
     }
 
-    /// <summary>A ceremony that never landed mints nothing anyone must keep — and
-    /// must not leave a phantom obligation behind.</summary>
+    /// <summary>A failure BEFORE the ceremony could start (no connection,
+    /// unparseable secret bytes) — the one shape that still arrives as an exception —
+    /// mints nothing anyone must keep, and must not leave a phantom obligation
+    /// behind.</summary>
     [Fact]
     public async Task AFailedSuccessionOwesNothing()
     {
@@ -422,6 +435,160 @@ public class RecoveryKitViewModelTests : IDisposable
         Assert.False(SuccessionHandoff.KitOwed);
         Assert.Null(vm.MintedSecretHex);
         Assert.NotNull(vm.ErrorMessage);
+    }
+
+    // ── The ceremony's typed outcome: every arm but landed ───────────────
+    //
+    // settings.md § Recovery kit → The ceremony's outcome is headlined by its arm:
+    // the shared sentence goes on error-message VERBATIM — wrapping nothing, so a
+    // second headline in front of it reds the whole-sentence equality below — and
+    // the arm carrying the only copy of the successor seed is parked exactly as the
+    // persist-failure message is, decided by the record's flag. None of the three
+    // switches to a successor or records a handoff: this device adopted nothing.
+
+    private static async Task<(RecoveryKitViewModel Vm, StolenCeremonyHold Hold, bool Switched)>
+        RunCeremony(uniffi.fauna_ffi.FfiStolenOutcome outcome)
+    {
+        var rpc = new MockNestRpcClient { NextStolenOutcome = outcome };
+        var hold = new StolenCeremonyHold();
+        var vm = new RecoveryKitViewModel(rpc, hold)
+        {
+            PhraseInput = "kit", StolenConfirmInput = "SUCCEED",
+        };
+        var switched = false;
+        await vm.SucceedWithHeldKitAsync(Predecessor, _ => { switched = true; return Task.CompletedTask; });
+        return (vm, hold, switched);
+    }
+
+    /// <summary>Nothing moved: the one arm that IS a failure, and its sentence already
+    /// says so — the shared <c>stolen_ceremony_failed</c> headline, nothing in front
+    /// of it.</summary>
+    [Fact]
+    public async Task NothingMoved_PaintsTheSharedSentenceVerbatim_AndOwesNothing()
+    {
+        var (vm, hold, switched) = await RunCeremony(MockNestRpcClient.MakeStolenUnlanded(
+            "not-landed", "settings.recovery_kit.stolen_ceremony_failed",
+            new() { ["message"] = "the nest refused the kit" }));
+
+        Assert.Equal("Couldn't recover your account: the nest refused the kit", vm.ErrorMessage);
+        Assert.False(switched);
+        Assert.False(SuccessionHandoff.KitOwed);
+        Assert.Null(vm.LandedSuccession);
+        Assert.Null(vm.MintedSecretHex);
+        Assert.False(vm.StolenPersistFailurePending);
+        Assert.False(hold.MessagePending);
+    }
+
+    /// <summary>Landed for another: the account WAS recovered — by another device —
+    /// so a failure headline would be false. Final, and nothing is parked: the
+    /// sentence carries no seed.</summary>
+    [Fact]
+    public async Task LandedForAnother_PaintsItsOwnSentence_WithNoFailureHeadline()
+    {
+        var other = new string('d', 64);
+        var (vm, hold, switched) = await RunCeremony(MockNestRpcClient.MakeStolenUnlanded(
+            "landed-for-another", "settings.recovery_kit.stolen_landed_for_another",
+            new() { ["actor"] = other }));
+
+        Assert.Equal(
+            $"Your account has already been moved to a different identity ({other}) — another device with the same recovery kit got there first. Import that identity to get back into your account.",
+            vm.ErrorMessage);
+        Assert.False(switched);
+        Assert.False(SuccessionHandoff.KitOwed);
+        Assert.False(vm.StolenPersistFailurePending);
+        Assert.False(hold.MessagePending);
+    }
+
+    /// <summary>Undecided, with the successor verified saved here: the outcome is
+    /// unknown, not failed, and the way back is a relaunch — painted, never parked
+    /// (the record's flag is false).</summary>
+    [Fact]
+    public async Task UndecidedButSaved_PaintsTheSentence_AndParksNothing()
+    {
+        var (vm, hold, switched) = await RunCeremony(MockNestRpcClient.MakeStolenUnlanded(
+            "undecided", "settings.recovery_kit.stolen_outcome_unknown_saved",
+            new() { ["cause"] = "the nest stopped answering", ["reported"] = "timed out" },
+            carriesTheOnlySeed: false));
+
+        Assert.Equal(
+            "Couldn't confirm whether your account was recovered (the nest stopped answering). Your new identity is saved on this device — reopen the app to sign in with it. Details: timed out",
+            vm.ErrorMessage);
+        Assert.False(switched);
+        Assert.False(vm.StolenPersistFailurePending);
+        Assert.False(hold.MessagePending);
+    }
+
+    /// <summary>
+    /// ⚠ Undecided, and the successor seed did NOT read back here: the sentence is
+    /// the only copy of the new key, so it is parked exactly as the persist-failure
+    /// message is — a later writer cannot clobber it, the hold keeps the
+    /// supersession teardown off the page — and the session is NOT torn down.
+    /// </summary>
+    [Fact]
+    public async Task UndecidedAndUnsaved_ParksTheSentence_AndDoesNotTearTheSessionDown()
+    {
+        var secret = new string('e', 64);
+        var (vm, hold, switched) = await RunCeremony(MockNestRpcClient.MakeStolenUnlanded(
+            "undecided", "settings.recovery_kit.stolen_outcome_unknown_unsaved",
+            new() { ["cause"] = "the nest stopped answering", ["reported"] = "timed out", ["secret"] = secret },
+            carriesTheOnlySeed: true));
+
+        var parked =
+            $"Couldn't confirm whether your account was recovered (the nest stopped answering), and this device couldn't save your new identity. Write down this secret key now and import it — it is the only way back into your account: {secret}. Details: timed out";
+        Assert.Equal(parked, vm.ErrorMessage);
+        Assert.False(switched);
+        Assert.True(vm.StolenPersistFailurePending);
+        Assert.True(hold.MessagePending);
+        // The park holds: every other writer on the section leaves it alone.
+        vm.SetGuardedError("something else");
+        Assert.Equal(parked, vm.ErrorMessage);
+    }
+
+    /// <summary>The park is decided by the record's flag, never by reading the key —
+    /// mutation check: a view model that parked on <c>…_unsaved</c> instead reds
+    /// this.</summary>
+    [Fact]
+    public async Task TheParkFollowsTheFlag_NotTheKey()
+    {
+        var (vm, hold, _) = await RunCeremony(MockNestRpcClient.MakeStolenUnlanded(
+            "undecided", "settings.recovery_kit.stolen_outcome_unknown_saved",
+            new() { ["cause"] = "c", ["reported"] = "r" },
+            carriesTheOnlySeed: true));
+
+        Assert.True(vm.StolenPersistFailurePending);
+        Assert.True(hold.MessagePending);
+    }
+
+    /// <summary>
+    /// The two parked sentences carry the only copy of the successor seed, and
+    /// <c>ShellLog</c>'s redaction rule bars secrets from the shared log ring and its
+    /// on-disk file — so the park writes the slot WITHOUT logging its text (linux's
+    /// <c>park_stolen_failed_message</c> logs a seed-free line the same way).
+    /// Mutation check: parking through <c>SetError</c>, which logs its whole
+    /// argument, reds this. The real ring (<see cref="ShellLogTests"/>), GUID-unique
+    /// secrets, so a parallel test's entries cannot collide.
+    /// </summary>
+    [Fact]
+    public async Task TheParkedSeedNeverReachesTheLog()
+    {
+        try { uniffi.fauna_ffi.FaunaFfiMethods.InstallLogging(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "fauna-shelllog-test")); }
+        catch { /* already installed this run — the global subscriber persists */ }
+        var undecidedSecret = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+        var persistSecret = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+
+        var (undecided, _, _) = await RunCeremony(MockNestRpcClient.MakeStolenUnlanded(
+            "undecided", "settings.recovery_kit.stolen_outcome_unknown_unsaved",
+            new() { ["cause"] = "c", ["reported"] = "r", ["secret"] = undecidedSecret },
+            carriesTheOnlySeed: true));
+        var (persist, _, _) = await RunCeremony(MockNestRpcClient.MakeStolenLanded(
+            MockNestRpcClient.MakeLandedSuccession(
+                successorSecretHex: persistSecret, newActorIdHex: Successor, persisted: false)));
+
+        // Both arms really parked their seed on screen — the negative below is not vacuous.
+        Assert.Contains(undecidedSecret, undecided.ErrorMessage!);
+        Assert.Contains(persistSecret, persist.ErrorMessage!);
+        var ring = uniffi.fauna_ffi.FaunaFfiMethods.LogSnapshot();
+        Assert.DoesNotContain(ring, e => e.message.Contains(undecidedSecret) || e.message.Contains(persistSecret));
     }
 
     // ── The successor's closing act ──────────────────────────────────────

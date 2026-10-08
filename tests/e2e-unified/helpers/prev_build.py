@@ -696,13 +696,14 @@ def _macos_rpath_deps(binary: Path) -> list[str]:
 
     SwiftPM links its own targets statically and the FFI arrives as a static `.a` inside
     the xcframework, so the tempting assumption is "the executable is standalone". It is
-    **not**: `FaunaMacOS` links `@rpath/Sparkle.framework/Versions/B/Sparkle` (the
-    updater), a real framework bundle that SwiftPM drops *beside* the executable in the
-    build dir. Wipe the build dir and the cached binary dies at launch with `rc=-6` and a
+    **not** for every commit a previous build may come from: until 2026-10-08
+    `FaunaMacOS` linked an `@rpath/<Name>.framework/Versions/B/<Name>` (the auto-update
+    framework the app no longer carries), a real framework bundle that SwiftPM drops
+    *beside* the executable in the build dir. Wipe the build dir and the cached binary dies at launch with `rc=-6` and a
     dyld "no such file" for a framework nobody remembers linking.
 
     So the dependency list is read from the binary itself rather than guessed. Returns
-    entries like ``Sparkle.framework/Versions/B/Sparkle`` (the @rpath prefix stripped),
+    entries like ``<Name>.framework/Versions/B/<Name>`` (the @rpath prefix stripped),
     which is exactly the path to reproduce next to the cached executable — dyld resolves
     @rpath against @executable_path, so a framework sitting beside the binary is found.
     """
@@ -804,7 +805,7 @@ def build_prev(commit: str, profile: str = "debug", client: str | None = None) -
         # DLLs, .resx-derived resources, and the native fauna_ffi.dll under
         # runtimes/win-arm64/native/. Caching just the .exe (as the generic loop above
         # does for every other app) produces a binary that dies on launch missing its
-        # managed deps — the windows analogue of the macOS Sparkle.framework trap below,
+        # managed deps — the windows analogue of the macOS framework trap below,
         # except total (the whole directory) rather than two named files. So the whole
         # containing directory travels as one unit, and `built[client]` points at the exe
         # inside the copy.
@@ -825,7 +826,7 @@ def build_prev(commit: str, profile: str = "debug", client: str | None = None) -
         # (Versions/Current -> B), and flattening it produces a bundle dyld won't load.
         produced_dir = produced[client].parent
         for dep in _macos_rpath_deps(built[client]):
-            bundle = dep.split("/", 1)[0]  # Sparkle.framework/Versions/B/Sparkle -> Sparkle.framework
+            bundle = dep.split("/", 1)[0]  # <Name>.framework/Versions/B/<Name> -> <Name>.framework
             src_bundle, dest_bundle = produced_dir / bundle, out_dir / bundle
             if src_bundle.exists() and not dest_bundle.exists():
                 shutil.copytree(src_bundle, dest_bundle, symlinks=True)

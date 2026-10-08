@@ -289,6 +289,9 @@ where
         &mut Vec::new(),
     );
     let custody = fleet.generation_custody();
+    // Built once for the pass: the reader consults it for a shred's
+    // authorship alone (`generation_tip::generation_key_for`).
+    let view = crate::fleet_removal::fleet_view(store, trust).await?;
     let mut reescrowed = BTreeSet::new();
     let mut restored = 0usize;
     let mut door_failure = None;
@@ -322,8 +325,14 @@ where
         if fauna_core::generation::generation_id(&core).ok() != Some(generation_id) {
             continue;
         }
-        let Some(key) =
-            generation_tip::generation_key_for(store, &generation_id, writer_key, custody).await?
+        let Some(key) = generation_tip::generation_key_for(
+            store,
+            &generation_id,
+            writer_key,
+            custody,
+            Some(&view),
+        )
+        .await?
         else {
             continue;
         };

@@ -766,13 +766,6 @@ impl ShareServer {
                 None => reply.missing.push(want.store_key.clone()),
                 Some(bytes) => {
                     let total_len = bytes.len() as u64;
-                    if want.offset > total_len {
-                        // Loud, not an empty slice: an empty slice would read as
-                        // "converged" to a puller assembling the body.
-                        return Err(unsupported(
-                            "the want's offset is past the end of the stored body",
-                        ));
-                    }
                     // budget > 0 here — a want reaching this arm already
                     // passed the loop-top zero-budget check above.
                     // A chunk body can be 8 MiB against a 1 MiB frame, so the
@@ -783,9 +776,15 @@ impl ShareServer {
                     // advances. An `offset == total_len` want yields an empty
                     // slice, which the puller reads as complete — the same
                     // arithmetic that ends an ordinary body.
-                    let start = want.offset as usize;
-                    let end = (start + budget).min(bytes.len());
-                    let slice = &bytes[start..end];
+                    let Some(slice) =
+                        fauna_peer_sync::ranged::slice_for(&bytes, want.offset, budget)
+                    else {
+                        // Loud, not an empty slice: an empty slice would read as
+                        // "converged" to a puller assembling the body.
+                        return Err(unsupported(
+                            "the want's offset is past the end of the stored body",
+                        ));
+                    };
                     budget -= slice.len();
                     reply.chunks.push(PeerShareChunk {
                         store_key: want.store_key.clone(),

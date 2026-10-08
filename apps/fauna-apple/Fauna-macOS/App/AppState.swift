@@ -447,6 +447,11 @@ class MacAppState {
     /// instance rather than build a second one that would never hear back.
     var pushManager: PushManager?
 
+    /// The newer-version check (`UpdateCheck`): one per process, shared by
+    /// Settings → General's About block, the app menu item and the
+    /// once-per-sign-in look, so all three paint the same notice.
+    let updates = UpdateCheck()
+
     /// The Events page's view model, published here by `EventSplitView` so
     /// `AppDelegate.applicationShouldTerminate` can flush the events-drafts
     /// rail on quit (`reserved-folders.md` § The leave-flush promise) — the

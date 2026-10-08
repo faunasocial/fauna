@@ -7,7 +7,8 @@
 //!
 //! A connection's serve set is **exactly** [`allowlisted_kinds`]:
 //! `fauna.peer.node_info` (the pre-witness probe), the admission exchange,
-//! `fauna.sync.changes.list`, and `fauna.peer.sync.blocks.pull`. Nothing
+//! `fauna.sync.changes.list`, `fauna.peer.sync.blocks.pull`, and
+//! `fauna.peer.sync.chunks.pull` (a sibling's file bodies). Nothing
 //! else is mapped, so `PeerChannel::serve` answers every other kind
 //! `fauna.protocol.unknown_kind` — no config, capability-mint, admin, or
 //! key-material kind exists on this dispatcher, and class-2 state rides only
@@ -50,8 +51,9 @@ use fauna_peer_channel::{HandlerFactory, PeerHandlers, PeerNode, base_peer_handl
 use fauna_protocol::account_state::{ACCOUNT_STATE_SCOPE, ItemClass};
 use fauna_protocol::peer_sync::{
     ERR_NOT_ADMITTED, ERR_OVER_QUOTA, ERR_UNSUPPORTED, ERR_WITNESS_REFUSED, KIND_PEER_SYNC_ADMIT,
-    KIND_PEER_SYNC_BLOCKS_PULL, PeerSyncAdmitReply, PeerSyncAdmitRequest, PeerSyncBlock,
-    PeerSyncBlocksPullReply, PeerSyncBlocksPullRequest,
+    KIND_PEER_SYNC_BLOCKS_PULL, KIND_PEER_SYNC_CHUNKS_PULL, PeerSyncAdmitReply,
+    PeerSyncAdmitRequest, PeerSyncBlock, PeerSyncBlocksPullReply, PeerSyncBlocksPullRequest,
+    PeerSyncChunk, PeerSyncChunksPullReply, PeerSyncChunksPullRequest,
 };
 use fauna_protocol::sync::{SyncChange, SyncChangesListReply, SyncChangesListRequest};
 use fauna_protocol::{RpcError, Value};
@@ -114,14 +116,31 @@ pub type CustodyRevocationFn = Arc<dyn Fn(&[u8]) -> bool + Send + Sync>;
 /// rows, sever at their next evaluation regardless.
 pub type DeviceRemovedFn = Arc<dyn Fn(&[u8; 32], &[u8; 32]) -> bool + Send + Sync>;
 
+/// The serve side's **file-body source**: one stored chunk body of a file-sync
+/// folder, by the folder's `FolderRef` wire string and the chunk's store key —
+/// `None` when this device holds no body for it. The host answers it through
+/// the one serve core (`fauna_sync_engine::engine::SyncEngine::serve_chunk`,
+/// reached through the host's relay seat), so the peer leg is that core's
+/// further consumer, never a second serve path (`file-sync.md` § Relay
+/// serving). It never fetches on the asker's behalf.
+pub type FileChunkFn = Arc<
+    dyn Fn(
+            String,
+            [u8; 32],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Vec<u8>>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// The kinds this dispatcher serves — the whole allowlist (rule 3). Public so
 /// the compliance test asserts the *set*, not a sample.
-pub const fn allowlisted_kinds() -> [&'static str; 4] {
+pub const fn allowlisted_kinds() -> [&'static str; 5] {
     [
         fauna_protocol::peer::KIND_PEER_NODE_INFO,
         KIND_PEER_SYNC_ADMIT,
         "fauna.sync.changes.list",
         KIND_PEER_SYNC_BLOCKS_PULL,
+        KIND_PEER_SYNC_CHUNKS_PULL,
     ]
 }
 
@@ -289,6 +308,11 @@ pub struct PeerSyncServerConfig {
     /// production wiring always passes `Some` (`fauna-sync-engine`'s
     /// `peer_leg::ensure_bound`).
     pub device_removed: Option<DeviceRemovedFn>,
+    /// Where `fauna.peer.sync.chunks.pull` reads file bodies ([`FileChunkFn`]).
+    /// `None` — a host running no file-sync engines — answers every want
+    /// `missing`, which sends the puller to the nest: a refusal would cost the
+    /// same and say less.
+    pub file_chunks: Option<FileChunkFn>,
     pub quotas: QuotaConfig,
     pub now: NowFn,
 }
@@ -420,6 +444,8 @@ impl PeerSyncServer {
         let list_slot = Arc::clone(&verdict);
         let pull_server = Arc::clone(self);
         let pull_slot = Arc::clone(&verdict);
+        let chunks_server = Arc::clone(self);
+        let chunks_slot = Arc::clone(&verdict);
 
         base_peer_handlers(self.config.display_name.clone())
             .on(KIND_PEER_SYNC_ADMIT, move |req| {
@@ -436,6 +462,11 @@ impl PeerSyncServer {
                 let server = Arc::clone(&pull_server);
                 let slot = Arc::clone(&pull_slot);
                 async move { server.handle_blocks_pull(&peer, &slot, req.payload).await }
+            })
+            .on(KIND_PEER_SYNC_CHUNKS_PULL, move |req| {
+                let server = Arc::clone(&chunks_server);
+                let slot = Arc::clone(&chunks_slot);
+                async move { server.handle_chunks_pull(&peer, &slot, req.payload).await }
             })
     }
 
@@ -798,6 +829,76 @@ impl PeerSyncServer {
         }
         to_value(&reply)
     }
+
+    /// `fauna.peer.sync.chunks.pull` — a sibling's file bodies, sliced to the
+    /// frame. Admitted for an **own-account device** only: a sibling of this
+    /// account holds the same folders, while a custodian (a custody-grant
+    /// verdict) and an owner device dialing this machine as ITS custodian (a
+    /// verdict for a custodied account) hold account planes, not file bodies.
+    ///
+    /// Every want is answered through [`PeerSyncServerConfig::file_chunks`]
+    /// and the body re-derived per want, as the share leg's chunk door does —
+    /// the serve core keeps no chunk cache by rule. A want past the reply's
+    /// budget is `deferred` unread, so a want list costs at most one reply's
+    /// worth of serving per request.
+    async fn handle_chunks_pull(
+        &self,
+        peer: &EndpointKey,
+        slot: &Mutex<Option<AdmittedConnection>>,
+        payload: Value,
+    ) -> Result<Value, RpcError> {
+        let req: PeerSyncChunksPullRequest = from_value(&payload)?;
+        let (verdict, _store) = self.admitted_connection(peer, slot)?;
+        let own_device = slot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|a| a.device_key.is_some() && a.custody_grant_id.is_none());
+        if verdict.account != self.account || !own_device {
+            return Err(not_admitted(
+                "file bodies are served to a device of this account only",
+            ));
+        }
+        let mut wants = Vec::with_capacity(req.wants.len());
+        for want in &req.wants {
+            let key = <[u8; 32]>::try_from(want.store_key.as_ref())
+                .map_err(|_| unsupported("a store key must be exactly 32 bytes"))?;
+            wants.push((key, want));
+        }
+
+        let mut reply = PeerSyncChunksPullReply::default();
+        let mut budget = crate::ranged::MAX_BODY_BYTES_PER_REPLY;
+        for (key, want) in wants {
+            if budget == 0 {
+                reply.deferred.push(want.store_key.clone());
+                continue;
+            }
+            let body = match &self.config.file_chunks {
+                Some(source) => source(req.folder.clone(), key).await,
+                None => None,
+            };
+            let Some(body) = body else {
+                reply.missing.push(want.store_key.clone());
+                continue;
+            };
+            // budget > 0, so every slice of an incomplete body is non-empty and
+            // a pull always advances (`ranged::slice_for`).
+            let Some(slice) = crate::ranged::slice_for(&body, want.offset, budget) else {
+                return Err(unsupported(
+                    "the want's offset is past the end of the stored body",
+                ));
+            };
+            budget -= slice.len();
+            reply.chunks.push(PeerSyncChunk {
+                store_key: want.store_key.clone(),
+                offset: want.offset,
+                bytes: serde_bytes::ByteBuf::from(slice.to_vec()),
+                total_len: body.len() as u64,
+                extra: Default::default(),
+            });
+        }
+        to_value(&reply)
+    }
 }
 
 /// Bring the peer-sync node up — the **one** door to the leg's listener.
@@ -947,6 +1048,7 @@ mod tests {
                 own_witness_kind: WITNESS_DEVICE_AUTHORIZATION.to_string(),
                 custody_revoked: None,
                 device_removed: None,
+                file_chunks: None,
                 quotas: QuotaConfig::default(),
                 now: Arc::new(|| 5_000),
             },
@@ -982,6 +1084,7 @@ mod tests {
                 own_witness_kind: WITNESS_DEVICE_AUTHORIZATION.to_string(),
                 custody_revoked: None,
                 device_removed: None,
+                file_chunks: None,
                 quotas: QuotaConfig {
                     conns_per_window: 1,
                     ..QuotaConfig::default()
@@ -1069,6 +1172,15 @@ mod tests {
         custody_revoked: Option<CustodyRevocationFn>,
         device_removed: Option<DeviceRemovedFn>,
     ) -> (tempfile::TempDir, Arc<PeerSyncServer>, ActorKeypair) {
+        admit_server_serving(custody_revoked, device_removed, None).await
+    }
+
+    /// [`admit_server_with`] plus a file-body source.
+    async fn admit_server_serving(
+        custody_revoked: Option<CustodyRevocationFn>,
+        device_removed: Option<DeviceRemovedFn>,
+        file_chunks: Option<FileChunkFn>,
+    ) -> (tempfile::TempDir, Arc<PeerSyncServer>, ActorKeypair) {
         let owner = ActorKeypair::from_secret([9u8; 32]);
         let account = owner.actor_id().0;
         let dir = tempfile::tempdir().unwrap();
@@ -1092,11 +1204,166 @@ mod tests {
                 own_witness_kind: WITNESS_DEVICE_AUTHORIZATION.to_string(),
                 custody_revoked,
                 device_removed,
+                file_chunks,
                 quotas: QuotaConfig::default(),
                 now: Arc::new(|| 5_000),
             },
         ));
         (dir, server, owner)
+    }
+
+    // ── fauna.peer.sync.chunks.pull ─────────────────────────────────────────
+
+    /// A file-body source holding `body` under `key` in folder `"7"`.
+    fn one_body(key: [u8; 32], body: Vec<u8>) -> FileChunkFn {
+        Arc::new(move |folder: String, wanted: [u8; 32]| {
+            let hit = (folder == "7" && wanted == key).then(|| body.clone());
+            Box::pin(async move { hit })
+        })
+    }
+
+    fn chunks_payload(folder: &str, wants: &[([u8; 32], u64)]) -> Value {
+        to_value(&PeerSyncChunksPullRequest {
+            folder: folder.into(),
+            wants: wants
+                .iter()
+                .map(|(k, offset)| fauna_protocol::peer_sync::PeerSyncChunkWant {
+                    store_key: serde_bytes::ByteBuf::from(k.to_vec()),
+                    offset: *offset,
+                    extra: Default::default(),
+                })
+                .collect(),
+            extra: Default::default(),
+        })
+        .unwrap()
+    }
+
+    /// A sibling of this account is served its folder's chunk body, sliced to
+    /// the reply budget and resumable from the served offset; a key this
+    /// device holds no body for is `missing` (the nest's to serve).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sibling_pulls_a_folders_chunk_in_slices() {
+        let key = [0xA1u8; 32];
+        let body: Vec<u8> = (0..(crate::ranged::MAX_BODY_BYTES_PER_REPLY + 100))
+            .map(|i| i as u8)
+            .collect();
+        let (_dir, server, owner) =
+            admit_server_serving(None, None, Some(one_body(key, body.clone()))).await;
+        let device = [0x0Au8; 32];
+        let slot = Mutex::new(None);
+        let peer = EndpointKey::from_bytes(device);
+        server
+            .handle_admit(&peer, &slot, device_admit_payload(&owner, device))
+            .await
+            .expect("a sibling admits");
+
+        let gone = [0xB2u8; 32];
+        let reply = server
+            .handle_chunks_pull(
+                &peer,
+                &slot,
+                chunks_payload("7", &[(gone, 0), (key, 0), (gone, 0)]),
+            )
+            .await
+            .expect("an admitted sibling pulls");
+        let reply: PeerSyncChunksPullReply = from_value(&reply).unwrap();
+        assert_eq!(reply.chunks.len(), 1);
+        // The budget went to the body: the want after it is deferred unread.
+        assert_eq!(
+            reply.deferred,
+            vec![serde_bytes::ByteBuf::from(gone.to_vec())]
+        );
+        assert_eq!(reply.chunks[0].total_len, body.len() as u64);
+        let first = reply.chunks[0].bytes.len();
+        assert_eq!(first, crate::ranged::MAX_BODY_BYTES_PER_REPLY);
+        assert_eq!(
+            reply.missing,
+            vec![serde_bytes::ByteBuf::from(gone.to_vec())]
+        );
+
+        let reply = server
+            .handle_chunks_pull(&peer, &slot, chunks_payload("7", &[(key, first as u64)]))
+            .await
+            .unwrap();
+        let reply: PeerSyncChunksPullReply = from_value(&reply).unwrap();
+        assert_eq!(reply.chunks[0].bytes.as_ref(), &body[first..]);
+
+        // Another folder's want is not this body's, however the key reads.
+        let reply = server
+            .handle_chunks_pull(&peer, &slot, chunks_payload("8", &[(key, 0)]))
+            .await
+            .unwrap();
+        let reply: PeerSyncChunksPullReply = from_value(&reply).unwrap();
+        assert!(reply.chunks.is_empty() && reply.missing.len() == 1);
+    }
+
+    /// File bodies go to this account's own devices only: a custodian and an
+    /// owner device of a custodied account are refused at the chunk door,
+    /// whatever they may pull elsewhere.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn file_bodies_are_refused_to_a_custodian_and_to_a_custodied_accounts_fleet() {
+        let key = [0xA1u8; 32];
+        let (_dir, server, owner) = admit_server_serving(
+            Some(Arc::new(|_: &[u8]| false)),
+            None,
+            Some(one_body(key, vec![1, 2, 3])),
+        )
+        .await;
+
+        let custodian = [0xC5u8; 32];
+        let (payload, _) = custody_admit_payload(&owner, custodian);
+        let slot = Mutex::new(None);
+        let peer = EndpointKey::from_bytes(custodian);
+        server.handle_admit(&peer, &slot, payload).await.unwrap();
+        let err = server
+            .handle_chunks_pull(&peer, &slot, chunks_payload("7", &[(key, 0)]))
+            .await
+            .expect_err("a custodian holds no file bodies");
+        assert_eq!(err.code, ERR_NOT_ADMITTED);
+
+        let other = ActorKeypair::from_secret([21u8; 32]);
+        let (_cdir, handle, _cid, _scope) = custodied_store(&hex::encode(other.actor_id().0)).await;
+        server.set_custodied(HashMap::from([(other.actor_id().0, served(handle))]));
+        let device = [0x0Fu8; 32];
+        let slot = Mutex::new(None);
+        let peer = EndpointKey::from_bytes(device);
+        server
+            .handle_admit(&peer, &slot, device_admit_payload(&other, device))
+            .await
+            .unwrap();
+        let err = server
+            .handle_chunks_pull(&peer, &slot, chunks_payload("7", &[(key, 0)]))
+            .await
+            .expect_err("another account's device holds none of this account's folders");
+        assert_eq!(err.code, ERR_NOT_ADMITTED);
+    }
+
+    /// No admission, no bytes; and a host with no file-body source answers
+    /// every want missing rather than refusing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_chunk_door_needs_admission_and_degrades_to_missing() {
+        let key = [0xA1u8; 32];
+        let (_dir, server, owner) = admit_server_serving(None, None, None).await;
+        let device = [0x0Au8; 32];
+        let slot = Mutex::new(None);
+        let peer = EndpointKey::from_bytes(device);
+        let err = server
+            .handle_chunks_pull(&peer, &slot, chunks_payload("7", &[(key, 0)]))
+            .await
+            .expect_err("unadmitted");
+        assert_eq!(err.code, ERR_NOT_ADMITTED);
+
+        server
+            .handle_admit(&peer, &slot, device_admit_payload(&owner, device))
+            .await
+            .unwrap();
+        let reply = server
+            .handle_chunks_pull(&peer, &slot, chunks_payload("7", &[(key, 0)]))
+            .await
+            .unwrap();
+        let reply: PeerSyncChunksPullReply = from_value(&reply).unwrap();
+        assert!(reply.chunks.is_empty());
+        assert_eq!(reply.missing.len(), 1);
     }
 
     fn custody_admit_payload(owner: &ActorKeypair, custodian: [u8; 32]) -> (Value, Vec<u8>) {

@@ -218,7 +218,7 @@ class MessageBannerObserverTest {
     fun theHostFiresARealNotificationAndReseedsAtSignOut() {
         val app = RuntimeEnvironment.getApplication()
         val platform = shadowOf(app.getSystemService(NotificationManager::class.java))
-        val host = ConversationsManagerHost(NotificationHelper(app))
+        val host = ConversationsManagerHost(NotificationHelper(app), com.fauna.app.widget.WidgetUnreadPublisher(app))
         host.manager.installMockBackendsForTest()
         val before = bannerLog()
         val posted = platform.allNotifications.size

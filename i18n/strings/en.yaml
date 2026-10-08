@@ -1516,6 +1516,17 @@ conversations:
     # producer — `ConversationsManager::send`, which `send_new_thread` tail-calls
     # — so one key, with the backend's own rejection as {message}.
     error_send: 'Could not send this message: {message}'
+    # Compose addressed to one of the account's own mailing lists
+    # (mail-mass-mailing.md § Composing a list message; the view is built in
+    # fauna_conversations::list_send). The pre-Send warning
+    # (dm-compose-list-send-warning), its form when the nest gives no daily
+    # limit, the approaching / over-limit notice (dm-compose-list-quota-warning)
+    # and the whole-send progress (dm-compose-list-send-progress).
+    list_send_warning: "This will send to {count} subscribed recipients on {list}. Today's quota: {used} / {limit}."
+    list_send_warning_no_limit: This will send to {count} subscribed recipients on {list}.
+    list_quota_approaching: Approaching daily limit — {remaining} more recipients today
+    list_quota_over: "Sending to {count} recipients would pass today's limit of {limit} ({remaining} left). Try again tomorrow."
+    list_send_progress: 'Sent to {list}: {delivered} of {count} recipients delivered'
     # Staging an attachment needs an open composer to stage it onto
     # (`add_new_thread_attachment` returns None otherwise). Reported rather than
     # dropped — an attach that vanishes silently reads as a product bug
@@ -4109,7 +4120,6 @@ settings:
   new_nest_url: New Nest URL
   new_nest_url_placeholder: 'https://nest.fauna.social'
   update_button: Update
-  updates: Updates
   storage_desc: Account storage usage.
   about: About
   about_name: Fauna for Windows
@@ -4119,9 +4129,6 @@ settings:
   general: General
   appearance: Appearance
   show_in_dock: Show in Dock
-  auto_check_updates: Automatically check for updates
-  auto_download_updates: Automatically download updates
-  last_checked: 'Last checked:'
   p2p_redirect: Peer connections and bridges are managed on the Devices and Bridges pages.
   open_devices: Open Devices
   open_bridges: Open Bridges
@@ -4665,6 +4672,10 @@ mail_lists:
   # The armed Delete's own label: deleting a list deletes every member row with
   # it, and the confirm must say so (mail-mass-mailing.md § The list as an alias row).
   delete_confirm: Delete the list and all its members?
+  # The armed Submit's own label when the List-Archive link points off the user's
+  # own server: the link is published to every recipient (mail-mass-mailing.md
+  # § Don't do these).
+  archive_off_server_confirm: This archive link is not on your server and goes out with every message. Save anyway?
   members: Members
   no_domain: Add a mail domain before creating lists.
   members_title: Members
@@ -7032,6 +7043,48 @@ error:
     # a send to (or a deposit from) a peer the guardian blocked
     # (family-safety.md § The bridge-DM gate).
     guardian_approval_required: This account can only message approved contacts.
+  # ── The bridged reply/quote doors (feed.md § Interaction bar → *Reply and
+  # quote on a bridged post*). A refusal is the affordance's inline failure,
+  # and the reason only the nest knows — which account is missing, which
+  # toggle is off — must reach the user with its remedy. ONE code per remedy,
+  # a remedy being what to change AND on which page: the three bridges link
+  # from three different pages (ActivityPub on Bridges, Bluesky on AT
+  # Protocol, Nostr on its own page), so each sentence names its page. ──
+  activitypub:
+    # fauna.activitypub.not_linked — a reply to or quote of a fediverse post
+    # when the account has no ActivityPub record at all (activitypub.md
+    # § Reply and quote → *The door*). The remedy is the ActivityPub card on
+    # the Bridges page.
+    not_linked: This post came from the fediverse, and ActivityPub isn't enabled for your account yet. Enable it on the Bridges page first.
+    # fauna.activitypub.switched_off — the record exists but federation is
+    # switched off (the same door). Nothing was composed; the remedy is that
+    # card's toggle.
+    switched_off: Your ActivityPub federation is switched off, so this can't be sent to the fediverse. Turn it back on from the Bridges page.
+  bluesky:
+    # fauna.bluesky.not_linked — a reply to or quote of a Bluesky post with no
+    # consume-side link this nest may write through (bridges.md
+    # § Cross-posting → *Reply and quote — the unified shape*: no linked
+    # account, or a hosted identity D7 withholds). ONE string for both,
+    # because the fix is the same: the linked-account level on the AT
+    # Protocol page.
+    not_linked: This post came from Bluesky, and no Bluesky account is linked for you. Link one on the AT Protocol page first.
+  nostr:
+    # The door's four refusals (nostr.md § Replying to and quoting a nostr
+    # note → *The door*), each naming what to change on the Nostr page.
+    # fauna.nostr.not_linked — no Nostr key is linked at all.
+    not_linked: This post came from Nostr, and no Nostr key is linked for you. Link one on the Nostr page first.
+    # fauna.nostr.no_custodial_key — the key is linked in a signing mode the
+    # nest cannot sign with (remote / nip07); the remedy is a generated or
+    # imported key.
+    no_custodial_key: Your nest doesn't hold your Nostr key, so it can't sign this for you. Switch to a generated or imported key on the Nostr page.
+    # fauna.nostr.no_relays_configured — the publish relay list was emptied on
+    # purpose (nostr.md § Errors & edge cases: never silently defaulted).
+    # Minted by the reply door, by `nostr.events.publish_signed` and by a
+    # Nostr conversation leg's send alike — one string for every caller.
+    no_relays_configured: You've removed every Nostr relay, so there is nowhere to publish this. Add a relay on the Nostr page first.
+    # fauna.nostr.replies_off — a reply (a quote still acks) while the
+    # *Publish replies* toggle is off.
+    replies_off: Replies to Nostr are switched off, so this wasn't sent. Turn on Publish replies on the Nostr page.
   nest:
     # fauna.nest.outdated — the nest booted a degraded "needs-update" mode (it
     # cannot safely operate its newer at-rest DB). Actionable: update the nest.

@@ -314,6 +314,12 @@ pub trait PlacementKind: Send + Sync + 'static {
     /// A tombstone's delete time; `None` for a tombstone the kind records
     /// no delete time for (a mail `Move` tombstone), which is never pruned.
     fn tombstone_deleted_at(t: &Self::Tombstone) -> Option<i64>;
+    /// Record in the manifest what the retention prune just dropped, so a
+    /// replica rebuilt from it knows its tombstone list is incomplete below
+    /// that point. Mail keeps a per-mailbox prune floor
+    /// (`MailboxState::pruned_modseq`); a kind that records nothing keeps the
+    /// default.
+    fn note_pruned(_m: &mut Self::Manifest, _pruned: &[Self::Tombstone]) {}
 }
 
 /// Per-actor in-memory state. Loaded from disk on first access.
@@ -633,16 +639,21 @@ impl<K: PlacementKind> PlacementJournal<K> {
     /// sync serve path enforces on its own expunged table). Past that window a
     /// client is told to full-resync, so a pruned tombstone is unobservable;
     /// the manifest's tombstones have no other production consumer (they are a
-    /// DR artifact). A `None` `deleted_at` (a mail `Move` tombstone) is never
-    /// pruned. Returns the number pruned.
+    /// DR artifact — which is why the prune leaves its mark through
+    /// [`PlacementKind::note_pruned`]: a restore replays only the survivors).
+    /// A `None` `deleted_at` (a mail `Move` tombstone) is never pruned.
+    /// Returns the number pruned.
     pub async fn prune_tombstones(&self, actor_id: &[u8; 32], cutoff: i64) -> Result<u32> {
         let actor_state = self.actor_state(actor_id).await?;
         let mut state = actor_state.lock().await;
-        let tombstones = K::tombstones_mut(&mut state.manifest);
-        let before = tombstones.len();
-        tombstones.retain(|t| K::tombstone_deleted_at(t).is_none_or(|d| d >= cutoff));
-        let pruned = before - tombstones.len();
+        let (kept, dropped): (Vec<_>, Vec<_>) =
+            std::mem::take(K::tombstones_mut(&mut state.manifest))
+                .into_iter()
+                .partition(|t| K::tombstone_deleted_at(t).is_none_or(|d| d >= cutoff));
+        *K::tombstones_mut(&mut state.manifest) = kept;
+        let pruned = dropped.len();
         if pruned > 0 {
+            K::note_pruned(&mut state.manifest, &dropped);
             state
                 .manifest
                 .save_atomic(&state.manifest_path)

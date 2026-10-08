@@ -52,9 +52,9 @@ Stamped 2026-09-23 at 039e9619ca.
 10. [app] Resetting your filter asks you to confirm first and says it cannot be undone — `docs/goal/behavior/mail-spam.md` § Reset
    - `tests/e2e-unified/tests/test_mail_spam_controls.py::test_reset_confirm_says_it_cannot_be_undone`
 11. [app] An undo or reset on one device updates the training history already open on your other devices — `docs/goal/behavior/mail-spam.md` § Reset
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_spam_controls.py::test_an_undo_or_reset_on_one_device_updates_the_history_open_on_another`
 12. [app] A lesson you gave in a mail app is in your training history the next time you open it — `docs/goal/behavior/mail-spam.md` § Implementation status today
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_spam_controls.py::test_a_lesson_given_in_a_mail_app_is_in_the_history_next_time`
 13. [app] Contributing your training is off until you turn it on, and turning it on shows as a grant you can revoke from your grant log — `docs/goal/behavior/mail-spam.md` § Encrypted-mode interaction
    - `tests/e2e-unified/tests/test_mail_spam_controls.py::test_contributing_is_off_until_turned_on_and_is_a_revocable_grant`
 14. [app] Marking a message as spam is offered on messages you received, never on your own — `docs/goal/behavior/mail-spam.md` § 1. Explicit "Mark as spam" gesture (Fauna app first-party) — SHIPPED on the conversation surface
@@ -119,8 +119,8 @@ Stamped 2026-09-23 at 039e9619ca.
 | 8 | nest | `tests/e2e-unified/tests/api/test_report_sharing.py::test_report_sharing_k_gate_opt_in_transparency_and_opt_out` | nest (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_mail_spam_controls.py::test_history_rows_show_the_message_the_lesson_and_where_it_was_given` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_mail_spam_controls.py::test_reset_confirm_says_it_cannot_be_undone` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 11 | app | (none) | — |
-| 12 | app | (none) | — |
+| 11 | app | `tests/e2e-unified/tests/test_mail_spam_controls.py::test_an_undo_or_reset_on_one_device_updates_the_history_open_on_another` | tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_mail_spam_controls.py::test_a_lesson_given_in_a_mail_app_is_in_the_history_next_time` | tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_mail_spam_controls.py::test_contributing_is_off_until_turned_on_and_is_a_revocable_grant` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_mail_spam_controls.py::test_mark_as_spam_is_offered_on_received_messages_only` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_mail_spam_controls.py::test_your_own_spam_threshold_sorts_your_mail` | macos (macos): passed, ios (macos): passed, tui (linux): passed |

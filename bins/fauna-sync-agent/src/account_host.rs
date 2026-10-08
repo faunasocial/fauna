@@ -540,6 +540,7 @@ async fn assemble(state: &SyncServiceState, inputs: &HostInputs) -> anyhow::Resu
         process_rpc,
         Some(reconnects),
         Some(rpc.subscribe_pushes()),
+        Some(state.peer_files.binding()),
     );
 
     let handle = AccountStoreRuntime::start(params).await?;
@@ -590,6 +591,7 @@ fn runtime_params<R>(
     process_rpc: Option<R>,
     reconnects: Option<watch::Receiver<u64>>,
     pushes: Option<tokio::sync::broadcast::Receiver<fauna_protocol::PushEvent>>,
+    file_sync: Option<fauna_sync_engine::account_runtime::PeerFileSync>,
 ) -> AccountRuntimeParams<R> {
     AccountRuntimeParams {
         store_root,
@@ -643,8 +645,13 @@ fn runtime_params<R>(
         // Nor the road: a succession is delivered by a seed holder, which can
         // sign in as a retired identity where a chain must be replayed.
         owed_nests: None,
+        //
+        // The binding also carries this host's file-sync engines onto the leg
+        // (`crate::peer_files`): the agent holds the bodies, so it is the
+        // process that serves a sibling's chunk want and asks a sibling first.
         peer_transport: Some(std::sync::Arc::new(
-            |inputs: fauna_sync_engine::account_runtime::PeerLegFactoryInputs| {
+            move |inputs: fauna_sync_engine::account_runtime::PeerLegFactoryInputs| {
+                let file_sync = file_sync.clone();
                 Box::pin(async move {
                     let (transport, bound_addrs) = fauna_iroh::peer_leg_transport(
                         inputs.writer_key.to_bytes(),
@@ -654,6 +661,7 @@ fn runtime_params<R>(
                     Ok(fauna_sync_engine::account_runtime::PeerLegBinding {
                         transport,
                         bound_addrs,
+                        file_sync,
                     })
                 })
             },
@@ -838,6 +846,7 @@ mod tests {
             production_credential_store(),
             &test_inputs(),
             (),
+            None,
             None,
             None,
             None,

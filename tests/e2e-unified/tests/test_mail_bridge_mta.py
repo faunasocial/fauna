@@ -145,7 +145,7 @@ def test_inbound_mx_round_trip(mail_bridge_mta):
     override clears DNSBL, disables greylist, and sets
     `fcrdns_mode=off`, so the first RCPT is accepted (no first-seen
     greylist tempfail) and `Backend.NewSession` does no resolver lookup
-    on the loopback peer. Before finding #4 this test paid a 60 s
+    on the loopback peer. Before the fixture's DNS-gate override this test paid a 60 s
     greylist hold-down across two connections and bound to IPv6 to dodge
     the DNSBL response for 127.0.0.x; on the default `fcrdns_mode`
     `NewSession`'s connection-time PTR lookup on the loopback peer could

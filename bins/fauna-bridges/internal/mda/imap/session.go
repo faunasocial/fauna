@@ -13,6 +13,7 @@ import (
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/authlock"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/byteplane"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mailfauna"
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mda/undecryptable"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/wsrpc"
 	faunaFfi "github.com/faunasocial/fauna/libs/fauna-mail-go/fauna_ffi"
 )
@@ -141,6 +142,13 @@ type Session struct {
 	// Shared by the Backend across all sessions. Reads/writes hold the
 	// cache's own mutex internally; never under `s.mu`.
 	cache *bodyStructureCache
+
+	// undecryptableWarn is the Backend's once-per-record WARN dedup for a
+	// mail record no key in the session's standing set opens (FETCH serves
+	// it as the placeholder on every request that spans it). Shared across
+	// sessions so a MUA's re-sync never re-alerts; nil in hand-built test
+	// sessions, where the WARN is simply not logged.
+	undecryptableWarn *undecryptable.WarnDedup
 
 	// plane is the Backend's bulk-byte-plane client, snapshotted at
 	// NewSession: a body too large for the 2 MiB WS-RPC frame arrives as a

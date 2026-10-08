@@ -223,6 +223,13 @@ pub(crate) enum Cmd {
         now: fauna_core::data::Timestamp,
         reply: oneshot::Sender<Result<bool>>,
     },
+    /// A retired MSEK generation's door
+    /// ([`AccountStoreHandle::retire_mail_generation`]), boxed: it carries the
+    /// retired MSEK.
+    RetireMailGeneration {
+        generation: Box<fauna_core::data::PriorMsekRetirement>,
+        reply: oneshot::Sender<Result<bool>>,
+    },
     /// The succession ledger's write door
     /// ([`AccountStoreHandle::merge_succession_ledger`]), boxed because a
     /// ledger carries the whole grant log.
@@ -366,6 +373,13 @@ pub(crate) enum Cmd {
     ReconcileNow {
         reply: oneshot::Sender<PumpReport>,
     },
+    /// The grant-mint door's publish ([`AccountStoreHandle::publish_ledger`]):
+    /// the publish step run now, answered `Ok` only when no succession-ledger
+    /// row this device wrote stays unsent. Pass-bound, like the local-write
+    /// wake's publish it runs early.
+    PublishLedger {
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// The explicit pass barrier ([`AccountStoreHandle::settled`]): a
     /// pass-bound no-op, answered only between passes.
     Settled {
@@ -491,7 +505,8 @@ impl Cmd {
     ///   own tip-sealed put may be holding — so inside a pass the put is
     ///   parked instead ([`serve_local_cmd`] asks
     ///   [`AccountStatePlane::origination_mints`] first) and mints after it.
-    /// - **Pass-bound:** `ReconcileNow` (a pass of its own); `Settled` (the
+    /// - **Pass-bound:** `ReconcileNow` (a pass of its own); `PublishLedger`
+    ///   (the publish step, which a pass runs too); `Settled` (the
     ///   barrier — answered between passes by definition); `RetireEnrollment`
     ///   and `Shutdown` (they end the principal's sessions, which no pass may
     ///   be mid-flight for); `DeadGenerations` and `LetGo` (they ask the
@@ -536,6 +551,7 @@ impl Cmd {
             | Cmd::PutMailCredential { .. }
             | Cmd::MarkMailCredentialWrapped { .. }
             | Cmd::RevokeMailCredential { .. }
+            | Cmd::RetireMailGeneration { .. }
             | Cmd::PutFollow { .. }
             | Cmd::Unfollow { .. }
             | Cmd::MergeSuccessionLedger { .. }
@@ -565,6 +581,7 @@ impl Cmd {
             | Cmd::Listed { .. }
             | Cmd::UnkeyedHold { .. } => true,
             Cmd::ReconcileNow { .. }
+            | Cmd::PublishLedger { .. }
             | Cmd::Settled { .. }
             | Cmd::RetireEnrollment { .. }
             | Cmd::DeadGenerations { .. }
@@ -603,7 +620,8 @@ impl Cmd {
             Cmd::WriteMailState { .. }
             | Cmd::PutMailCredential { .. }
             | Cmd::MarkMailCredentialWrapped { .. }
-            | Cmd::RevokeMailCredential { .. } => Some(mp::KIND_MAIL),
+            | Cmd::RevokeMailCredential { .. }
+            | Cmd::RetireMailGeneration { .. } => Some(mp::KIND_MAIL),
             Cmd::MergeSuccessionLedger { .. }
             | Cmd::RepointSuccessionLedger { .. }
             | Cmd::RaiseGrantMarks { .. } => Some(mp::KIND_SUCCESSION_LEDGER),
@@ -1423,6 +1441,25 @@ impl AccountStoreHandle {
             .send(Cmd::RevokeMailCredential {
                 credential_id,
                 now: fauna_core::data::Timestamp::now(),
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+    }
+
+    /// Record a retired MSEK generation at `generation/<fingerprint>`,
+    /// joined into what is stored (a row already there keeps the later
+    /// instant). Whether anything was written; the writer door's refusals
+    /// surface as `Err`.
+    pub async fn retire_mail_generation(
+        &self,
+        generation: fauna_core::data::PriorMsekRetirement,
+    ) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::RetireMailGeneration {
+                generation: Box::new(generation),
                 reply,
             })
             .await
@@ -2483,6 +2520,24 @@ impl AccountStoreHandle {
         rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))
     }
 
+    /// Publish this device's unsent rows now and answer whether the bound
+    /// nest acknowledged every succession-ledger row it wrote — the
+    /// local-write wake's publish step, run on demand and awaited
+    /// (`ui/nests.md` § Trust facet — grants → *Record-then-deposit*, the
+    /// published form: a grant's `Mint` reaches the nest before its blob).
+    /// An `Err` names why a row stays owed: the nest offline or refusing the
+    /// push, a rotated writer (the runtime reassembles), the runtime gone.
+    pub async fn publish_ledger(&self) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::PublishLedger { reply })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
     /// The registration chain moved (a kit ceremony created or replaced the
     /// RecoveryKey): carry it to every linked nest now, not at the next full
     /// pass (`identity-succession.md` § Enforcement on the home nest → *Every
@@ -2846,6 +2901,12 @@ impl fauna_client_config::SuccessionLedgerStore for AccountStoreHandle {
             .map_err(|e| fauna_client_config::StoreError::Save(format!("{e:#}")))
     }
 
+    async fn publish_ledger(&self) -> Result<(), fauna_client_config::StoreError> {
+        AccountStoreHandle::publish_ledger(self)
+            .await
+            .map_err(|e| fauna_client_config::StoreError::Save(format!("{e:#}")))
+    }
+
     async fn repoint(
         &self,
         retired: fauna_core::identity::ActorId,
@@ -3106,6 +3167,15 @@ impl fauna_client_config::MailStore for AccountStoreHandle {
 
     async fn revoke(&self, credential_id: String) -> Result<bool, fauna_client_config::StoreError> {
         self.revoke_mail_credential(credential_id)
+            .await
+            .map_err(|e| fauna_client_config::StoreError::Save(format!("{e:#}")))
+    }
+
+    async fn retire_generation(
+        &self,
+        generation: fauna_core::data::PriorMsekRetirement,
+    ) -> Result<bool, fauna_client_config::StoreError> {
+        self.retire_mail_generation(generation)
             .await
             .map_err(|e| fauna_client_config::StoreError::Save(format!("{e:#}")))
     }
@@ -3491,6 +3561,11 @@ where
                 now,
             )
             .await;
+            return wrote(r, |written| *written, local.publish_due, reply);
+        }
+        Cmd::RetireMailGeneration { generation, reply } => {
+            let r =
+                crate::mail_rows::put_generation(local.store, local.fleet_plane, &generation).await;
             return wrote(r, |written| *written, local.publish_due, reply);
         }
         // The offline-share ceremony record: a read-join-put on this one

@@ -457,6 +457,10 @@ pub fn heal_parents(leaf_ids: &[[u8; 32]]) -> Vec<[u8; 32]> {
     leaf_ids[start..].to_vec()
 }
 
+/// The page [`AccountStatePlane::owes_own_state`] walks this device's
+/// unpublished rows in — normally a handful, so one page.
+const UNPUBLISHED_PAGE: u32 = 256;
+
 /// The class-2 leg of one account scope: publish, walk, reconcile.
 pub struct AccountStatePlane<'a, B: StoreBackend, R: RpcRequester> {
     store: &'a AccountStore<B>,
@@ -1574,6 +1578,48 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
 
     pub fn scope(&self) -> &str {
         &self.scope
+    }
+
+    /// Whether this device still owes the bound nest a publish of one of its
+    /// own state rows that `owed` matches by `(kind, key)` — a row this
+    /// writer wrote above its own published high-water (its frontier slot on
+    /// this scope, which only the nest's acknowledgement advances), or one
+    /// the nest refused for room and the slot moved past (parked: owed until
+    /// its retry lands). The read behind every "has my write reached the
+    /// nest" question (`crate::deployment_seed_rows::deployment_seed_published`,
+    /// the grant mint's ledger publish).
+    pub async fn owes_own_state(&self, owed: impl Fn(&str, &str) -> bool) -> Result<bool> {
+        let writer = self.store.writer();
+        let matches = |row: &JournalRow| matches!(&row.item, ItemRef::StateKey { kind, key, .. } if owed(kind, key));
+        for seq in self.store.parked(&self.scope, &writer).await? {
+            let row = self
+                .store
+                .scope_rows(&self.scope, &writer, seq.saturating_sub(1), 1)
+                .await?;
+            if row.first().is_some_and(|r| r.seq == seq && matches(r)) {
+                return Ok(true);
+            }
+        }
+        let mut after = self
+            .store
+            .frontier(&self.scope)
+            .await?
+            .into_iter()
+            .find(|(w, _)| *w == writer)
+            .map_or(0, |(_, seq)| seq);
+        loop {
+            let rows = self
+                .store
+                .scope_rows(&self.scope, &writer, after, UNPUBLISHED_PAGE)
+                .await?;
+            let Some(last) = rows.last() else {
+                return Ok(false);
+            };
+            after = last.seq;
+            if rows.iter().any(&matches) {
+                return Ok(true);
+            }
+        }
     }
 
     /// The attached retained-bundle custody, for sibling steps that resolve
@@ -4227,7 +4273,7 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
                     .ingest_state(&row, self.entry_of(&plaintext))
                     .await?;
                 report.applied += 1;
-                self.drop_retained_if_shredded(&plaintext);
+                self.drop_retained_if_shredded(&plaintext).await?;
             }
             (MergeOutcome::Replace, Take::Carry(why)) => {
                 // Carried: the fleet's value, `merge_meta` verbatim, becomes
@@ -4257,7 +4303,7 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
                 // publish, and an aborted walk would bank no listing.
                 let published = self.publish_own_rows_through(&plaintext, our_seq).await;
                 report.tolerate_carry_scope_full(published)?;
-                self.drop_retained_if_shredded(&plaintext);
+                self.drop_retained_if_shredded(&plaintext).await?;
             }
             (MergeOutcome::Merged(merged), mode) => {
                 // The merged value is a NEW value this replica authored, so it
@@ -4305,7 +4351,7 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
                         report.tolerate_carry_scope_full(published)?;
                     }
                 }
-                self.drop_retained_if_shredded(&merged);
+                self.drop_retained_if_shredded(&merged).await?;
                 return Ok(());
             }
             (MergeOutcome::NeedsThreeWay, _) => bail!(
@@ -4356,22 +4402,42 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
     }
 
     /// The walk-side half of the crypto-shred contract (W5.4a): a mint row
-    /// whose applied/merged state is `Shredded` drops the retained bundle's
-    /// key the moment it lands — not only when a later read happens to name
-    /// that generation (`generation_tip::RetainedKeyCustody`, duty three).
-    /// Row content never aborts anything here: an undecodable mint row is the
-    /// resolver's business, not this hook's.
-    fn drop_retained_if_shredded(&self, state: &EntryPlaintext) {
-        let Some(custody) = self.custody else { return };
+    /// whose applied/merged state is an **authored** `Shredded` drops the
+    /// retained bundle's key the moment it lands — not only when a later read
+    /// happens to name that generation (`generation_tip::RetainedKeyCustody`,
+    /// duty three). Authored is judged against the device set this replica
+    /// has merged at hook time ([`GenerationMintRecord::shred_is_authored`],
+    /// read only once a row decodes `Shredded`, so the walk's hot path reads
+    /// nothing extra); an unauthored shred drops nothing (`account-data-taxonomy.md`
+    /// § *Fleet-scope reclamation* → *the authored shred*). Per-writer
+    /// frontiers interleave, so the shredder's `Enrolled` row may merge after
+    /// its shred and the hook see it too early: the reclamation pass drops
+    /// every authored shred's key again, idempotently, so the drop is
+    /// eventual. Row content never aborts anything here: an undecodable mint
+    /// row is the resolver's business, not this hook's; `Err` is a store read.
+    ///
+    /// [`GenerationMintRecord::shred_is_authored`]: fauna_core::generation::GenerationMintRecord::shred_is_authored
+    async fn drop_retained_if_shredded(&self, state: &EntryPlaintext) -> Result<()> {
+        let Some(custody) = self.custody else {
+            return Ok(());
+        };
         if state.kind != fauna_protocol::merge_policy::KIND_GENERATION_MINT || state.tombstone {
-            return;
+            return Ok(());
         }
-        if let Ok(fauna_core::generation::GenerationMintRecord::Shredded { core, .. }) =
-            fauna_core::encoding::canonical_decode(&state.value)
-            && let Ok(id) = fauna_core::generation::generation_id(&core)
+        let Ok(record @ fauna_core::generation::GenerationMintRecord::Shredded { .. }) =
+            fauna_core::encoding::canonical_decode::<fauna_core::generation::GenerationMintRecord>(
+                &state.value,
+            )
+        else {
+            return Ok(());
+        };
+        let view = crate::fleet_removal::fleet_view(self.store, self.trust).await?;
+        if let Ok(id) = record.shred_is_authored(&view)
+            && fauna_core::hex32::encode(&id) == state.key
         {
             custody.drop_generation_key(&id);
         }
+        Ok(())
     }
 
     /// Open one feed row under this build's keys, or `None` for the
@@ -4397,11 +4463,17 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
             if let std::collections::btree_map::Entry::Vacant(entry) =
                 generation_schedules.entry(generation)
             {
+                // No view: the walk's per-row open reads no device set, so
+                // a `Shredded` mint reads unauthored HERE and drops nothing —
+                // the walk's key drop is [`Self::drop_retained_if_shredded`]
+                // at the moment the shred merges, and the reclamation pass
+                // behind it.
                 let Some(key) = generation_tip::generation_key_for(
                     self.store,
                     &generation,
                     self.writer_key,
                     self.custody,
+                    None,
                 )
                 .await?
                 else {
@@ -4516,7 +4588,8 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
     ///   of a mint row applies), and a `Minted` record's authorship verifies
     ///   ([`fauna_core::generation::verify_mint_authorship`]). A `Shredded`
     ///   record carries no minter signature; it crosses on the binding and
-    ///   on (b), and the kind's join then drops the key
+    ///   on (b), and the key then drops only if the shred is authored by a
+    ///   verified member of this replica's view
     ///   ([`Self::drop_retained_if_shredded`]).
     /// - **(b) the key is in hand.** The retained bundle holds, at that id, a
     ///   key matching the core's commitment. A device carries no record of a
@@ -5336,6 +5409,69 @@ mod door_tests {
         assert!(
             sent.windows(2).all(|w| w[0] < w[1]),
             "journal order: {sent:?}"
+        );
+    }
+    /// **The walk's hook drops a key on an authored shred only**
+    /// (`account-data-taxonomy.md` § *Fleet-scope reclamation* → *the
+    /// authored shred*): a sig-less `Shredded` landing on the
+    /// walk leaves the retained key, and so does one signed by a device this
+    /// replica has not merged as a verified member — which is also the
+    /// too-early case, the shredder's `Enrolled` row merging after its shred.
+    /// Once that row has merged the same shred drops the key (the reclamation
+    /// pass is the eventual drop when no later merge re-runs the hook).
+    /// Red-verified: with the hook back on `Shredded { .. }` alone, the first
+    /// assertion fails.
+    #[tokio::test]
+    async fn the_walk_hook_drops_a_retained_key_on_an_authored_shred_only() {
+        use crate::generation_fixture_test_support::{Bundle, THEM, device_id_of, enrollment_row};
+        use crate::generation_tip::RetainedKeyCustody as _;
+        let f = fixture().await;
+        f.put(enrollment_row(US)).await;
+        let (g, key, core) = f.mint_over(&[member_of(US)]).await;
+        let bundle = Bundle::default();
+        bundle.record_generation_key(&g, &key);
+        let p = f.plane().with_generation_custody(&bundle);
+        let landed = |record: &GenerationMintRecord| EntryPlaintext {
+            kind: KIND_GENERATION_MINT.into(),
+            key: fauna_core::hex32::encode(&g),
+            merge_meta: None,
+            value: fauna_core::encoding::canonical_encode(record)
+                .unwrap()
+                .into(),
+            tombstone: false,
+        };
+
+        let unsigned = GenerationMintRecord::Shredded {
+            core: core.clone(),
+            shredded_at_ms: 9_000,
+            shredded_by: device_id_of(US),
+            shredder_sig: vec![],
+        };
+        p.drop_retained_if_shredded(&landed(&unsigned))
+            .await
+            .unwrap();
+        assert!(
+            bundle.retained_generation_key(&g).is_some(),
+            "a sig-less shred drops no key"
+        );
+
+        // THEM signs; THEM's enrollment has not merged here yet.
+        let by_them = fauna_core::generation::sign_shred(&device_key(THEM), core, 9_000).unwrap();
+        p.drop_retained_if_shredded(&landed(&by_them))
+            .await
+            .unwrap();
+        assert!(
+            bundle.retained_generation_key(&g).is_some(),
+            "a shred by no verified member (yet) drops no key"
+        );
+
+        f.put(enrollment_row(THEM)).await;
+        p.drop_retained_if_shredded(&landed(&by_them))
+            .await
+            .unwrap();
+        assert!(
+            bundle.retained_generation_key(&g).is_none(),
+            "an authored shred drops the retained key"
         );
     }
 }

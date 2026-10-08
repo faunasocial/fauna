@@ -205,12 +205,16 @@ object TestAgent {
      */
     @Volatile private var webdavServeReply: JSONObject? = null
 
+    /** The application context, for the pokes that enqueue through WorkManager. */
+    @Volatile private var appContext: Context? = null
+
     fun start(context: Context, bridgeUrl: String, appState: AppState) {
         // Latch E2E mode for process-global consumers (e.g. the conversations
         // manager host) before the early-return guard, so a re-entrant call
         // still leaves the flag set.
         isE2EActive = true
         if (job != null) return
+        appContext = context.applicationContext
         val db = FaunaDatabase.getInstance()
         // Reach the Hilt-managed singleton OnboardingHost so call_machine_method
         // commands target the same machine the on-screen UI observes. Required
@@ -912,6 +916,9 @@ object TestAgent {
             put("mls_folded_commits", mlsFoldedCommits)
             put("account_pump_cycles", accountPumpCycles)
             put("feed_reloads", feedReloads)
+            // `fauna_e2e_agent::WIDGET_REFRESH_KEY` — bumped by the widget
+            // worker's pass and nothing else, so the poke below has a barrier.
+            put("widget_refresh", com.fauna.app.widget.WidgetRefreshPasses.stateJson())
             put("message_banners", messageBanners ?: JSONObject.NULL)
             put("connection", connection)
             // Top-level, like every app's: `helpers/waiting.py` reads both keys
@@ -1320,6 +1327,22 @@ object TestAgent {
                     session.convReceiveNow()
                 } else {
                     android.util.Log.i("TestAgent", "conv_receive_now: no conversations session yet (pre-auth)")
+                }
+            }
+            "widget_refresh_scheduled_pass_now" -> {
+                // The home-screen widget's scheduled-pass poke (convention 14's
+                // `run_now`; `fauna_e2e_agent::WIDGET_REFRESH_SCHEDULED_PASS_NOW`,
+                // the iOS arm's twin): one `WidgetDataWorker` enqueued through
+                // WorkManager, so the poke constructs and runs the identical
+                // worker the 15-minute schedule does — never its body called
+                // around WorkManager. Fire-and-forget: the barrier is the
+                // `widget_refresh` counters in `serializeState`, not this ack.
+                val ctx = appContext
+                    ?: return "widget_refresh_scheduled_pass_now: the agent holds no application context"
+                try {
+                    com.fauna.app.widget.WidgetDataWorker.enqueueOneShot(ctx)
+                } catch (e: Exception) {
+                    return "widget_refresh_scheduled_pass_now threw ${e::class.simpleName}: ${e.message}"
                 }
             }
             "account_pump_now" -> {

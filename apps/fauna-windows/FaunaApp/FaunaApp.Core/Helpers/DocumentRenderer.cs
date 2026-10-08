@@ -248,6 +248,32 @@ internal static class DocumentRenderer
     internal static string? MediaVideoHash(RenderDocument doc)
         => uniffi.fauna_ffi.FaunaFfiMethods.RenderDocumentFirstVideoHash(doc);
 
+    /// <summary>The nest-relative path of a bridged post's picture — its first folded
+    /// <c>ProxiedImage</c> — or <c>null</c> when the post carries none, or carries a blob
+    /// <c>Image</c>, which wins the one <c>post-image</c> slot (render-model.md § D6c; the
+    /// precedence tui's <c>proxied_post_image</c> and apple's <c>documentPostImage</c> keep).
+    /// A path, never a hash: the feed fetches it from the user's own nest with the session
+    /// bearer (<c>INestHttpClient.GetContentAsync</c>), with no sealed-media open and no
+    /// C2PA check, and paints it immediately — no reveal gate. Read off the shared Rust
+    /// <c>RenderDocument::proxied_images</c> via <c>render_document_proxied_images</c>, which
+    /// recurses like its siblings.</summary>
+    internal static string? MediaProxiedPath(RenderDocument doc)
+        => MediaImageHash(doc) is null
+            ? uniffi.fauna_ffi.FaunaFfiMethods.RenderDocumentProxiedImages(doc).FirstOrDefault()?.path
+            : null;
+
+    /// <summary>The nest-relative path of a bridged post's video — its first folded
+    /// <c>ProxiedVideo</c> — or <c>null</c> when the post carries none, or carries a blob
+    /// <c>Video</c> (render-model.md § D6c → Proxied video; the exact twin of
+    /// <see cref="MediaProxiedPath"/> for the <c>video-thumbnail</c> slot). The feed paints
+    /// the path beside the play glyph where it paints the hash for a <c>Video</c>, and never
+    /// byte-loads it. Read off the shared Rust <c>RenderDocument::proxied_videos</c> via
+    /// <c>render_document_proxied_videos</c>.</summary>
+    internal static string? MediaProxiedVideoPath(RenderDocument doc)
+        => MediaVideoHash(doc) is null
+            ? uniffi.fauna_ffi.FaunaFfiMethods.RenderDocumentProxiedVideos(doc).FirstOrDefault()?.path
+            : null;
+
     /// <summary>Every <c>Resolved</c> folded <c>LinkPreview</c>, in body order (render-model.md
     /// § D4). The producer's bare-URL rule emits one (<c>state: Resolving</c>) after **each**
     /// standalone paragraph that is a single bare URL, <b>leaving the inline link in place</b>,
@@ -353,13 +379,13 @@ internal static class DocumentRenderer
             case RenderBlock.Video:
                 break;
             // A bridged post's nest-served picture (render-model.md § D6c) — the feed's
-            // `post-image` slot, like Image; the windows paint of it is a trickle-down lift.
-            // This arm only defends a *nested* one (the manager never emits one).
+            // `post-image` slot, like Image, painted from MediaProxiedPath. This arm only
+            // defends a *nested* one (the manager never emits one).
             case RenderBlock.ProxiedImage:
                 break;
             // A bridged post's nest-served video (render-model.md § D6c → Proxied video) — the
-            // feed's `video-thumbnail` slot, like Video; the windows paint of it rides the same
-            // lift. This arm only defends a *nested* one (the manager never emits one).
+            // feed's `video-thumbnail` slot, like Video, painted from MediaProxiedVideoPath.
+            // This arm only defends a *nested* one (the manager never emits one).
             case RenderBlock.ProxiedVideo:
                 break;
             // A first-class attachment (render-model.md § D2). Top-level attachments are filtered

@@ -278,6 +278,13 @@ pub struct FfiAgentStatus {
     pub state: FfiAgentHealthState,
     pub version: String,
     pub uptime_secs: u64,
+    /// Whether the agent can post the `ws-device` push banner here
+    /// (`ServiceStatusInfo::notification_sink`, `sync-agent.md` § Local agent
+    /// health): `Some(false)` headless or where the platform's arm cannot post,
+    /// `None` when the agent is not running or too old to say. The push
+    /// control's inline line reads it (`settings.md` § Push notifications).
+    #[uniffi(default = None)]
+    pub notification_sink: Option<bool>,
 }
 
 /// The agent's per-device sync signal (`GetServiceStatus` → `SyncStatusInfo`) — the
@@ -949,6 +956,7 @@ impl FfiSyncAgentProvisioner {
                 .map(|s| s.version.clone())
                 .unwrap_or_default(),
             uptime_secs: status.as_ref().map(|s| s.uptime_secs).unwrap_or(0),
+            notification_sink: status.as_ref().and_then(|s| s.notification_sink),
         }
     }
 }
@@ -1231,6 +1239,56 @@ pub fn spawn_sync_event_listener(
             msg: format!("agent endpoint unresolvable: {e}"),
         })?;
     FfiSyncAgentEventListener::spawn_at(endpoint, observer)
+}
+
+/// Handle over the app's attachment lease on this user's agent
+/// (`fauna_client_sync::attachment` — the one tui links directly): while it is
+/// held, the agent counts this app as open and leaves `ws-device` push banners
+/// to it (`common.md` § Push Notifications → *Transports*). Held for the app
+/// process's whole life; the lease itself ends when the process exits, a crash
+/// included, so there is no release call — [`Self::stop`] only stops
+/// re-attaching after an agent restart.
+#[derive(uniffi::Object)]
+pub struct FfiAgentAttachment {
+    inner: std::sync::Mutex<Option<fauna_client_sync::attachment::AppAttachment>>,
+}
+
+#[uniffi::export]
+impl FfiAgentAttachment {
+    /// Stop re-attaching. Idempotent; also runs when the object drops.
+    pub fn stop(&self) {
+        if let Ok(mut held) = self.inner.lock() {
+            held.take();
+        }
+    }
+}
+
+/// Attach this app to the user's default agent endpoint for the process's life
+/// — never blocks; a background thread connects, sends `AttachApp` and
+/// re-attaches across agent restarts. `app` names the app (`"windows"`);
+/// `notification_identity` is the identity the agent posts this app's banners
+/// under while it is closed — windows: the AUMID of the app's own toast
+/// registration — or `None`. Same endpoint resolution as
+/// [`spawn_sync_event_listener`] (an e2e launch's isolated pipe included).
+#[uniffi::export]
+pub fn attach_to_sync_agent(
+    app: String,
+    notification_identity: Option<String>,
+) -> Result<Arc<FfiAgentAttachment>, FfiError> {
+    let endpoint =
+        fauna_ipc::endpoint::AgentEndpoint::default_for_user().map_err(|e| FfiError::General {
+            msg: format!("agent endpoint unresolvable: {e}"),
+        })?;
+    let attachment = fauna_client_sync::attachment::attach_app(
+        endpoint,
+        fauna_client_sync::attachment::AttachingApp {
+            app,
+            notification_identity,
+        },
+    );
+    Ok(Arc::new(FfiAgentAttachment {
+        inner: std::sync::Mutex::new(Some(attachment)),
+    }))
 }
 
 /// FaunaKit's call site for `sync-agent.md` § Credential model → *The

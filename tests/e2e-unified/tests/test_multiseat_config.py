@@ -356,6 +356,7 @@ _HOME_SEED = "33" * 32
 @pytest.fixture
 def _seed_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() under Windows
     monkeypatch.delenv("FAUNA_LIVE_SECRET_HEX", raising=False)
     monkeypatch.delenv("FAUNA_LIVE_NEST_URL", raising=False)
     return tmp_path

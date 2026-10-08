@@ -200,12 +200,15 @@ def test_last_app_flag_wins_matching_pytest_getoption(monkeypatch):
     """
     monkeypatch.setattr(sys, "argv", ["pytest", "--app", "sweep", "--app", "tui"])
     assert conftest.get_available_apps() == ["tui"]
-    monkeypatch.setattr(sys, "argv", ["pytest", "--app=sweep", "--app=web"])
-    assert conftest.get_available_apps() == ["web"]
+    # `android`, not `web`: web is refused off Linux, and this proof is about
+    # which occurrence wins, which any app token shows on every dev machine.
+    monkeypatch.setattr(sys, "argv", ["pytest", "--app=sweep", "--app=android"])
+    assert conftest.get_available_apps() == ["android"]
 
 
 def test_resolve_app_tokens_dedups_and_preserves_order():
-    assert conftest._resolve_app_tokens(" tui , web ,tui") == ["tui", "web"]
+    # `android`, not `web`: web is refused off Linux, order/dedup is app-agnostic.
+    assert conftest._resolve_app_tokens(" tui , android ,tui") == ["tui", "android"]
     assert conftest._resolve_app_tokens("") == []
     assert conftest._resolve_app_tokens("sweep") == conftest.sweep_apps()
 

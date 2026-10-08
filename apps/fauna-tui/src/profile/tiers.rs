@@ -269,8 +269,11 @@ pub fn field(st: &ProfileState, field: &TierField) -> String {
         TierField::FormName => form(st).map(|f| f.name.clone()),
         TierField::FormRank => form(st).map(|f| f.rank.clone()),
         TierField::FormDescription => form(st).map(|f| f.description.clone()),
+        #[cfg(feature = "payments")]
         TierField::FormPriceHint => form(st).map(|f| f.price_hint.clone()),
+        #[cfg(feature = "payments")]
         TierField::FormAskingPrice => form(st).map(|f| f.asking_price.clone()),
+        #[cfg(feature = "payments")]
         TierField::FormPaymentUrl => form(st).map(|f| f.payment_url.clone()),
         #[cfg(feature = "payments")]
         TierField::ProviderFormSecret => provider_form(st).map(|f| f.secret.clone()),
@@ -297,16 +300,19 @@ pub fn set_field(st: &mut ProfileState, field: TierField, value: String) {
                 f.description = value;
             }
         }
+        #[cfg(feature = "payments")]
         TierField::FormPriceHint => {
             if let Some(f) = st.author.form.as_mut() {
                 f.price_hint = value;
             }
         }
+        #[cfg(feature = "payments")]
         TierField::FormAskingPrice => {
             if let Some(f) = st.author.form.as_mut() {
                 f.asking_price = value;
             }
         }
+        #[cfg(feature = "payments")]
         TierField::FormPaymentUrl => {
             if let Some(f) = st.author.form.as_mut() {
                 f.payment_url = value;
@@ -340,11 +346,16 @@ pub enum TierField {
     FormRank,
     /// `subscription-tier-form-description`
     FormDescription,
-    /// `subscription-tier-form-price-hint`
+    /// `subscription-tier-form-price-hint` — the first of the editor's three
+    /// money fields, the plane's author half (`dynamic-features.md`
+    /// § Platform-family surface excision → *The price-and-route class*).
+    #[cfg(feature = "payments")]
     FormPriceHint,
     /// `subscription-tier-form-asking-price`
+    #[cfg(feature = "payments")]
     FormAskingPrice,
     /// `subscription-tier-form-payment-url`
+    #[cfg(feature = "payments")]
     FormPaymentUrl,
     /// `subscription-provider-form-secret`
     #[cfg(feature = "payments")]
@@ -413,7 +424,11 @@ pub fn elements(st: &ProfileState) -> Vec<Element> {
                 .within(ids::SUBSCRIPTION_TIER_ROW, i),
         );
         // Always emitted (empty allowed) so the flat per-id index stays aligned
-        // with the row index — the offers-browse convention.
+        // with the row index — the offers-browse convention. A price display is
+        // the money plane's (`dynamic-features.md` § Platform-family surface
+        // excision → *The price-and-route class*): a store-safe build paints
+        // no price at all, so the alignment holds within each flavor.
+        #[cfg(feature = "payments")]
         out.push(
             Element::label(
                 ids::SUBSCRIPTION_TIER_PRICE,
@@ -468,6 +483,13 @@ pub fn elements(st: &ProfileState) -> Vec<Element> {
             )
             .labelled(s::DESCRIPTION),
         );
+        // The editor's three money fields — the plane's author half
+        // (`dynamic-features.md` § Platform-family surface excision → *The
+        // price-and-route class*): a store-safe build renders no price and no
+        // payment route. Omitting them on an edit keeps the stored values
+        // (`tiers.update`'s merge rule), so an excised editor never clears a
+        // priced tier a full client authored.
+        #[cfg(feature = "payments")]
         out.push(
             Element::input(
                 ids::SUBSCRIPTION_TIER_FORM_PRICE_HINT,
@@ -476,6 +498,7 @@ pub fn elements(st: &ProfileState) -> Vec<Element> {
             )
             .labelled(s::PRICE_HINT),
         );
+        #[cfg(feature = "payments")]
         out.push(
             Element::input(
                 ids::SUBSCRIPTION_TIER_FORM_ASKING_PRICE,
@@ -484,6 +507,7 @@ pub fn elements(st: &ProfileState) -> Vec<Element> {
             )
             .labelled(s::ASKING_PRICE),
         );
+        #[cfg(feature = "payments")]
         out.push(
             Element::input(
                 ids::SUBSCRIPTION_TIER_FORM_PAYMENT_URL,

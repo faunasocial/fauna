@@ -300,6 +300,20 @@ pub enum DataMessage {
     SweepRetried {
         result: Result<Box<fauna_client_recovery::ceremony::SweepStatus>, String>,
     },
+    /// The relaunch adoption's owed sweep came back. `Ok` carries the report
+    /// to park (always one — `SweepRetryAnswer::into_owed_status`) and the
+    /// answer's sentence, if it has one; `Err` means nothing ran, and the
+    /// obligation is re-armed for `successor`.
+    OwedSweepDischarged {
+        result: Result<
+            (
+                Box<fauna_client_recovery::ceremony::SweepStatus>,
+                Option<String>,
+            ),
+            String,
+        >,
+        successor: String,
+    },
     SpamPreferencesLoaded {
         prefs: fauna_client_spam::spam::SpamPreferences,
     },
@@ -1712,7 +1726,13 @@ pub fn build_main_window(
             // The lock is page-dependent (the family page is exempt), so it
             // re-evaluates on every navigation, not just on a status read.
             crate::screen_lock::refresh(&lock_for_nav, s.visible_child_name().as_deref());
+            // AFTER the canonical-entry reset above, so re-entering Settings
+            // never reads the last visit's `account` sub-page as a visit.
+            // Leaving the shell from Account is leaving Account
+            // (`settings::stolen_hold::AccountVisit`).
+            crate::settings::note_shell_page(rail == "settings");
         });
+        crate::settings::note_shell_page(stack.visible_child_name().as_deref() == Some("settings"));
     }
 
     // Re-evaluate the lock once a minute so a ward already in the app crosses
@@ -2596,6 +2616,17 @@ pub fn handle_ui_message(
                 //    ceremony just named, and takes the obligation exactly once.
                 {
                     let successor = state.borrow().actor_id.clone();
+                    // A relaunch adoption also owes the group sweep its lost
+                    // ceremony never ran (`succession-propagation.md`
+                    // § Propagation → *Own device fleet*, the relaunch-adoption
+                    // clause): an unbidden press of the sweep retry, ahead of
+                    // the kit, whose fold parks the report the answer chooses.
+                    if crate::settings::recovery_kit::claim_succession_sweep(&successor) {
+                        tracing::info!(
+                            "[succession] discharging the owed group sweep for {successor}"
+                        );
+                        fauna_client.discharge_owed_sweep();
+                    }
                     if crate::settings::recovery_kit::claim_succession_kit(&successor) {
                         tracing::info!(
                             "[succession] discharging the owed successor kit for {successor}"
@@ -2655,7 +2686,15 @@ pub fn handle_ui_message(
                 // are kept here too: the old secret is still the user's, and it
                 // is what a successor ceremony and any later re-import reason
                 // about. The account moved, not the person.
-                crate::settings::escalate_to_launch("identity-superseded");
+                //
+                // Except when this device's own stolen-identity ceremony caused
+                // it: escalating would shut the client runtime down under the
+                // ceremony task, so its fold — adopt the successor, or park the
+                // key it could not store — would never run. The hold performs
+                // it once that flow is done (`settings::stolen_hold`).
+                if !crate::settings::defer_own_supersession() {
+                    crate::settings::escalate_to_launch("identity-superseded");
+                }
             }
 
             DataMessage::SignInRefused => {
@@ -3726,6 +3765,10 @@ pub fn handle_ui_message(
                 crate::settings::apply_sweep_retried(result);
             }
 
+            DataMessage::OwedSweepDischarged { result, successor } => {
+                crate::settings::apply_owed_sweep_discharged(result, successor);
+            }
+
             DataMessage::AftermathProgress(update) => {
                 crate::settings::apply_aftermath_progress(update.clone());
             }
@@ -4495,6 +4538,15 @@ fn show_toast(widgets: &WidgetHandles, message: &str) {
 /// funnel logs it at `error` as it shows, so it also lands in Settings → Logs.
 pub fn set_error_message(widgets: &WidgetHandles, message: &str) {
     tracing::error!("{message}");
+    // On Settings → Account the banner IS that page's error surface, and a
+    // pending stolen-ceremony persist-failure message — the only copy of the
+    // successor's key — wins over every other writer there until the user
+    // leaves (`settings.md` § Recovery kit → *The persist-failure message
+    // survives the page*): an Account control whose result lands here (Export
+    // my data) must not paint over it. Logged above, so nothing is lost.
+    if crate::settings::account_error_slot_is_held() {
+        return;
+    }
     crate::settings::render_error_label(&widgets.error_label, Some(message));
 }
 

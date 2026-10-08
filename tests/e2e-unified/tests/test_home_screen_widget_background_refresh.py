@@ -1,4 +1,4 @@
-"""tier_3 — on iOS the widget's count keeps itself current through the OS-scheduled refresh.
+"""tier_3 — on iOS and android the widget's count keeps itself current through the OS-scheduled refresh.
 
 `apps/common.md` § Home-screen widget promises the count stays current in the
 background without the app being opened; `apps/ios.md` § Home-screen widget names
@@ -9,6 +9,12 @@ pass (`ConversationsVM.receivePass` — the session's `pollConversations` +
 This file is `docs/features/home-screen-widget.md` outcome 2's iOS witness; the
 macOS one (the app resident with its window closed) is
 `test_home_screen_widget.py`.
+
+**android** has the same shape (`apps/android.md` § App Widgets): WorkManager
+alone schedules the 15-minute `WidgetDataWorker`, whose pass is one receive pass
+over the live session (`ConversationsManagerHost.widgetRefreshPass`), and the
+poke enqueues that same worker through WorkManager — the schedule's own
+construct-and-run path, never the body called around it.
 
 **How a schedule only the OS owns is driven.** No test can wait for a
 `BGAppRefreshTask`, and the type has no public initializer, so the handler's body
@@ -55,10 +61,11 @@ from helpers.waiting import wait_until
 pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.real_conversations,
-    # iOS only, by design: the one app whose widget currency rests on an
+    # iOS and android, by design: the apps whose widget currency rests on an
     # OS-scheduled task (`feature-catalog.md` § Cell semantics, the
     # marked-witness rule). macOS refuses the poke — it has no scheduler.
     pytest.mark.ios,
+    pytest.mark.android,
 ]
 
 

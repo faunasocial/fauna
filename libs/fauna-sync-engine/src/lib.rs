@@ -221,6 +221,12 @@ mod share_replica_test;
 /// transfer.
 #[cfg(feature = "p2p-share")]
 pub mod share_serve_tally;
+/// The peer leg's admitted-sibling registry — the one sibling chunk source.
+#[cfg(feature = "account-runtime")]
+pub mod sibling_chunks;
+/// Where a download looks for chunk bodies before the nest (the same-account
+/// peer data plane's pull seam, `p2p.md` § Goal).
+pub mod sibling_source;
 /// Path-traversal guard — moved to `fauna-core` 2026-07-16 so the shared
 /// client-side file-download walk (`fauna_core::file_download`, which wasm
 /// compiles and this crate cannot) guards its own paths. Re-exported so this

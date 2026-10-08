@@ -77,6 +77,7 @@ fn manifest_roundtrip() {
             uid_next: 43,
             highestmodseq: 1_005,
             attrs: vec!["\\Inbox".to_string()],
+            pruned_modseq: 0,
         }],
         placements: vec![RecordPlacement {
             mailbox: "INBOX".to_string(),

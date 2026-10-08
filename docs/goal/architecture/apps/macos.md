@@ -2,7 +2,7 @@
 
 Owns: macos
 Status: ratified
-Authority: macos-app architecture — the desktop shell (windows, menu bar, quick switcher, Sparkle updates), the macOS half of the sync deployment (the one-shot-only engine host's lifecycle, the sync-agent provisioner, and the location-binding UI — resident engines moved to the per-user `fauna-sync-agent`, owner `sync-agent.md` § Implementation status today milestone A4), macOS entitlements/packaging posture, and the macOS-specific halves of shared FaunaKit subsystems; cross-app behavior → [`common.md`](common.md); the FaunaKit shared-layer inventory → [`ios.md`](ios.md) § FaunaKit (the single inventory home — this doc points); credential storage → `common.md` § Credential storage (contract) + [`ios.md`](ios.md) § Credential Storage (the one apple mechanics section); e2e driving → [`apple-e2e-automation.md`](apple-e2e-automation.md); sync control plane rules → [`../app-guidelines.md`](../app-guidelines.md) rule 9; transport → [`../transport.md`](../transport.md); packaging artifacts → [`../installers/macos.md`](../installers/macos.md).
+Authority: macos-app architecture — the desktop shell (windows, menu bar, quick switcher, the newer-version check), the macOS half of the sync deployment (the one-shot-only engine host's lifecycle, the sync-agent provisioner, and the location-binding UI — resident engines moved to the per-user `fauna-sync-agent`, owner `sync-agent.md` § Implementation status today milestone A4), macOS entitlements/packaging posture, and the macOS-specific halves of shared FaunaKit subsystems; cross-app behavior → [`common.md`](common.md); the FaunaKit shared-layer inventory → [`ios.md`](ios.md) § FaunaKit (the single inventory home — this doc points); credential storage → `common.md` § Credential storage (contract) + [`ios.md`](ios.md) § Credential Storage (the one apple mechanics section); e2e driving → [`apple-e2e-automation.md`](apple-e2e-automation.md); sync control plane rules → [`../app-guidelines.md`](../app-guidelines.md) rule 9; transport → [`../transport.md`](../transport.md); packaging artifacts → [`../installers/macos.md`](../installers/macos.md).
 
 ## Implementation status today
 
@@ -18,7 +18,7 @@ Broadly implemented. One declared gap remains open (Sync); the other (legacy eve
 
 ## Goal
 
-A SwiftUI macOS desktop app that consumes the shared Rust core through `FaunaFFI.xcframework` (UniFFI), shares FaunaKit with iOS, and adds desktop-class subsystems — multi-window layout, persistent menu bar, always-on sync via FSEvents-driven directory watching, Sparkle auto-updates — while delegating sync control to the nest API (WS-RPC kinds) per the cross-app guidelines.
+A SwiftUI macOS desktop app that consumes the shared Rust core through `FaunaFFI.xcframework` (UniFFI), shares FaunaKit with iOS, and adds desktop-class subsystems — multi-window layout, persistent menu bar, always-on sync via FSEvents-driven directory watching, a notice-only newer-version check — while delegating sync control to the nest API (WS-RPC kinds) per the cross-app guidelines.
 
 ---
 
@@ -31,7 +31,7 @@ A SwiftUI macOS desktop app that consumes the shared Rust core through `FaunaFFI
 | Minimum deployment | macOS 15.0 |
 | Shared library | FaunaKit (same `Package.swift` as iOS; module inventory → [`ios.md`](ios.md) § FaunaKit) |
 | Native bindings | `FaunaFFI.xcframework` via UniFFI, built by `just apple-ffi` (not arch-limited; the slice set is the framework's shape, owned by [`../build-target-layout-macos.md`](../build-target-layout-macos.md) § *apple-ffi slice set*) |
-| Auto-updates | Sparkle framework (macOS-conditioned dependency in `Package.swift`); the user-initiated check is the app-menu item `Fauna-macOS/App/CheckForUpdatesView.swift` wraps over `SPUUpdater` — the cross-platform promise and its desktop-only scope → [`../installers/README.md`](../installers/README.md) § Knowing a newer version is out |
+| Update check | Notice-only, over the shared `fauna-ffi` face of `fauna_client::update_look` (`checkForNewerRelease`, `lookAtSignIn`, `releaseFeedOrigin`) — `Fauna-macOS/App/UpdateCheck.swift`, one instance on `MacAppState`. The door is Settings → General's About block (`settings-app-version`, `settings-check-updates-button`, `update-available-notice`, linux's shape), with the app menu's *Check for Updates…* as a second door onto the same check; the once-per-sign-in look runs from both session-building paths (`completeAuthenticatedLaunch`, the e2e session patch). Under e2e, a DEBUG build reads the stub feed from `FAUNA_E2E_RELEASE_FEED_URL` (`E2eEnv.releaseFeedUrl`, convention 15). No download, no in-place replacement, no toggle. The promise and its desktop-only scope → [`../installers/README.md`](../installers/README.md) § Knowing a newer version is out |
 
 ## What Is Shared with iOS
 
@@ -168,7 +168,7 @@ Uses `FaunaFFI.xcframework` (UniFFI into the shared conversations session). Swif
 | Navigation | Persistent sidebar + split views | Tab bar + More hub (`ui/README.md` § Navigation) |
 | Windows | Multiple (main, settings, onboarding) | Single window |
 | Menu bar | Yes (+ menu-command shortcuts) | N/A |
-| Updates | Sparkle framework | App Store |
+| Updates | notice-only check (you install the newer `.dmg`/`.pkg`) | App Store |
 | Backup UI | Timeline, diffs, conflict review, integrity checks | Basic list |
 | Secret storage | Shared `KeychainStore` — see [`ios.md`](ios.md) § Credential Storage | Same (one implementation) |
 | P2P | No page surface (removed 2026-07-13 — `behavior/p2p.md`) | Same — no page surface |

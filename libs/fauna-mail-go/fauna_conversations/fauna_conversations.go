@@ -5868,6 +5868,15 @@ type ComposeState struct {
 	ReplyRecipients []TypedAddress
 	RecipientPicker *RecipientPickerState
 	SendState       SendState
+	// The list-send view when this compose's one mail recipient is one of the
+	// account's own mailing lists (`mail-mass-mailing.md` § Composing a list
+	// message) — `None` for every other compose. Derived by
+	// [`crate::ConversationsManager::refresh_list_send`] from the nest's
+	// figures, so it never rests with the draft (`store::drafts::persistable`
+	// writes it `None`): a restored draft re-derives.
+	// Defaulted for UniFFI so the shells' positional test constructors stay
+	// valid as the record grows.
+	ListSend *ListSendView
 }
 
 func (r *ComposeState) Destroy() {
@@ -5878,6 +5887,7 @@ func (r *ComposeState) Destroy() {
 	FfiDestroyerSequenceTypedAddress{}.Destroy(r.ReplyRecipients)
 	FfiDestroyerOptionalRecipientPickerState{}.Destroy(r.RecipientPicker)
 	FfiDestroyerSendState{}.Destroy(r.SendState)
+	FfiDestroyerOptionalListSendView{}.Destroy(r.ListSend)
 }
 
 type FfiConverterComposeState struct{}
@@ -5897,6 +5907,7 @@ func (c FfiConverterComposeState) Read(reader io.Reader) ComposeState {
 		FfiConverterSequenceTypedAddressINSTANCE.Read(reader),
 		FfiConverterOptionalRecipientPickerStateINSTANCE.Read(reader),
 		FfiConverterSendStateINSTANCE.Read(reader),
+		FfiConverterOptionalListSendViewINSTANCE.Read(reader),
 	}
 }
 
@@ -5916,6 +5927,7 @@ func (c FfiConverterComposeState) Write(writer io.Writer, value ComposeState) {
 	FfiConverterSequenceTypedAddressINSTANCE.Write(writer, value.ReplyRecipients)
 	FfiConverterOptionalRecipientPickerStateINSTANCE.Write(writer, value.RecipientPicker)
 	FfiConverterSendStateINSTANCE.Write(writer, value.SendState)
+	FfiConverterOptionalListSendViewINSTANCE.Write(writer, value.ListSend)
 }
 
 type FfiDestroyerComposeState struct{}
@@ -6146,6 +6158,71 @@ func (c FfiConverterEvictionFailure) Write(writer io.Writer, value EvictionFailu
 type FfiDestroyerEvictionFailure struct{}
 
 func (_ FfiDestroyerEvictionFailure) Destroy(value EvictionFailure) {
+	value.Destroy()
+}
+
+// What the compose form shows for a compose addressed to one of the
+// account's own lists. `None` on [`crate::compose::ComposeState::list_send`]
+// for every other compose.
+type ListSendView struct {
+	// The list's name, as the texts below name it.
+	ListName string
+	// Subscribed recipients the next send reaches.
+	MemberCount uint64
+	// `dm-compose-list-send-warning`.
+	SendWarning fauna_core.LocalizedText
+	// `dm-compose-list-quota-warning` — shown only when today's remaining
+	// allowance is within 10% of the cap, or too small for this list.
+	QuotaWarning *fauna_core.LocalizedText
+	// `dm-compose-list-send-progress` — shown once the list has a send.
+	Progress *fauna_core.LocalizedText
+}
+
+func (r *ListSendView) Destroy() {
+	FfiDestroyerString{}.Destroy(r.ListName)
+	FfiDestroyerUint64{}.Destroy(r.MemberCount)
+	fauna_core.FfiDestroyerLocalizedText{}.Destroy(r.SendWarning)
+	FfiDestroyerOptionalLocalizedText{}.Destroy(r.QuotaWarning)
+	FfiDestroyerOptionalLocalizedText{}.Destroy(r.Progress)
+}
+
+type FfiConverterListSendView struct{}
+
+var FfiConverterListSendViewINSTANCE = FfiConverterListSendView{}
+
+func (c FfiConverterListSendView) Lift(rb RustBufferI) ListSendView {
+	return LiftFromRustBuffer[ListSendView](c, rb)
+}
+
+func (c FfiConverterListSendView) Read(reader io.Reader) ListSendView {
+	return ListSendView{
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		fauna_core.FfiConverterLocalizedTextINSTANCE.Read(reader),
+		FfiConverterOptionalLocalizedTextINSTANCE.Read(reader),
+		FfiConverterOptionalLocalizedTextINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterListSendView) Lower(value ListSendView) C.RustBuffer {
+	return LowerIntoRustBuffer[ListSendView](c, value)
+}
+
+func (c FfiConverterListSendView) LowerExternal(value ListSendView) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ListSendView](c, value))
+}
+
+func (c FfiConverterListSendView) Write(writer io.Writer, value ListSendView) {
+	FfiConverterStringINSTANCE.Write(writer, value.ListName)
+	FfiConverterUint64INSTANCE.Write(writer, value.MemberCount)
+	fauna_core.FfiConverterLocalizedTextINSTANCE.Write(writer, value.SendWarning)
+	FfiConverterOptionalLocalizedTextINSTANCE.Write(writer, value.QuotaWarning)
+	FfiConverterOptionalLocalizedTextINSTANCE.Write(writer, value.Progress)
+}
+
+type FfiDestroyerListSendView struct{}
+
+func (_ FfiDestroyerListSendView) Destroy(value ListSendView) {
 	value.Destroy()
 }
 
@@ -9426,6 +9503,47 @@ type FfiDestroyerOptionalComposeState struct{}
 func (_ FfiDestroyerOptionalComposeState) Destroy(value *ComposeState) {
 	if value != nil {
 		FfiDestroyerComposeState{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalListSendView struct{}
+
+var FfiConverterOptionalListSendViewINSTANCE = FfiConverterOptionalListSendView{}
+
+func (c FfiConverterOptionalListSendView) Lift(rb RustBufferI) *ListSendView {
+	return LiftFromRustBuffer[*ListSendView](c, rb)
+}
+
+func (_ FfiConverterOptionalListSendView) Read(reader io.Reader) *ListSendView {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterListSendViewINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalListSendView) Lower(value *ListSendView) C.RustBuffer {
+	return LowerIntoRustBuffer[*ListSendView](c, value)
+}
+
+func (c FfiConverterOptionalListSendView) LowerExternal(value *ListSendView) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*ListSendView](c, value))
+}
+
+func (_ FfiConverterOptionalListSendView) Write(writer io.Writer, value *ListSendView) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterListSendViewINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalListSendView struct{}
+
+func (_ FfiDestroyerOptionalListSendView) Destroy(value *ListSendView) {
+	if value != nil {
+		FfiDestroyerListSendView{}.Destroy(*value)
 	}
 }
 

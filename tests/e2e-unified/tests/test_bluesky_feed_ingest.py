@@ -35,8 +35,8 @@ address; the bytes-to-art half is pinned headlessly
 (``a_bridged_proxied_image_paints_in_post_image_through_the_nest``).
 
 tier_3: a locally-built nest and the real app — tui, which built the
-``ProxiedImage`` paint first, and macos/ios, linux and web, whose `post-image`
-placeholder answers the same path; the atproto network is a fake.
+``ProxiedImage`` paint first, and macos/ios, linux, web and windows, whose
+`post-image` placeholder answers the same path; the atproto network is a fake.
 """
 
 from __future__ import annotations
@@ -142,6 +142,7 @@ def _poll_now(nest) -> dict:
 @pytest.mark.ios
 @pytest.mark.linux
 @pytest.mark.web
+@pytest.mark.windows
 @pytest.mark.feature("atproto")
 def test_a_followed_bluesky_post_arrives_in_the_feed_and_a_reply_threads_under_it(
     request, app, bluesky_feed_nest, atproto_far_end,

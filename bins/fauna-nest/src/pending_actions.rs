@@ -1093,84 +1093,156 @@ pub async fn execute_action(state: &Arc<AppState>, action: &PendingActionRow) ->
 
 /// Process all ready pending actions (status='pending' AND execute_after <= now).
 ///
-/// For each ready action:
-/// - If `requires_quorum > 0` and the number of approvals is less than the quorum,
-///   expire the action and log an audit entry.
-/// - Otherwise execute the action, mark it executed, and log an audit entry.
-///
-/// Returns the count of actions that were executed (not expired).
+/// Returns the count of actions that were executed (not expired). Each row the
+/// batch read returned is handed to [`run_ready_action`].
 pub async fn execute_ready_actions(state: &Arc<AppState>) -> Result<usize> {
-    let db = &state.db;
-    let actions = db.list_ready_pending_actions().await?;
+    let actions = state.db.list_ready_pending_actions().await?;
     let mut executed_count = 0usize;
-
     for action in actions {
-        let approvals: Vec<String> = serde_json::from_str(&action.approvals).unwrap_or_default();
+        if run_ready_action(state, action).await {
+            executed_count += 1;
+        }
+    }
+    Ok(executed_count)
+}
 
-        if action.requires_quorum > 0 && (approvals.len() as i64) < action.requires_quorum {
-            // Insufficient approvals — expire
-            if let Err(e) = db.mark_pending_action_expired(action.id).await {
+/// Run one row of the executor's batch: claim it, then expire it when its
+/// quorum is short, otherwise execute it. Returns whether it executed.
+///
+/// `held` is the batch read's copy, which may be stale by this row's turn: a
+/// cancel can land in between. So the row is first claimed (`pending` →
+/// `executing`, [`CacheDb::claim_pending_action`]) and every decision below is
+/// taken from the row the claim returned; a row no longer `pending` is skipped
+/// (`nest/common.md` § Pending Actions System → *The executor claims before
+/// it acts*).
+///
+/// [`CacheDb::claim_pending_action`]: crate::db::CacheDb::claim_pending_action
+pub(crate) async fn run_ready_action(state: &Arc<AppState>, held: PendingActionRow) -> bool {
+    let db = &state.db;
+    let action = match db.claim_pending_action(held.id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            tracing::info!(
+                action_id = held.id,
+                action_type = %held.action_type,
+                "pending action no longer pending at its turn; skipped"
+            );
+            return false;
+        }
+        Err(e) => {
+            tracing::warn!(action_id = held.id, error = %e, "failed to claim pending action");
+            return false;
+        }
+    };
+    let approvals: Vec<String> = serde_json::from_str(&action.approvals).unwrap_or_default();
+
+    if action.requires_quorum > 0 && (approvals.len() as i64) < action.requires_quorum {
+        // Insufficient approvals — expire
+        match db.mark_pending_action_expired(action.id).await {
+            Ok(true) => {}
+            // The succession disarm cancelled the claimed row first; its
+            // cancel stands.
+            Ok(false) => return false,
+            Err(e) => {
                 tracing::warn!(
                     action_id = action.id,
                     error = %e,
                     "failed to mark pending action expired"
                 );
-                continue;
+                release_claim(state, action.id).await;
+                return false;
             }
-            let _ = db
-                .audit(
-                    Some(&action.actor_id),
-                    "pending_action.expired",
-                    action.target.as_deref(),
-                    Some(&format!("id={} type={}", action.id, action.action_type)),
-                )
-                .await;
-            tracing::info!(
+        }
+        let _ = db
+            .audit(
+                Some(&action.actor_id),
+                "pending_action.expired",
+                action.target.as_deref(),
+                Some(&format!("id={} type={}", action.id, action.action_type)),
+            )
+            .await;
+        tracing::info!(
+            action_id = action.id,
+            action_type = %action.action_type,
+            requires_quorum = action.requires_quorum,
+            approvals = approvals.len(),
+            "pending action expired (insufficient quorum)"
+        );
+        notify_transition(state, &action, Transition::Expired).await;
+        false
+    } else {
+        // Execute
+        if let Err(e) = execute_action(state, &action).await {
+            tracing::warn!(
                 action_id = action.id,
                 action_type = %action.action_type,
-                requires_quorum = action.requires_quorum,
-                approvals = approvals.len(),
-                "pending action expired (insufficient quorum)"
+                error = %e,
+                "pending action execution failed"
             );
-            notify_transition(state, &action, Transition::Expired).await;
-        } else {
-            // Execute
-            if let Err(e) = execute_action(state, &action).await {
+            // Back to `pending`: the next tick retries it, as before the claim.
+            release_claim(state, action.id).await;
+            return false;
+        }
+        match db.mark_pending_action_executed(action.id).await {
+            Ok(true) => {}
+            // The row is gone: an account deletion's run purges its own
+            // actor's rows, this one included (`pending_actions` is
+            // `Policy::Purge`). It executed.
+            Ok(false) if matches!(db.get_pending_action(action.id).await, Ok(None)) => {}
+            Ok(false) => {
+                // Only the succession disarm moves a claimed row. It could not
+                // recall the run already under way; the row keeps its
+                // `cancelled`, and the audit log says the action ran anyway.
+                let _ = db
+                    .audit(
+                        Some(&action.actor_id),
+                        "pending_action.executed_after_disarm",
+                        action.target.as_deref(),
+                        Some(&format!("id={} type={}", action.id, action.action_type)),
+                    )
+                    .await;
                 tracing::warn!(
                     action_id = action.id,
                     action_type = %action.action_type,
-                    error = %e,
-                    "pending action execution failed"
+                    "pending action ran after the succession disarm cancelled it"
                 );
-                continue;
+                return false;
             }
-            if let Err(e) = db.mark_pending_action_executed(action.id).await {
+            Err(e) => {
+                // The retry an unguarded mark failure always caused: the row
+                // goes back to `pending` and the next tick runs it again (a
+                // release that fails too leaves it to the boot reconcile).
                 tracing::warn!(
                     action_id = action.id,
                     error = %e,
                     "failed to mark pending action executed"
                 );
-                continue;
+                release_claim(state, action.id).await;
+                return false;
             }
-            let _ = db
-                .audit(
-                    Some(&action.actor_id),
-                    "pending_action.executed",
-                    action.target.as_deref(),
-                    Some(&format!("id={} type={}", action.id, action.action_type)),
-                )
-                .await;
-            tracing::info!(
-                action_id = action.id,
-                action_type = %action.action_type,
-                "pending action executed"
-            );
-            notify_transition(state, &action, Transition::Executed).await;
-            executed_count += 1;
         }
+        let _ = db
+            .audit(
+                Some(&action.actor_id),
+                "pending_action.executed",
+                action.target.as_deref(),
+                Some(&format!("id={} type={}", action.id, action.action_type)),
+            )
+            .await;
+        tracing::info!(
+            action_id = action.id,
+            action_type = %action.action_type,
+            "pending action executed"
+        );
+        notify_transition(state, &action, Transition::Executed).await;
+        true
     }
+}
 
-    Ok(executed_count)
+async fn release_claim(state: &Arc<AppState>, id: i64) {
+    if let Err(e) = state.db.release_pending_action_claim(id).await {
+        tracing::warn!(action_id = id, error = %e, "failed to release pending action claim");
+    }
 }
 
 /// Spawn a background tokio task that ticks every 60 seconds and processes
@@ -1181,6 +1253,14 @@ pub async fn execute_ready_actions(state: &Arc<AppState>) -> Result<usize> {
 /// in `state.auth.token_store` and `state.ws`.
 pub fn start_executor(state: Arc<AppState>) {
     state.clone().spawn_scoped(async move {
+        // Boot reconcile, before the first tick: a row a crash left claimed
+        // (`executing`) goes back to the queue, never stranded
+        // (`nest/common.md` § Client-state recoverability).
+        match state.db.requeue_stranded_pending_actions().await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("pending action executor: re-queued {n} stranded claims"),
+            Err(e) => tracing::warn!("pending action executor: boot re-queue failed: {e}"),
+        }
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
@@ -1644,5 +1724,165 @@ mod security_notice_tests {
             effective_quorum(&ActionType::HandleChange, &roster(&[]), &a, None),
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod claim_tests {
+    //! A cancel the nest accepts must hold: the executor claims each row
+    //! (`pending` → `executing`) before it acts, so a cancel landing between
+    //! the tick's batch read and the row's turn wins, and a cancel landing
+    //! after the claim is refused honestly (`nest/common.md` § Pending Actions
+    //! System → *The executor claims before it acts*).
+    use super::*;
+    use crate::db::CacheDb;
+
+    async fn state_with_handle(actor: &[u8; 32], handle: &str) -> Arc<AppState> {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        db.create_user(actor, "free", "test").await.unwrap();
+        db.set_handle(actor, handle).await.unwrap();
+        Arc::new(AppState::for_test(db))
+    }
+
+    async fn due_handle_change(state: &Arc<AppState>, actor: &[u8; 32]) -> i64 {
+        let row = schedule(
+            state,
+            &ActionType::HandleChange,
+            actor,
+            Some("renamed"),
+            Some(r#"{"new_handle": "renamed"}"#),
+        )
+        .await
+        .unwrap();
+        state.db.test_set_execute_after(row.id, 1).await.unwrap();
+        row.id
+    }
+
+    /// The review's witness (PROBE-801-28-A), adapted to the claim step: the
+    /// tick has read its batch, the creator cancels, then the loop reaches the
+    /// held row.
+    #[tokio::test]
+    async fn a_cancel_landing_after_the_batch_read_wins() {
+        let creator = [0x41u8; 32];
+        let state = state_with_handle(&creator, "original").await;
+        let id = due_handle_change(&state, &creator).await;
+
+        let batch = state.db.list_ready_pending_actions().await.unwrap();
+        let held = batch.into_iter().find(|a| a.id == id).unwrap();
+        state
+            .db
+            .cancel_pending_action(id, &creator)
+            .await
+            .expect("the cancel is accepted and reported as done");
+
+        assert!(!run_ready_action(&state, held).await, "nothing executed");
+        assert_eq!(
+            state.db.get_handle(&creator).await.unwrap().as_deref(),
+            Some("original"),
+            "a cancelled action must not execute"
+        );
+        let after = state.db.get_pending_action(id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status, "cancelled",
+            "the cancel must not be overwritten"
+        );
+    }
+
+    /// Once the executor holds the row, the action is running: a cancel is
+    /// refused rather than reported done over an action that then runs.
+    #[tokio::test]
+    async fn a_cancel_after_the_claim_is_refused_honestly() {
+        let creator = [0x42u8; 32];
+        let state = state_with_handle(&creator, "original").await;
+        let id = due_handle_change(&state, &creator).await;
+
+        let claimed = state.db.claim_pending_action(id).await.unwrap().unwrap();
+        assert_eq!(claimed.status, "executing");
+        let err = state
+            .db
+            .cancel_pending_action(id, &creator)
+            .await
+            .expect_err("a claimed action is not cancellable");
+        assert!(err.to_string().contains("not cancellable"), "{err}");
+        assert!(state.db.mark_pending_action_executed(id).await.unwrap());
+        let after = state.db.get_pending_action(id).await.unwrap().unwrap();
+        assert_eq!(after.status, "executed");
+    }
+
+    /// A crash between the claim and the mark leaves the row `executing`;
+    /// the boot reconcile hands it back to the queue, and the next tick runs it.
+    #[tokio::test]
+    async fn a_row_a_crash_left_claimed_is_requeued_at_boot() {
+        let creator = [0x43u8; 32];
+        let state = state_with_handle(&creator, "original").await;
+        let id = due_handle_change(&state, &creator).await;
+        state.db.claim_pending_action(id).await.unwrap().unwrap();
+        assert!(
+            state
+                .db
+                .list_ready_pending_actions()
+                .await
+                .unwrap()
+                .is_empty(),
+            "a claimed row is not ready"
+        );
+
+        assert_eq!(
+            state.db.requeue_stranded_pending_actions().await.unwrap(),
+            1
+        );
+        let row = state.db.get_pending_action(id).await.unwrap().unwrap();
+        assert_eq!(row.status, "pending");
+        assert_eq!(execute_ready_actions(&state).await.unwrap(), 1);
+        assert_eq!(
+            state.db.get_handle(&creator).await.unwrap().as_deref(),
+            Some("renamed")
+        );
+    }
+
+    /// A failed run hands its claim back: the row is `pending` again and the
+    /// next tick retries it.
+    #[tokio::test]
+    async fn a_failed_run_leaves_the_row_able_to_run_again() {
+        let creator = [0x44u8; 32];
+        let state = state_with_handle(&creator, "original").await;
+        // A handle change with no payload fails in `execute_action`.
+        let id = state
+            .db
+            .create_pending_action(&ActionType::HandleChange, &creator, None, None, None)
+            .await
+            .unwrap();
+        state.db.test_set_execute_after(id, 1).await.unwrap();
+
+        assert_eq!(execute_ready_actions(&state).await.unwrap(), 0);
+        let row = state.db.get_pending_action(id).await.unwrap().unwrap();
+        assert_eq!(row.status, "pending");
+        assert!(
+            state
+                .db
+                .list_ready_pending_actions()
+                .await
+                .unwrap()
+                .iter()
+                .any(|a| a.id == id),
+            "the next tick sees it again"
+        );
+    }
+
+    /// The terminal marks move only a claimed row: a cancelled row stays
+    /// cancelled whichever mark reaches it.
+    #[tokio::test]
+    async fn the_terminal_marks_never_overwrite_a_terminal_status() {
+        let creator = [0x45u8; 32];
+        let state = state_with_handle(&creator, "original").await;
+        let id = due_handle_change(&state, &creator).await;
+        state.db.cancel_pending_action(id, &creator).await.unwrap();
+
+        assert!(!state.db.mark_pending_action_executed(id).await.unwrap());
+        assert!(!state.db.mark_pending_action_expired(id).await.unwrap());
+        assert!(state.db.claim_pending_action(id).await.unwrap().is_none());
+        let row = state.db.get_pending_action(id).await.unwrap().unwrap();
+        assert_eq!(row.status, "cancelled");
+        assert!(row.executed_at.is_none());
     }
 }

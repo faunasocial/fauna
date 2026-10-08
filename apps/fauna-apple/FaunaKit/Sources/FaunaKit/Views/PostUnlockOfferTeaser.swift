@@ -27,7 +27,14 @@ public struct PostUnlockOfferTeaser: View {
         self.vm = vm
     }
 
+    /// The price, the external payment link and the buy affordance are the
+    /// money plane's buyer half (dynamic-features.md § Platform-family surface
+    /// excision → *The price-and-route class*): a store-safe build shows a sold
+    /// post as an ordinary gated post — the badge and nothing more. The resolve
+    /// that fills `offer` is an ungated `fauna.subscriptions.*` read, so the
+    /// render carries its own condition (the inert-record trap).
     public var body: some View {
+        #if !FAUNA_EXCISE_PAYMENTS
         if let offer {
             automationText(Ids.gatedPostPrice, offer.priceHint ?? "")
                 .font(.caption2)
@@ -44,6 +51,9 @@ public struct PostUnlockOfferTeaser: View {
                 .automationActivate(Ids.gatedPostBuyButton) { Task { await buy() } }
                 .faunaGate("fauna.subscriptions.subscribe")
         }
+        #else
+        EmptyView()
+        #endif
     }
 
     private func openPaymentLink(_ url: String) {

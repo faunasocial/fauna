@@ -141,6 +141,12 @@ public class MockNestHttpClient : INestHttpClient
         return Task.FromResult((NextBlobBytes, NextBlobHasC2pa));
     }
 
+    public Task<byte[]> GetContentAsync(string path, CancellationToken ct = default)
+    {
+        RecordCall("GetContent");
+        return Task.FromResult(NextBlobBytes);
+    }
+
     public List<(byte[] Data, UploadAudience Audience)> UploadBlobCalls { get; } = new();
     public string NextUploadedBlobHash { get; set; } = "00" + new string('0', 62); // valid 64-char hex
 

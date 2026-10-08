@@ -307,7 +307,7 @@ pub struct TokenMint {
 /// uniquifies the otherwise-deterministic Ed25519 signature, so two clients of
 /// one actor signing within the same millisecond produce *distinct* signatures
 /// and the single-use replay guard no longer rejects the second as a replay
-/// (auth-handshake finding #1).
+/// (the auth-handshake fix).
 ///
 /// `client_ip` is the seam for new-IP detection ([`note_sign_in_address`]). The
 /// sole caller — the pre-identity WS handshake handler — passes the address the
@@ -359,7 +359,7 @@ pub async fn direct_auth_core(
     //     so this only bites an exact-duplicate request inside 30 s. Concurrent
     //     *distinct* same-actor clients no longer collide here: each WS handshake
     //     folds its own `client_nonce` into the signed message, so two legitimate
-    //     same-ms requests carry distinct signatures (auth-handshake finding #1).
+    //     same-ms requests carry distinct signatures (the auth-handshake fix).
     if !state
         .auth
         .replay_guard

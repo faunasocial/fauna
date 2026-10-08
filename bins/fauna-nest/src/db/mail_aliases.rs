@@ -3,7 +3,7 @@
 //!
 //! `fauna.bridges.validate_recipient` (the MTA's RCPT TO gate) resolves
 //! through `lookup_exact_alias`. Replaces the standalone
-//! `recipient_routes` table that finding #1
+//! `recipient_routes` table that a review
 //! identified as never-written-in-production: every RCPT TO rejected
 //! with "no such recipient" because `put_recipient_route` had only
 //! unit-test callers.

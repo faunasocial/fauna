@@ -269,6 +269,38 @@ impl<R: RpcRequester, S: IntentStore> PushRegistration<R, S> {
     }
 }
 
+/// A desktop's standing reason the push banner cannot reach this machine,
+/// shown on the control's inline line while nothing failed in flight
+/// (`settings.md` § Push notifications — the desktops' one added cause).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StandingFailure {
+    /// The sync agent, which posts the banner while the app is closed, did not
+    /// answer.
+    AgentUnreachable,
+    /// The agent answered and has no notification sink here (a headless
+    /// machine, or no identity to post under).
+    NoSink,
+}
+
+/// Which standing line the control paints: none for an opted-out install (it
+/// needs no sink), the unreachable agent first, then a sink the agent reports
+/// absent. `sink` is the agent's `notification_sink` — `None` (an agent too old
+/// to say) shows nothing; `agent_running` is whether its last status call
+/// answered. A failed toggle's own error takes the line over this.
+pub fn standing_failure(
+    opted_in: bool,
+    agent_running: bool,
+    sink: Option<bool>,
+) -> Option<StandingFailure> {
+    if !opted_in {
+        return None;
+    }
+    if !agent_running {
+        return Some(StandingFailure::AgentUnreachable);
+    }
+    (sink == Some(false)).then_some(StandingFailure::NoSink)
+}
+
 /// The native desktop [`IntentStore`]: one small file under the app's
 /// install-scoped directory, written atomically (temp file + rename).
 #[cfg(not(target_arch = "wasm32"))]
@@ -310,6 +342,33 @@ mod tests {
     use fauna_client_testkit::{FailingRequester, RecordingRequester, block_on};
     use fauna_protocol::push::{SubscribeReply, UnsubscribeReply, UnsubscribeRequest};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn an_opted_out_install_shows_no_standing_failure() {
+        assert_eq!(standing_failure(false, false, Some(false)), None);
+    }
+
+    #[test]
+    fn an_unreachable_agent_is_named_first() {
+        assert_eq!(
+            standing_failure(true, false, None),
+            Some(StandingFailure::AgentUnreachable)
+        );
+        assert_eq!(
+            standing_failure(true, false, Some(false)),
+            Some(StandingFailure::AgentUnreachable)
+        );
+    }
+
+    #[test]
+    fn a_headless_agent_says_no_sink_and_an_older_one_says_nothing() {
+        assert_eq!(
+            standing_failure(true, true, Some(false)),
+            Some(StandingFailure::NoSink)
+        );
+        assert_eq!(standing_failure(true, true, None), None);
+        assert_eq!(standing_failure(true, true, Some(true)), None);
+    }
 
     #[derive(Default, Clone)]
     struct MemStore(Arc<Mutex<PushIntent>>);

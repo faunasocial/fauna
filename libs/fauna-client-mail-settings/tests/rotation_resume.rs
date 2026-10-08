@@ -56,8 +56,6 @@ fn stale_peer_row(rows: &MailRows, old: &SecretArray32) -> MailStateRow {
     let stored = rows.state.clone().expect("a stored state row");
     MailStateRow {
         msek: Some(old.clone()),
-        prior_mseks: Vec::new(),
-        prior_msek_retirements: Vec::new(),
         succession_burns: Vec::new(),
         pending_rotation: None,
         updated_at: Timestamp(stored.updated_at.0 + 1_000_000),
@@ -107,15 +105,78 @@ async fn rotation_rewraps_all_credentials_and_updates_msek() {
             .all(|c| c.wrapped_under == Some(fp)),
         "every survivor is marked wrapped under MSEK'"
     );
-    // The retired MSEK is parked in the grace window WITH its retirement
+    // The retired MSEK is kept as its own generation row WITH its retirement
     // instant recorded, keyed by the msek value — the bounded-mail mint's
-    // generation seal intervals depend on it (content-sealing-epochs
-    // amendment 2026-07-19).
+    // generation seal intervals and the openers' seal-time selection depend
+    // on it.
     assert_eq!(stored.prior_mseks, vec![pre_msek.clone()]);
     let retired_at = stored
         .prior_msek_retired_at(&pre_msek)
         .expect("rotation records the retirement instant for the retired MSEK");
     assert!(retired_at > 0, "instant is a real unix-seconds timestamp");
+}
+
+/// **Four rotations keep every generation** (`owner-key-material.md`
+/// § Path B-sibling-2 → *Pre-rotation mail at rest*): each rotation's
+/// outgoing MSEK lands as its own `generation/<fingerprint>` row, so after
+/// four the custody holds all four — none dropped by the retired cap-2
+/// window — each with its retirement instant, most recently retired first
+/// (instants monotone); and the snapshot the last rotation provisioned
+/// carries all five generations with the four instants.
+#[tokio::test]
+async fn four_rotations_keep_every_generation_in_custody_and_snapshot() {
+    let (machine, nest, mail) = build();
+    enable(&machine).await;
+    let mut retired = Vec::new();
+    for _ in 0..4 {
+        retired.push(mail.current().msek.unwrap());
+        machine
+            .dispatch(MailSettingsAction::StartRotation {
+                excluded_credentials: Vec::new(),
+            })
+            .await
+            .unwrap();
+    }
+    let stored = mail.current();
+    let current = stored.msek.clone().unwrap();
+    assert!(!retired.contains(&current));
+
+    // Every generation, one row each — the custody never drops one.
+    let rows = mail.rows();
+    assert_eq!(
+        rows.generations.len(),
+        4,
+        "uncapped: all four retired generations"
+    );
+    for k in &retired {
+        assert!(
+            rows.generations.contains_key(&MsekFingerprint::of(k)),
+            "a retired generation is missing from the custody"
+        );
+        assert!(stored.prior_mseks.contains(k));
+    }
+    assert_eq!(stored.prior_mseks.len(), 4);
+    let instants = stored.prior_retired_at_unix();
+    assert_eq!(instants.len(), 4, "every generation carries its instant");
+    assert!(
+        instants.windows(2).all(|w| w[0] >= w[1]),
+        "most recently retired first: {instants:?}"
+    );
+
+    // The last provisioned snapshot carries all five generations.
+    let blob = nest
+        .state()
+        .provision_mls_snapshot
+        .last()
+        .cloned()
+        .expect("a snapshot was provisioned");
+    let plain = fauna_mls::wrapped_blob::unseal_mls_snapshot(&blob, &current.to_array())
+        .expect("the snapshot opens under the current MSEK");
+    let snap = fauna_mls::wrapped_blob::MlsSnapshotPlaintext::from_canonical_bytes(&plain)
+        .expect("snapshot decodes");
+    assert_eq!(snap.leaf_init_keypairs.len(), 5);
+    assert_eq!(snap.mail_epoch_grace_roots.len(), 4);
+    assert_eq!(snap.generation_retired_at_unix, instants);
 }
 
 #[tokio::test]
@@ -158,8 +219,9 @@ async fn rotation_republishes_the_epoch_schedule_from_the_new_msek() {
 /// A stale sibling's state row — the pre-rotation MSEK, no sentinel, a later
 /// stamp — lands right after finalize's swap write, and the state row's join
 /// (a deliberate-rotation latest-wins on the stamp) takes it: the swap is
-/// reverted and, since the displaced MSEK is not unioned into the grace
-/// window, MSEK′ is gone from `msek`, `prior_mseks` and the sentinel alike.
+/// reverted and, since the displaced MSEK is never unioned into the priors
+/// (a generation row is written only for the key a finalize retires), MSEK′
+/// is gone from `msek`, `prior_mseks` and the sentinel alike.
 /// Finalize must see that on its read back and re-drive — never declare a
 /// reverted rotation done, which would strand MSEK′ (already published and
 /// wrapped on the nest) with no client-side recovery.
@@ -211,7 +273,7 @@ async fn finalize_re_drives_when_a_peer_reverts_the_msek_swap() {
     assert_eq!(
         stored.prior_mseks,
         vec![pre_msek],
-        "the pre-rotation key is in the grace window"
+        "the pre-rotation key is kept as a prior generation"
     );
 }
 
@@ -226,15 +288,18 @@ async fn finalize_re_drives_when_a_peer_reverts_the_sentinel_clear() {
     enable(&machine).await;
 
     // The exact state finalize sees once the swap committed but the sentinel
-    // is not yet cleared: msek == new, the pre-rotation key in the window,
-    // the sentinel still carrying new_msek.
+    // is not yet cleared: msek == new, the pre-rotation key's generation
+    // row written, the sentinel still carrying new_msek.
     let old_msek = mail.current().msek.expect("enable set an msek");
     let new_msek: SecretArray32 = [0x5A; 32].into();
     let fp = MsekFingerprint::of(&new_msek);
     mail.mutate(|rows| {
+        rows.join_generation(fauna_core::data::PriorMsekRetirement {
+            msek: old_msek.clone(),
+            retired_at_unix: 1_800_000_000,
+        });
         let state = rows.state.as_mut().unwrap();
         state.msek = Some(new_msek.clone());
-        state.prior_mseks = vec![old_msek.clone()];
         state.pending_rotation = Some(MailRotationSentinel {
             new_msek: new_msek.clone(),
         });

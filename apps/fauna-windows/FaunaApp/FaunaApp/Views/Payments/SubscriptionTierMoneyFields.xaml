@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The subscription-tier editor's three money fields: the free-text price shown to
+  subscribers, the machine asking price in whole sats (monetization.md § The asking
+  price) and the external checkout URL. They sit inside the payments plane because
+  each one exists only to state a price or a payment route (dynamic-features.md
+  § Platform-family surface excision → The price-and-route class); the tier's name,
+  rank, description and auto-approve stay on ProfilePage, since a free tier is not
+  a payments operation.
+
+  ⚠ THIS FILE IS PART OF THE EXCISION UNIT for the same reason
+  PaymentsAuthorSections.xaml is (see that file's header): XAML has no
+  preprocessor, so only removing the ITEM (FaunaApp.csproj's `Views\Payments\**`
+  glob, store-safe only) removes these renders from the compiled artifact. NOTHING
+  outside Views\Payments\ may name this type from markup: ProfilePage's
+  `#if PAYMENTS` code-behind builds it and drops it into TierMoneyFieldsHost.
+
+  Omitting the fields is safe for a priced tier the store-safe build edits:
+  tiers.update reads a missing price hint, payment URL or asking price as keep, and
+  ProfileViewModel sends back whatever its form state was opened with.
+-->
+<UserControl
+    x:Class="FaunaApp.Views.Payments.SubscriptionTierMoneyFields"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- Spacing mirrors the TierForm StackPanel this is hosted inside (6), so the
+         three fields keep the form's rhythm. -->
+    <StackPanel Spacing="6">
+        <TextBox x:Name="PriceHintBox"
+                 AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionTierFormPriceHint}"
+                 Header="{loc:Localize Key=subscriptions/price_hint}" />
+        <!-- Whole-sats free text (`sats: u64, checked, no clamp`): the FFI call this
+             feeds refuses an overflow rather than truncating it, and an unparseable
+             value is treated as empty here, matching every other app's leg (no
+             machine price, never an error). -->
+        <TextBox x:Name="AskingPriceBox"
+                 AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionTierFormAskingPrice}"
+                 Header="{loc:Localize Key=subscriptions/asking_price}"
+                 InputScope="Number" />
+        <TextBox x:Name="PaymentUrlBox"
+                 AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionTierFormPaymentUrl}"
+                 Header="{loc:Localize Key=subscriptions/payment_url}" />
+    </StackPanel>
+</UserControl>

@@ -112,6 +112,16 @@ mod tests {
         let mail = FakeMailStore::with(&MailConfig {
             msek: Some([0x99; 32].into()),
             prior_mseks: vec![[0x88; 32].into(), [0x77; 32].into()],
+            prior_msek_retirements: vec![
+                fauna_core::data::PriorMsekRetirement {
+                    msek: [0x88; 32].into(),
+                    retired_at_unix: 200,
+                },
+                fauna_core::data::PriorMsekRetirement {
+                    msek: [0x77; 32].into(),
+                    retired_at_unix: 100,
+                },
+            ],
             ..MailConfig::default()
         });
         let ctx = block_on(dav_store_context(&mail, [8; 32])).expect("context");
@@ -155,6 +165,12 @@ mod tests {
                 unreachable!()
             }
             async fn revoke(&self, _: String) -> Result<bool, crate::StoreError> {
+                unreachable!()
+            }
+            async fn retire_generation(
+                &self,
+                _: fauna_core::data::PriorMsekRetirement,
+            ) -> Result<bool, crate::StoreError> {
                 unreachable!()
             }
         }

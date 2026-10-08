@@ -159,7 +159,7 @@ property of the challenge/verify path (security review § L4). The
 per-request nonce additionally lets **two legitimate concurrent same-actor
 apps** coexist: without it, two apps signing the same `(actor, timestamp)`
 in the same millisecond produce a byte-identical signature and the second is
-wrongly rejected as a replay (auth-handshake finding #1); distinct nonces ⇒
+wrongly rejected as a replay (the auth-handshake fix); distinct nonces ⇒
 distinct signatures ⇒ both mint. The same nonce doubles as the TLS
 channel-binding nonce (`security.md` § Transport trust, Axis 1).
 

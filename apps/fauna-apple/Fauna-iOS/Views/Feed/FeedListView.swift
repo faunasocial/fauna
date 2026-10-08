@@ -66,7 +66,9 @@ struct FeedListView: View {
             get: { vm.composeGatePreview },
             set: { vm.setComposeGatePreview($0) }
         )
-        // Sell-this-post bindings (mirror gateBinding/gatePreviewBinding).
+        #if !FAUNA_EXCISE_PAYMENTS
+        // Sell-this-post bindings (mirror gateBinding/gatePreviewBinding) —
+        // the money plane's, with the sell controls they feed.
         let sellPriceBinding = Binding(
             get: { vm.composeSellPrice },
             set: { vm.setComposeSell(price: $0, subscribersGetItFree: vm.composeSellSubscribersFree) }
@@ -80,6 +82,7 @@ struct FeedListView: View {
                                       subscribersGetItFree: vm.composeSellSubscribersFree,
                                       askingPrice: $0) }
         )
+        #endif
         return NavigationStack {
             ScrollView {
                 // Eager `ScrollView { VStack }`, NOT a lazy `List { Section }` (rule 6 —
@@ -362,7 +365,13 @@ struct FeedListView: View {
                                 ForEach(vm.ownRooms, id: \.room) { room in
                                     Text(L.feed.post.gateRoom(room: room.label)).tag(L.feed.post.gateRoom(room: room.label))
                                 }
+                                #if !FAUNA_EXCISE_PAYMENTS
+                                // The paywall-designation gesture — the money plane's
+                                // author half (dynamic-features.md § Platform-family
+                                // surface excision → *The price-and-route class*),
+                                // with the sell controls below.
                                 Text(L.feed.post.gateSell).tag(L.feed.post.gateSell)
+                                #endif
                             }
                             .pickerStyle(.menu)
                             .accessibilityIdentifier(Ids.composeGateTierSelect)
@@ -381,21 +390,22 @@ struct FeedListView: View {
                             }
                             // "Sell this post…" controls (monetization.md § Per-post
                             // pay-to-unlock; IDs user-approved 2026-07-29) — visible
-                            // only while Sell is the select's current answer.
+                            // only while Sell is the select's current answer. The
+                            // whole sale is the money plane's compose-side half,
+                            // excised with the Sell answer above and the tier form's
+                            // money fields (ProfileView.swift).
+                            #if !FAUNA_EXCISE_PAYMENTS
                             if vm.composeSell != nil {
                                 TextField(L.feed.post.sellPricePlaceholder, text: sellPriceBinding)
                                 .font(.caption)
                                 .accessibilityIdentifier(Ids.composeSellPrice)
                                 .automationField(Ids.composeSellPrice, text: sellPriceBinding)
-                                #if !FAUNA_EXCISE_PAYMENTS
-                                // The money plane's compose-side half, excised
-                                // with the tier form's own asking-price input
-                                // (ProfileView.swift).
+                                // The machine-comparable threshold (monetization.md
+                                // § The asking price) — independent of the price above.
                                 TextField(L.feed.post.sellAskingPricePlaceholder, text: sellAskingPriceBinding)
                                 .font(.caption)
                                 .accessibilityIdentifier(Ids.composeSellAskingPrice)
                                 .automationField(Ids.composeSellAskingPrice, text: sellAskingPriceBinding)
-                                #endif
                                 HStack {
                                     Text(L.feed.post.sellSubscribersFree)
                                         .font(.caption)
@@ -416,6 +426,7 @@ struct FeedListView: View {
                                     }
                                 }
                             }
+                            #endif
 
                             if let composeError = vm.composeError {
                                 Text(composeError)

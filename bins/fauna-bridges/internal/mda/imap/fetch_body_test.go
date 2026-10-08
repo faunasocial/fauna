@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/dagcbor"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mailfauna"
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mda/undecryptable"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/wsrpc"
 	faunaFfi "github.com/faunasocial/fauna/libs/fauna-mail-go/fauna_ffi"
 )
@@ -595,8 +597,15 @@ func TestFetchMissingCiphertextSkipsRow(t *testing.T) {
 // ── The uniform serve rule (three arms) ──
 //
 // One serve path (design D1): (a) a sealed record HPKE-opens via the
-// per-connection opener; (b) an unsealed payload is refused — never served
-// verbatim; (c) a sealed record the opener cannot open (wrong key) ERRORS.
+// per-connection opener; (b) an unsealed payload is never served verbatim;
+// (c) a sealed record the opener cannot open (wrong key) is never served
+// verbatim either. (b) and (c) are the same per-record condition — a record no
+// key in the session's standing set opens — and are served as the fixed
+// placeholder message, never an error to the FETCH (`imap-server.md`
+// § Body-section FETCH → *Unopenable records*). Only a session with no opener
+// at all (no MLS snapshot on file) still fails the FETCH: that is a session
+// condition, and a placeholder for every message would be cached by the MUA
+// for good.
 
 // fetchBodyOnce drives a single-UID BODY[] fetch through fetchWithDecryptor
 // with `stored` as the nest-served record and returns (emitted body, error).
@@ -646,13 +655,18 @@ func TestFetchSealedRecordOpensRegardlessOfStorageMode(t *testing.T) {
 	}
 }
 
-// (b) An unsealed payload (plain RFC 5322 bytes) is refused — with a real
-// opener and with none. Every mail record rests sealed, so raw bytes are
-// corruption, never a record to serve verbatim.
-func TestFetchRawRecordIsRefused(t *testing.T) {
+// (b) An unsealed payload (plain RFC 5322 bytes) is never served verbatim.
+// Every mail record rests sealed, so raw bytes are corruption: with a real
+// opener the record is served as the placeholder; with no opener the FETCH
+// fails on the missing snapshot, as for any record.
+func TestFetchRawRecordIsNeverServedVerbatim(t *testing.T) {
 	opener, _ := realOpenerFixture(t)
-	if got, err := fetchBodyOnce(t, &Session{}, []byte(plainTextRFC5322), opener); err == nil {
-		t.Fatalf("raw record must be refused, got served %q", got)
+	got, err := fetchBodyOnce(t, &Session{}, []byte(plainTextRFC5322), opener)
+	if err != nil {
+		t.Fatalf("raw record must be served as the placeholder, not fail the FETCH: %v", err)
+	}
+	if got != unopenableRecordPlaceholder {
+		t.Fatalf("raw record must be served as the placeholder, got %q", got)
 	}
 	if got, err := fetchBodyOnce(t, &Session{}, []byte(plainTextRFC5322), nil); err == nil {
 		t.Fatalf("raw record with no opener must be refused, got served %q", got)
@@ -660,19 +674,130 @@ func TestFetchRawRecordIsRefused(t *testing.T) {
 }
 
 // (c) A sealed record the session's opener CANNOT open (sealed to a
-// different leaf key) errors — never served verbatim.
-func TestFetchSealedRecordWrongKeyErrors(t *testing.T) {
+// different leaf key) is served as the placeholder — never verbatim, never
+// an error to the FETCH. With no opener at all, the FETCH still surfaces the
+// missing-snapshot error.
+func TestFetchSealedRecordWrongKeyServesPlaceholder(t *testing.T) {
 	opener, _ := realOpenerFixture(t)
 	wrongKeySealed := sealedEnvelopeFixture(t, []byte(plainTextRFC5322)) // throwaway key ≠ opener's leaf
-	s := &Session{}
-	if _, err := fetchBodyOnce(t, s, wrongKeySealed, opener); err == nil {
-		t.Fatalf("wrong-key sealed record must error, not serve")
+	got, err := fetchBodyOnce(t, &Session{}, wrongKeySealed, opener)
+	if err != nil {
+		t.Fatalf("wrong-key sealed record must be served degraded, not fail the FETCH: %v", err)
 	}
-	// And with no opener at all, a sealed record surfaces the
-	// missing-snapshot error.
-	s = &Session{}
-	if _, err := fetchBodyOnce(t, s, sealedEnvelopeFixture(t, []byte("x")), nil); err == nil ||
+	if got != unopenableRecordPlaceholder {
+		t.Fatalf("wrong-key sealed record must be served as the placeholder, got %q", got)
+	}
+	if _, err := fetchBodyOnce(t, &Session{}, sealedEnvelopeFixture(t, []byte("x")), nil); err == nil ||
 		!strings.Contains(err.Error(), "no MLS snapshot") {
 		t.Fatalf("sealed record with no opener must surface the missing-snapshot error, got %v", err)
 	}
+}
+
+// One record no standing key opens is a CONTAINED condition (the app rule's
+// twin, `mail-app-surface.md` § Inbound client receive → *Unopenable
+// records*): a FETCH spanning it returns every message, the unopenable one
+// degraded to the placeholder with its UID, flags and stored size intact. The
+// placeholder never enters the BODYSTRUCTURE cache (a record that opens later
+// must not be shadowed by it), and the WARN is logged once per record, however
+// many FETCHes span it.
+func TestFetchSpanningUnopenableRecordReturnsEveryMessage(t *testing.T) {
+	opener, seal := realOpenerFixture(t)
+	mids := [3][]byte{bytes32x(0x31), bytes32x(0x32), bytes32x(0x33)}
+	stored := [3][]byte{
+		seal([]byte(plainTextRFC5322)),
+		sealedEnvelopeFixture(t, []byte(plainTextRFC5322)), // sealed to another recipient
+		seal([]byte(plainTextRFC5322)),
+	}
+	caller := &bodyFetchCaller{cipherByID: map[string][]byte{}}
+	for i := range 3 {
+		caller.metaReplies = append(caller.metaReplies, wsrpc.MessageMeta{
+			UID: uint32(i + 1), MessageID: mids[i][:], Modseq: 42, Flags: []string{`\Flagged`},
+			InternalDate: 1_700_000_500, CiphertextSize: uint32(len(stored[i])),
+		})
+		caller.cipherByID[string(mids[i][:])] = stored[i]
+	}
+	logger, logBuf := newCountingLogger()
+	s := &Session{
+		client:              caller,
+		logger:              logger,
+		undecryptableWarn:   &undecryptable.WarnDedup{},
+		actorID:             bytes32x(0x55),
+		selectedMailbox:     "INBOX",
+		selectedUIDValidity: 100,
+		cache:               newBodyStructureCache(8),
+	}
+	var seqs imap.SeqSet
+	seqs.AddRange(1, 3)
+	opts := &imap.FetchOptions{
+		UID:           true,
+		Flags:         true,
+		RFC822Size:    true,
+		BodyStructure: &imap.FetchItemBodyStructure{},
+		Envelope:      true,
+		BodySection:   []*imap.FetchItemBodySection{{Peek: true}},
+	}
+
+	for pass := range 2 {
+		w := &bodyFetchWriter{}
+		if err := s.fetchWithDecryptor(w, seqs, opts, opener); err != nil {
+			t.Fatalf("pass %d: FETCH 1:3 must not fail on one unopenable record: %v", pass, err)
+		}
+		if len(w.rows) != 3 {
+			t.Fatalf("pass %d: FETCH 1:3 returned %d messages, want 3", pass, len(w.rows))
+		}
+		for i, row := range w.rows {
+			if !row.closed || row.uid != imap.UID(i+1) {
+				t.Fatalf("pass %d row %d: uid=%d closed=%v", pass, i, row.uid, row.closed)
+			}
+			if len(row.flags) != 1 || row.flags[0] != imap.FlagFlagged {
+				t.Errorf("pass %d row %d: flags %v, want [\\Flagged]", pass, i, row.flags)
+			}
+			if row.rfcSize != int64(len(stored[i])) {
+				t.Errorf("pass %d row %d: RFC822.SIZE %d, want the stored size %d", pass, i, row.rfcSize, len(stored[i]))
+			}
+			body := row.bodySections[0].written.String()
+			if i == 1 {
+				if body != unopenableRecordPlaceholder {
+					t.Errorf("pass %d: unopenable record's BODY[] = %q, want the placeholder", pass, body)
+				}
+				if row.env == nil || row.env.Subject != unopenableRecordPlaceholderSubject {
+					t.Errorf("pass %d: unopenable record's ENVELOPE = %+v, want the placeholder subject", pass, row.env)
+				}
+				if !row.bsCalled {
+					t.Errorf("pass %d: unopenable record must still answer BODYSTRUCTURE", pass)
+				}
+				continue
+			}
+			if body != plainTextRFC5322 {
+				t.Errorf("pass %d row %d: BODY[] = %q, want the real message", pass, i, body)
+			}
+			if row.env == nil || row.env.Subject != "hello" {
+				t.Errorf("pass %d row %d: ENVELOPE = %+v, want subject hello", pass, i, row.env)
+			}
+		}
+	}
+
+	for i := range 3 {
+		_, _, hit := s.cache.Get(bodyStructureCacheKey{
+			actorID: string(s.actorID), mailbox: "INBOX", uidValidity: 100, uid: uint32(i + 1),
+		})
+		if want := i != 1; hit != want {
+			t.Errorf("uid %d: cache hit = %v, want %v (the placeholder is never cached)", i+1, hit, want)
+		}
+	}
+	if got := countLevel(logBuf, "WARN"); got != 1 {
+		t.Errorf("WARN count = %d across two FETCHes, want exactly 1 (once per record)", got)
+	}
+}
+
+// newCountingLogger returns a logger writing to buf at DEBUG level (so both
+// tiers are captured) and the buffer to inspect.
+func newCountingLogger() (*slog.Logger, *bytes.Buffer) {
+	var buf bytes.Buffer
+	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	return slog.New(h), &buf
+}
+
+func countLevel(buf *bytes.Buffer, level string) int {
+	return strings.Count(buf.String(), "level="+level)
 }

@@ -525,7 +525,10 @@ import Foundation
                     actorId: actorId,
                     deviceId: hex_to_data(ctx.deviceIdHex),
                     deviceLabel: ctx.deviceLabel,
-                    backupKey: backupKey
+                    backupKey: backupKey,
+                    // The extension holds no registry: the app provisions the
+                    // account's PAIRED predecessor chain beside the owner key.
+                    predecessorChain: FaunaAccounts.registry().predecessorChain(actorId: data_to_hex(actorId))
                 ),
                 bearer: bearer.token,
                 signer: FileProviderSignerWatch.machineSigner(actorId: actorId)

@@ -389,7 +389,7 @@ fn open_mail_matches_open_when_opener_has_no_msek() {
 /// MSEK-rotation grace for epoch keys (design § 5, Track 1c): a record
 /// epoch-sealed under the OLD generation's root before a hard-revoke opens
 /// through an opener built with the NEW MSEK, because the post-rotation
-/// snapshot (the production `build_mls_snapshot_plaintext([new, old])`
+/// snapshot (the production `build_mls_snapshot_plaintext([new, old], ..)`
 /// output) carries the old generation's `mail_epoch_grace_root`. The same
 /// record stays dark to an opener whose snapshot has no grace root — the
 /// grace material, not the new MSEK, is what opens it.
@@ -404,7 +404,7 @@ fn open_mail_opens_old_root_epoch_content_via_grace_root() {
     let envelope_bytes = seal_to_recipient(plaintext.clone(), old_pk.to_vec()).expect("seal");
 
     // The post-rotation snapshot, exactly as rotation.rs builds it.
-    let rotated = build_mls_snapshot_plaintext(&[new_msek, old_msek])
+    let rotated = build_mls_snapshot_plaintext(&[new_msek, old_msek], &[])
         .to_canonical_bytes()
         .expect("encode rotated snapshot");
     let opener = epoch_aware_opener_with_snapshot(&new_msek, rotated);
@@ -415,7 +415,7 @@ fn open_mail_opens_old_root_epoch_content_via_grace_root() {
 
     // Without the grace root (single-generation snapshot) the record is
     // dark — proving the grace material is load-bearing.
-    let bare = build_mls_snapshot_plaintext(&[new_msek])
+    let bare = build_mls_snapshot_plaintext(&[new_msek], &[])
         .to_canonical_bytes()
         .expect("encode bare snapshot");
     let opener = epoch_aware_opener_with_snapshot(&new_msek, bare);
@@ -436,7 +436,7 @@ fn open_mail_backscan_runs_per_grace_root() {
     let plaintext = b"stale-schedule seal, then rotation".to_vec();
     let envelope_bytes = seal_to_recipient(plaintext.clone(), old_stale_pk.to_vec()).expect("seal");
 
-    let rotated = build_mls_snapshot_plaintext(&[new_msek, old_msek])
+    let rotated = build_mls_snapshot_plaintext(&[new_msek, old_msek], &[])
         .to_canonical_bytes()
         .expect("encode rotated snapshot");
     let opener = epoch_aware_opener_with_snapshot(&new_msek, rotated);
@@ -444,6 +444,58 @@ fn open_mail_backscan_runs_per_grace_root() {
         .open_mail(envelope_bytes, record_ts)
         .expect("per-root back-scan opens stale old-root epoch content");
     assert_eq!(opened, plaintext);
+}
+
+/// **Every generation is carried** (`owner-key-material.md` § Path
+/// B-sibling-2 → *Pre-rotation mail at rest*): after FOUR rotations the MDA's
+/// opener, built from the five-generation snapshot with its retirement
+/// instants, still opens both a standing-sealed and an epoch-sealed record
+/// sealed under the oldest generation — the window the retired cap-3
+/// snapshot closed — keyed off the record's seal basis.
+#[test]
+fn open_mail_opens_the_oldest_of_five_generations_by_seal_time() {
+    let history: Vec<[u8; 32]> = (0x41u8..=0x45).map(|b| [b; 32]).collect();
+    let oldest = history[4];
+    let record_ts = 500 * MAIL_SEALING_EPOCH_SECS + 10;
+    // Each prior retired one epoch apart, all after the record was sealed.
+    let retired: Vec<u64> = (1..=4u64)
+        .rev()
+        .map(|k| record_ts + k * MAIL_SEALING_EPOCH_SECS)
+        .collect();
+    let snapshot = build_mls_snapshot_plaintext(&history, &retired)
+        .to_canonical_bytes()
+        .expect("encode five-generation snapshot");
+    let opener = epoch_aware_opener_with_snapshot(&history[0], snapshot);
+
+    let (_, standing_pk) = derive_recipient_hpke_keypair(&oldest);
+    let standing = seal_to_recipient(
+        b"standing, four rotations ago".to_vec(),
+        standing_pk.to_vec(),
+    )
+    .expect("seal standing");
+    assert_eq!(
+        opener
+            .open_mail(standing.clone(), record_ts)
+            .expect("opens by seal time"),
+        b"standing, four rotations ago"
+    );
+    assert_eq!(
+        opener
+            .open_mail(standing, 0)
+            .expect("opens with an unknown basis too"),
+        b"standing, four rotations ago"
+    );
+
+    let (_, epoch_pk) =
+        derive_recipient_epoch_hpke_keypair(&oldest, mail_sealing_epoch_of(record_ts));
+    let epoch = seal_to_recipient(b"epoch, four rotations ago".to_vec(), epoch_pk.to_vec())
+        .expect("seal epoch");
+    assert_eq!(
+        opener
+            .open_mail(epoch, record_ts)
+            .expect("the oldest grace root opens it"),
+        b"epoch, four rotations ago"
+    );
 }
 
 /// The example.com CalDAV flood, reproduced at its mechanism.

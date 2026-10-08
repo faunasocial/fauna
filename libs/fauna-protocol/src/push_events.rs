@@ -751,6 +751,19 @@ pub struct StaleSurfaces {
     /// every app's status producer keeps last-known state on an error, so the
     /// sweep can only ever move enforcement state on a successful reply.
     pub family: bool,
+    /// The Settings → Mail → Spam page's training-history list
+    /// (`mail-spam.md` § Undo, § Reset) — re-read by the shared
+    /// `MailSpamMachine`'s hydrate. Fed by `spam_model_updated` (an undo, or a
+    /// lesson written through `put_spam_model`) and `spam_model_reset`, which
+    /// the nest sends to the actor's own open surfaces so an undo or a reset on
+    /// one device reaches the list already open on another.
+    ///
+    /// ⚠ Apps page-gate this one, for [`Self::address_book`]'s reason: a third-
+    /// party mail app moving a batch of messages to Junk trains once per
+    /// message, and each lesson is one push. Arriving-while-elsewhere needs no
+    /// refresh — the page already re-reads on every visit (`mail-spam.md`
+    /// § Implementation status item 5, the refresh-on-visible requirement).
+    pub mail_spam: bool,
 }
 
 impl StaleSurfaces {
@@ -767,6 +780,7 @@ impl StaleSurfaces {
         address_book: false,
         media: false,
         family: false,
+        mail_spam: false,
     };
 
     /// **Everything.** A reconnect resets the push `seq` to 0
@@ -789,6 +803,7 @@ impl StaleSurfaces {
             address_book: true,
             media: true,
             family: true,
+            mail_spam: true,
         }
     }
 
@@ -844,6 +859,12 @@ impl StaleSurfaces {
                 media: true,
                 ..Self::NONE
             },
+            "fauna.bridges.push.spam_model_updated" | "fauna.bridges.push.spam_model_reset" => {
+                Self {
+                    mail_spam: true,
+                    ..Self::NONE
+                }
+            }
             "fauna.protocol.resync_required" => Self {
                 feed: false,
                 family: false,
@@ -866,6 +887,7 @@ impl StaleSurfaces {
             && (self.address_book || !other.address_book)
             && (self.media || !other.media)
             && (self.family || !other.family)
+            && (self.mail_spam || !other.mail_spam)
     }
 
     /// Both sets' surfaces — for a caller accumulating several pushes into one
@@ -882,6 +904,7 @@ impl StaleSurfaces {
             address_book: self.address_book || other.address_book,
             media: self.media || other.media,
             family: self.family || other.family,
+            mail_spam: self.mail_spam || other.mail_spam,
         }
     }
 
@@ -901,6 +924,7 @@ impl StaleSurfaces {
             && !self.address_book
             && !self.media
             && !self.family
+            && !self.mail_spam
     }
 }
 
@@ -1025,11 +1049,15 @@ impl PushEvent {
             // A relay ask for the serving engine; it changes no data an app
             // shows (the reader's own GET is what the bytes answer).
             PushEvent::SyncChunkWanted(_) => StaleSurfaces::NONE,
-            // The actor's own spam model changed. Routed to their clients for
-            // the open `mail-spam` page's training-history list — a surface no
-            // app has flagged here yet; it joins the list above when one does.
+            // The actor's own training history changed — an undo or a lesson
+            // (`spam_model_updated`) or a reset (`spam_model_reset`) — so the
+            // open `mail-spam` page's list re-reads (`mail-spam.md` § Reset
+            // step 6, § Undo step 4).
             PushEvent::BridgeSpamModelUpdated(_) | PushEvent::BridgeSpamModelReset(_) => {
-                StaleSurfaces::NONE
+                StaleSurfaces {
+                    mail_spam: true,
+                    ..StaleSurfaces::NONE
+                }
             }
             // A wire kind this build has never heard of — logged at the push
             // pump, stale-making nowhere.
@@ -2243,6 +2271,18 @@ mod tests {
         })
     }
 
+    fn spam_model_updated() -> PushEvent {
+        PushEvent::BridgeSpamModelUpdated(crate::bridge_routing::BridgeSpamModelUpdatedPush {
+            actor_id: vec![5u8; 32],
+        })
+    }
+
+    fn spam_model_reset() -> PushEvent {
+        PushEvent::BridgeSpamModelReset(crate::bridge_routing::BridgeSpamModelResetPush {
+            actor_id: vec![6u8; 32],
+        })
+    }
+
     /// Every kind that carries a user-visible surface, and what it stales.
     #[test]
     fn each_push_kind_stales_its_own_surface() {
@@ -2295,6 +2335,21 @@ mod tests {
                 ..StaleSurfaces::NONE
             }
         );
+        // An undo (`spam_model_updated`) and a reset (`spam_model_reset`) on
+        // one device must reach the training history open on the user's other
+        // devices (`mail-spam.md` § Reset step 6, § Undo step 4).
+        for event in [spam_model_updated(), spam_model_reset()] {
+            assert_eq!(
+                event.invalidates(),
+                StaleSurfaces {
+                    mail_spam: true,
+                    ..StaleSurfaces::NONE
+                },
+                "{:?}",
+                event.kind()
+            );
+            assert_eq!(StaleSurfaces::for_kind(event.kind()), event.invalidates());
+        }
     }
 
     /// A kind whose consumer lives somewhere other than the snapshot surfaces
@@ -2329,6 +2384,8 @@ mod tests {
             address_book_changed(),
             sync_changed(),
             consent_requested(),
+            spam_model_updated(),
+            spam_model_reset(),
         ] {
             assert!(
                 sweep.covers(&event.invalidates()),
@@ -2372,6 +2429,8 @@ mod tests {
             resync_required(),
             mail_received(),
             mail_flags_changed(),
+            spam_model_updated(),
+            spam_model_reset(),
         ] {
             assert!(
                 reconnect.covers(&event.invalidates()),
@@ -2405,6 +2464,8 @@ mod tests {
             resync_required(),
             mail_received(),
             mail_flags_changed(),
+            spam_model_updated(),
+            spam_model_reset(),
         ] {
             assert!(
                 !event.invalidates().family,

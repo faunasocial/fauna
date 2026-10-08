@@ -41,21 +41,31 @@ impl Drop for AppAttachment {
     }
 }
 
-/// Attach `app` (`"tui"`, `"linux"`, `"windows"`) to the agent at `endpoint`
-/// for as long as this process lives. Never blocks the caller.
-pub fn attach_app(endpoint: AgentEndpoint, app: &'static str) -> AppAttachment {
+/// Who is attaching: the app's name (`"tui"`, `"linux"`, `"windows"`) and, on
+/// a platform whose banners are posted under an app identity, that identity
+/// (windows: the AUMID of the app's own toast registration — the agent posts
+/// its toasts under it while the app is closed; `None` elsewhere).
+#[derive(Debug, Clone)]
+pub struct AttachingApp {
+    pub app: String,
+    pub notification_identity: Option<String>,
+}
+
+/// Attach `app` to the agent at `endpoint` for as long as this process lives.
+/// Never blocks the caller.
+pub fn attach_app(endpoint: AgentEndpoint, app: AttachingApp) -> AppAttachment {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     let spawned = std::thread::Builder::new()
         .name("fauna-agent-attach".into())
-        .spawn(move || run(&endpoint, app, &thread_stop));
+        .spawn(move || run(&endpoint, &app, &thread_stop));
     if let Err(e) = spawned {
         tracing::warn!("agent attachment: could not start: {e}");
     }
     AppAttachment { stop }
 }
 
-fn run(endpoint: &AgentEndpoint, app: &'static str, stop: &AtomicBool) {
+fn run(endpoint: &AgentEndpoint, app: &AttachingApp, stop: &AtomicBool) {
     let mut retry = RETRY_MIN;
     while !stop.load(Ordering::SeqCst) {
         match attach_once(endpoint, app) {
@@ -80,12 +90,13 @@ fn run(endpoint: &AgentEndpoint, app: &'static str, stop: &AtomicBool) {
 
 fn attach_once(
     endpoint: &AgentEndpoint,
-    app: &'static str,
+    app: &AttachingApp,
 ) -> Result<fauna_ipc::sync_pipe_client::SyncPipeClient, String> {
     let client = endpoint.connect().map_err(|e| e.to_string())?;
     let reply = client
         .request(RequestMethod::AttachApp {
-            app: Some(app.to_string()),
+            app: Some(app.app.clone()),
+            notification_identity: app.notification_identity.clone(),
         })
         .map_err(|e| e.to_string())?;
     match reply.result {

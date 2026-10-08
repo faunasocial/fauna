@@ -1241,7 +1241,15 @@ mod native {
                 fauna_ipc::endpoint::AgentEndpoint::default_for_user()
                     .inspect_err(|e| tracing::warn!("agent attachment: no endpoint: {e}"))
                     .ok()
-                    .map(|endpoint| fauna_client_sync::attachment::attach_app(endpoint, "tui"))
+                    .map(|endpoint| {
+                        fauna_client_sync::attachment::attach_app(
+                            endpoint,
+                            fauna_client_sync::attachment::AttachingApp {
+                                app: "tui".into(),
+                                notification_identity: None,
+                            },
+                        )
+                    })
             });
         }
 

@@ -202,6 +202,13 @@ pub const KIND_PAYLOAD_COVERAGE: &[(&str, &[&str])] = &[
             "peer_sync_block",
         ],
     ),
+    (
+        fauna_protocol::peer_sync::KIND_PEER_SYNC_CHUNKS_PULL,
+        &[
+            "peer_sync_chunks_pull_request",
+            "peer_sync_chunks_pull_reply",
+        ],
+    ),
 ];
 
 /// Target 3 — the peer-leg kinds' payload structs: arbitrary bytes through
@@ -219,7 +226,7 @@ pub fn check_kind_payload_decode(data: &[u8]) -> usize {
     };
     use fauna_protocol::peer_sync::{
         PeerSyncAdmitReply, PeerSyncAdmitRequest, PeerSyncBlock, PeerSyncBlocksPullReply,
-        PeerSyncBlocksPullRequest,
+        PeerSyncBlocksPullRequest, PeerSyncChunksPullReply, PeerSyncChunksPullRequest,
     };
     use fauna_protocol::sync::{SyncChangesListReply, SyncChangesListRequest};
 
@@ -242,6 +249,8 @@ pub fn check_kind_payload_decode(data: &[u8]) -> usize {
     try_decode!(PeerSyncBlock);
     try_decode!(PeerSyncBlocksPullRequest);
     try_decode!(PeerSyncBlocksPullReply);
+    try_decode!(PeerSyncChunksPullRequest);
+    try_decode!(PeerSyncChunksPullReply);
     try_decode!(SyncChangesListRequest);
     try_decode!(SyncChangesListReply);
     ok

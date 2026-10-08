@@ -104,7 +104,7 @@ _UI_S = 15.0
 _CONVERGE_S = 240.0
 
 _PAGE = "page.html"
-_BODY = b"<!doctype html><title>ccxxvi</title><h1>bound flip-back</h1>\n"
+_BODY = b"<!doctype html><title>bound flip-back</title><h1>bound flip-back</h1>\n"
 
 
 def _changes(nest, actor, folder: str) -> list[dict]:

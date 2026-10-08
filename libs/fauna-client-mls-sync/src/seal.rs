@@ -71,14 +71,14 @@ pub fn backup_key_from_seed(seed: &[u8; 32]) -> BackupKey {
 /// `encrypt_backup_chunk` (ChaCha20-Poly1305 under `key`). Byte-for-byte what
 /// the nest content-addresses on, and the inverse of [`unseal_replica`]. The
 /// returned bytes are ciphertext (safe to hold/log-length); the caller should
-/// pass `plaintext` from a [`Zeroizing`] buffer (finding 2).
+/// pass `plaintext` from a [`Zeroizing`] buffer.
 pub fn seal_replica(plaintext: &[u8], key: &BackupKey) -> Result<Vec<u8>, ReplicaSealError> {
     seal_backup_chunk(plaintext, key, ReplicaSealError::Encrypt)
 }
 
 /// Inverse of [`seal_replica`]: decrypt → decompress → the canonical plaintext,
-/// wrapped in [`Zeroizing`] so the group secrets it may carry are wiped on drop
-/// (finding 2). The caller decodes it into a `ProviderReplica` /
+/// wrapped in [`Zeroizing`] so the group secrets it may carry are wiped on drop.
+/// The caller decodes it into a `ProviderReplica` /
 /// `ChannelHistorySlice` and drops the buffer.
 pub fn unseal_replica(
     blob: &[u8],

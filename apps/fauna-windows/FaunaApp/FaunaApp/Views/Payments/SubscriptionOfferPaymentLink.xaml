@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The external checkout link of one offered tier on another actor's profile
+  (monetization.md § Pillar 1 surface 2), shown only when the tier carries a
+  payment URL. Inside the payments plane because it exists only to state a payment
+  route (dynamic-features.md § Platform-family surface excision → The price-and-route
+  class) — it is the very element whose presence in an excised iOS archive raised
+  that ruling.
+
+  ⚠ THIS FILE IS PART OF THE EXCISION UNIT (see PaymentsAuthorSections.xaml's
+  header). ProfilePage's offer-row DataTemplate hosts one of these per row through
+  a ContentControl whose Loaded handler fills it under `#if PAYMENTS`; nothing
+  outside Views\Payments\ may name this type from markup. The click is raised as
+  OpenRequested and the page opens the URL, behind the shared https-only guard.
+-->
+<UserControl
+    x:Class="FaunaApp.Views.Payments.SubscriptionOfferPaymentLink"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <Button x:Name="LinkButton"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.SubscriptionOfferPaymentLink}"
+            VerticalAlignment="Center"
+            Click="LinkButton_Click"
+            Content="{loc:Localize Key=subscriptions/payment_url}" />
+</UserControl>

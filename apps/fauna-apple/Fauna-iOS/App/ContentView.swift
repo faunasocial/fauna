@@ -142,6 +142,12 @@ private struct GlobalChrome: ViewModifier {
                     appState.selectedTab = "more"
                     appState.moreSelectedView = "family"
                 }
+                // The shared report sheet + its acknowledgement
+                // (moderation.md § User-initiated reporting): ONE host over
+                // every page — and over the admin shell too, since this chrome
+                // survives it — so a report filed from a card the
+                // reporter-side hide then replaces still paints `report-status`.
+                ReportHost()
             }
         }
     }

@@ -4265,6 +4265,16 @@ impl App {
         {
             self.spawn_page_op(PageOp::Contacts(op));
         }
+        // Page-gated like address_book — see `StaleSurfaces::mail_spam`: a third-
+        // party mail app's batch Junk move is one push per lesson, and a visit
+        // re-reads the list anyway. What the flag buys is the undo or reset made
+        // on another device landing in the list open here.
+        if r.mail_spam
+            && self.page == Page::Settings
+            && let Some(op) = crate::settings::mail_spam_resync_op(&self.settings)
+        {
+            self.spawn_page_op(PageOp::Settings(op));
+        }
         // Page-gated, unlike every arm above — see `StaleSurfaces::media`. `Media` is
         // a cross-*set* aggregate whose nav-enter read already covers the
         // arrive-while-elsewhere case, so the flag buys exactly one thing: the

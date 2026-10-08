@@ -847,7 +847,7 @@ fn set_external_apps_enabled_handler() -> RpcHandler {
 /// ⚠ It is deliberately **its own constant**, not a reuse of any F4 freshness
 /// number (the DPoP window, the assertion cap, the PAR TTL). Those bound
 /// cryptographic artifacts; this bounds a person. Sharing one would mean a
-/// future change to either silently moved the other — the trap finding 79
+/// future change to either silently moved the other — the trap an earlier review
 /// records, in the one direction F4 has already declined to follow.
 pub(crate) const CONSENT_REQUEST_TTL_MILLIS: i64 = 10 * 60 * 1000;
 
@@ -5505,7 +5505,7 @@ mod tests {
     /// the provenance key the projection loop's "already published these bytes?"
     /// lookup matches on, so a one-character disagreement would make every image
     /// re-fetch and re-hash forever with nothing failing — the exact class of
-    /// two-sides-green-while-disagreeing bug finding 13 was written about.
+    /// two-sides-green-while-disagreeing bug the cross-side pinning rule was written about.
     #[tokio::test]
     async fn the_answered_fauna_cid_is_spelled_as_the_outbound_side_spells_it() {
         let state = fixture_state().await;
@@ -8666,7 +8666,7 @@ mod tests {
         ///
         /// The stamp is asserted in the same breath because it is what stops
         /// the F2.4 sweep collecting the bytes out from under the profile
-        /// (finding 42's class: bytes stored with no reference the GC oracle
+        /// (the unreferenced-blob class: bytes stored with no reference the GC oracle
         /// walks are bytes already scheduled for deletion).
         #[tokio::test]
         async fn an_external_app_sets_a_profile_picture_from_its_own_upload() {
@@ -9001,7 +9001,7 @@ mod tests {
             assert_eq!(push.kind, "fauna.atproto.consent_requested");
             // Through `from_push`, not a hand-rolled decode: that is the
             // classification every app actually runs, so this pins the
-            // registry arm as well as the payload (findings 13/49 — pin the two
+            // registry arm as well as the payload (pin the two
             // sides against each other, never each against its own literal).
             let fauna_protocol::PushEvent::AtprotoConsentRequested(pushed) =
                 fauna_protocol::PushEvent::from_push(&push.kind, push.payload)

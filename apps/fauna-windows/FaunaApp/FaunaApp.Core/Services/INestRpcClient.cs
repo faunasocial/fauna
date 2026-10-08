@@ -1981,6 +1981,19 @@ internal interface INestRpcClient
         FfiAgentReachabilityObserver? reachabilityObserver);
 
     /// <summary>
+    /// This install's push registration under <paramref name="actorId"/>, built on this
+    /// client's live connection — the shared <c>fauna_client_push::registration</c> machine
+    /// (the install intent bit, the which-actor record, the leave-shape drops) behind
+    /// <c>FfiPushRegistration</c> (<c>common.md</c> § Push Notifications → <i>Registration</i>).
+    /// <paramref name="intentPath"/> is the install-scoped intent file;
+    /// <paramref name="deviceId"/> the install's derived id for the actor
+    /// (<c>FfiAccountRegistry.DeviceIdForActor</c>) — the one id the row is keyed under
+    /// and the connection announces.
+    /// </summary>
+    Task<IFfiPushRegistration> BuildPushRegistrationAsync(
+        string intentPath, string actorId, string deviceId);
+
+    /// <summary>
     /// Restore this session's nest from the copy <paramref name="agent"/> holds —
     /// the confirmed <c>backup-destination-reseed-confirm-button</c> action
     /// (<c>backup-destinations.md</c> § Re-seed → <i>Where the ceremony runs</i>:
@@ -2524,12 +2537,18 @@ internal interface INestRpcClient
     ///
     /// <para><b>Irreversible</b>, and the caller must have gated it behind
     /// <c>identity-stolen-confirm-field</c> reading the literal <c>SUCCEED</c>.
-    /// An <c>Err</c> means the succession did not land; the failure arms that DO
-    /// carry a seed come back as a result whose <c>Persisted</c> tells the truth
-    /// about it — and on <c>Persisted == false</c> the caller must put the secret
-    /// on screen and <b>not</b> tear the session down.</para>
+    /// Every ceremony that RAN comes back as the typed
+    /// <see cref="FfiStolenOutcome"/> — <c>landed</c> / <c>not-landed</c> /
+    /// <c>landed-for-another</c> / <c>undecided</c>, pre-submit refusals included
+    /// (<c>identity-succession.md</c> § Implementation status today, the
+    /// typed-outcome ruling); only a failure before it could start (unparseable
+    /// secret bytes, no connection) throws. On <c>landed</c> with
+    /// <c>persisted == false</c>, and on any arm with
+    /// <c>carriesTheOnlySeed</c>, the caller holds the only copy of the successor
+    /// seed: it must park it on screen and <b>not</b> tear the session
+    /// down.</para>
     /// </summary>
-    Task<FfiLandedSuccession> SuccessionSucceedWithHeldKitAsync(string kitInput);
+    Task<FfiStolenOutcome> SuccessionSucceedWithHeldKitAsync(string kitInput);
 
     /// <summary>
     /// <c>run_succession_aftermath</c> — the post-succession aftermath: legs 1, 2,

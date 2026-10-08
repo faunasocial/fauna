@@ -7,7 +7,8 @@
   // here: the shared `LaunchMachine` classifies the launch row and owns the
   // pin-forget seam. They stay exported from `$lib/wasm` for the SPA's own
   // `challengeVerify` path (`lib/store.ts`'s background identity refresh).
-  import { ensureWasm, parseIdentityImport, logMessage, recoveryBoxesLocal, recoverSelfhostedCommandLocal, shortNestId, actorIdFromSecret, resolveVerifiedSuccessor } from '$lib/wasm';
+  import { ensureWasm, parseIdentityImport, logMessage, recoveryBoxesLocal, recoverSelfhostedCommandLocal, shortNestId, actorIdFromSecret, resolveVerifiedSuccessor, adoptHeldSuccessor } from '$lib/wasm';
+  import { base } from '$app/paths';
   import {
     dnsManagementMachineWithCredentials,
     applyServingEnablement,
@@ -1111,9 +1112,23 @@
     if (!nestUrl || !secret) return; // No stored nest/identity ⇒ nothing to walk.
     try {
       await ensureWasm();
-      const successor = await resolveVerifiedSuccessor(nestUrl, actorIdFromSecret(secret));
+      const predecessor = actorIdFromSecret(secret);
+      const successor = await resolveVerifiedSuccessor(nestUrl, predecessor);
       if (!successor) return;
       if (m && m.step() === 'identity_import') {
+        // Save in the one case with nothing left to import: this browser
+        // already holds the PROVEN successor's key — the state a lost
+        // succession reply leaves behind, whose message promised that reopening
+        // the app signs in as it. The screen is then not upgraded but
+        // replaced: activate the successor and relaunch into it, the switch
+        // `performSwitch` makes (a hard reload — a soft `goto` would not
+        // rebuild the wasm session). tui's `App::adopt_held_successor` twin.
+        if (await adoptHeldSuccessor(predecessor, successor)) {
+          console.info('[launch] adopting the held verified successor', successor);
+          await accountsSwitch(successor);
+          window.location.assign(`${base}/feed`);
+          return;
+        }
         m.beginImportIdentityWithReason(
           t.onboarding.launch.identity_superseded_verified({ successor }),
         );

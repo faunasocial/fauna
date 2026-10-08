@@ -347,6 +347,17 @@ public final class AdminNestVM: BusyAdminCommandVM {
     /// transition is one write (`TakedownSectionState`).
     public private(set) var takedown = TakedownSectionState()
 
+    /// The open abuse reports waiting for an admin (`admin-nest-reports-section`;
+    /// moderation.md § User-initiated reporting → *Where it lands*), already
+    /// folded into rows by the shared `queue_row_view`.
+    public private(set) var reports: [FfiReportQueueRow] = []
+    /// Whether the queue has been read at least once — the empty line paints
+    /// only off this bit (`ui/README.md` § List pages: loading is not empty).
+    public private(set) var reportsLoaded = false
+    /// The verdict line of the last resolve or failed read, `nil` before one —
+    /// its own element, never the page's `error-message`.
+    public private(set) var reportsStatus: String?
+
     private var admin: FfiAdminClient?
     private var api: APIClient?
     private var natMachine: AdminNatModeMachine?
@@ -372,6 +383,63 @@ public final class AdminNestVM: BusyAdminCommandVM {
         // Its own read, after and outside `hydrate()`'s one `do`: a throw
         // there blanks the whole page's error surface, and this one must not.
         oauth.keysLoaded(await readOauthKeys())
+        // The reports queue is read in the page's load too, and likewise outside
+        // `hydrate()`'s one `do` — a failed read must not blank the page.
+        await loadReports()
+    }
+
+    /// Read the open reports (`fauna.admin.abuse_report.queue`).
+    public func loadReports() async {
+        guard let admin else { return }
+        do {
+            reports = try await admin.abuseReportQueue()
+            reportsLoaded = true
+        } catch {
+            reportsStatus = renderLocalizedText(reportResolveVerdict(acted: false, error: String(describing: error)))
+        }
+    }
+
+    /// `admin-nest-report-acted-button` / `-dismiss-button` — record the outcome
+    /// (a record, never an action: acting is the takedown console or a
+    /// suspension), then re-read so the row leaves the queue.
+    public func resolveReport(_ row: FfiReportQueueRow, acted: Bool) async {
+        guard let admin else { return }
+        do {
+            try await admin.abuseReportResolve(reportId: row.reportId, acted: acted)
+            reportsStatus = renderLocalizedText(reportResolveVerdict(acted: acted, error: nil))
+        } catch {
+            reportsStatus = renderLocalizedText(reportResolveVerdict(acted: acted, error: String(describing: error)))
+        }
+        await loadReports()
+    }
+
+    /// `admin-nest-report-open-takedown-button` — pre-fill the legal-takedown
+    /// console from the row's subject (`report_takedown_prefill`). The prefill
+    /// carries NO citation, so the console's own guard still stands.
+    public func openTakedown(for row: FfiReportQueueRow) {
+        guard let prefill = reportTakedownPrefill(subject: row.subject) else { return }
+        takedown.contentId = prefill.contentId
+        takedown.conversation = prefill.conversation
+    }
+
+    /// One queue row's line — `reason · kind id · origin · when — note —
+    /// “excerpt”` (web's `reportLine`, tui's `reports_elements`: the e2e reads
+    /// this text on every app).
+    public nonisolated static func reportLine(_ row: FfiReportQueueRow) -> String {
+        let kind: String
+        let id: String
+        switch row.subject {
+        case .post(let cid): (kind, id) = ("post", cid)
+        case .message(_, let recordCid): (kind, id) = ("message", recordCid)
+        case .actor(let actorId): (kind, id) = ("actor", actorId)
+        case .unknown: (kind, id) = ("unknown", "")
+        }
+        let when = Date(timeIntervalSince1970: Double(row.createdAt) / 1_000_000)
+            .formatted(date: .abbreviated, time: .shortened)
+        var text = "\(renderLocalizedText(row.reason)) · \(kind) \(id) · \(renderLocalizedText(row.origin)) · \(when)"
+        if let note = row.note, !note.isEmpty { text += " — \(note)" }
+        if let excerpt = row.excerpt, !excerpt.isEmpty { text += " — “\(excerpt)”" }
+        return text
     }
 
     /// Re-read the serving port / host-OS maintenance state (`fauna.setup.status`)

@@ -469,12 +469,13 @@ pub trait HydrationHost: FileHydrator + PlaceholderLister + LocalWriteHost {
     /// on-demand root*, point 4). A host must answer every command it is sent.
     async fn answer_engine_command(&self, cmd: EngineCommand);
 
-    /// Answer one relay ask the host's seat routed to this root
-    /// (`file-sync.md` § Relay serving): serve the key from a hydrated body,
-    /// or decline. Called by [`serve_hydration_root`] beside the loop.
-    /// **Defaults to a no-op**: every implementor but [`SyncEngine`] is a test
-    /// double that announces nothing, so it is never asked.
-    async fn answer_relay_ask(&self, _ask: fauna_sync_engine::relay_seat::ServeAsk) {}
+    /// Answer one serve ask the host's seat routed to this root — the nest's
+    /// relay or a sibling device's (`file-sync.md` § Relay serving): serve the
+    /// key from a hydrated body, or decline. Called by [`serve_hydration_root`]
+    /// beside the loop. **Defaults to a no-op** (a dropped ask reads as a
+    /// decline): every implementor but [`SyncEngine`] is a test double that
+    /// announces nothing, so it is never asked.
+    async fn answer_serve_ask(&self, _ask: fauna_sync_engine::relay_seat::ServeAsk) {}
 
     // ── The off-disk placeholder posture (the linux FUSE root) ──────────────────
     //
@@ -554,8 +555,8 @@ impl HydrationHost for SyncEngine {
         fauna_sync_engine::always_resident::answer_engine_command(self, cmd).await
     }
 
-    async fn answer_relay_ask(&self, ask: fauna_sync_engine::relay_seat::ServeAsk) {
-        SyncEngine::answer_relay_ask(self, ask).await
+    async fn answer_serve_ask(&self, ask: fauna_sync_engine::relay_seat::ServeAsk) {
+        SyncEngine::answer_serve_ask(self, ask).await
     }
 
     async fn set_placeholders_off_disk(&self) -> Result<()> {
@@ -1747,7 +1748,7 @@ pub(crate) async fn serve_hydration_root<H, I, C, G>(
 {
     let serving = async {
         match serve {
-            Some(mut inbox) => inbox.serve_with(|ask| hydrator.answer_relay_ask(ask)).await,
+            Some(mut inbox) => inbox.serve_with(|ask| hydrator.answer_serve_ask(ask)).await,
             None => std::future::pending().await,
         }
     };

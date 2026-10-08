@@ -1012,6 +1012,50 @@ async fn a_negative_nest_place_quiet_period_is_refused() {
     );
 }
 
+/// A quiet period over the ceiling is refused like a negative one
+/// (2026-10-08): an unbounded value let one account's own folder panic the nest-wide
+/// snapshot scheduler. The ceiling itself is still accepted.
+#[tokio::test]
+async fn a_nest_place_quiet_period_over_the_ceiling_is_refused() {
+    let (router, state) = router_and_state().await;
+    let actor = [39u8; 32];
+    create_set(&router, &state, actor, "papers").await;
+
+    let update = |quiet_secs: i64| {
+        encode(&FolderUpdateRequest {
+            name: "papers".into(),
+            nest_place: Some(NestPlacePolicy {
+                quiet_secs: Some(quiet_secs),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    };
+
+    for over in [NestPlacePolicy::MAX_QUIET_SECS + 1, i64::MAX] {
+        let err = dispatch(
+            &router,
+            Arc::clone(&state),
+            actor,
+            "fauna.folders.update",
+            update(over),
+        )
+        .await
+        .expect_err("a quiet period past the ceiling is not a cadence");
+        assert_eq!(err.code, "fauna.folders.bad_request");
+    }
+
+    dispatch(
+        &router,
+        Arc::clone(&state),
+        actor,
+        "fauna.folders.update",
+        update(NestPlacePolicy::MAX_QUIET_SECS),
+    )
+    .await
+    .expect("the ceiling itself is a valid quiet period");
+}
+
 /// The per-set WebDAV serve flag (`folders.webdav_enabled`) round-trips through
 /// `fauna.folders.update` and is projected on the owner's list row. Every
 /// non-reserved folder may be served — a folder has no type, so the former

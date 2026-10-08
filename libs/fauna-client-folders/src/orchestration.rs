@@ -1673,27 +1673,55 @@ where
         event: fauna_core::grant_event::GrantEvent,
     ) -> Result<fauna_core::succession_ledger::SuccessionLedger, PaywallSetError<R::Error, G::Error>>
     {
+        let replica = self.paywall_event_replica(event)?;
+        self.paywall_log()?
+            .merge(replica)
+            .await
+            .map_err(|e| PaywallSetError::GrantLog(e.to_string()))
+    }
+
+    /// Record the paywall grant's `Mint` and publish it to the bound nest's
+    /// acknowledgement — the grant-mint door
+    /// (`SuccessionLedgerStore::merge_published`), whose answer alone releases
+    /// the blob.
+    #[cfg(feature = "mls")]
+    async fn publish_paywall_mint(
+        &self,
+        event: fauna_core::grant_event::GrantEvent,
+    ) -> Result<fauna_client_config::PublishedLedger, PaywallSetError<R::Error, G::Error>> {
+        let replica = self.paywall_event_replica(event)?;
+        self.paywall_log()?
+            .merge_published(replica)
+            .await
+            .map_err(|e| PaywallSetError::GrantLog(e.to_string()))
+    }
+
+    /// `event`, signed by the owner, as a one-event ledger replica.
+    #[cfg(feature = "mls")]
+    fn paywall_event_replica(
+        &self,
+        event: fauna_core::grant_event::GrantEvent,
+    ) -> Result<fauna_core::succession_ledger::SuccessionLedger, PaywallSetError<R::Error, G::Error>>
+    {
         use grant_log::GrantEventSigner as _;
         let signed = grant_log::KeypairGrantEventSigner::new(&self.keypair)
             .sign_grant_event(event)
             .map_err(|e| PaywallSetError::GrantLog(e.to_string()))?;
-        self.paywall_log()?
-            .merge(
-                fauna_core::succession_ledger::SuccessionLedger::events_replica(
-                    self.keypair.actor_id(),
-                    vec![signed],
-                ),
-            )
-            .await
-            .map_err(|e| PaywallSetError::GrantLog(e.to_string()))
+        Ok(
+            fauna_core::succession_ledger::SuccessionLedger::events_replica(
+                self.keypair.actor_id(),
+                vec![signed],
+            ),
+        )
     }
 
     /// Record the paywall grant's `Mint`, then deposit `blob` — the
     /// record-then-deposit order every minting site keeps (`ui/nests.md`
     /// § Trust facet — grants): the blob is released only against the log the
-    /// write stored ([`grant_log::UndepositedGrant::release`]), so the grant is
-    /// on the owner's facet, and survives its reconcile sweep, before it is
-    /// live on the nest.
+    /// write stored and the bound nest acknowledged
+    /// ([`grant_log::UndepositedGrant::release`]), so the grant is on the
+    /// owner's facet, and survives every replica's reconcile sweep, before it
+    /// is live on the nest.
     #[cfg(feature = "mls")]
     async fn mint_paywall_grant(
         &self,
@@ -1707,8 +1735,8 @@ where
             .to_canonical_bytes()
             .map_err(|e| PaywallSetError::Mint(MintGrantError::Wrap(e)))?;
         let pending = grant_log::UndepositedGrant::new(grant_id, blob_bytes);
-        let stored = self
-            .record_paywall_event(grant_log::build_mint_event(
+        let published = self
+            .publish_paywall_mint(grant_log::build_mint_event(
                 grant_id,
                 holder_pubkey,
                 grant_log::event_scope_of(&blob.scope),
@@ -1718,7 +1746,7 @@ where
             ))
             .await?;
         let blob_bytes = pending
-            .release(&grant_log::RecordedGrants::from_stored(&stored))
+            .release(&grant_log::PublishedGrants::from_published(&published))
             .map_err(|e| PaywallSetError::GrantLog(e.to_string()))?;
         let _: MintGrantReply = self
             .files
@@ -7478,6 +7506,27 @@ mod tests {
         );
         assert_eq!(current[0].scope[0].class, "content.read");
         assert_eq!(current[0].scope[0].kind.as_deref(), Some("folder"));
+    }
+
+    /// Record, publish, then deposit (`ui/nests.md` § Trust facet — grants →
+    /// *Record-then-deposit*, the published form): a paywall `Mint` the bound
+    /// nest did not acknowledge deposits nothing, and the next paywall, once
+    /// the nest takes the publish, deposits.
+    #[cfg(feature = "mls")]
+    #[test]
+    fn paywall_set_publishes_the_mint_before_the_deposit() {
+        let nest = Arc::new(FakeNest::default());
+        let (a, log) = author_with_log(nest.clone(), FakeGroup::with_members(&[]));
+        let (_sk, holder_pk) = fauna_mls::wrapped_blob::generate_x25519_keypair();
+
+        log.publish_refuses(true);
+        block_on(a.paywall_set("premium", "gold", None, holder_pk, None))
+            .expect_err("an unpublished mint must not deposit");
+        assert!(nest.mints.lock().unwrap().is_empty(), "nothing deposited");
+
+        log.publish_refuses(false);
+        block_on(a.paywall_set("premium", "gold", None, holder_pk, None)).expect("paywall");
+        assert_eq!(nest.mints.lock().unwrap().len(), 1);
     }
 
     /// The reconcile sweep revokes every grant id the nest holds that the log

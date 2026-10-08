@@ -101,11 +101,19 @@ impl FfiFeedManager {
         self.inner.update_compose_gate(gate_tier, gate_preview);
     }
 
-    /// Stage the composer's **"Sell this post…"** fields (`compose-sell-price` /
-    /// `compose-sell-subscribers-free`) — the sell sibling of
+    /// Stage the composer's **"Sell this post…"** fields — the sell sibling of
     /// [`update_compose_gate`](Self::update_compose_gate), sharing its teaser.
     /// `Some` enters sell mode and clears any selected gate tier; `None` leaves
     /// it. `monetization.md` § Per-post pay-to-unlock.
+    // `payments`-gated doc line: the ids are the price-and-route class
+    // (`dynamic-features.md` § Platform-family surface excision), and a UniFFI
+    // docstring rides every artifact (criterion 1, prose included) — gate the
+    // line, never reword it (`value_format.rs` § Gated element ids live in
+    // gated DOC LINES).
+    #[cfg_attr(
+        feature = "payments",
+        doc = " The fields paint `compose-sell-price` / `compose-sell-subscribers-free`."
+    )]
     pub fn update_compose_sell(&self, sell: Option<SellComposeState>, gate_preview: String) {
         self.inner.update_compose_sell(sell, gate_preview);
     }
@@ -624,10 +632,14 @@ impl FfiFeedManager {
     /// Per-post pay-to-unlock → *the buyer's price read is post-addressed*)
     /// and fold it into the matching `PostSummary.unlock_offer`, then notify.
     /// A no-op unless `gated_tier` names a `post-unlock-*` tier and the offer
-    /// isn't already resolved. Drives `gated-post-price` /
-    /// `gated-post-payment-link` / `gated-post-buy-button` — the purchase
-    /// itself is the existing `FfiSubscriptionsClient::subscribe` against the
-    /// resolved `tier_name`, no new call.
+    /// isn't already resolved. The purchase itself is the existing
+    /// `FfiSubscriptionsClient::subscribe` against the resolved `tier_name`,
+    /// no new call.
+    // `payments`-gated doc line — see `update_compose_sell` above.
+    #[cfg_attr(
+        feature = "payments",
+        doc = " Drives `gated-post-price` / `gated-post-payment-link` / `gated-post-buy-button`."
+    )]
     pub async fn resolve_post_unlock_offer(&self, post_id: String) {
         self.inner.resolve_post_unlock_offer(post_id).await;
     }
@@ -642,13 +654,18 @@ impl FfiFeedManager {
         self.inner.resolve_post(post_id).await
     }
 
-    /// Buy a sold post via the self-serve teaser affordance
-    /// (`gated-post-buy-button`) — the existing subscribe flow against the
-    /// resolved offer's `tier_name`, no new nest write. `Ok(Some(true))` =
+    /// Buy a sold post via the self-serve teaser affordance — the existing
+    /// subscribe flow against the resolved offer's `tier_name`, no new nest
+    /// write. `Ok(Some(true))` =
     /// queued (pending author approval, the client-minted-tier norm),
     /// `Ok(Some(false))` = approved outright, `Ok(None)` = the post isn't
     /// loaded or its offer hasn't resolved yet (flattened from
     /// `Option<Result<_>>` — UniFFI can't lower that nesting directly).
+    // `payments`-gated doc line — see `update_compose_sell` above.
+    #[cfg_attr(
+        feature = "payments",
+        doc = " The affordance is `gated-post-buy-button`."
+    )]
     pub async fn buy_unlock_offer(&self, post_id: String) -> Result<Option<bool>, FfiError> {
         match self.inner.buy_unlock_offer(post_id).await {
             Some(Ok(queued)) => Ok(Some(queued)),

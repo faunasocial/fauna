@@ -210,9 +210,9 @@
               "state": "partial"
             },
             "macos": {
-              "date": "",
+              "date": "2026-10-08",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.3-dev+1cd3bd62 standalone",
               "state": "partial"
             },
             "tui": {
@@ -508,10 +508,10 @@
               "state": "full"
             },
             "windows": {
-              "date": "",
+              "date": "2026-10-08",
               "dirty": false,
-              "stamp": "",
-              "state": "partial"
+              "stamp": "0.1.3-dev+3a518178 standalone",
+              "state": "full"
             }
           },
           "full": true,
@@ -546,10 +546,10 @@
               "state": "full"
             },
             "macos": {
-              "date": "",
+              "date": "2026-10-08",
               "dirty": false,
-              "stamp": "",
-              "state": "none"
+              "stamp": "0.1.3-dev+1cf3db28 standalone",
+              "state": "full"
             },
             "tui": {
               "date": "2026-10-05",
@@ -564,10 +564,10 @@
               "state": "none"
             },
             "windows": {
-              "date": "",
+              "date": "2026-10-08",
               "dirty": false,
-              "stamp": "",
-              "state": "none"
+              "stamp": "0.1.3-dev+862c7d57 standalone",
+              "state": "failing"
             }
           },
           "full": true,
@@ -1030,7 +1030,7 @@
               "date": "",
               "dirty": false,
               "stamp": "",
-              "state": "partial"
+              "state": "full"
             }
           },
           "full": true,
@@ -1083,9 +1083,9 @@
               "state": "partial"
             },
             "windows": {
-              "date": "",
+              "date": "2026-10-08",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.3-dev+3a518178 standalone",
               "state": "partial"
             }
           },
@@ -1139,10 +1139,10 @@
               "state": "partial"
             },
             "windows": {
-              "date": "",
+              "date": "2026-10-08",
               "dirty": false,
-              "stamp": "",
-              "state": "partial"
+              "stamp": "0.1.3-dev+862c7d57 standalone",
+              "state": "full"
             }
           },
           "full": true,
@@ -1867,10 +1867,10 @@
               "state": "partial"
             },
             "windows": {
-              "date": "",
+              "date": "2026-10-08",
               "dirty": false,
-              "stamp": "",
-              "state": "partial"
+              "stamp": "0.1.3-dev+8b195137 standalone",
+              "state": "full"
             }
           },
           "full": true,
@@ -2156,10 +2156,10 @@
               "state": "none"
             },
             "windows": {
-              "date": "",
+              "date": "2026-10-08",
               "dirty": false,
-              "stamp": "",
-              "state": "none"
+              "stamp": "0.1.3-dev+862c7d57 standalone",
+              "state": "full"
             }
           },
           "full": true,
@@ -2383,9 +2383,9 @@
               "state": "full"
             },
             "windows": {
-              "date": "",
+              "date": "2026-10-08",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.3-dev+95fc19e6 standalone",
               "state": "partial"
             }
           },
@@ -2503,9 +2503,9 @@
               "state": "partial"
             },
             "windows": {
-              "date": "",
+              "date": "2026-10-08",
               "dirty": false,
-              "stamp": "",
+              "stamp": "0.1.3-dev+3a518178 standalone",
               "state": "partial"
             }
           },
@@ -3594,7 +3594,7 @@
               "date": "2026-10-06",
               "dirty": false,
               "stamp": "0.1.2-dev+a1f84cc6 standalone",
-              "state": "partial"
+              "state": "full"
             }
           },
           "full": true,
@@ -4455,7 +4455,7 @@
               "date": "2026-09-28",
               "dirty": false,
               "stamp": "0.1.2-dev+7663afa6 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
               "date": "2026-09-01",
@@ -4470,7 +4470,7 @@
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/mail-mass-mailing.md § Goal",
           "guide": "docs/guides/own-your-mail.md § Newsletters and mailing lists",
           "nest_only": false,
@@ -4526,7 +4526,7 @@
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/behavior/mail-spam.md § Goal",
           "guide": "docs/guides/own-your-mail.md § Spam, your way",
           "nest_only": false,
@@ -4748,10 +4748,10 @@
               "state": "partial"
             },
             "windows": {
-              "date": "2026-09-11",
-              "dirty": true,
-              "stamp": "0.1.2-dev+6d8dc256.dirty standalone",
-              "state": "partial"
+              "date": "2026-10-06",
+              "dirty": false,
+              "stamp": "0.1.2-dev+c4a95c20 standalone",
+              "state": "full"
             }
           },
           "full": true,
@@ -4845,7 +4845,7 @@
               "date": "2026-10-06",
               "dirty": false,
               "stamp": "0.1.2-dev+a1f84cc6 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "tui": {
               "date": "2026-09-28",
@@ -5146,7 +5146,7 @@
               "date": "",
               "dirty": false,
               "stamp": "",
-              "state": "none"
+              "state": "partial"
             },
             "web": {
               "date": "",
@@ -5527,10 +5527,10 @@
               "state": "none"
             },
             "ios": {
-              "date": "",
+              "date": "2026-10-07",
               "dirty": false,
-              "stamp": "",
-              "state": "none"
+              "stamp": "0.1.3-dev+a5d2dc2b standalone",
+              "state": "partial"
             },
             "linux": {
               "date": "",
@@ -5539,10 +5539,10 @@
               "state": "none"
             },
             "macos": {
-              "date": "",
+              "date": "2026-10-07",
               "dirty": false,
-              "stamp": "",
-              "state": "none"
+              "stamp": "0.1.3-dev+a5d2dc2b standalone",
+              "state": "partial"
             },
             "tui": {
               "date": "2026-10-05",

@@ -164,6 +164,12 @@ impl SupervisedChannel for ClientChannel {
                 err,
                 NestClientError::SubprotocolMismatch | NestClientError::NestIdentityChanged { .. }
             )
+            // Case 1 by value: a caller-supplied `LaunchMachineBearer` has no
+            // latch, and carries the refusal typed instead (`map_api_err`).
+            || matches!(
+                err,
+                NestClientError::Rpc(e) if e.code == fauna_protocol::RpcError::CODE_SUPERSEDED
+            )
     }
 
     /// A locked account (`fauna.auth.account_locked`) is terminal until its

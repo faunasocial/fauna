@@ -186,7 +186,7 @@ impl DavRecipientKeys {
     pub fn unseal(&self, encrypted_body: &[u8]) -> Result<Vec<u8>, SealError> {
         let envelope = MailRecordEnvelope::from_canonical_bytes(encrypted_body)
             .map_err(|e| SealError::Unseal(e.to_string()))?;
-        open_mail_record_standing(&envelope, &self.ring).ok_or_else(|| {
+        open_mail_record_standing(&envelope, &self.ring, &[], None).ok_or_else(|| {
             SealError::Unseal(format!(
                 "no key in the ring opens it ({} tried: current + {} grace)",
                 self.ring.len(),

@@ -3374,13 +3374,16 @@ pub(super) const MIGRATIONS_BRIDGE_ABSORPTION: &str = "
         ON bridge_imap_messages(actor_id, mailbox, modseq);
 
     -- Per-(actor, mailbox) IMAP collection state. uid_next = next UID to hand out;
-    -- highestmodseq = max modseq ever used in this mailbox.
+    -- highestmodseq = max modseq ever used in this mailbox. pruned_modseq = the
+    -- placement manifest's prune floor, set only by a restore: below it the
+    -- rebuilt bridge_imap_expunged log is incomplete (imap-server.md § QRESYNC).
     CREATE TABLE IF NOT EXISTS bridge_imap_mailbox_state (
         actor_id      BLOB NOT NULL,
         mailbox       TEXT NOT NULL,
         uid_validity  INTEGER NOT NULL DEFAULT 1,
         uid_next      INTEGER NOT NULL DEFAULT 1,
         highestmodseq INTEGER NOT NULL DEFAULT 1,
+        pruned_modseq INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (actor_id, mailbox)
     );
 

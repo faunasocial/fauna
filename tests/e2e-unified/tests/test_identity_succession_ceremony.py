@@ -992,7 +992,7 @@ def test_after_the_recovery_a_contact_can_still_add_you_to_a_conversation(
 # `AccountRegistry` — the one delegation `refuse_secret_writes_for_test` needs.
 # The name table and the fault itself are shared Rust; each other app joins by
 # adding that single arm to its agent.
-_REFUSAL_DOOR_APPS = ("tui", "macos", "ios", "windows")
+_REFUSAL_DOOR_APPS = ("tui", "macos", "ios", "windows", "linux", "web")
 
 _HEX64 = re.compile(r"[0-9a-fA-F]{64}")
 
@@ -1080,11 +1080,15 @@ def test_a_key_this_device_cannot_store_stays_on_screen_until_you_leave(
         )
         shown = app.error_text()
         key = shown[len(prefix):]
-        assert _HEX64.fullmatch(key), (
+        # Booleans, never the strings: pytest's assertion rewrite prints both
+        # operands of a failed comparison, and these carry the key.
+        is_hex_key = _HEX64.fullmatch(key) is not None
+        assert is_hex_key, (
             "the message must end in the successor's 64-hex secret key — it is "
             f"the only way back into the account; reads {_redacted(shown)!r}"
         )
-        assert key not in (stolen_seed, held), (
+        is_new_key = key not in (stolen_seed, held)
+        assert is_new_key, (
             "the key shown must be the NEW identity's, not the stolen seed or "
             "the recovery kit just spent"
         )
@@ -1098,7 +1102,8 @@ def test_a_key_this_device_cannot_store_stays_on_screen_until_you_leave(
         # return the write has already been attempted — no timing involved.
         app.driver.click("settings-export-data-button")
         after = app.error_text()
-        assert after == shown, (
+        kept = after == shown
+        assert kept, (
             "a later write to the Account page's error slot replaced the only "
             f"copy of the new key; it now reads {_redacted(after)!r}"
         )

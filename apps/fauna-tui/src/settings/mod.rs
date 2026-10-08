@@ -2266,6 +2266,23 @@ pub fn atproto_resync_op(state: &SettingsState) -> Option<Op> {
         .map(|machine| Op::HydrateAtproto { machine, nest })
 }
 
+/// Re-read the Spam sub-page's training history off a *push* (or a reconnect)
+/// rather than a visit — `fauna_protocol::StaleSurfaces::mail_spam`: an undo or
+/// a reset on another device (`mail-spam.md` § Reset step 6, § Undo step 4).
+///
+/// The visit's own hydrate op, minus the visit's `reset_form` — a push must
+/// never disarm a confirm the user is looking at. `None` unless the Spam
+/// sub-page is the one shown (the flag is page-gated; a visit re-reads anyway)
+/// or before login (no machine).
+pub fn mail_spam_resync_op(state: &SettingsState) -> Option<Op> {
+    if state.sub != SubPage::MailSpam {
+        return None;
+    }
+    let machine = state.mail_spam.machine.clone()?;
+    let nest = state.nest.clone()?;
+    Some(Op::HydrateMailSpam { machine, nest })
+}
+
 /// Re-read the Connected apps page off the same push — the consent card moved
 /// there from the atproto page, and `list_pending_consents` is still the one
 /// source of the card set. A quiet push raises no event at all, which is why
@@ -7574,9 +7591,22 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             app.settings.mail_lists.reset_form();
             None
         }
+        // A List-Archive link off the user's own server arms Submit first (the
+        // two-click shape below, reused for a save that destroys nothing —
+        // `mail-mass-mailing.md` § Don't do these): the first press saves
+        // nothing, a second press on the same link saves.
         Action::MailListsSubmit { .. } => {
-            let machine = app.settings.mail_lists.machine.clone()?;
-            let action = app.settings.mail_lists.submit_action()?;
+            let l = &mut app.settings.mail_lists;
+            let machine = l.machine.clone()?;
+            let action = l.submit_action()?;
+            if let Some(url) = l.archive_needing_confirm()
+                && l.archive_confirm_armed.as_deref() != Some(url.as_str())
+            {
+                l.archive_confirm_armed = Some(url);
+                l.delete_armed = None;
+                return None;
+            }
+            l.archive_confirm_armed = None;
             Some(Op::MailListsDispatch { machine, action })
         }
         // The two-click inline confirm, the `MailAliasesDelete` shape: arming is
@@ -7586,6 +7616,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             let l = &mut app.settings.mail_lists;
             if l.delete_armed.as_deref() != Some(list_id_hex.as_str()) {
                 l.delete_armed = Some(list_id_hex);
+                l.archive_confirm_armed = None;
                 return None;
             }
             let machine = l.machine.clone()?;
@@ -13181,6 +13212,7 @@ fn apply_mail_lists_snapshot(app: &mut App, snapshot: MailListsSnapshot) {
     // click after a completed delete must not fall through onto a re-ordered
     // list — and this one cascades every member row.
     l.delete_armed = None;
+    l.archive_confirm_armed = None;
     l.snapshot = Some(snapshot);
 }
 

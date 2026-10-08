@@ -989,6 +989,9 @@ impl From<fauna_protocol::StaleSurfaces> for FfiStaleSurfaces {
             media: s.media,
             family: s.family,
             address_book: s.address_book,
+            // `s.mail_spam` (the spam page's training history) is not carried
+            // yet: no UniFFI app consumes it, and the field lands here together
+            // with the first native consumer, so the tracked bindings move once.
         }
     }
 }

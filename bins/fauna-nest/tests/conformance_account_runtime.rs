@@ -3549,6 +3549,7 @@ fn mem_factory(
                         listeners,
                     }),
                     bound_addrs: vec!["203.0.113.7:4711".parse().unwrap()],
+                    file_sync: None,
                 })
             })
         },

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The sell-this-post composer (monetization.md § Per-post pay-to-unlock): the price
+  shown to buyers, the machine asking price in whole sats (monetization.md § The
+  asking price) and whether the author's subscribers get the post free. Shown only
+  while "Sell this post…" is the compose-gate answer (FeedComposeBar's
+  UpdateSellFieldsVisibility). The whole composer, and that answer itself, sit inside
+  the payments plane: it is the paywall-designation gesture
+  (dynamic-features.md § Platform-family surface excision → The price-and-route
+  class). The answer is an option value, not an element, so it is gated in
+  FeedComposeBar's own `#if PAYMENTS` code, which this file cannot reach.
+
+  ⚠ THIS FILE IS PART OF THE EXCISION UNIT (see PaymentsAuthorSections.xaml's
+  header). FeedComposeBar's `#if PAYMENTS` code-behind builds it and drops it into
+  SellFieldsHost; nothing outside Views\Payments\ may name this type from markup.
+-->
+<UserControl
+    x:Class="FaunaApp.Views.Payments.SellComposeFields"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- Spacing mirrors FeedComposeBar's own StackPanel (4), which held these three
+         directly before the move. -->
+    <StackPanel Spacing="4">
+        <TextBox x:Name="PriceBox"
+                 AutomationProperties.AutomationId="{x:Bind ids:Ids.ComposeSellPrice}"
+                 AcceptsReturn="False" MaxLength="200" />
+        <!-- Whole-sats free text: the FFI call this feeds refuses an overflow rather
+             than truncating it, and an unparseable value is treated as empty (no
+             machine price, never an error), matching every other app's leg. -->
+        <TextBox x:Name="AskingPriceBox"
+                 AutomationProperties.AutomationId="{x:Bind ids:Ids.ComposeSellAskingPrice}"
+                 InputScope="Number" />
+        <CheckBox x:Name="SubscribersFreeCheck"
+                  AutomationProperties.AutomationId="{x:Bind ids:Ids.ComposeSellSubscribersFree}"
+                  IsChecked="True" />
+    </StackPanel>
+</UserControl>

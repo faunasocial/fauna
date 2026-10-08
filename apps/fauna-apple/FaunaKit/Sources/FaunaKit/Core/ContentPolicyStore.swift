@@ -23,17 +23,49 @@ public struct ContentPolicyInputs: Equatable {
     /// supervised viewer's policy read lands; always `false` for an
     /// unsupervised viewer (`contentPolicy == nil`).
     public var contentNotify: Bool
+    /// The ids the viewer hid by reporting them — posts, messages (record
+    /// digest) and accounts (actor id) — the `fauna.state.moderation` record's
+    /// hidden-content list (`moderation.md` § Corollary — block also hides).
+    /// A personal filter: the shared `content_render_for_item` answers
+    /// `reported` for an item in it, or whose author is in it.
+    public var hiddenContent: [String]
 
     public init(
         contentPolicy: FfiContentPolicy? = nil,
         ownSpamPermille: UInt16? = nil,
         ownPhishingPermille: UInt16? = nil,
-        contentNotify: Bool = false
+        contentNotify: Bool = false,
+        hiddenContent: [String] = []
     ) {
         self.contentPolicy = contentPolicy
         self.ownSpamPermille = ownSpamPermille
         self.ownPhishingPermille = ownPhishingPermille
         self.contentNotify = contentNotify
+        self.hiddenContent = hiddenContent
+    }
+
+    /// Whether the viewer's own report hides this item — the shared
+    /// `content_render_for_item` face, asked with the reported list alone so
+    /// the guardian/region/threshold composition stays where it already is.
+    /// Short-circuits for an empty list (nothing reported, no FFI call).
+    func isReported(itemId: String?, authorId: String?) -> Bool {
+        guard !hiddenContent.isEmpty, itemId != nil || authorId != nil else { return false }
+        return contentRenderForItem(
+            hiddenContent: hiddenContent, itemId: itemId ?? "", authorId: authorId, labels: [],
+            contentPolicy: nil, ownSpamPermille: nil, ownPhishingPermille: nil, regionPolicies: []
+        ).reported
+    }
+
+    /// The post body the card PAINTS, for the e2e state read — `""` for a post
+    /// the viewer's own report hides (the card paints "You reported this" and no
+    /// body), the document's plaintext otherwise. Apple's lazy feed list does not
+    /// register `feed-post-text` in-process, so the harness reads the feed from the
+    /// serialized state (`_use_state_for_feed_reads`); serializing the painted text
+    /// keeps that read equal to every other app's element read, where a hidden card
+    /// simply has no body element.
+    public func paintedBody(of post: PostSummary) -> String {
+        isReported(itemId: post.postId, authorId: post.author)
+            ? "" : renderDocumentToPlaintext(document: post.document)
     }
 
     /// The client render verdict for one item's `labels` — one of
@@ -75,11 +107,22 @@ public struct ContentPolicyInputs: Equatable {
     /// decision's `placeholder` is the region arm, painted AHEAD of the family
     /// arm. A nil `region` (a preview, a view test) falls back to the
     /// two-source `verdictFor`.
+    ///
+    /// The viewer's OWN report is the arm ahead of all three: an item they
+    /// reported (`reportKey`) or whose author they reported (`reportAuthor`) comes
+    /// back `block` with `reported` set, so the surface paints "You reported
+    /// this" and no body. The keys are the report subject's, NOT the render id —
+    /// a post's cid and author, a message's plane record DIGEST and sender actor
+    /// (`moderation.md` § Corollary); `nil` for an item with no report identity.
     @MainActor
     public func recordedRender(
-        itemId: String, labels: [ContentLabelEntry], region: RegionStore?, subject: RegionSubject
+        itemId: String, labels: [ContentLabelEntry], region: RegionStore?, subject: RegionSubject,
+        reportKey: String? = nil, reportAuthor: String? = nil
     ) -> RegionRenderDecision {
         GuardianNotifyCadence.shared.record(itemId: itemId, labels: labels, contentPolicy: contentPolicy)
+        if isReported(itemId: reportKey, authorId: reportAuthor) {
+            return RegionRenderDecision(verdict: "block", placeholder: nil, reported: true)
+        }
         if let region {
             return region.render(labels: labels, inputs: self, subject: subject)
         }
@@ -127,7 +170,20 @@ enum ContentPolicyReadResult<T> {
 public final class ContentPolicyStore {
     public private(set) var inputs = ContentPolicyInputs()
 
+    /// The shared report sheet's state — held here because the reporter-side
+    /// hide list above is this store's input, and a report filed from a card
+    /// the hide then replaces still has to paint its acknowledgement
+    /// (``ReportSheetStore``).
+    public let report = ReportSheetStore()
+
     public init() {}
+
+    /// Replace the reporter-side hide list (a `hide_reported` reply, or the
+    /// `load_hidden_content` read) — the stored list is the whole truth.
+    @MainActor
+    public func setHiddenContent(_ ids: [String]) {
+        inputs.hiddenContent = ids
+    }
 
     /// Restore (or clear) the guardian half from the persisted last-known
     /// supervision snapshot, ahead of the first `refresh` landing
@@ -146,6 +202,12 @@ public final class ContentPolicyStore {
         let half = Self.guardianHalf(of: snapshot)
         inputs.contentPolicy = half.policy
         inputs.contentNotify = half.notify
+        // The reporter-side hide list and the open report sheet are one
+        // account's (`account-scoping.md`): a departing account's reports must
+        // never hide, or be acknowledged on, the next one. The incoming
+        // account's list arrives with its `refresh`.
+        inputs.hiddenContent = []
+        report.reset()
         GuardianNotifyCadence.shared.setEnabled(inputs.contentNotify)
     }
 
@@ -202,6 +264,14 @@ public final class ContentPolicyStore {
 
         inputs = Self.merged(previous: inputs, policy: policyResult, own: ownResult)
 
+        // The reporter-side hide list, keep-on-failure like the halves above:
+        // a failed read leaves the last-known list in force. Awaited HERE, on
+        // the refresh trigger — never on a surface's mount path (web's first
+        // run hung the feed behind it).
+        if let hidden = try? await loadHiddenContent() {
+            inputs.hiddenContent = hidden
+        }
+
         // Guardian Notify's ward-side counting (family-safety.md § Guardian
         // Notify) — the SAME post-auth + reconnect trigger as this refresh,
         // matching linux/android/windows: `set_ward_content_notify` fires
@@ -237,6 +307,7 @@ public final class ContentPolicyStore {
             contentPolicy: contentPolicy,
             ownSpamPermille: ownSpamPermille,
             ownPhishingPermille: ownPhishingPermille,
-            contentNotify: contentNotify)
+            contentNotify: contentNotify,
+            hiddenContent: previous.hiddenContent)
     }
 }

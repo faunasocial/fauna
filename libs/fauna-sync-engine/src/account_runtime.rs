@@ -93,7 +93,7 @@ use tokio::sync::{broadcast, oneshot, watch};
 use crate::attested_predecessors::AttestedPredecessors;
 use crate::peer_leg::PeerLegState;
 pub use crate::peer_leg::{
-    DialPass, PeerLegBinding, PeerLegFactoryInputs, PeerLegPass, PeerTransportFactory,
+    DialPass, PeerFileSync, PeerLegBinding, PeerLegFactoryInputs, PeerLegPass, PeerTransportFactory,
 };
 use crate::principal_bundle::PrincipalSlot;
 use crate::principal_succession::WriterKeyProvenance;

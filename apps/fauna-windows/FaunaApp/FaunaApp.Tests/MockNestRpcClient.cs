@@ -3006,6 +3006,21 @@ internal sealed class MockNestRpcClient : INestRpcClient
             "MockNestRpcClient cannot build a FfiSyncAgentProvisioner (needs a live FfiNestClient).");
     }
 
+    /// <summary>What <see cref="BuildPushRegistrationAsync"/> hands back — a fake
+    /// <c>IFfiPushRegistration</c> a test sets; unset, the build throws like the
+    /// provisioner's (the real one needs a live <c>FfiNestClient</c>).</summary>
+    public IFfiPushRegistration? NextPushRegistration { get; set; }
+
+    public Task<IFfiPushRegistration> BuildPushRegistrationAsync(
+        string intentPath, string actorId, string deviceId)
+    {
+        _calls.Add($"BuildPushRegistration:{actorId}:{deviceId}");
+        return NextPushRegistration is { } registration
+            ? Task.FromResult(registration)
+            : throw new NotSupportedException(
+                "MockNestRpcClient cannot build a FfiPushRegistration (needs a live FfiNestClient).");
+    }
+
     /// <summary>What <see cref="ReseedCustodianStoreAsync"/> answers — the agent
     /// face itself needs a live <c>FfiNestClient</c>, so the mock stands in for
     /// the whole pass-through.</summary>
@@ -3265,8 +3280,9 @@ internal sealed class MockNestRpcClient : INestRpcClient
     /// <summary>What the three minting ceremonies hand back.</summary>
     public FfiMintedKit NextMintedKit { get; set; } = new FfiMintedKit(new string('a', 64), true, null);
 
-    /// <summary>What <see cref="SuccessionSucceedWithHeldKitAsync"/> hands back.</summary>
-    public FfiLandedSuccession NextLandedSuccession { get; set; } = MakeLandedSuccession();
+    /// <summary>What <see cref="SuccessionSucceedWithHeldKitAsync"/> hands back — the
+    /// ceremony's typed outcome, the landed arm by default.</summary>
+    public FfiStolenOutcome NextStolenOutcome { get; set; } = MakeStolenLanded(MakeLandedSuccession());
 
     /// <summary>What <see cref="RecoveryVetoPendingReplacementAsync"/> reports.</summary>
     public bool NextVetoCancelledSomething { get; set; } = true;
@@ -3314,12 +3330,12 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(1_700_000_000L);
     }
 
-    public Task<FfiLandedSuccession> SuccessionSucceedWithHeldKitAsync(string kitInput)
+    public Task<FfiStolenOutcome> SuccessionSucceedWithHeldKitAsync(string kitInput)
     {
         _calls.Add("SuccessionSucceedWithHeldKit");
         LastSuccessionKitInput = kitInput;
         Throw();
-        return Task.FromResult(NextLandedSuccession);
+        return Task.FromResult(NextStolenOutcome);
     }
 
     /// <summary>
@@ -3534,6 +3550,27 @@ internal sealed class MockNestRpcClient : INestRpcClient
             reviewRoster ?? Array.Empty<byte[]>(),
             sweepStateJson ?? "{\"kind\":\"ran\"}",
             succeededAt);
+
+    /// <summary>The stolen ceremony's <c>landed</c> arm: no sentence (its outcome is
+    /// the switch, or the persist-failure message <paramref name="landed"/>'s
+    /// <c>persisted</c> decides), never the seed flag.</summary>
+    public static FfiStolenOutcome MakeStolenLanded(FfiLandedSuccession landed) =>
+        new FfiStolenOutcome("landed", null, landed, false);
+
+    /// <summary>
+    /// One of the stolen ceremony's three arms that did not land the succession for
+    /// this device — <c>not-landed</c> / <c>landed-for-another</c> /
+    /// <c>undecided</c> — carrying its shared sentence as the dotted key + named args
+    /// the FFI hands over. <paramref name="carriesTheOnlySeed"/> is passed explicitly
+    /// rather than derived from <paramref name="key"/> ON PURPOSE, for the same
+    /// reason as <see cref="MakeRecoveryKitStatus"/>'s flags: it is the record's own
+    /// answer, and a mock that re-derived it would let a view model quietly do the
+    /// same.
+    /// </summary>
+    public static FfiStolenOutcome MakeStolenUnlanded(
+        string kind, string key, Dictionary<string, string> args, bool carriesTheOnlySeed = false) =>
+        new FfiStolenOutcome(
+            kind, new uniffi.fauna_core.LocalizedText(key, args), null, carriesTheOnlySeed);
 
     /// <summary>
     /// Build a <see cref="FfiCardRow"/> fixture with the common vCard fields

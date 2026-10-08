@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  `xcodebuild -exportArchive` options for the iOS App Store build: a signed
+  `.ipa` written to disk, NEVER uploaded (docs/goal/architecture/installers/ios.md
+  § Upload mechanics). Every key below keeps the export off Apple's servers:
+
+  * destination = export — the upload is a separate act from a recorded public
+    commit; it uses its OWN options file (or an -exportOptionsPlist override),
+    never an edit of this one.
+  * signingStyle = manual with the four App Store profiles named below — no
+    account session, so nothing can create or refresh a profile.
+  * manageAppVersionAndBuildNumber = false — true makes the exporter query App
+    Store Connect for build numbers; CFBundleVersion is pinned at 1 anyway.
+  * uploadSymbols = false — symbols only matter to an upload.
+
+  Pinned by tests/e2e-unified/tests/test_apple_identifier_pins.py.
+-->
+<dict>
+	<key>destination</key>
+	<string>export</string>
+	<key>manageAppVersionAndBuildNumber</key>
+	<false/>
+	<key>method</key>
+	<string>app-store-connect</string>
+	<key>provisioningProfiles</key>
+	<dict>
+		<key>social.fauna.fauna</key>
+		<string>Fauna AppStore social.fauna.fauna</string>
+		<key>social.fauna.fauna.FileProvider</key>
+		<string>Fauna AppStore social.fauna.fauna.FileProvider</string>
+		<key>social.fauna.fauna.FileProviderUI</key>
+		<string>Fauna AppStore social.fauna.fauna.FileProviderUI</string>
+		<key>social.fauna.fauna.Widget</key>
+		<string>Fauna AppStore social.fauna.fauna.Widget</string>
+	</dict>
+	<key>signingCertificate</key>
+	<string>Apple Distribution</string>
+	<key>signingStyle</key>
+	<string>manual</string>
+	<key>stripSwiftSymbols</key>
+	<true/>
+	<key>teamID</key>
+	<string>7457N3M72H</string>
+	<key>uploadSymbols</key>
+	<false/>
+</dict>
+</plist>

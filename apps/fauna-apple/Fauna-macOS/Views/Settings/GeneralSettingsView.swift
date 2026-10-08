@@ -1,19 +1,12 @@
 import SwiftUI
 import FaunaKit
-import Sparkle
 
 struct GeneralSettingsView: View {
     @Environment(MacAppState.self) private var appState
     @Environment(FaunaClient.self) private var client: FaunaClient?
     @State private var pushManager: PushManager?
 
-    // Optional cast: under XCUITest the delegate adaptor timing can leave
-    // NSApp.delegate as something other than AppDelegate at view-construction
-    // time. A forced cast crashes the whole app (SIGABRT, swift_dynamicCastFailure).
-    // When unavailable, hide the Updates section rather than crash.
-    private var updater: SPUUpdater? {
-        (NSApp.delegate as? AppDelegate)?.updaterController.updater
-    }
+    private var updates: UpdateCheck { appState.updates }
 
     var body: some View {
         @Bindable var state = appState
@@ -60,33 +53,28 @@ struct GeneralSettingsView: View {
                     }
             }
 
-            if let updater {
-                Section(L.settings.updates) {
-                    Toggle(L.settings.autoCheckUpdates,
-                           isOn: Binding(
-                            get: { updater.automaticallyChecksForUpdates },
-                            set: { updater.automaticallyChecksForUpdates = $0 }
-                           ))
+            // About: the version you are running and the newer-version check
+            // (`docs/features/app-version-and-updates.md`; `installers/README.md`
+            // § Knowing a newer version is out) — linux's General-page block, the
+            // same three ids. The check only tells you: no toggle, no download.
+            Section(L.settings.about) {
+                LabeledContent(L.settings.generalPage.version) {
+                    automationText(Ids.settingsAppVersion, updates.runningVersion)
+                        .textSelection(.enabled)
+                }
 
-                    Toggle(L.settings.autoDownloadUpdates,
-                           isOn: Binding(
-                            get: { updater.automaticallyDownloadsUpdates },
-                            set: { updater.automaticallyDownloadsUpdates = $0 }
-                           ))
-
-                    HStack {
-                        Text(L.settings.lastChecked)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        if let lastCheck = updater.lastUpdateCheckDate {
-                            Text(lastCheck, style: .relative)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Text(L.common.never)
-                                .foregroundStyle(.secondary)
-                        }
+                Button(updates.buttonLabel) { updates.check() }
+                    .disabled(updates.isChecking)
+                    .accessibilityIdentifier(Ids.settingsCheckUpdatesButton)
+                    .automationActivate(Ids.settingsCheckUpdatesButton,
+                                        isEnabled: { !updates.isChecking },
+                                        text: { updates.buttonLabel }) {
+                        updates.check()
                     }
-                    .font(.caption)
+
+                if let notice = updates.notice {
+                    automationText(Ids.updateAvailableNotice, notice)
+                        .textSelection(.enabled)
                 }
             }
         }

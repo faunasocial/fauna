@@ -145,9 +145,12 @@ impl fauna_client_conversations::BridgedKeys for WebBridgedKeys {
     }
 
     fn open_bridged(&self, sealed: &[u8], received_at_ms: i64) -> Option<String> {
+        // No retirement instants cross the JS seam yet: the whole set walks
+        // newest first (every generation still opens).
         fauna_client_conversations::open_bridged_row(
             &self.standing,
             &self.epoch_roots,
+            &[],
             sealed,
             received_at_ms,
         )
@@ -4298,11 +4301,15 @@ fn open_sealed_mail_record(
     // over the roots, then the standing arm over the complete key set (current
     // + grace generations, either suite per keypair), so standing-sealed and
     // pre-rotation mail open exactly as they do on every other app.
+    // No retirement instants cross the JS seam yet (`setRecipientKeypairs`
+    // carries the keypairs alone): the whole set walks newest first, which
+    // opens every generation — only the seal-time ordering is native-only.
     fauna_mail::open_inbound_record_with_keys(
         sealed_envelope,
         &epoch_roots,
         seal_instant,
         &keypairs,
+        &[],
     )
     .map_err(|e| OpenMiss::Unopenable(format!("open inbound record (uid {uid}): {e}")))
 }

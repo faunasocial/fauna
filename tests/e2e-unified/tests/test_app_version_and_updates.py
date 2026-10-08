@@ -28,15 +28,13 @@ Three outcomes, all walked on the Settings landing:
    mark until it does.
 
 **Columns.** Outcome 1 is owed on every app. Outcomes 2 and 3 are desktop + tui —
-absent by design on web, ios and android (the page's `absences`). tui and linux
-carry all three ids and are walked (the About block is the Settings root on tui,
-the General page on linux — `SettingsActions.navigate_to_about`). Windows and
-macOS are not a paint away: windows has no version row and its `UpdateService`
-keeps its own feed URL instead of the shared entry point; macOS shows no app
-version and its check is Sparkle, which owes the reshape ruled 2026-10-03 and an
-FFI face for `fauna_client::update_look`. So this walk `skip_unbuilt`s them
-rather than marking the module tui + linux: the day each is built, the skip
-falls away and the same walk witnesses it.
+absent by design on web, ios and android (the page's `absences`). tui, linux and
+macOS carry all three ids and are walked (the About block is the Settings root on
+tui, the General page on linux and macOS — `SettingsActions.navigate_to_about`).
+Windows is not a paint away: it has no version row and its `UpdateService` keeps
+its own feed URL instead of the shared entry point. So this walk `skip_unbuilt`s
+it rather than marking the module per app: the day it is built, the skip falls
+away and the same walk witnesses it.
 """
 
 from __future__ import annotations
@@ -125,13 +123,12 @@ def _skip_unless_the_update_ids_are_painted(app) -> None:
             capability="the newer-version notice",
             doc="docs/goal/architecture/installers/README.md § Knowing a newer version is out",
         )
-    if driver.is_windows() or driver.is_macos():
+    if driver.is_windows():
         skip_unbuilt(
             driver,
             surface="settings-check-updates-button / update-available-notice",
-            detail="windows' check keeps its own feed URL and owes the sign-in look; "
-                   "macOS's is Sparkle, owing the 2026-10-03 reshape and an FFI face "
-                   "for the shared update_look — neither carries the ids yet",
+            detail="windows' check keeps its own feed URL and owes the sign-in look — "
+                   "it does not carry the ids yet",
             tracked=_TRACKED,
         )
 
@@ -139,12 +136,12 @@ def _skip_unless_the_update_ids_are_painted(app) -> None:
 @pytest.mark.feature("app-version-and-updates")
 def test_settings_shows_the_version_you_are_running(logged_in_app):
     app = logged_in_app
-    if app.driver.is_windows() or app.driver.is_macos():
+    if app.driver.is_windows():
         skip_unbuilt(
             app.driver,
             surface="settings-app-version",
-            detail="neither windows' About section nor macOS shows the app's version "
-                   "yet — a row to build, not an id to paint",
+            detail="windows' About section does not show the app's version yet — "
+                   "a row to build, not an id to paint",
             tracked=_TRACKED,
         )
     app.settings.navigate_to_about()

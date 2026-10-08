@@ -315,6 +315,8 @@ fn persistable(compose: &ComposeState) -> ComposeState {
         recipient_picker: compose.recipient_picker.as_ref().map(persistable_picker),
         // ---- transient: never rests ----
         send_state: SendState::Idle,
+        // Derived from the nest's figures; re-derived after a restore.
+        list_send: None,
     }
 }
 

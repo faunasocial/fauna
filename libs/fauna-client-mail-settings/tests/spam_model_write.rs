@@ -994,6 +994,51 @@ async fn a_refused_deposit_finds_the_mint_already_recorded() {
     assert_eq!(stored.grant_events[0].kind, GrantEventKind::Mint);
 }
 
+/// Record, publish, then deposit (`ui/nests.md` § Trust facet — grants →
+/// *Record-then-deposit*, the published form): a `Mint` the bound nest did not
+/// acknowledge deposits no blob — a sibling replica could not yet read the
+/// event its reconcile sweep judges the row by. The event stays recorded
+/// locally, the recoverable direction.
+#[tokio::test]
+async fn an_unpublished_mint_deposits_nothing() {
+    let (_holder_secret, holder_public) = holder_keys();
+    let (_secret, public) = recipient_keys();
+    let mut start = SpamModel::new();
+    start.train_spam("buy cheap pills now");
+    let sealed_start = seal_to_recipient(&start.to_bytes(), &public)
+        .expect("seal start")
+        .to_canonical_bytes()
+        .expect("encode");
+
+    let (machine, nest, cfg) = build(&[SPAM_MODEL_SEALED_AT_REST], true);
+    {
+        let mut s = nest.state();
+        s.spam_model = Some(sealed_start);
+        s.contribute_baseline = true;
+        s.holder_seal_target = Some(HolderSealTarget {
+            x25519_pubkey: holder_public.to_vec(),
+            mlkem_ek: None,
+            ..Default::default()
+        });
+    }
+    cfg.publish_refuses(true);
+
+    machine
+        .attach_and_mint_baseline_grant()
+        .await
+        .expect_err("an unacknowledged Mint refuses the opt-in");
+
+    assert!(
+        nest.state().minted_grants.is_empty(),
+        "no blob deposited behind an unpublished event"
+    );
+    assert_eq!(
+        cfg.current().grant_events.len(),
+        1,
+        "the Mint stays recorded"
+    );
+}
+
 #[tokio::test]
 async fn opt_out_revokes_the_open_grant_and_logs_it() {
     // Opt in first (mint), then opt out (revoke) — the OFF half of the toggle.

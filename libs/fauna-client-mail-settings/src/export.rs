@@ -806,20 +806,23 @@ pub struct StandingKeyRecordOpener {
     standing: Vec<fauna_mls::wrapped_blob::StandingMailKeypair>,
     /// Newest generation first, aligned with `standing`.
     epoch_roots: Vec<zeroize::Zeroizing<[u8; 32]>>,
+    /// Each prior generation's retirement instant, aligned with `standing[1..]`
+    /// — the seal-time trial order.
+    retired_at_unix: Vec<u64>,
 }
 
 impl StandingKeyRecordOpener {
     /// Derive the opener from the account's MSEK history — the current MSEK
-    /// first, then each retained grace generation (capped by the shared
-    /// derivation, never here).
-    pub fn from_msek_history(mseks: &[[u8; 32]]) -> Self {
+    /// first, then every retired generation (uncapped) — with each prior's
+    /// retirement instant (`retired_at_unix`, aligned with `mseks[1..]`).
+    pub fn from_msek_history(mseks: &[[u8; 32]], retired_at_unix: &[u64]) -> Self {
         Self {
             standing: fauna_mls::wrapped_blob::derive_standing_mail_keypairs(mseks),
             epoch_roots: mseks
                 .iter()
-                .take(fauna_mls::wrapped_blob::SNAPSHOT_GRACE_KEYPAIRS)
                 .map(fauna_mls::wrapped_blob::derive_mail_epoch_root)
                 .collect(),
+            retired_at_unix: retired_at_unix.to_vec(),
         }
     }
 }
@@ -832,6 +835,7 @@ impl MailRecordOpening for StandingKeyRecordOpener {
             &roots,
             seal_instant,
             &self.standing,
+            &self.retired_at_unix,
         )
         .map_err(|e| DispatchError::InvalidState(format!("open record: {e}")))
     }
@@ -2630,9 +2634,10 @@ mod tests {
             mint_export_session_key_for(&self.msek, &ACTOR)
         }
         async fn export_record_opener(&self) -> Result<Arc<dyn MailRecordOpening>, DispatchError> {
-            Ok(Arc::new(StandingKeyRecordOpener::from_msek_history(&[
-                self.msek,
-            ])))
+            Ok(Arc::new(StandingKeyRecordOpener::from_msek_history(
+                &[self.msek],
+                &[],
+            )))
         }
         async fn unwrap_export_session_key(
             &self,

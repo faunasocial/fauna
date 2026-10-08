@@ -141,7 +141,7 @@ MAX_MLS_REPLICA_BYTES = 2 * 1024 * 1024 - 64 * 1024
 
 
 def test_replica_put_rejects_oversize_blob(nest_instance):
-    """Finding 1: a sealed blob over `MAX_MLS_REPLICA_BYTES` is rejected with the
+    """A sealed blob over `MAX_MLS_REPLICA_BYTES` is rejected with the
     clean `fauna.mls.too_large` domain error (defense-in-depth vs. a raw WS-frame
     drop); a blob exactly at the cap still fits under the 2 MiB frame — the 64 KiB
     envelope headroom — and is accepted."""

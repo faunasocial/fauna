@@ -3,6 +3,7 @@ package com.fauna.app.core.conversations
 import com.fauna.app.core.NotificationHelper
 import com.fauna.app.core.ShellLog
 import com.fauna.app.testing.TestAgent
+import com.fauna.app.widget.WidgetUnreadPublisher
 import com.fauna.ffi.FfiContactOverlays
 import com.fauna.ffi.FfiDraftsSync
 import com.fauna.ffi.FfiNestClient
@@ -46,6 +47,7 @@ import javax.inject.Singleton
 @Singleton
 class ConversationsManagerHost @Inject constructor(
     notifications: NotificationHelper,
+    private val widget: WidgetUnreadPublisher,
 ) {
     private val _snapshot = MutableStateFlow<ConversationsSnapshot?>(null)
 
@@ -223,10 +225,13 @@ class ConversationsManagerHost @Inject constructor(
     // the composition context, so no explicit main-thread marshaling is needed
     // (unlike the Windows INotifyPropertyChanged path). The same notification
     // re-arms the debounced draft autosave (a cheap no-op when no draftsSync is
-    // attached or the snapshot is unchanged) and runs one banner tick.
+    // attached or the snapshot is unchanged), runs one banner tick, and
+    // publishes the home-screen widget's count — the shared fold over every
+    // thread, never this snapshot's list, which a typed search narrows.
     private val observer = object : SnapshotObserver {
         override fun `onChanged`() {
             _snapshot.value = manager.snapshot()
+            publishWidgetCount()
             scheduleDraftsSave()
             banners.tick(manager)
             refreshOverlays()
@@ -243,6 +248,45 @@ class ConversationsManagerHost @Inject constructor(
         TestAgent.installMockBackendsIfE2E(bareManager)
         bareManager.addObserver(observer)
         _snapshot.value = bareManager.snapshot()
+    }
+
+    /**
+     * Publish the live manager's unread total for the home-screen widget
+     * (`apps/android.md` § App Widgets): `unreadTotal()`, the shared
+     * `fauna_conversations` fold every app's outside-the-app surface reads.
+     */
+    private fun publishWidgetCount() {
+        widget.publish(manager.unreadTotal().toInt())
+    }
+
+    /**
+     * The widget refresh pass [com.fauna.app.widget.WidgetDataWorker] runs: one
+     * receive pass over the live session (`pollConversations` + `pollMail`, the
+     * reconnect backstop the receive loop also ticks), whose ingest ticks
+     * [observer] and so publishes the count, then the total it left behind —
+     * the apple `ConversationsVM.receivePass` twin. `null` when no session is
+     * live (a process the OS started cold for the worker, or signed out): then
+     * the widget is repainted from the last published count, never from the
+     * bare manager's zero.
+     */
+    suspend fun widgetRefreshPass(): Int? {
+        val session = conversationsSession ?: run {
+            widget.rerender()
+            return null
+        }
+        try {
+            session.pollConversations()
+        } catch (e: Exception) {
+            ShellLog.i("FaunaWidget", "background conversations poll failed: ${e.message}")
+        }
+        try {
+            session.pollMail()
+        } catch (e: Exception) {
+            ShellLog.i("FaunaWidget", "background mail poll failed: ${e.message}")
+        }
+        val total = manager.unreadTotal().toInt()
+        widget.publish(total)
+        return total
     }
 
     /**
@@ -317,6 +361,7 @@ class ConversationsManagerHost @Inject constructor(
             sessionManager = m
             m.addObserver(observer)
             _snapshot.value = m.snapshot()
+            publishWidgetCount()
             receiveLoopJob = draftsScope.launch { session.startReceiveLoop() }
         }
         refreshOverlays()
@@ -368,6 +413,7 @@ class ConversationsManagerHost @Inject constructor(
             // tracker seeds on them silently (MessageBannerObserver's reset doc).
             banners.resetForIdentityChange()
             _snapshot.value = bareManager.snapshot()
+            publishWidgetCount()
         }
         refreshOverlays()
     }

@@ -36,7 +36,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use fauna_account_store::{sqlite::SqliteBackend, store::AccountStore, types::WriterId};
 use fauna_client::NestClient;
 use fauna_client_capabilities::custody_grants::{custody_event_scopes, custody_mint_blob};
-use fauna_client_capabilities::grant_log::{self, RecordedGrants};
+use fauna_client_capabilities::grant_log::{self, PublishedGrants};
 use fauna_client_capabilities::rpc::CapabilitiesClient;
 use fauna_core::crypto::{AccountStateKeySchedule, BackupKey};
 use fauna_core::custody_grant::{
@@ -220,11 +220,16 @@ async fn mint_custody_row_windowed(
     )
     .expect("record the Mint event");
     // The grant log is the succession ledger; the Mint is recorded before
-    // the release, exactly as a minting machine records it.
+    // the release, exactly as a minting machine records it. This test drives
+    // the nest's custody door, not the grant-mint door, so the log stands in
+    // for one the bound nest acknowledged (the door itself is pinned over a
+    // real account runtime in `conformance_capability_reconcile_sweep_pass.rs`).
     let stored = log;
     let blob_bytes = undeposited
-        .release(&RecordedGrants::from_stored(&stored))
-        .expect("released against the stored log");
+        .release(&PublishedGrants::from_published(
+            &fauna_client_config::PublishedLedger::acknowledged_for_test(stored),
+        ))
+        .expect("released against the published log");
     let reply = CapabilitiesClient::new(Arc::clone(nest))
         .mint(blob_bytes)
         .await

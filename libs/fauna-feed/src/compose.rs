@@ -212,20 +212,31 @@ impl FeedComposeState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SellComposeState {
-    /// `compose-sell-price` — free text, handed to `prepare_sell_post` as the
+    /// The sold post's free-text price, handed to `prepare_sell_post` as the
     /// minted tier's `price_hint` (display-only, the zero-integration floor of
     /// `monetization.md` § Deliberate generality bounds).
+    // `payments`-gated doc lines on this record: the ids are the price-and-route
+    // class (`dynamic-features.md` § Platform-family surface excision), and a
+    // UniFFI record's field docstrings ride every artifact (criterion 1, prose
+    // included) — gate the line, never reword it (`snapshot.rs`, the note on
+    // `PostSummary::tips`).
+    #[cfg_attr(feature = "payments", doc = " The input is `compose-sell-price`.")]
     pub price: String,
-    /// `compose-sell-asking-price` — free text, parsed as a whole-sats `u64`
+    /// The machine-comparable whole-sats price — free text, parsed as a `u64`
     /// and handed to `prepare_sell_post`'s `asking_price_sats`. Independent of
     /// `price` (the free-text hint above) — no parsing ever infers one from
     /// the other (`monetization.md` § The asking price). Empty means no
     /// machine price: the minted tier stays a tip target forever, never a
     /// purchase. `#[serde(default)]` so an on-disk draft saved before this
     /// field existed still deserializes.
+    // `payments`-gated doc line — see `price` above.
+    #[cfg_attr(
+        feature = "payments",
+        doc = " The input is `compose-sell-asking-price`."
+    )]
     #[serde(default)]
     pub asking_price: String,
-    /// `compose-sell-subscribers-free` — the single ratified rank knob
+    /// The single ratified rank knob
     /// (`monetization.md:126`). `true` mints the unlock tier at rank 1, inside
     /// every paid subscription; `false` mints it above the author's highest
     /// regular rank (pure pay-per-view).
@@ -235,6 +246,11 @@ pub struct SellComposeState {
     /// would reasonably cover, so pay-per-view is the deliberate opt-in. This
     /// is why the type carries a hand-written [`Default`] rather than deriving
     /// one.
+    // `payments`-gated doc line — see `price` above.
+    #[cfg_attr(
+        feature = "payments",
+        doc = " The checkbox is `compose-sell-subscribers-free`."
+    )]
     pub subscribers_get_it_free: bool,
 }
 

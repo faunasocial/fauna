@@ -1850,7 +1850,13 @@ public class APIClient {
             secret: hex_to_data(secret),
             deviceId: hex_to_data(deviceId),
             stateDir: stateDir,
-            deviceLabel: deviceLabel
+            deviceLabel: deviceLabel,
+            // The registry, so every engine this host builds carries the
+            // account's PAIRED predecessor chain, resolved in Rust off this
+            // session's own actor: a row a retired identity signed opens under
+            // that identity's root (`writer-signed-change-records.md` ruling
+            // (8)(c)). Handed none, the host proves the link by the walk only.
+            accounts: FaunaAccounts.registry()
         )
     }
 
@@ -1977,7 +1983,13 @@ public class APIClient {
             deviceLabel: deviceLabel,
             spawner: spawner,
             bearerSource: bearerSource,
-            reachabilityObserver: reachabilityObserver
+            reachabilityObserver: reachabilityObserver,
+            // The registry, from which Rust resolves the capability's
+            // `predecessor_keys_by_actor` — each retired key PAIRED with its
+            // identity, so the agent offers a predecessor-signed row only that
+            // predecessor's root (`sync-agent-credentials.md` § Credential
+            // model). The two flat lists above stay: the face takes both.
+            accounts: FaunaAccounts.registry()
         )
         return provisioner
     }
@@ -2009,6 +2021,21 @@ public class APIClient {
     public func devicesMachine(observer: DevicesObserver) async throws -> DevicesMachine {
         let nest = try await ensureNestConnected()
         let machine = buildDevicesMachine(nest: nest, observer: observer)
+        // READ-side custody for a successor: the registry's PAIRED predecessor
+        // chain, widening the label custody the build wired. A succession
+        // re-points an owned set to the successor and re-seals nothing, so its
+        // name still rests under the predecessor's owner root; unwired, the
+        // successor's Folders page drops every set it inherited
+        // (`succession-aftermath.md` § Re-key scope, the `BackupKey` corpus row).
+        // Never a seal root. The Media seat's twin (`MediaMachineVM.configure`);
+        // windows' `BuildDevicesMachineAsync`. Empty for an identity that never
+        // succeeded.
+        if let actorId = boundActorIdHex {
+            let chain = FaunaAccounts.registry().predecessorChain(actorId: actorId)
+            if !chain.actorIds.isEmpty {
+                machine.setPredecessorChain(actorIds: chain.actorIds, keys: chain.keys)
+            }
+        }
         // Inject the MLS join-filter the machine uses to decide which *shared-with-me*
         // (`role == "member"`) folders may surface. The nest returns ROSTERED members
         // — it cannot observe an MLS group join (client-side crypto) — so the machine

@@ -1535,6 +1535,60 @@ impl AccountDriver {
                                 return ServeEnd::Reassemble;
                             }
                         }
+                        // The grant-mint door's publish: the local-write
+                        // wake's step, run now on every role (a non-holder's
+                        // own rows are its own to publish), then the one
+                        // question the mint asks — does any ledger row this
+                        // device wrote still sit above its published
+                        // high-water?
+                        Cmd::PublishLedger { reply } => {
+                            *publish_due = false;
+                            let outcome = contained_pump(
+                                "publish-ledger",
+                                None,
+                                sign_out,
+                                &mut drive!(),
+                                publish_step(planes),
+                            )
+                            .await;
+                            let Ok(report) = outcome else {
+                                let _ = reply.send(Err(
+                                    "the account runtime reassembled during the publish".into(),
+                                ));
+                                return ServeEnd::Reassemble;
+                            };
+                            log_pump("publish-ledger", &report);
+                            if report.stale_writer {
+                                let _ = reply.send(Err(
+                                    "the writer was rotated under this process; the publish \
+                                     retries after reassembly"
+                                        .into(),
+                                ));
+                                tracing::info!(
+                                    "account runtime: reassembling — the writer was rotated \
+                                     under this process (publish-ledger)"
+                                );
+                                return ServeEnd::Reassemble;
+                            }
+                            let owed = planes
+                                .fleet
+                                .owes_own_state(|kind, _| {
+                                    kind == fauna_protocol::merge_policy::KIND_SUCCESSION_LEDGER
+                                })
+                                .await;
+                            let _ = reply.send(match owed {
+                                Ok(false) => Ok(()),
+                                Ok(true) if report.errors.is_empty() => {
+                                    Err("the bound nest has not acknowledged the grant log yet"
+                                        .into())
+                                }
+                                Ok(true) => Err(format!(
+                                    "the bound nest did not acknowledge the grant log: {}",
+                                    report.errors.join("; ")
+                                )),
+                                Err(e) => Err(format!("reading the unpublished rows: {e:#}")),
+                            });
+                        }
                         // The explicit pass barrier: answered here, between
                         // passes, after every command parked before it.
                         Cmd::Settled { reply } => {

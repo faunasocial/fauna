@@ -96,6 +96,11 @@ test-helpers = [
   # transport's pace override and report counter, the shared counters, and the
   # sweep loop's wake.
   "fauna-rpc-wasm/test-helpers",
+  # The registry's secret-write fault check (`write_secret_slot`), so the
+  # stolen-identity ceremony this chunk runs honours the
+  # `refuse_secret_writes_for_test` fault `fauna-wasm-onboarding`'s door arms
+  # in the shared localStorage backing. Forwarded, rule (b).
+  "fauna-client-accounts/test-helpers",
   "dep:fauna-e2e-contract",
   "dep:tokio",
 ]
