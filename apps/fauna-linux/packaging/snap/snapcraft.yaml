@@ -1,7 +1,7 @@
 name: fauna
 # The product version — must equal the root Cargo.toml [workspace.package]
 # version (product-version.md; version-lockstep merge gate).
-version: '0.1.2'
+version: '0.1.3'
 summary: Decentralized social communication
 description: |
   End-to-end encrypted messaging, group chat, calendar, file sync,

@@ -243,8 +243,32 @@ struct MailListAddSheet: View {
     @State private var perSend = ""
     @State private var submitting = false
     @State private var error: String?
+    /// The archive URL the Submit is armed for (two-click confirm,
+    /// `architecture/apps/common.md` § Two-click confirm): the first press on an
+    /// off-server link saves nothing and asks; a second press on the SAME URL
+    /// saves. Keyed on the URL, so editing the link disarms it.
+    @State private var armedArchiveUrl: String?
 
     private var isEditing: Bool { editing != nil }
+
+    private var trimmedArchiveUrl: String { listArchiveUrl.trimmingCharacters(in: .whitespaces) }
+
+    /// Whether the link points off the user's own server and has not been
+    /// confirmed yet — the shared predicate, never re-derived here.
+    private var archiveNeedsConfirm: Bool {
+        archiveUrlNeedsConfirm(
+            archiveUrl: trimmedArchiveUrl,
+            savedArchiveUrl: editing?.listArchiveUrl,
+            localDomains: vm.localDomains)
+    }
+
+    private var submitArmed: Bool { armedArchiveUrl != nil && armedArchiveUrl == trimmedArchiveUrl }
+
+    private var submitLabel: String {
+        if submitting { return "…" }
+        if submitArmed { return L.mailLists.archiveOffServerConfirm }
+        return isEditing ? L.common.save : L.mailLists.submit
+    }
 
     var body: some View {
         Form {
@@ -292,14 +316,16 @@ struct MailListAddSheet: View {
             }
 
             Section {
-                Button(submitting ? "…" : (isEditing ? L.common.save : L.mailLists.submit)) {
+                Button(submitLabel) {
                     Task { await submit() }
                 }
                 .disabled(submitting || name.trimmingCharacters(in: .whitespaces).isEmpty)
                 .accessibilityIdentifier(Ids.mailListsAddSheetSubmitButton)
                 .automationActivate(
                     Ids.mailListsAddSheetSubmitButton,
-                    isEnabled: { !submitting && !name.trimmingCharacters(in: .whitespaces).isEmpty }
+                    isEnabled: { !submitting && !name.trimmingCharacters(in: .whitespaces).isEmpty },
+                    // The armed/unarmed label is what the journey reads.
+                    text: { submitLabel }
                 ) { Task { await submit() } }
                 // `submit()` branches on this same `editing != nil` — the
                 // aliases-submit case one level over (tui's `MailListsSubmit` is
@@ -327,6 +353,11 @@ struct MailListAddSheet: View {
     }
 
     private func submit() async {
+        if archiveNeedsConfirm && !submitArmed {
+            // The first press only asks: nothing is saved.
+            armedArchiveUrl = trimmedArchiveUrl
+            return
+        }
         submitting = true
         defer { submitting = false }
         let domain = vm.localDomains.indices.contains(domainIndex) ? vm.localDomains[domainIndex] : ""
@@ -346,6 +377,7 @@ struct MailListAddSheet: View {
             action = .create(draft: draft)
         }
         await vm.dispatch(action)
+        armedArchiveUrl = nil
         if let e = vm.errorMessage { error = e } else { dismiss() }
     }
 }

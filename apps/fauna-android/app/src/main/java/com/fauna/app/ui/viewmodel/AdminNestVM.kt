@@ -296,11 +296,74 @@ class AdminNestVM @Inject constructor(
         }
     }
 
+    // ── Reports queue (`admin-nest-reports-section`; moderation.md § User-initiated
+    // reporting → *Where it lands*) ──
+    // The open reports waiting for an admin, already folded into rows by the
+    // shared `queue_row_view`. Read in the page's load but OUTSIDE `hydrate()`'s
+    // one `try`, so a failed read never blanks the page's error surface.
+
+    /** [rows] is the queue; [loaded] is the bit the empty line paints off (loading
+     *  is not empty — `ui/README.md` § List pages); [status] is the verdict line of
+     *  the last resolve or failed read — its own element, never `error-message`. */
+    data class ReportsState(
+        val rows: List<com.fauna.ffi.FfiReportQueueRow> = emptyList(),
+        val loaded: Boolean = false,
+        val status: String? = null,
+    )
+
+    val reports = MutableStateFlow(ReportsState())
+
+    /** `admin-nest-report-open-takedown-button`'s payload, consumed once by
+     *  `TakedownSection` (which owns the console's draft fields as local Compose
+     *  state): the content id and kind to pre-fill, with NO citation, so the
+     *  console's own guard still stands. */
+    val takedownPrefill = MutableStateFlow<com.fauna.ffi.FfiTakedownPrefill?>(null)
+
+    /** Read the open reports (`fauna.moderation.abuse_report.queue`). */
+    fun loadReports() {
+        viewModelScope.launch {
+            try {
+                val rows = api.abuseReportQueue()
+                reports.update { it.copy(rows = rows, loaded = true) }
+            } catch (e: Exception) {
+                val verdict = com.fauna.ffi.reportResolveVerdict(false, e.message ?: e.toString())
+                reports.update { it.copy(status = resolveLocalized(appContext, verdict)) }
+            }
+        }
+    }
+
+    /** `admin-nest-report-acted-button` / `-dismiss-button` — record the outcome (a
+     *  record, never an action: acting is the takedown console or a suspension),
+     *  then re-read so the row leaves the queue. */
+    fun resolveReport(row: com.fauna.ffi.FfiReportQueueRow, acted: Boolean) {
+        viewModelScope.launch {
+            val verdict = try {
+                api.abuseReportResolve(row.reportId, acted)
+                com.fauna.ffi.reportResolveVerdict(acted, null)
+            } catch (e: Exception) {
+                com.fauna.ffi.reportResolveVerdict(acted, e.message ?: e.toString())
+            }
+            reports.update { it.copy(status = resolveLocalized(appContext, verdict)) }
+            loadReports()
+        }
+    }
+
+    /** `admin-nest-report-open-takedown-button` — pre-fill the legal-takedown console
+     *  from the row's subject (`reportTakedownPrefill`). */
+    fun openReportTakedown(row: com.fauna.ffi.FfiReportQueueRow) {
+        com.fauna.ffi.reportTakedownPrefill(row.subject)?.let { takedownPrefill.value = it }
+    }
+
+    fun consumeTakedownPrefill() {
+        takedownPrefill.value = null
+    }
+
     init {
         hydrate()
         hydrateNatMode()
         hydrateRegion()
         hydrateOauthKeys()
+        loadReports()
     }
 
     /** Re-render the three NAT StateFlows from the machine's current snapshot
@@ -558,6 +621,10 @@ class AdminNestVM @Inject constructor(
                 // session rails. The custodian push loop in particular held a
                 // host bound to the now-wiped nest.
                 actorScope.dropActorScopedState()
+                // The succession hand-off's ONE clear point: it exists to
+                // survive a switch teardown, and a reset leaves no successor,
+                // predecessor or sweep to describe.
+                com.fauna.app.core.SuccessionHandoff.clearOnFactoryReset()
                 onComplete()
             } catch (e: Exception) {
                 // The box is untouched on a failed reset.
@@ -739,6 +806,31 @@ class AdminNestVM @Inject constructor(
                 oauthCallFailed(e)
             }
             finishOauthCall(verdict)
+        }
+    }
+
+    companion object {
+        /**
+         * One queue row's line — `reason · kind id · origin · when — note — “excerpt”`
+         * (web's `reportLine`, tui's `reports_elements`, apple's `reportLine`: the e2e
+         * reads this text on every app). [resolve] maps a shared [LocalizedText] to the
+         * user's words.
+         */
+        fun reportLine(row: com.fauna.ffi.FfiReportQueueRow, resolve: (LocalizedText) -> String): String {
+            val (kind, id) = when (val s = row.subject) {
+                is com.fauna.ffi.FfiReportSubject.Post -> "post" to s.cid
+                is com.fauna.ffi.FfiReportSubject.Message -> "message" to s.recordCid
+                is com.fauna.ffi.FfiReportSubject.Actor -> "actor" to s.actorId
+                is com.fauna.ffi.FfiReportSubject.Unknown -> "unknown" to ""
+            }
+            // `created_at` is microseconds since the epoch.
+            val whenText = java.text.DateFormat
+                .getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT)
+                .format(java.util.Date(row.createdAt / 1_000))
+            val text = StringBuilder("${resolve(row.reason)} · $kind $id · ${resolve(row.origin)} · $whenText")
+            row.note?.takeIf { it.isNotEmpty() }?.let { text.append(" — ").append(it) }
+            row.excerpt?.takeIf { it.isNotEmpty() }?.let { text.append(" — “").append(it).append("”") }
+            return text.toString()
         }
     }
 }

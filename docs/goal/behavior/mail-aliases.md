@@ -636,7 +636,7 @@ sheet reopens**, so a stale batch's summary never greets the next paste.
 `mail_aliases.import_invalid_line` i18n string — no app shows the bare
 counts summary anymore.
 
-`kind = 'exact'` storage ships in I4 (tracked internally — finding #1; the
+`kind = 'exact'` storage ships in I4 (tracked internally; the
 Admin-class write that shipped with it was removed 2026-10-03, § Cross-actor
 isolation). At that point:
 
@@ -833,10 +833,11 @@ internally, § N3) having landed, which it has):
   fleet-wide slice through the shared machine, not a per-app one.
 - **The add sheet's Disposable choice** (§ Layout: the kind picker's third
   option, with the ttl/uses inputs its mint takes) is built on **android**
-  and, since 2026-10-05, **tui** (the picker steps Exact → Wildcard →
+  and, since 2026-10-05, **tui**, and since 2026-10-08 on **macOS and iOS**
+  (one FaunaKit sheet; the picker steps Exact → Wildcard →
   Disposable and carries the selection as its `kind` attr; Disposable hides
   the pattern and the per-alias controls and dispatches `GenerateDisposable
-  { ttl_days, uses, label }`). Apple's inputs are disabled, web sends null,
+  { ttl_days, uses, label }`). Web sends null,
   and linux and windows keep the pair hidden and mint only via the generate
   button with the defaults.
 

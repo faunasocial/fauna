@@ -135,3 +135,102 @@ where
     }
     sweep
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use fauna_account_store::memory::MemoryBackend;
+    use fauna_account_store::types::WriterId;
+
+    use super::*;
+
+    const ACCOUNT: ActorId = ActorId([0x11; 32]);
+    const DEPOSITED: [u8; 16] = [0x42; 16];
+
+    /// Records every kind sent and refuses each, so a revoke the judge fires
+    /// is visible however the nest would have answered it.
+    #[derive(Clone, Default)]
+    struct Nest {
+        sent: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl RpcRequester for Nest {
+        type Error = String;
+        async fn request<Req, Reply>(&self, kind: &'static str, _: Req) -> Result<Reply, String>
+        where
+            Req: serde::Serialize,
+            Reply: serde::de::DeserializeOwned,
+        {
+            self.sent.lock().unwrap().push(kind);
+            Err(format!("{kind}: refused by the test nest"))
+        }
+    }
+
+    async fn store() -> AccountStore<MemoryBackend> {
+        AccountStore::open(
+            MemoryBackend::new(),
+            &fauna_core::hex32::encode(&ACCOUNT.0),
+            WriterId([0x33; 32]),
+        )
+        .await
+        .expect("open the in-memory store")
+    }
+
+    async fn judge(walk: &WalkReport) -> (CapabilitySweep, Vec<&'static str>, Vec<String>) {
+        let store = store().await;
+        let nest = Nest::default();
+        let mut errors = Vec::new();
+        let sweep = judge_and_revoke(
+            &store,
+            &nest,
+            Some(ACCOUNT),
+            Enumerated::Ids(vec![DEPOSITED]),
+            Some(walk),
+            &mut errors,
+        )
+        .await;
+        let sent = nest.sent.lock().unwrap().clone();
+        (sweep, sent, errors)
+    }
+
+    /// The *only where the walk is* "never" for an unkeyed replica
+    /// (`ui/nests.md` § Trust facet — grants → *Reconcile*): a walk that left
+    /// a row unopened for want of its generation key may have left a
+    /// sibling's ledger row — and the `Mint` it carries — out of the fold, so
+    /// the judge does not run. This replica's ledger holds no `Mint` at all,
+    /// so a judge that ran would revoke the deposited grant.
+    #[tokio::test]
+    async fn a_walk_that_left_rows_unkeyed_revokes_nothing() {
+        let walk = WalkReport {
+            unkeyed: [[0x77; 32]].into_iter().collect(),
+            ..WalkReport::default()
+        };
+        let (sweep, sent, errors) = judge(&walk).await;
+        assert_eq!(
+            sweep,
+            CapabilitySweep {
+                enumerated: 1,
+                revoked: 0,
+                skipped: Some("fleet walk left rows unkeyed"),
+            }
+        );
+        assert!(sent.is_empty(), "no revoke was sent: {sent:?}");
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    /// The control: the same replica after a walk that opened every row
+    /// judges and revokes the grant its ledger does not hold — so the pin
+    /// above is held by the unkeyed skip, not by some other refusal.
+    #[tokio::test]
+    async fn a_fully_keyed_walk_judges_and_revokes_the_unrecognized() {
+        let (sweep, sent, errors) = judge(&WalkReport::default()).await;
+        assert_eq!(sweep.skipped, None);
+        assert_eq!(sent, ["fauna.capabilities.revoke"]);
+        assert_eq!(
+            errors.len(),
+            1,
+            "the refused revoke is reported: {errors:?}"
+        );
+    }
+}

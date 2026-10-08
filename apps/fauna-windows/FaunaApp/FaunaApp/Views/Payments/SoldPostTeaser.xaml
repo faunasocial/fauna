@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The sold-post buyer teaser on one post card (gap (2c), monetization.md § Per-post
+  pay-to-unlock → the buyer's price read is post-addressed): the price, an optional
+  external payment link and the buy affordance, present iff
+  fauna.subscriptions.post_unlock.get resolved an offer for this post
+  (FeedPage.SyncPosts's fire-once resolve trigger). Mirrors linux's post_list.rs
+  top_line group (same row as the gated-post badge). Inside the payments plane
+  because each element exists only to state a price, state a payment route or move
+  money (dynamic-features.md § Platform-family surface excision → The
+  price-and-route class); the badge stays on the card, so a store-safe build shows a
+  sold post as an ordinary gated post.
+
+  ⚠ THIS FILE IS PART OF THE EXCISION UNIT (see PaymentsAuthorSections.xaml's
+  header). FeedPage's per-card DataTemplate hosts one of these per realized card
+  through SoldPostTeaserHost, filled under `#if PAYMENTS` exactly like
+  PostTipDisplay's TipDisplayHost; nothing outside Views\Payments\ may name this
+  type from markup. Both clicks are raised as events and handled by the page.
+-->
+<UserControl
+    x:Class="FaunaApp.Views.Payments.SoldPostTeaser"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <StackPanel Orientation="Horizontal" Spacing="8">
+        <TextBlock x:Name="PriceText"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.GatedPostPrice}"
+                   FontSize="10" Opacity="0.7" VerticalAlignment="Center" />
+        <!-- The link's https-only guard fires on click (FeedPage; the same check
+             the profile's offer checkout link applies), not on
+             visibility: a non-https url still shows the button, matching the
+             reference. -->
+        <Button x:Name="PaymentLinkButton"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.GatedPostPaymentLink}"
+                Click="PaymentLinkButton_Click"
+                Content="{loc:Localize Key=subscriptions/payment_url}"
+                FontSize="10" Padding="4,1" VerticalAlignment="Center" />
+        <Button x:Name="BuyButton"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.GatedPostBuyButton}"
+                Click="BuyButton_Click"
+                Content="{loc:Localize Key=feed/post/buy_button}"
+                Style="{StaticResource AccentButtonStyle}"
+                FontSize="10" Padding="4,1" VerticalAlignment="Center" />
+    </StackPanel>
+</UserControl>

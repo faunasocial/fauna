@@ -118,6 +118,7 @@ public sealed partial class AdminNestPage : Page
             // shared `arm_label` and its blocked reason, not a blank button.
             _vm.RefreshTakedownArm();
             RenderTakedown();
+            RenderReports();
             RenderOauth();
 
             await LoadNatModeAsync();
@@ -567,6 +568,77 @@ public sealed partial class AdminNestPage : Page
         TakedownStatusText.Text = _vm.TakedownStatus ?? string.Empty;
         TakedownStatusText.Visibility =
             _vm.TakedownStatus is not null ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    // ── Abuse reports queue (admin-nest-report-*, moderation.md § User-initiated
+    //    reporting → Where it lands) ───────────────────────────────────────────
+
+    private bool _reportsBound;
+
+    /// <summary>Paint the queue from the VM: the rows bind once to the VM's flat
+    /// collection; the loading line shows until a queue read has landed and the empty
+    /// line only after it (a read in flight is never "no open reports"); the status
+    /// line shows only once a resolve (or a failed read) has said something.</summary>
+    private void RenderReports()
+    {
+        if (_vm is null) return;
+        if (!_reportsBound)
+        {
+            ReportsList.ItemsSource = _vm.Reports;
+            _reportsBound = true;
+        }
+        ReportsLoadingText.Visibility =
+            _vm.ReportsLoaded ? Visibility.Collapsed : Visibility.Visible;
+        ReportsEmptyText.Visibility =
+            _vm.ReportsLoaded && _vm.Reports.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ReportsStatusText.Text = _vm.ReportsStatus ?? string.Empty;
+        ReportsStatusText.Visibility =
+            string.IsNullOrEmpty(_vm.ReportsStatus) ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    // The two resolve buttons dispatch `fauna.moderation.abuse_report.resolve` (an
+    // admin-class WRITE, so OnlineOnly): each gates itself on Loaded, the row being
+    // a DataTemplate whose buttons exist only once realized. The kind is a literal
+    // at each call site, which the offline-gate-kinds checker requires. The
+    // open-takedown button dispatches nothing (it only pre-fills the console) and
+    // declares no kind.
+    private void ReportActedButton_Loaded(object sender, RoutedEventArgs e) =>
+        ((Button)sender).FaunaGate("fauna.moderation.abuse_report.resolve");
+
+    private void ReportDismissButton_Loaded(object sender, RoutedEventArgs e) =>
+        ((Button)sender).FaunaGate("fauna.moderation.abuse_report.resolve");
+
+    /// <summary>admin-nest-report-open-takedown-button → pre-fill the takedown
+    /// console from the row (the shared <c>report_takedown_prefill</c>), citation
+    /// left blank so the console's own guard stands. The console's inputs are
+    /// two-way with the VM only on EDIT, so the pre-filled values are pushed back
+    /// into them here.</summary>
+    private void ReportOpenTakedown_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null || sender is not Button { Tag: string reportId }) return;
+        if (!_vm.OpenReportTakedown(reportId)) return;
+        TakedownContentIdInput.Text = _vm.TakedownContentId;
+        TakedownTypeConversationRadio.IsChecked = _vm.TakedownConversation;
+        TakedownTypePostRadio.IsChecked = !_vm.TakedownConversation;
+        TakedownReferenceInput.Text = string.Empty;
+        TakedownRestoreCheckbox.IsChecked = false;
+        RenderTakedown();
+    }
+
+    /// <summary>admin-nest-report-acted-button → record "acted on".</summary>
+    private async void ReportActed_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null || sender is not Button { Tag: string reportId }) return;
+        await _vm.ResolveReportAsync(reportId, acted: true);
+        RenderReports();
+    }
+
+    /// <summary>admin-nest-report-dismiss-button → record "dismissed".</summary>
+    private async void ReportDismiss_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null || sender is not Button { Tag: string reportId }) return;
+        await _vm.ResolveReportAsync(reportId, acted: false);
+        RenderReports();
     }
 
     // ── Outside-app sign-in keys (admin-nest-oauth-*, authorization-server.md

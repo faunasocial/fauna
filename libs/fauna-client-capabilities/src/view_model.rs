@@ -890,13 +890,17 @@ pub fn held_custodies(custody: &CustodyConfig) -> Vec<HeldCustodyView> {
     rows
 }
 
-/// The consent fold: offers this account has neither accepted nor declined.
+/// The consent fold: offers this account has neither accepted nor declined,
+/// whose term has not passed (an expired offer is spent on both sides —
+/// [`crate::custody_ceremony::held_offer_expired`]).
 /// Deterministic order: oldest offer first (first asked, first answered).
-pub fn custody_offers(custody: &CustodyConfig) -> Vec<CustodyOfferView> {
+pub fn custody_offers(custody: &CustodyConfig, now_micros: u64) -> Vec<CustodyOfferView> {
+    let now = fauna_core::data::Timestamp(now_micros);
     let mut rows: Vec<CustodyOfferView> = custody
         .held
         .iter()
         .filter(|h| h.accept.is_empty() && !h.declined && !h.removed && !h.offer.is_empty())
+        .filter(|h| !crate::custody_ceremony::held_offer_expired(h, now))
         .filter_map(|h| {
             let env: fauna_core::encoding::EmbedAsBytes =
                 fauna_core::encoding::canonical_decode(&h.offer).ok()?;
@@ -968,7 +972,7 @@ pub fn fold_custody_facet(
     CustodyFacetSnapshot {
         rows: custody_rows(custody, ledger, now_micros),
         held: held_custodies(custody),
-        offers: custody_offers(custody),
+        offers: custody_offers(custody, now_micros),
     }
 }
 
@@ -2552,6 +2556,7 @@ mod tests {
     #[test]
     fn held_and_offer_folds_respect_accept_and_decline() {
         let (o, h) = (owner_kp(), host_kp());
+        let now_micros = 6;
         let mut cfg = CustodyConfig::default();
         cfg.held.push(HeldCustody {
             grant_id: GRANT.to_vec(),
@@ -2561,7 +2566,7 @@ mod tests {
         });
 
         // Pending: on the consent fold, not the held fold.
-        let offers = custody_offers(&cfg);
+        let offers = custody_offers(&cfg, now_micros);
         assert_eq!(offers.len(), 1);
         assert_eq!(offers[0].owner, o.actor_id().0);
         assert_eq!(offers[0].scopes, CustodyScopeSet::Account);
@@ -2574,7 +2579,7 @@ mod tests {
             &GRANT,
             Timestamp(6)
         ));
-        assert!(custody_offers(&cfg).is_empty());
+        assert!(custody_offers(&cfg, now_micros).is_empty());
         assert!(held_custodies(&cfg).is_empty());
 
         // Accepted (fresh record): on the held fold with the accept's budget
@@ -2586,7 +2591,7 @@ mod tests {
             !crate::custody_ceremony::decline_offer(&mut cfg, &GRANT, Timestamp(8)),
             "an accepted custody is the stop control's business, not decline's"
         );
-        assert!(custody_offers(&cfg).is_empty());
+        assert!(custody_offers(&cfg, now_micros).is_empty());
         let held = held_custodies(&cfg);
         assert_eq!(held.len(), 1);
         assert_eq!(held[0].retained_bytes_cap, 8192);
@@ -2626,7 +2631,7 @@ mod tests {
         let facet = fold_custody_facet(&cfg, &ledger, now_micros);
         assert_eq!(facet.rows, custody_rows(&cfg, &ledger, now_micros));
         assert_eq!(facet.held, held_custodies(&cfg));
-        assert_eq!(facet.offers, custody_offers(&cfg));
+        assert_eq!(facet.offers, custody_offers(&cfg, now_micros));
         assert_eq!(facet.held.len(), 1, "the accepted one");
         assert_eq!(facet.offers.len(), 1, "the pending one");
     }

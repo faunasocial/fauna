@@ -1,4 +1,4 @@
-package dav
+package undecryptable
 
 import (
 	"bytes"
@@ -24,7 +24,7 @@ func countLevel(buf *bytes.Buffer, level string) int {
 // PROPFIND must alert once, then fall to DEBUG.
 func TestRepeatedCollectionWarnsOnceThenDebugs(t *testing.T) {
 	logger, buf := newCountingLogger()
-	var d UndecryptableWarnDedup
+	var d WarnDedup
 
 	for range 50 {
 		d.Log(logger, "cal-a", "caldav: skipping calendar with undecryptable metadata")
@@ -42,7 +42,7 @@ func TestRepeatedCollectionWarnsOnceThenDebugs(t *testing.T) {
 // swallowed by the first one's.
 func TestEachCollectionGetsItsOwnWarn(t *testing.T) {
 	logger, buf := newCountingLogger()
-	var d UndecryptableWarnDedup
+	var d WarnDedup
 
 	for range 10 {
 		d.Log(logger, "cal-a", "skipping")
@@ -60,9 +60,9 @@ func TestEachCollectionGetsItsOwnWarn(t *testing.T) {
 // collection the box has never warned about.
 func TestPastTheCapEveryCollectionStillWarns(t *testing.T) {
 	logger, buf := newCountingLogger()
-	var d UndecryptableWarnDedup
+	var d WarnDedup
 
-	for i := range maxTrackedUndecryptableCollections {
+	for i := range maxTrackedIDs {
 		d.Log(logger, string(rune(i))+"-filler", "skipping")
 	}
 	warnsAfterFill := countLevel(buf, "WARN")
@@ -82,7 +82,7 @@ func TestPastTheCapEveryCollectionStillWarns(t *testing.T) {
 // sighting — that is the double-WARN the re-check under the lock prevents.
 func TestConcurrentFirstSightingWarnsOnce(t *testing.T) {
 	logger, buf := newCountingLogger()
-	var d UndecryptableWarnDedup
+	var d WarnDedup
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -104,6 +104,6 @@ func TestConcurrentFirstSightingWarnsOnce(t *testing.T) {
 
 // A nil logger is a no-op rather than a panic (a Backend built without one).
 func TestNilLoggerIsANoOp(t *testing.T) {
-	var d UndecryptableWarnDedup
+	var d WarnDedup
 	d.Log(nil, "cal-a", "skipping")
 }

@@ -1,5 +1,6 @@
 package com.fauna.app.testing
 
+import java.lang.reflect.Method
 import org.junit.runners.model.FrameworkMethod
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.internal.bytecode.InstrumentationConfiguration
@@ -49,6 +50,23 @@ import org.robolectric.internal.bytecode.InstrumentationConfiguration
  * needs Robolectric's instrumentation.
  *
  * Pinned by [com.fauna.app.core.FfiBindingsSingleHandleMapTest].
+ *
+ * ## Why: Compose's main-thread dispatcher outlives the main looper's queue
+ *
+ * The second process-global this runner guards. Compose applies a snapshot write
+ * made outside composition through `AndroidUiDispatcher.Main`, which posts ONE
+ * main-looper message to drain its queue and counts itself scheduled until that
+ * message runs. Robolectric clears the main looper between tests, so a test that
+ * ends with that message queued — any test writing snapshot state (an `AppState`
+ * field) without idling the looper — strands the dispatcher for the rest of the
+ * JVM: no later outside-composition write is ever applied, and every Compose test
+ * after it dies of `AppNotIdleException` ("Compose did not get idle"). Which test
+ * strands it moves with timing, so it presented as a class-count-dependent wall
+ * in the full suite while every class passed alone.
+ *
+ * The fix: run the main looper's due work at the end of every test, while the
+ * test's own environment is still up, so nothing Compose posted is dropped by
+ * the reset. Pinned by [ComposeDispatcherSurvivesTestBoundaryTest].
  */
 class FaunaRobolectricTestRunner(testClass: Class<*>) : RobolectricTestRunner(testClass) {
 
@@ -58,6 +76,19 @@ class FaunaRobolectricTestRunner(testClass: Class<*>) : RobolectricTestRunner(te
             .doNotAcquirePackage(UNIFFI_MODULES_PACKAGE)
             .doNotAcquirePackage(JNA_PACKAGE)
             .build()
+
+    override fun afterTest(method: FrameworkMethod, bootstrappedMethod: Method) {
+        try {
+            // The sandbox's own copy of the helper: this runner is loaded by the
+            // application class loader, the Android classes it drives are not.
+            bootstrappedMethod.declaringClass.classLoader
+                .loadClass(MainLooperDrain::class.java.name)
+                .getMethod("drain")
+                .invoke(null)
+        } finally {
+            super.afterTest(method, bootstrappedMethod)
+        }
+    }
 
     companion object {
         /** Hand-written FFI surface + the generated `fauna_ffi.kt` bindings. */

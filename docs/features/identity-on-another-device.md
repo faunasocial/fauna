@@ -39,7 +39,7 @@ Stamped 2026-09-19 at 0bb8814071.
 |---|---|---|
 | web | ✅ full | 0.1.2-dev+4bc2efab standalone |
 | linux | ✅ full | 0.1.2-dev+c4a95c20 standalone |
-| windows | ⚠ partial | |
+| windows | ✅ full | 0.1.3-dev+3a518178 standalone |
 | macos | ⚠ partial | |
 | ios | ⚠ partial | |
 | android |  no run recorded | |
@@ -55,6 +55,6 @@ Stamped 2026-09-19 at 0bb8814071.
 | 2 | app | `tests/e2e-unified/tests/test_handle_first_back_buttons.py::test_identity_import_back_returns_to_identity_choice` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_identity_reimport_resets_handle_check.py::test_reimporting_a_different_key_restarts_the_handle_check` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_onboarding_handle_check_reset.py::test_handle_check_resets_on_identity_reimport` | web (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_identity_uri_handle_prefill.py::test_an_identity_code_carrying_a_handle_prefills_the_handle_step` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_identity_uri_handle_prefill.py::test_an_identity_code_without_a_handle_leaves_the_handle_step_empty` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_identity_uri_handle_prefill.py::test_an_identity_code_carrying_a_handle_prefills_the_handle_step` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_identity_uri_handle_prefill.py::test_an_identity_code_without_a_handle_leaves_the_handle_step_empty` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 <!-- features-render:end -->

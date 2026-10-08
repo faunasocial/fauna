@@ -19,8 +19,6 @@ public partial class SettingsViewModel : ViewModelBase
     [ObservableProperty] private bool _isLoading;
     [ObservableProperty] private string _newNestUrl = string.Empty;
     [ObservableProperty] private string _newHandle = string.Empty;
-    [ObservableProperty] private string _updateStatus = Strings.Get("settings/check_for_updates");
-    [ObservableProperty] private bool _isCheckingUpdate;
     // Unknown is a distinct state from any real mode — never seed a default
     // (settings.md item 7, linux's original fix). LoadAsync's InboxModeGetAsync() fetch is the
     // only writer for the load path; a client that instead seeded "open" here
@@ -76,7 +74,6 @@ public partial class SettingsViewModel : ViewModelBase
     // (`fauna.account.get`, `fauna.quota.get`, `fauna.account.delete`); the
     // HTTP `/api/v1/account` twin was deleted nest-side.
     private readonly INestRpcClient _rpc;
-    private readonly UpdateService _updateService;
     // The Export My Data save step (settings.md § Data export) — the SAME
     // seam single-file restore uses (native FileSavePicker in production, a
     // fixed e2e directory). Null on the three sibling settings sub-pages
@@ -86,15 +83,9 @@ public partial class SettingsViewModel : ViewModelBase
     private readonly ISnapshotFileSaver? _fileSaver;
 
     internal SettingsViewModel(INestHttpClient nest, INestRpcClient rpc, ISnapshotFileSaver? fileSaver = null)
-        : this(nest, rpc, new UpdateService(new System.Net.Http.HttpClient()), fileSaver) { }
-
-    internal SettingsViewModel(
-        INestHttpClient nest, INestRpcClient rpc, UpdateService updateService,
-        ISnapshotFileSaver? fileSaver = null)
     {
         _nest = nest;
         _rpc = rpc;
-        _updateService = updateService;
         _fileSaver = fileSaver;
         // Seed the backing field (not the property) so the initial read doesn't
         // re-persist; a local file, available without an authed session.
@@ -209,26 +200,6 @@ public partial class SettingsViewModel : ViewModelBase
         finally
         {
             IsSavingInboxMode = false;
-        }
-    }
-
-    [RelayCommand]
-    private async Task CheckForUpdateAsync()
-    {
-        IsCheckingUpdate = true;
-        UpdateStatus = Strings.Get("settings/checking_update");
-        try
-        {
-            var tag = await _updateService.CheckForUpdateAsync();
-            UpdateStatus = tag is not null ? $"{tag} {Strings.Get("settings/update_available")}" : Strings.Get("settings/up_to_date");
-        }
-        catch
-        {
-            UpdateStatus = Strings.Get("settings/check_failed");
-        }
-        finally
-        {
-            IsCheckingUpdate = false;
         }
     }
 

@@ -268,7 +268,9 @@ impl<R: RpcRequester + Clone> SearchManager<R> {
             let mut s = self.state.write().unwrap();
             s.in_flight = false;
             s.has_more = has_more;
-            s.no_results = results.is_empty();
+            // The empty state is a search that LOOKED everywhere and found
+            // nothing; zero rows behind a failed arm is the error alone.
+            s.no_results = results.is_empty() && failures.is_empty();
             s.results = results;
             s.error = arm_failure_text(&failures);
         }
@@ -828,6 +830,31 @@ mod tests {
         assert!(
             !snap.no_results,
             "rows are on screen — this is not the empty state"
+        );
+    }
+
+    /// A search whose only arm failed (web has no local arm) found NOTHING
+    /// because it could not look, not because nothing matches: it says it
+    /// failed and never paints `search-no-results` beside that
+    /// (`search.md` § Errors & edge cases).
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_failed_search_with_no_rows_is_an_error_not_the_empty_state() {
+        let nest = Arc::new(FakeNest {
+            fail: Mutex::new(Some("nest unreachable".into())),
+            ..Default::default()
+        });
+        let m = manager_with(nest, None);
+        m.run_query("hello", "all").await;
+
+        let snap = m.snapshot();
+        assert!(snap.results.is_empty());
+        assert!(
+            snap.error.is_some(),
+            "the failure must surface on error-message"
+        );
+        assert!(
+            !snap.no_results,
+            "a search that could not look is not one that found nothing"
         );
     }
 

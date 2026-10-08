@@ -121,10 +121,12 @@ historical **`content_key_version`**. Properties, each by construction:
   local file (the Media library on all 7 apps — a nest-side view fetched by hash) have
   nothing to apply and are unaffected.
 
-  On an on-demand (cfapi) client this is exactly the existing dehydrate path: re-point the row,
-  `dehydrate_placeholder`, emit `FileStatusChanged{CloudOnly}` — the next open re-hydrates the
-  historical bytes, because the hydration `FETCH_DATA` resolves its manifest from that same
-  local row.
+  On an on-demand (cfapi) client this is the invalidation path: re-point the row,
+  `supersede_placeholder` (free the cached bytes and leave the placeholder describing the restored
+  version — its size and mtime, since cfapi asks for exactly the placeholder's size on the next
+  open, and a bare dehydrate keeps the current one), emit `FileStatusChanged{CloudOnly}` — the
+  next open re-hydrates the historical bytes, because the hydration `FETCH_DATA` resolves its
+  manifest from that same local row.
 
   **Three orderings are load-bearing.**
 
@@ -134,14 +136,16 @@ historical **`content_key_version`**. Properties, each by construction:
      row stale. Both a **placeholder** row (no local bytes) and a **hydrated** row heal at the next
      service start, by the same start-up `changes.list` fold, but by *opposite* mechanisms because
      the risk differs. A placeholder the fold **re-points** in place (its manifest no longer matches
-     the nest's head; no local bytes to lose). A hydrated row's bytes are on disk and may carry an
+     the nest's head; no local bytes to lose), and a cfapi host then re-describes its on-disk
+     placeholder — size and mtime — as the new version. A hydrated row's bytes are on disk and may carry an
      unsynced local edit, so the fold **never rewrites it** — it *reports* the row, and the on-demand
      host invalidates it via ordering 3 below. If that invalidation's dehydrate refuses (a locally
      edited file), the row stays hydrated and the divergence becomes an ordinary conflict; otherwise
      the file becomes a placeholder at the new head and the next open re-hydrates the restored bytes.
   2. **Within a *restore's* local apply: durable row before volatile cache.** Re-point the sync-state
-     row, *then* drop the cached bytes. A failed dehydrate then leaves a correct row and a stale
-     cache, which any later eviction (or the user's own "free up space") completes. The reverse would
+     row, *then* drop the cached bytes. A failed free then leaves a correct row and a stale
+     cache — never a truncated file: an open of a placeholder that describes another size than its
+     row's version is refused, not served (`on-demand-files.md` § On-Demand Files). The reverse would
      leave a freed placeholder still pointing at the **old** manifest, so the next open actively
      re-materializes the pre-restore bytes — strictly worse than a stale cache. This holds because a
      restore records content the user *chose*: there is no local edit to protect, so the row is
@@ -150,19 +154,25 @@ historical **`content_key_version`**. Properties, each by construction:
      When the trigger is not the user's own restore but the fold discovering that a **remote** change
      moved the head under a hydrated file, the on-disk copy may be racing a **local edit that has not
      yet been uploaded** (the uploader is asynchronous — a write is observed, queued, and pushed, so
-     there is always a window in which the newest bytes exist only on this disk). Here dehydrate is
-     the **gate, not the follow-up**: run it *first*, and only re-point on success. A dirty file makes
-     dehydrate refuse, so the edit survives and the row stays `Synced` — and because a tracked file's
+     there is always a window in which the newest bytes exist only on this disk). Here the free is
+     the **gate, not the follow-up**: run it *first*, and only re-point on success. On cfapi the free
+     is one `CfUpdatePlaceholder` that also re-describes the placeholder as the new version (size and
+     mtime: cfapi asks for exactly the placeholder's size on the next open, so a placeholder left at
+     the old size served a grown file truncated — which was then uploaded over the real edit) and is
+     refused unless the file is in sync. A dirty file makes
+     the free refuse, so the edit survives and the row stays `Synced` — and because a tracked file's
      change **must** be uploaded (`on-demand-files.md` § On-Demand Files → *Sync direction*), what happens next is an
      ordinary two-sided divergence, resolved per [`conflicts.md`](conflicts.md) like any other. Re-pointing first would
      strand the edit under a `Placeholder` row claiming no local bytes. A crash between the freed
-     bytes and the re-point is safe and idempotent — the row still resolves the old manifest, the next
-     open re-materializes the old bytes, and the next fold retries.
+     bytes and the re-point is safe and idempotent — the row still resolves the old manifest, so an
+     open before the retry gets the old version, or is refused when the placeholder already
+     describes a different size (never a truncated file); and the next fold, which at a restart
+     runs before any open is served, retries.
 
      ⚠ **The pre-2026-07-14 wording justified this gate by asserting "an on-demand host is
      download-only, so nothing else guards it."** That premise is retired (`on-demand-files.md` § On-Demand Files →
      *Sync direction*): an on-demand host is two-way, so the edit *does* have another guardian. The
-     **ordering rule is unchanged** — dehydrate still gates the re-point, because an
+     **ordering rule is unchanged** — the free still gates the re-point, because an
      upload-in-flight window exists regardless — but it no longer rests on the host being
      one-directional.
 
@@ -480,7 +490,9 @@ a charge with no delete verb could not have released them (`reserved-folders.md`
   `../architecture/apps/sync-agent.md` § Implementation status, A1b/A5) `RestoreFileVersion` pipe
   verb records the restore, then re-points its own row through the
   all-columns `SyncDb::upsert_entry` (there is still no narrow setter; the `ON CONFLICT` clause
-  leaves `pinned` intact), `dehydrate_placeholder`s the stale bytes and emits
+  leaves `pinned` intact), `supersede_placeholder`s the stale bytes (the placeholder left
+  describing the restored version — the `dehydrate_placeholder` it called until 2026-10-08 kept the
+  current size) and emits
   `FileStatusChanged{CloudOnly}`. Media still needs none of this on any of the 7 apps — it is
   a nest-side library fetched by hash, so `MediaMachine::restore_version` correctly stops at
   `refresh()`.
@@ -492,13 +504,22 @@ a charge with no delete verb could not have released them (`reserved-folders.md`
   healed. The fold now owns `Placeholder` rows and only those, mirroring the rule its delete arm
   already followed: a bytes-free placeholder is re-pointed when the folded head's
   `(manifest_hash, size_bytes, content_key_version)` differs; an unchanged head writes nothing.
+  **The re-point reaches the disk too (2026-10-08):** the fold names its re-pointed rows
+  (`PlaceholderFold::repointed`, with the new version's size and mtime), and the cfapi host
+  re-describes each placeholder already on the disk (`bridge::redescribe_repointed` →
+  `fauna_cfapi::supersede_placeholder`) — until then a cloud-only file whose size a remote edit
+  changed kept its old size on disk, and its next open was served truncated or short.
 - **Stale hydrated copies invalidated at service start: LANDED (2026-07-10).** A `Synced` row is
   still never *rewritten* by the fold — its bytes are on disk and may carry an unsynced local edit.
   But the fold no longer stays silent about one whose head moved: it now **reports** each such row
   (`SyncEngine::record_placeholders_from_changes` returns a `PlaceholderFold` carrying the
   `StaleHydratedRow`s alongside the recorded count), and the Windows on-demand host acts on the
-  report at `prepare()` — dehydrating the file first (cfapi's `CF_INSYNC_POLICY_TRACK_ALL` root
-  refuses a locally-edited file, so the edit is never clobbered), then re-pointing the row at the
+  report at `prepare()` — freeing the file first, the placeholder left describing the new version
+  (`fauna_cfapi::supersede_placeholder`: `CfUpdatePlaceholder` with the new size and mtime,
+  `DEHYDRATE`, and `VERIFY_IN_SYNC`, so cfapi's `CF_INSYNC_POLICY_TRACK_ALL` root
+  refuses a locally-edited file and the edit is never clobbered; a bare `CfDehydratePlaceholder`,
+  used until 2026-10-08, kept the old size, and a grown file's next open was served a prefix that
+  the engine then uploaded over the real edit), then re-pointing the row at the
   head via `SyncEngine::repoint_hydrated_to_placeholder`, then emitting `FileStatusChanged{CloudOnly}`
   (§ Restore ordering 3 — dehydrate-before-row, the inverse of a restore's ordering). This heals both
   a remote modify to a hydrated file *and* a restore interrupted on a hydrated file.

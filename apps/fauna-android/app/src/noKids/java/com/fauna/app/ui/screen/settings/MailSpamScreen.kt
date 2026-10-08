@@ -17,6 +17,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.components.rememberTwoClickArm
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.resolveLocalized
@@ -337,7 +338,7 @@ private fun ThresholdOverrideField(
 private fun ResetModelRow(working: Boolean, onResetModel: () -> Unit) {
     // Two-click inline confirm (no separate ui.yaml confirm element prescribed),
     // mirroring the Linux mail_spam.rs reset affordance.
-    var armed by remember { mutableStateOf(false) }
+    val arm = rememberTwoClickArm()
     // ⚠ THE WHOLE BUTTON GATES — arm click included — and that is NOT the
     // "arming is local, the confirm declares" rule being broken. That rule
     // exists because an *opener* reveals something worth reading offline (a
@@ -352,20 +353,13 @@ private fun ResetModelRow(working: Boolean, onResetModel: () -> Unit) {
     val resetGate = faunaGate("fauna.bridges.reset_spam_model", enabled = !working)
     Column {
         OutlinedButton(
-            onClick = {
-                if (armed) {
-                    armed = false
-                    onResetModel()
-                } else {
-                    armed = true
-                }
-            },
+            onClick = { arm.press(onResetModel) },
             enabled = resetGate.enabled,
             colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
             modifier = Modifier.testTag(Ids.MAIL_SPAM_RESET_MODEL_BUTTON),
         ) {
             Text(
-                if (armed) stringResource(R.string.common_confirm)
+                if (arm.armed) stringResource(R.string.mail_spam_reset_confirm)
                 else stringResource(R.string.mail_spam_reset_button),
             )
         }

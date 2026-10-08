@@ -5001,10 +5001,16 @@ components:
         AVPlayer in a SwiftUI VideoPlayer in the same element, publishing state
         idle/loading/playing/error plus position and source; never autoplays
         (InlineVideoPlaybackTests; test_feed_video_playback.py marked, its run
-        owed)."
+        owed). A bridged post's ProxiedVideo (render-model.md § D6c → Proxied
+        video, 2026-10-08) paints in the same element as the play glyph + its
+        nest-relative path (documentMediaProxiedVideoPath) when the post has no
+        blob Video — inert (no resolve closure) and never byte-loaded."
       ios: "Same shared FaunaKit VideoThumbnailView as macOS, inline player
         included (since 2026-10-03). Call sites: the shared PostCardBody (list
-        card) + PostDetailView (post detail). Built 2026-08-25."
+        card) + PostDetailView (post detail). Built 2026-08-25. A bridged post's
+        ProxiedVideo (render-model.md § D6c → Proxied video, 2026-10-08) paints
+        in the same element as the play glyph + its nest-relative path
+        (documentMediaProxiedVideoPath), inert and never byte-loaded."
       web: "VideoThumbnail.svelte, painted when the decoded body item's media_type
         starts with 'video/' (media_type is the browser-supplied File.type at
         upload, not server-sniffed — real end-to-end since always). Verified

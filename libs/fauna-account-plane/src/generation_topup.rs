@@ -235,6 +235,7 @@ where
             &generation_id,
             writer_key,
             fleet.generation_custody(),
+            Some(&view),
         )
         .await?
         else {
@@ -779,6 +780,7 @@ mod tests {
                 core,
                 shredded_at_ms: 9_000,
                 shredded_by: device_id_of(US),
+                shredder_sig: vec![],
             },
         ))
         .await;
@@ -1051,6 +1053,7 @@ mod tests {
             &f.store,
             &generation_id,
             &device_key(THEM),
+            None,
             None,
         )
         .await

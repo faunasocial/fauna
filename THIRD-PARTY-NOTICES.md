@@ -434,14 +434,11 @@ table above.
 
 ## Swift packages (`apps/fauna-apple`)
 
-Every SwiftPM dependency pinned in `apps/fauna-apple/Package.resolved`
-(shared by the macOS and iOS targets).
+The Apple apps (macOS and iOS) pin no remote SwiftPM dependency:
+`apps/fauna-apple/Package.swift` declares none, so there is no
+`Package.resolved` to list.
 
-| Package | Location | Version / Revision | Licence |
-|---|---|---|---|
-| `sparkle` | `https://github.com/sparkle-project/Sparkle` | 2.9.0 (`21d8df80`) | unverified |
-
-1 top-level package total: 0 with a known licence, 1 marked `unverified`.
+0 top-level packages total.
 
 ## Rust crates
 

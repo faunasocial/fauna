@@ -677,6 +677,18 @@ public sealed class DirectNestClient : INestHttpClient
         return (data, hasC2pa);
     }
 
+    public async Task<byte[]> GetContentAsync(string path, CancellationToken ct = default)
+    {
+        // Refused before authenticating or dialing: HttpClient dials an absolute or
+        // scheme-relative URL as written and sends the bearer with it (NestContentPath).
+        if (!NestContentPath.IsNestRelative(path))
+            throw new ArgumentException("not a nest-relative content path", nameof(path));
+        await EnsureAuthAsync(ct).ConfigureAwait(false);
+        var resp = await _http.GetAsync(path, ct).ConfigureAwait(false);
+        resp.EnsureSuccessStatusCode();
+        return await resp.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
+    }
+
     // Email Filters (`fauna.email.filters.*`, NestRpcClient) — the HTTP twins
     // were deleted nest-side.
 

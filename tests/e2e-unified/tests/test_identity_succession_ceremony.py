@@ -295,14 +295,6 @@ def _ceremony_over_a_real_group(app, nest_instance) -> dict:
     the sweep ran over a live engine, evicted the old leaf from every group, the
     retry gate matches, and the nest saw the commits — holds for both callers.
     """
-    from tests.api import conv_api
-    from tests.api.conv_api import inbox as _inbox
-    from tests.test_fauna_mls_cross_device_sync import _wait_thread_snippet
-
-    port = nest_instance["port"]
-    base = nest_instance["url"]
-    admin_sk = nest_instance["admin"]["signing_key"]
-
     # Skip-gate FIRST, before any nest-side setup: an app without the succession
     # driver must report "not built" rather than fail on a real backend it also
     # does not have. account-actor-id is Status-page-only, so it is read on the
@@ -321,7 +313,8 @@ def _ceremony_over_a_real_group(app, nest_instance) -> dict:
     # The REAL conversations backend is not decoration here: the ceremony takes
     # the old engine off the live session (`app.conversations.real_session`), so
     # without it the sweep reports NoEngine and this test would prove nothing.
-    # The assertion on `status == "ran"` below is what keeps that honest.
+    # The assertion on `status == "ran"` in `_assert_the_group_was_swept` is
+    # what keeps that honest.
     #
     # Deliberately NOT paired with a `disable_real_faunamls()` teardown, unlike
     # the `real_faunamls_app` fixture. Two reasons, and the second is why a
@@ -331,27 +324,7 @@ def _ceremony_over_a_real_group(app, nest_instance) -> dict:
     # touches no conversations. Meanwhile this test ends with the app signed in
     # as a DIFFERENT account, so a teardown call would be driving a
     # mid-succession app and could raise over the top of a real failure.
-    app.conversations.enable_real_faunamls()
-
-    # An API-tier peer with REAL key packages — the real backend parses each one
-    # during bootstrap, so the fake byte strings the mock tests use yield no
-    # group at all. bob has no MLS engine; he is here to make the group real and
-    # to observe the channel from outside the app.
-    bob = conv_api.reachable_peer(port, admin_sk, old_actor)
-
-    # The group, through the app's own recipient resolution — convention 8: the
-    # mutation under test is driven the way a user drives it.
-    app.conversations.real_resolve_send_new(bob["actor_id_hex"], "before the theft")
-    thread = _wait_thread_snippet(app, "before the theft", timeout=30.0)
-    assert thread is not None, (
-        "the group must exist before the ceremony — a succession over zero "
-        f"groups is precisely the hole this test fills; error: {app.error_text()!r}"
-    )
-    channel = thread.channel_id_hex
-    assert channel, "the thread must be bound to a channel after the send"
-    assert len(_inbox(base, bob)) >= 1, "a real Welcome should be delivered to bob"
-    envelopes_before = len(conv_api.channel_fetch(port, bob, channel, after=0))
-    assert envelopes_before >= 1, "the Application envelope should be on the channel"
+    group = _stage_a_real_group(app, nest_instance, old_actor)
 
     # ── the theft remedy, exactly as the sibling test drives it ──────────────
     app.settings.navigate()
@@ -377,6 +350,53 @@ def _ceremony_over_a_real_group(app, nest_instance) -> dict:
     # one field the authenticated-state teardown preserves), which is why this
     # read works at all after the app has come back up as the successor.
     sweep = app.driver.get_state("data.succession_sweep")
+    _assert_the_group_was_swept(app, nest_instance, group, sweep)
+    return sweep
+
+
+def _stage_a_real_group(app, nest_instance, old_actor: str) -> dict:
+    """Bootstrap one real group the signed-in app holds, before a ceremony.
+
+    Returns what `_assert_the_group_was_swept` corroborates against: the peer,
+    the channel and the envelope count a non-member saw before the sweep.
+    """
+    from tests.api import conv_api
+    from tests.api.conv_api import inbox as _inbox
+    from tests.test_fauna_mls_cross_device_sync import _wait_thread_snippet
+
+    port = nest_instance["port"]
+    app.conversations.enable_real_faunamls()
+
+    # An API-tier peer with REAL key packages — the real backend parses each one
+    # during bootstrap, so the fake byte strings the mock tests use yield no
+    # group at all. bob has no MLS engine; he is here to make the group real and
+    # to observe the channel from outside the app.
+    bob = conv_api.reachable_peer(port, nest_instance["admin"]["signing_key"], old_actor)
+
+    # The group, through the app's own recipient resolution — convention 8: the
+    # mutation under test is driven the way a user drives it.
+    app.conversations.real_resolve_send_new(bob["actor_id_hex"], "before the theft")
+    thread = _wait_thread_snippet(app, "before the theft", timeout=30.0)
+    assert thread is not None, (
+        "the group must exist before the ceremony — a succession over zero "
+        f"groups is precisely the hole this test fills; error: {app.error_text()!r}"
+    )
+    channel = thread.channel_id_hex
+    assert channel, "the thread must be bound to a channel after the send"
+    assert len(_inbox(nest_instance["url"], bob)) >= 1, (
+        "a real Welcome should be delivered to bob"
+    )
+    envelopes_before = len(conv_api.channel_fetch(port, bob, channel, after=0))
+    assert envelopes_before >= 1, "the Application envelope should be on the channel"
+    return {"bob": bob, "channel": channel, "envelopes_before": envelopes_before}
+
+
+def _assert_the_group_was_swept(app, nest_instance, group: dict, sweep) -> None:
+    """The staged group was re-pointed: the sweep's own report says it ran over
+    a live engine and evicted the old leaf everywhere, the retry gate matches,
+    and the nest independently saw the commits."""
+    from tests.api import conv_api
+
     assert sweep is not None, (
         "no sweep ran during the ceremony — the succession re-pointed the "
         "account and left every group holding the stolen credential"
@@ -407,14 +427,17 @@ def _ceremony_over_a_real_group(app, nest_instance) -> dict:
     # statement, then remove-old — so the channel a NON-member observes must
     # have grown. Asserting growth rather than an exact count keeps this from
     # breaking on a future carrier change that is not this test's subject.
-    envelopes_after = len(conv_api.channel_fetch(port, bob, channel, after=0))
-    assert envelopes_after > envelopes_before, (
+    envelopes_after = len(
+        conv_api.channel_fetch(
+            nest_instance["port"], group["bob"], group["channel"], after=0
+        )
+    )
+    assert envelopes_after > group["envelopes_before"], (
         "the sweep's commits never reached the nest: the channel still carries "
         f"{envelopes_after} envelopes. A report claiming the groups were "
         "re-pointed while the members were never told is the failure mode the "
         "add-before-join ordering exists to prevent"
     )
-    return sweep
 
 
 @pytest.mark.real_conversations
@@ -992,7 +1015,7 @@ def test_after_the_recovery_a_contact_can_still_add_you_to_a_conversation(
 # `AccountRegistry` — the one delegation `refuse_secret_writes_for_test` needs.
 # The name table and the fault itself are shared Rust; each other app joins by
 # adding that single arm to its agent.
-_REFUSAL_DOOR_APPS = ("tui", "macos", "ios", "windows")
+_REFUSAL_DOOR_APPS = ("tui", "macos", "ios", "windows", "linux", "web")
 
 _HEX64 = re.compile(r"[0-9a-fA-F]{64}")
 
@@ -1080,11 +1103,15 @@ def test_a_key_this_device_cannot_store_stays_on_screen_until_you_leave(
         )
         shown = app.error_text()
         key = shown[len(prefix):]
-        assert _HEX64.fullmatch(key), (
+        # Booleans, never the strings: pytest's assertion rewrite prints both
+        # operands of a failed comparison, and these carry the key.
+        is_hex_key = _HEX64.fullmatch(key) is not None
+        assert is_hex_key, (
             "the message must end in the successor's 64-hex secret key — it is "
             f"the only way back into the account; reads {_redacted(shown)!r}"
         )
-        assert key not in (stolen_seed, held), (
+        is_new_key = key not in (stolen_seed, held)
+        assert is_new_key, (
             "the key shown must be the NEW identity's, not the stolen seed or "
             "the recovery kit just spent"
         )
@@ -1098,7 +1125,8 @@ def test_a_key_this_device_cannot_store_stays_on_screen_until_you_leave(
         # return the write has already been attempted — no timing involved.
         app.driver.click("settings-export-data-button")
         after = app.error_text()
-        assert after == shown, (
+        kept = after == shown
+        assert kept, (
             "a later write to the Account page's error slot replaced the only "
             f"copy of the new key; it now reads {_redacted(after)!r}"
         )
@@ -1283,6 +1311,15 @@ def test_a_lost_reply_you_cannot_check_says_so_and_reopening_signs_you_in(
     — the account may already belong to a key that exists only on this device
     — and the wording is the whole safety property: it must never read as
     "nothing happened", and the way back in it names must actually work.
+
+    **And the reopened device re-points its own groups without a press**
+    (`succession-propagation.md` § Propagation → *Own device fleet*, the
+    relaunch-adoption clause). The lost ceremony died before its sweep, so the
+    retired leaf still sits in the group staged here; the adoption owes the
+    sweep exactly as it owes the kit, and the successor's post-auth hook
+    discharges it as an unbidden press of the sweep retry. Asserted as the
+    same state the ceremony's own sweep is read as
+    (`_assert_the_group_was_swept`), never a `no_engine` report.
     """
     from helpers.rpc_hold import (
         drop_rpc_reply,
@@ -1305,6 +1342,8 @@ def test_a_lost_reply_you_cannot_check_says_so_and_reopening_signs_you_in(
             "client-local store across a relaunch, so 'reopen the app' would "
             "open a fresh install rather than the device holding the successor"
         )
+    app.settings._navigate_subpage("status")
+    group = _stage_a_real_group(app, nest_instance, app.settings.actor_id())
     old_actor, held = _kit_in_hand(app)
 
     dropped_before = rpc_hold_status(port, _SUBMIT_KIND)["dropped"]
@@ -1366,4 +1405,20 @@ def test_a_lost_reply_you_cannot_check_says_so_and_reopening_signs_you_in(
             "said was saved; paste-secret-field visible="
             f"{app.is_visible('paste-secret-field')}"
         ),
+    )
+
+    # ── …and the owed sweep re-pointed the group, unbidden. ─────────────────
+    # The discharge is a background op, so its report is waited for as the
+    # STATE settling out of `None` — and nothing is pressed meanwhile.
+    wait_until(
+        lambda: app.driver.get_state("data.succession_sweep") is not None,
+        SUCCESSION_AND_RELAUNCH_S,
+        diagnose=lambda: (
+            "the reopened successor never swept: the adoption owes the group "
+            "sweep its lost ceremony never ran, and the retired leaf still sits "
+            f"in the staged group; error={_redacted(app.error_text())!r}"
+        ),
+    )
+    _assert_the_group_was_swept(
+        app, nest_instance, group, app.driver.get_state("data.succession_sweep")
     )

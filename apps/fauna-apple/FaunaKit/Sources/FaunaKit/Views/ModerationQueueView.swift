@@ -63,6 +63,23 @@ public struct ModerationQueueView: View {
 
     private var queue: some View {
         ScrollView {
+            VStack(spacing: 0) {
+                queueRows
+                reportsSection
+            }
+        }
+        // Container id + `.contain` so the child row ids (`content-label-badge`,
+        // `train-correction-button`) stay queryable alongside it (apple container
+        // a11y rule); `automationValue` registers it for the in-process driver so
+        // `is_visible("moderation-queue")` holds even on an empty queue.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(Ids.moderationQueue)
+        .automationValue(Ids.moderationQueue, text: { "\(vm.rows.count)" })
+    }
+
+    @ViewBuilder
+    private var queueRows: some View {
+        Group {
             if vm.rows.isEmpty {
                 // `rows: []` is the empty state, not an error.
                 VStack(spacing: 8) {
@@ -88,13 +105,54 @@ public struct ModerationQueueView: View {
                 }
             }
         }
-        // Container id + `.contain` so the child row ids (`content-label-badge`,
-        // `train-correction-button`) stay queryable alongside it (apple container
-        // a11y rule); `automationValue` registers it for the in-process driver so
-        // `is_visible("moderation-queue")` holds even on an empty queue.
+    }
+
+    /// The reporter's own ledger (`moderation-reports-section`;
+    /// moderation.md § User-initiated reporting → *What the reporter is told*):
+    /// every report this user filed, one flat `moderation-report-item` per row
+    /// with a `moderation-report-withdraw-button` on the open ones. Read beside
+    /// the queue on every Moderation entry; the empty line paints only off the
+    /// `loaded` bit.
+    private var reportsSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(renderLocalizedText(reportLedgerTitle()))
+                .font(.headline)
+                .padding(.top, 16)
+            if vm.reportsLoaded && vm.reports.isEmpty {
+                Text(renderLocalizedText(reportLedgerEmpty()))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(vm.reports, id: \.reportId) { row in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    let line = ModerationQueueVM.ledgerLine(row)
+                    Text(line)
+                        .font(.caption)
+                        .accessibilityIdentifier(Ids.moderationReportItem)
+                        .automationValue(Ids.moderationReportItem, text: { line })
+                    Spacer()
+                    if row.canWithdraw {
+                        Button(L.moderation.report.withdraw) {
+                            Task { await vm.withdrawReport(reportId: row.reportId) }
+                        }
+                        .controlSize(.small)
+                        .accessibilityIdentifier(Ids.moderationReportWithdrawButton)
+                        .automationActivate(Ids.moderationReportWithdrawButton) {
+                            Task { await vm.withdrawReport(reportId: row.reportId) }
+                        }
+                    }
+                }
+            }
+            if !vm.reportStatus.isEmpty {
+                Text(vm.reportStatus).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier(Ids.moderationQueue)
-        .automationValue(Ids.moderationQueue, text: { "\(vm.rows.count)" })
+        .accessibilityIdentifier(Ids.moderationReportsSection)
+        .automationValue(Ids.moderationReportsSection, text: { "\(vm.reports.count)" })
     }
 }
 

@@ -8,7 +8,7 @@
 //! `ImapPolicy` / `OutboundPolicy`); these kinds add the admin *write* path so
 //! an override is overlaid onto the catalog default before `fetch_config`
 //! encodes. `None` / unset ⇒ catalog default. Was the single 4-field
-//! `put_mail_policy` (DNS-perimeter slice, finding #4), now
+//! `put_mail_policy` (DNS-perimeter slice), now
 //! `put_spam_policy` covering the whole
 //! `SpamPolicyThresholds` sub-struct.
 

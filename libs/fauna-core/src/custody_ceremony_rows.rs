@@ -23,9 +23,13 @@
 //! the split; the plane arm is the per-record half of the composite merge
 //! ([`CustodyRecord::merge`]). A record is never removed — a declined offer
 //! or a reclaimed custody stays as a monotone mark, which is what keeps an
-//! idempotent re-ingest from resurrecting it — so the kind has no tombstone.
-//! Each row stays bounded because each side keeps ONE latest receipt, never
-//! a history.
+//! idempotent re-ingest from resurrecting it — so the kind has no tombstone,
+//! and a spent, unanswered offer's row is not reclaimed either (ruled
+//! 2026-10-08, `account-replica-posture.md` § Replica posture → *The custody
+//! grant + ceremony*, step 1: the policy refuses tombstones and a published
+//! row is permanent per `(item_key, writer)`; the bounded capture rate
+//! stands). Each row stays bounded because each side keeps ONE latest
+//! receipt, never a history.
 //!
 //! **Decode posture: an unknown field is refused, not stripped**
 //! (`config-dissolution.md` P4 — the CrdtPerField posture). The value types

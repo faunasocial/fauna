@@ -193,11 +193,17 @@ fn build_offer_row(ctx: &Rc<Ctx>, tier: &TierItem) -> gtk::Box {
     set_test_id(&name, ids::SUBSCRIPTION_OFFER_NAME);
     info.append(&name);
 
-    let price = gtk::Label::new(tier.price_hint.as_deref());
-    price.set_halign(gtk::Align::Start);
-    price.add_css_class("dim-label");
-    set_test_id(&price, ids::SUBSCRIPTION_OFFER_PRICE);
-    info.append(&price);
+    // The price display and the payment link below are the money plane's
+    // (`dynamic-features.md` § Platform-family surface excision → *The
+    // price-and-route class*); the subscribe button is not.
+    #[cfg(feature = "payments")]
+    {
+        let price = gtk::Label::new(tier.price_hint.as_deref());
+        price.set_halign(gtk::Align::Start);
+        price.add_css_class("dim-label");
+        set_test_id(&price, ids::SUBSCRIPTION_OFFER_PRICE);
+        info.append(&price);
+    }
 
     let description = gtk::Label::new(tier.description.as_deref());
     description.set_halign(gtk::Align::Start);
@@ -209,6 +215,7 @@ fn build_offer_row(ctx: &Rc<Ctx>, tier: &TierItem) -> gtk::Box {
     row.append(&info);
 
     // External payment link (only when the tier carries a checkout URL).
+    #[cfg(feature = "payments")]
     if let Some(url) = tier.payment_url.clone() {
         let pay = gtk::Button::with_label(s::PAYMENT_URL);
         pay.set_valign(gtk::Align::Center);

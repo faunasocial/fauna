@@ -134,6 +134,7 @@ pub async fn serve_fetch(
     relative_path: &str,
     offset: i64,
     length: i64,
+    file_size: i64,
 ) -> Result<ContentHash> {
     serve_fetch_chunked(
         hydrator,
@@ -141,6 +142,7 @@ pub async fn serve_fetch(
         relative_path,
         offset,
         length,
+        file_size,
         TRANSFER_CHUNK_BYTES,
     )
     .await
@@ -150,27 +152,41 @@ pub async fn serve_fetch(
 /// (clamped to the file; `length < 0` means "to EOF") to `sink` in `chunk_bytes` pieces.
 /// On hydrate error this is the **sole** failure reporter — it calls
 /// [`TransferSink::transfer_failed`] and returns the error for the caller to log.
+///
+/// `file_size` is the size the OS holds for the placeholder, which is all it will take. A
+/// body of any other length is the wrong version for that placeholder (one left describing
+/// a version a remote edit superseded — [`PlaceholderInvalidator::supersede`]), and serving
+/// it would land a prefix of it, or leave the open waiting on bytes past its end; the
+/// transfer FAILS instead, so the open errors and nothing truncated is ever recorded.
 pub(crate) async fn serve_fetch_chunked(
     hydrator: &dyn FileHydrator,
     sink: &dyn TransferSink,
     relative_path: &str,
     offset: i64,
     length: i64,
+    file_size: i64,
     chunk_bytes: usize,
 ) -> Result<ContentHash> {
+    let fail = |e: anyhow::Error| {
+        // Sole failure reporter: tell the OS so the opening process does not hang,
+        // then surface the error for the driving thread to log.
+        if let Err(report_err) = sink.transfer_failed() {
+            tracing::warn!(error = %report_err, "reporting hydrate failure to cfapi failed");
+        }
+        Err(e)
+    };
     let bytes = match hydrator.download_file_bytes(relative_path).await {
         Ok(bytes) => bytes,
-        Err(e) => {
-            // Sole failure reporter: tell the OS so the opening process does not hang,
-            // then surface the error for the driving thread to log.
-            if let Err(report_err) = sink.transfer_failed() {
-                tracing::warn!(error = %report_err, "reporting hydrate failure to cfapi failed");
-            }
-            return Err(e);
-        }
+        Err(e) => return fail(e),
     };
 
     let file_len = bytes.len() as i64;
+    if file_len != file_size {
+        return fail(anyhow::anyhow!(
+            "the placeholder describes {file_size} bytes but its version has {file_len}: \
+             refusing to serve the wrong version"
+        ));
+    }
     let start = offset.clamp(0, file_len);
     let end = if length < 0 {
         file_len
@@ -262,6 +278,8 @@ pub enum HydrationCommand {
         rel: String,
         offset: i64,
         length: i64,
+        /// The size the OS holds for the placeholder ([`serve_fetch_chunked`]).
+        file_size: i64,
         sink: Box<dyn TransferSink + Send>,
     },
     /// Serve a FETCH_PLACEHOLDERS request: list `parent_rel`'s immediate children.
@@ -469,12 +487,13 @@ pub trait HydrationHost: FileHydrator + PlaceholderLister + LocalWriteHost {
     /// on-demand root*, point 4). A host must answer every command it is sent.
     async fn answer_engine_command(&self, cmd: EngineCommand);
 
-    /// Answer one relay ask the host's seat routed to this root
-    /// (`file-sync.md` § Relay serving): serve the key from a hydrated body,
-    /// or decline. Called by [`serve_hydration_root`] beside the loop.
-    /// **Defaults to a no-op**: every implementor but [`SyncEngine`] is a test
-    /// double that announces nothing, so it is never asked.
-    async fn answer_relay_ask(&self, _ask: fauna_sync_engine::relay_seat::ServeAsk) {}
+    /// Answer one serve ask the host's seat routed to this root — the nest's
+    /// relay or a sibling device's (`file-sync.md` § Relay serving): serve the
+    /// key from a hydrated body, or decline. Called by [`serve_hydration_root`]
+    /// beside the loop. **Defaults to a no-op** (a dropped ask reads as a
+    /// decline): every implementor but [`SyncEngine`] is a test double that
+    /// announces nothing, so it is never asked.
+    async fn answer_serve_ask(&self, _ask: fauna_sync_engine::relay_seat::ServeAsk) {}
 
     // ── The off-disk placeholder posture (the linux FUSE root) ──────────────────
     //
@@ -554,8 +573,8 @@ impl HydrationHost for SyncEngine {
         fauna_sync_engine::always_resident::answer_engine_command(self, cmd).await
     }
 
-    async fn answer_relay_ask(&self, ask: fauna_sync_engine::relay_seat::ServeAsk) {
-        SyncEngine::answer_relay_ask(self, ask).await
+    async fn answer_serve_ask(&self, ask: fauna_sync_engine::relay_seat::ServeAsk) {
+        SyncEngine::answer_serve_ask(self, ask).await
     }
 
     async fn set_placeholders_off_disk(&self) -> Result<()> {
@@ -689,6 +708,20 @@ pub(crate) trait PlaceholderInvalidator {
     /// from destroying a user's edit.
     fn dehydrate(&self, abs_path: &Path) -> Result<()>;
 
+    /// [`dehydrate`](Self::dehydrate) for a file another device's edit SUPERSEDED: free
+    /// `abs_path`'s bytes AND leave its placeholder describing the new version — `size`
+    /// bytes, last written at `mtime` (Unix seconds). Reached by [`apply_stale_hydrated`] (a
+    /// hydrated copy) and [`apply_fold`] (a re-pointed cloud-only one).
+    ///
+    /// **Same contract: MUST fail if the file carries unsynced local edits.** And a binding
+    /// whose placeholders keep their size and mtime on the disk MUST move them here: cfapi asks
+    /// for exactly `[0, the placeholder's size)` on the next open, so a placeholder left at
+    /// the old size served a prefix of a grown file (then recorded and uploaded over the real
+    /// edit) — `on-demand-files.md` § On-Demand Files: a placeholder shows the right size
+    /// and modification time. A binding that reads both from the rows unlinks, as
+    /// [`dehydrate`](Self::dehydrate) does.
+    fn supersede(&self, abs_path: &Path, size: u64, mtime: i64) -> Result<()>;
+
     /// Classify what, if anything, the provider owes `abs_path` given its pin
     /// state and byte-presence — stat-only ([`crate::pin_reaction::pin_action_for_path`]).
     fn pin_action(&self, abs_path: &Path) -> Option<PinAction>;
@@ -779,6 +812,9 @@ impl<T: PlaceholderInvalidator + ?Sized> PlaceholderInvalidator for &T {
     fn dehydrate(&self, abs_path: &Path) -> Result<()> {
         (**self).dehydrate(abs_path)
     }
+    fn supersede(&self, abs_path: &Path, size: u64, mtime: i64) -> Result<()> {
+        (**self).supersede(abs_path, size, mtime)
+    }
     fn pin_action(&self, abs_path: &Path) -> Option<PinAction> {
         (**self).pin_action(abs_path)
     }
@@ -825,6 +861,10 @@ pub(crate) struct CfapiInvalidator;
 impl PlaceholderInvalidator for CfapiInvalidator {
     fn dehydrate(&self, abs_path: &Path) -> Result<()> {
         fauna_cfapi::dehydrate_placeholder(abs_path)
+    }
+
+    fn supersede(&self, abs_path: &Path, size: u64, mtime: i64) -> Result<()> {
+        fauna_cfapi::supersede_placeholder(abs_path, size, mtime)
     }
 
     fn pin_action(&self, abs_path: &Path) -> Option<PinAction> {
@@ -912,6 +952,12 @@ impl PlaceholderInvalidator for CfapiInvalidator {
     fn dehydrate(&self, _abs_path: &Path) -> Result<()> {
         Err(anyhow::anyhow!(
             "cfapi dehydrate unsupported on non-Windows targets"
+        ))
+    }
+
+    fn supersede(&self, _abs_path: &Path, _size: u64, _mtime: i64) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "cfapi placeholder update unsupported on non-Windows targets"
         ))
     }
 
@@ -1107,11 +1153,16 @@ async fn flip_clean_ancestor_dirs<H: HydrationHost, I: PlaceholderInvalidator>(
 /// second — the crash-safe order (`on-demand-files.md` § Linux FUSE binding, the
 /// dehydrate rule). An unlink that then fails leaves a `Placeholder` row over the
 /// bytes, which the next sweep repairs back to `Synced`.
+///
+/// `superseded_by` names the version a remote edit made, when that is why the bytes go
+/// ([`apply_stale_hydrated`]): the freed placeholder must then describe it
+/// ([`PlaceholderInvalidator::supersede`]), not the version whose bytes were freed.
 pub(crate) async fn free_local_bytes<H: HydrationHost, I: PlaceholderInvalidator + ?Sized>(
     hydrator: &H,
     invalidator: &I,
     abs: &Path,
     rel: &str,
+    superseded_by: Option<&StaleHydratedRow>,
 ) -> Result<()> {
     if invalidator.placeholders_off_disk() && !hydrator.dehydrate_off_disk(rel).await? {
         return Err(anyhow::anyhow!(
@@ -1119,7 +1170,14 @@ pub(crate) async fn free_local_bytes<H: HydrationHost, I: PlaceholderInvalidator
              has not finished syncing, or its folder keeps no content on the server"
         ));
     }
-    invalidator.dehydrate(abs)
+    match superseded_by {
+        None => invalidator.dehydrate(abs),
+        Some(head) => invalidator.supersede(
+            abs,
+            u64::try_from(head.size_bytes).unwrap_or(0),
+            head.remote_mtime,
+        ),
+    }
 }
 
 /// Invalidate the hydrated rows the fold reported stale ([`StaleHydratedRow`]): the
@@ -1148,10 +1206,16 @@ pub(crate) async fn free_local_bytes<H: HydrationHost, I: PlaceholderInvalidator
 /// the file staying on the disk as `Synced`. No holder answering leaves the old
 /// version whole for the next pull to retry.
 ///
-/// A crash between the dehydrate and the re-point is safe and idempotent: the row
-/// still resolves the *old* manifest, so the next open re-materializes the old
-/// bytes, and the next pull re-reports the row and retries. History is append-only
-/// and the nest is never wrong.
+/// **The free leaves the placeholder describing the NEW version**
+/// ([`PlaceholderInvalidator::supersede`]): cfapi asks for exactly the placeholder's size
+/// on the next open, so a placeholder left at the old size served a grown file's prefix,
+/// which the engine then recorded and uploaded over the real edit.
+///
+/// A crash between the free and the re-point is safe and idempotent: the row still
+/// resolves the *old* manifest, so an open before the retry gets the old version — or is
+/// refused, when the two versions differ in size ([`serve_fetch_chunked`]), never
+/// truncated — and the next pull re-reports the row and retries (at a restart, before
+/// any open is served). History is append-only and the nest is never wrong.
 pub(crate) async fn apply_stale_hydrated<H: HydrationHost>(
     hydrator: &H,
     invalidator: &dyn PlaceholderInvalidator,
@@ -1163,10 +1227,17 @@ pub(crate) async fn apply_stale_hydrated<H: HydrationHost>(
     for row in rows {
         let abs =
             crate::path_map::overlay_abs_path(&sync_root.to_string_lossy(), &row.relative_path);
-        // Gate: free the stale bytes. A dirty (locally edited) file makes this fail,
-        // and we then skip the re-point so the edit is preserved.
-        if let Err(e) =
-            free_local_bytes(hydrator, invalidator, Path::new(&abs), &row.relative_path).await
+        // Gate: free the stale bytes, leaving the placeholder describing the new version.
+        // A dirty (locally edited) file makes this fail, and we then skip the re-point so
+        // the edit is preserved.
+        if let Err(e) = free_local_bytes(
+            hydrator,
+            invalidator,
+            Path::new(&abs),
+            &row.relative_path,
+            Some(row),
+        )
+        .await
         {
             // A refusal may be the holder-keeps gate: this device's own record in
             // a folder whose nest holds no bytes. That body is replaced, not
@@ -1339,6 +1410,15 @@ async fn apply_fold<H: HydrationHost>(
             tracing::warn!(phase, error = %e, "marking materialized creates seen failed");
         }
     }
+    if !fold.repointed.is_empty() {
+        let n = redescribe_repointed(invalidator, sync_root, &fold.repointed);
+        tracing::info!(
+            phase,
+            repointed = fold.repointed.len(),
+            redescribed = n,
+            "re-described re-pointed placeholders"
+        );
+    }
     if fold.stale_hydrated.is_empty() {
         return;
     }
@@ -1354,6 +1434,45 @@ async fn apply_fold<H: HydrationHost>(
     )
     .await;
     tracing::info!(phase, invalidated = n, "invalidated stale hydrated copies");
+}
+
+/// Leave every placeholder the fold RE-POINTED ([`PlaceholderFold::repointed`]) describing
+/// its new version, through [`PlaceholderInvalidator::supersede`] — the fold moved only the
+/// row, and a placeholder already on the disk still carries the old version's size and
+/// mtime. A placeholder not on the disk (its directory not listed yet) gets both from its
+/// own listing, and an off-disk root's are rows only, so neither is touched. Best-effort
+/// per row like every other disk act of the fold: a refusal (a local edit since — the
+/// update is refused unless the placeholder is in sync) or a failure is logged, and the
+/// open of a placeholder that still disagrees with its row fails rather than serving the
+/// wrong bytes ([`serve_fetch`]). Returns how many were re-described.
+fn redescribe_repointed<I: PlaceholderInvalidator + ?Sized>(
+    invalidator: &I,
+    sync_root: &Path,
+    rows: &[PlaceholderRow],
+) -> usize {
+    if invalidator.placeholders_off_disk() {
+        return 0;
+    }
+    let mut redescribed = 0;
+    for row in rows {
+        let abs = PathBuf::from(crate::path_map::overlay_abs_path(
+            &sync_root.to_string_lossy(),
+            &row.rel,
+        ));
+        if std::fs::symlink_metadata(&abs).is_err() {
+            continue;
+        }
+        match invalidator.supersede(&abs, row.size, row.mtime) {
+            Ok(()) => redescribed += 1,
+            Err(e) => tracing::warn!(
+                rel = row.rel,
+                error = %e,
+                "re-describing a re-pointed placeholder failed (a local edit since?); its \
+                 next open is refused until it is"
+            ),
+        }
+    }
+    redescribed
 }
 
 /// Re-pull the nest and apply what came back. Best-effort, exactly like the startup
@@ -1456,7 +1575,7 @@ async fn react_to_pin<H: HydrationHost, I: PlaceholderInvalidator>(
             invalidator.kick_hydrate(&abs);
         }
         Some(PinAction::Dehydrate) => {
-            let done = match free_local_bytes(hydrator, invalidator, &abs, rel).await {
+            let done = match free_local_bytes(hydrator, invalidator, &abs, rel, None).await {
                 Ok(()) => true,
                 Err(refusal) => {
                     // The refusal is stale only if the content is provably the
@@ -1467,7 +1586,7 @@ async fn react_to_pin<H: HydrationHost, I: PlaceholderInvalidator>(
                     // assertion re-trips the bit, so the retry refuses it too.
                     match assert_recorded_in_sync(hydrator, invalidator, &abs, rel).await {
                         Ok(true) => {
-                            match free_local_bytes(hydrator, invalidator, &abs, rel).await {
+                            match free_local_bytes(hydrator, invalidator, &abs, rel, None).await {
                                 Ok(()) => true,
                                 Err(e) => {
                                     tracing::warn!(
@@ -1566,7 +1685,7 @@ async fn free_space<H: HydrationHost, I: PlaceholderInvalidator>(
             "not freeing: the file is kept on this device — stop keeping it first"
         ));
     }
-    free_local_bytes(hydrator, invalidator, &sync_root.join(rel), rel).await?;
+    free_local_bytes(hydrator, invalidator, &sync_root.join(rel), rel, None).await?;
     tracing::info!(rel, "file dehydrated (Free up space)");
     push_status(event_tx, sync_root, rel, FileStatus::CloudOnly);
     Ok(())
@@ -1599,7 +1718,7 @@ async fn set_pin<H: HydrationHost, I: PlaceholderInvalidator>(
             invalidator.kick_hydrate(&abs);
         }
     } else if !pin.cloud_only {
-        match free_local_bytes(hydrator, invalidator, &abs, rel).await {
+        match free_local_bytes(hydrator, invalidator, &abs, rel, None).await {
             Ok(()) => {
                 tracing::info!(rel, "unpinned file dehydrated");
                 push_status(event_tx, sync_root, rel, FileStatus::CloudOnly);
@@ -1747,7 +1866,7 @@ pub(crate) async fn serve_hydration_root<H, I, C, G>(
 {
     let serving = async {
         match serve {
-            Some(mut inbox) => inbox.serve_with(|ask| hydrator.answer_relay_ask(ask)).await,
+            Some(mut inbox) => inbox.serve_with(|ask| hydrator.answer_serve_ask(ask)).await,
             None => std::future::pending().await,
         }
     };
@@ -2091,6 +2210,7 @@ async fn serve_command<H: HydrationHost>(
             rel,
             offset,
             length,
+            file_size,
             sink,
         } => {
             // Wrap the sink to emit per-chunk progress when an event
@@ -2105,7 +2225,7 @@ async fn serve_command<H: HydrationHost>(
                 }),
                 _ => sink,
             };
-            match serve_fetch(hydrator, &*sink, &rel, offset, length).await {
+            match serve_fetch(hydrator, &*sink, &rel, offset, length, file_size).await {
                 Ok(content_hash) => {
                     // The file's bytes are now served to the OS (hydrated on
                     // disk). Record it Synced so the synchronous GetFileStatus
@@ -2869,6 +2989,9 @@ mod tests {
     #[derive(Default)]
     struct FakeInvalidator {
         dehydrated: std::sync::Mutex<Vec<String>>,
+        /// Every `supersede` the platform ACCEPTED, recorded as (abs, size, mtime) — it
+        /// refuses exactly as `dehydrate` does.
+        superseded: std::sync::Mutex<Vec<(String, u64, i64)>>,
         /// Absolute paths whose dehydrate should fail (a "dirty" local file).
         refuse: std::collections::HashSet<String>,
         /// The root keeps its placeholders off the disk (`placeholders_off_disk`).
@@ -2903,12 +3026,10 @@ mod tests {
         created: std::sync::Mutex<Vec<(String, bool)>>,
     }
 
-    impl PlaceholderInvalidator for FakeInvalidator {
-        fn placeholders_off_disk(&self) -> bool {
-            self.off_disk
-        }
-
-        fn dehydrate(&self, abs_path: &Path) -> Result<()> {
+    impl FakeInvalidator {
+        /// The fake platform's dirty-file refusal, shared by `dehydrate` and `supersede`:
+        /// the path as a string when it may be freed.
+        fn unless_refused(&self, abs_path: &Path) -> Result<String> {
             let s = abs_path.to_string_lossy().to_string();
             if self.refuse.contains(&s) {
                 return Err(anyhow!("fake dirty-file refusal"));
@@ -2918,7 +3039,24 @@ mod tests {
             {
                 return Err(anyhow!("fake not-in-sync refusal"));
             }
+            Ok(s)
+        }
+    }
+
+    impl PlaceholderInvalidator for FakeInvalidator {
+        fn placeholders_off_disk(&self) -> bool {
+            self.off_disk
+        }
+
+        fn dehydrate(&self, abs_path: &Path) -> Result<()> {
+            let s = self.unless_refused(abs_path)?;
             self.dehydrated.lock().unwrap().push(s);
+            Ok(())
+        }
+
+        fn supersede(&self, abs_path: &Path, size: u64, mtime: i64) -> Result<()> {
+            let s = self.unless_refused(abs_path)?;
+            self.superseded.lock().unwrap().push((s, size, mtime));
             Ok(())
         }
 
@@ -3309,7 +3447,8 @@ mod tests {
             ..Default::default()
         };
         let sink = RecordingSink::default();
-        serve_fetch_chunked(&hydrator, &sink, "f", 0, data.len() as i64, 4)
+        let len = data.len() as i64;
+        serve_fetch_chunked(&hydrator, &sink, "f", 0, len, len, 4)
             .await
             .unwrap();
         assert_eq!(
@@ -3332,7 +3471,7 @@ mod tests {
         };
         let sink = RecordingSink::default();
         // Request [2, 2+5) = bytes 2..7.
-        serve_fetch_chunked(&hydrator, &sink, "f", 2, 5, 4)
+        serve_fetch_chunked(&hydrator, &sink, "f", 2, 5, 10, 4)
             .await
             .unwrap();
         assert_eq!(
@@ -3345,7 +3484,7 @@ mod tests {
     async fn serve_fetch_reports_failure_when_hydrate_errors() {
         let hydrator = FakeHydrator::default(); // bytes: None -> hydrate fails
         let sink = RecordingSink::default();
-        let res = serve_fetch_chunked(&hydrator, &sink, "f", 0, 10, 4).await;
+        let res = serve_fetch_chunked(&hydrator, &sink, "f", 0, 10, 10, 4).await;
         assert!(res.is_err(), "hydrate error must propagate");
         assert!(
             *sink.failed.lock().unwrap(),
@@ -3364,10 +3503,44 @@ mod tests {
             ..Default::default()
         };
         let sink = RecordingSink::default();
-        serve_fetch_chunked(&hydrator, &sink, "f", 0, 0, 4)
+        serve_fetch_chunked(&hydrator, &sink, "f", 0, 0, 0, 4)
             .await
             .unwrap();
         assert_eq!(*sink.data.lock().unwrap(), vec![(0, vec![])]);
+    }
+
+    /// A placeholder left describing another version's size (a remote edit superseded it
+    /// and nothing re-described it) is never served a prefix of the new body, nor a body
+    /// shorter than the range the OS waits on: the transfer fails, nothing is sent, and the
+    /// error reaches the loop — which then records nothing hydrated.
+    #[tokio::test]
+    async fn serve_fetch_refuses_a_version_the_placeholder_does_not_describe() {
+        for (described, served) in [(6usize, 248usize), (248, 6)] {
+            let hydrator = FakeHydrator {
+                bytes: Some(vec![b'n'; served]),
+                ..Default::default()
+            };
+            let sink = RecordingSink::default();
+            let res = serve_fetch_chunked(
+                &hydrator,
+                &sink,
+                "f",
+                0,
+                described as i64,
+                described as i64,
+                4,
+            )
+            .await;
+            assert!(
+                res.is_err(),
+                "a {served} B version on a {described} B placeholder must be refused"
+            );
+            assert!(*sink.failed.lock().unwrap(), "the OS is told it failed");
+            assert!(
+                sink.data.lock().unwrap().is_empty(),
+                "not one byte of the wrong version is served"
+            );
+        }
     }
 
     // ── progress decorator (step 6) ──
@@ -3406,7 +3579,7 @@ mod tests {
     // ── apply_stale_hydrated: invalidate a superseded hydrated copy ──
 
     #[tokio::test]
-    async fn apply_stale_hydrated_dehydrates_then_repoints_and_emits_cloudonly() {
+    async fn apply_stale_hydrated_supersedes_then_repoints_and_emits_cloudonly() {
         let hydrator = FakeHydrator::default();
         let repointed = hydrator.repointed.clone();
         let invalidator = FakeInvalidator::default();
@@ -3417,10 +3590,16 @@ mod tests {
         let n = apply_stale_hydrated(&hydrator, &invalidator, root, &rows, Some(&tx)).await;
 
         assert_eq!(n, 1);
-        // Freed the bytes...
+        // Freed the bytes, leaving the placeholder describing the NEW version (its size
+        // and mtime — a bare dehydrate kept the old size, and the next open asked for
+        // exactly that many bytes of the new body)...
         assert_eq!(
-            *invalidator.dehydrated.lock().unwrap(),
-            vec!["C:\\sync\\a.txt".to_string()]
+            *invalidator.superseded.lock().unwrap(),
+            vec![("C:\\sync\\a.txt".to_string(), 99, 900)]
+        );
+        assert!(
+            invalidator.dehydrated.lock().unwrap().is_empty(),
+            "a superseded copy is never freed under the old version's description"
         );
         // ...then re-pointed the row...
         assert_eq!(*repointed.lock().unwrap(), vec!["a.txt".to_string()]);
@@ -3455,8 +3634,9 @@ mod tests {
             "the row must stay Synced — the local edit survives"
         );
         assert!(
-            invalidator.dehydrated.lock().unwrap().is_empty(),
-            "the refusing dehydrate recorded nothing"
+            invalidator.superseded.lock().unwrap().is_empty()
+                && invalidator.dehydrated.lock().unwrap().is_empty(),
+            "the refusing platform recorded nothing"
         );
         assert!(
             rx.try_recv().is_err(),
@@ -3518,7 +3698,8 @@ mod tests {
         assert_eq!(*hydrator.replace_asked.lock().unwrap(), vec!["a.txt"]);
         assert!(
             hydrator.repointed.lock().unwrap().is_empty()
-                && invalidator.dehydrated.lock().unwrap().is_empty(),
+                && invalidator.dehydrated.lock().unwrap().is_empty()
+                && invalidator.superseded.lock().unwrap().is_empty(),
             "nothing is freed and the row is not made a placeholder"
         );
         let EventKind::FileStatusChanged { status, .. } = rx.try_recv().unwrap().event else {
@@ -3568,6 +3749,50 @@ mod tests {
         let n = apply_stale_hydrated(&hydrator, &invalidator, root, &rows, None).await;
         assert_eq!(n, 0);
         assert!(hydrator.replace_asked.lock().unwrap().is_empty());
+    }
+
+    // ── redescribe_repointed: a re-pointed placeholder on the disk follows its row ──
+
+    #[test]
+    fn a_repointed_placeholder_on_the_disk_is_redescribed_as_the_new_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("listed.txt"), b"").unwrap();
+        std::fs::write(root.join("edited.txt"), b"").unwrap();
+        let at = |rel: &str| root.join(rel).to_string_lossy().to_string();
+        let invalidator = FakeInvalidator {
+            refuse: [at("edited.txt")].into_iter().collect(),
+            ..Default::default()
+        };
+        let rows = [
+            prow("listed.txt", 248, 1_700_000_100),
+            prow("edited.txt", 7, 1_700_000_100), // a local edit since: refused
+            prow("unlisted.txt", 9, 1_700_000_100), // not on the disk: its listing carries it
+        ];
+
+        let n = redescribe_repointed(&invalidator, root, &rows);
+
+        assert_eq!(n, 1);
+        assert_eq!(
+            *invalidator.superseded.lock().unwrap(),
+            vec![(at("listed.txt"), 248, 1_700_000_100)],
+            "only the placeholder on the disk is re-described, with the new size and mtime"
+        );
+    }
+
+    #[test]
+    fn an_off_disk_root_has_no_placeholder_to_redescribe() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), b"hydrated bytes").unwrap();
+        let invalidator = off_disk_root();
+
+        let n = redescribe_repointed(&invalidator, tmp.path(), &[prow("a.txt", 3, 1)]);
+
+        assert_eq!(n, 0);
+        assert!(
+            invalidator.superseded.lock().unwrap().is_empty(),
+            "an off-disk root's placeholders are rows: nothing on its disk is touched"
+        );
     }
 
     // ── serve_populate directory listing ──
@@ -3731,6 +3956,7 @@ mod tests {
             rel: "f".into(),
             offset: 0,
             length: 3,
+            file_size: 3,
             sink: Box::new(sink.clone()),
         })
         .unwrap();
@@ -3956,6 +4182,7 @@ mod tests {
             rel: "sub/f.txt".into(),
             offset: 0,
             length: 3,
+            file_size: 3,
             sink: Box::new(RecordingSink::default()),
         })
         .unwrap();
@@ -4080,7 +4307,10 @@ mod tests {
         assert_eq!(*hydrated.lock().unwrap(), vec!["sub/f.txt".to_string()]);
         assert_eq!(
             statuses,
-            vec![(format!("{}/sub/f.txt", root.display()), FileStatus::Synced)]
+            vec![(
+                crate::path_map::overlay_abs_path(&root.to_string_lossy(), "sub/f.txt"),
+                FileStatus::Synced
+            )]
         );
         let leftovers: Vec<_> = std::fs::read_dir(root.join("sub"))
             .unwrap()
@@ -4693,6 +4923,7 @@ mod tests {
             rel: "sub/f.txt".into(),
             offset: 0,
             length: 3,
+            file_size: 3,
             sink: Box::new(RecordingSink::default()),
         })
         .unwrap();

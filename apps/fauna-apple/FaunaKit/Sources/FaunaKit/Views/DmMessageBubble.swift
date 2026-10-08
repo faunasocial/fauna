@@ -192,7 +192,8 @@ public struct DmMessageBubble: View {
     private var decision: RegionRenderDecision {
         contentPolicy.recordedRender(
             itemId: message.messageId, labels: message.labels, region: region,
-            subject: .message(id: message.messageId, text: message.body))
+            subject: .message(id: message.messageId, text: message.body),
+            reportKey: message.planeRef?.recordDigest, reportAuthor: senderActorHex)
     }
 
     private var witnessKey: String { "conversation:\(message.messageId)" }
@@ -220,7 +221,30 @@ public struct DmMessageBubble: View {
     /// is NOT capability-gated (mail-spam.md § Encrypted-mode interaction; mirrors
     /// linux's `can_flag_spam = !msg.is_own`).
     private var canMarkSpam: Bool { !message.isOwn }
-    private var hasActions: Bool { canReact || canDelete || canMarkSpam }
+
+    /// The sender's hex actor id for a Fauna-rail address, `nil` for mail and
+    /// bridged senders — routes a report to the author's home nest and keys the
+    /// account-level hide.
+    private var senderActorHex: String? {
+        if case .fauna(_, let actorId) = message.sender { return actorId.hexString }
+        return nil
+    }
+
+    /// The report target for a RECEIVED conversation message off its plane ref
+    /// (`report_message_target` — the shared parse carries the sealed rule), or
+    /// `nil` for a mail/bridged message, which has no plane identity and paints
+    /// no report verb (moderation.md § User-initiated reporting → *App surface*).
+    private var reportTarget: FfiReportTarget? {
+        guard !message.isOwn, let plane = message.planeRef else { return nil }
+        return reportMessageTarget(
+            planeScope: plane.scope, recordDigest: plane.recordDigest,
+            senderActor: senderActorHex, plaintext: message.body)
+    }
+    private var canReport: Bool { reportTarget != nil }
+    private var hasActions: Bool { canReact || canDelete || canMarkSpam || canReport }
+
+    /// The shared report sheet's state (held by the content-policy store).
+    @Environment(ContentPolicyStore.self) private var policyStore: ContentPolicyStore?
 
     private var senderName: String {
         message.senderDisplay.isEmpty ? ConversationsUI.display(message.sender) : message.senderDisplay
@@ -299,7 +323,7 @@ public struct DmMessageBubble: View {
                 // AHEAD of the muted arm on purpose (the linux/web/android
                 // ordering): a guardian `block` must never be reachable through
                 // the muted-keyword reveal.
-                ContentPolicyBlockedNotice()
+                ContentPolicyBlockedNotice(reported: decision.reported)
                 timestampLabel
             } else if contentVerdict == "collapse" && !contentRevealed {
                 ContentPolicyCollapsedPlaceholder { contentRevealed = true }
@@ -700,6 +724,22 @@ public struct DmMessageBubble: View {
                 .accessibilityIdentifier(Ids.dmMessageMarkAsSpamButton)
                 .automationActivate(Ids.dmMessageMarkAsSpamButton) { performMarkAsSpam() }
             }
+
+            if canReport {
+                // Opens the shared report sheet (moderation.md § User-initiated
+                // reporting) — received messages with a plane ref only; the
+                // `ReportHost` the shell mounts paints it.
+                if canReact || canDelete || canMarkSpam { Divider() }
+                Button {
+                    openReport()
+                } label: {
+                    Label(L.conversations.detail.reportMessage, systemImage: "flag")
+                        .font(.caption2)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier(Ids.dmMessageReportButton)
+                .automationActivate(Ids.dmMessageReportButton) { openReport() }
+            }
         }
         .padding(8)
         .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
@@ -726,6 +766,13 @@ public struct DmMessageBubble: View {
         onDeleteMessage(message.messageId)
         confirmDelete = false
         showActions = false
+    }
+
+    /// Open the shared report sheet on this message and dismiss the overflow.
+    private func openReport() {
+        guard let target = reportTarget, let policyStore else { return }
+        showActions = false
+        policyStore.report.open(target)
     }
 
     /// Dispatch the mark-as-spam gesture and dismiss the overflow — no confirm

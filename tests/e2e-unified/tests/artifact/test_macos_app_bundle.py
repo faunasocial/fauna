@@ -3,8 +3,8 @@
 Subject: the real bundle `just mac-app` assembles, which `mac-dmg` packages and
 the all-in-one installer `.pkg` installs. Every other apple suite drives the bare
 swift-build Mach-O, so everything a bundle *adds* — `Bundle.main` resolution,
-Info.plist keys, `Contents/Resources`, the embedded `Sparkle.framework` and its
-rpath, the bundled `fauna-sync-agent`, the code signature and its entitlements —
+Info.plist keys, `Contents/Resources`, the app extensions, the bundled
+`fauna-sync-agent`, the code signature and its entitlements —
 is exercised by exactly nothing until this file runs. That is the client-side
 shape of the gap tier_4 exists to close for the nest (`testing.md` § The
 four-tier taxonomy): binaries bypass packaging, and packaging is where Apple
@@ -29,10 +29,6 @@ pytestmark = [pytest.mark.tier_4, pytest.mark.macos]
 
 # What `mac-app` puts in the bundle that a bare binary has no notion of. Each is
 # a real runtime dependency, not a manifest nicety:
-#   * Sparkle.framework — the app links `@rpath/Sparkle.framework/Versions/B/Sparkle`;
-#     absent, the app cannot auto-update. The recipe only prints a WARNING when it
-#     is missing and assembles the bundle anyway, so a broken build ships happily
-#     and nothing but this assertion turns that warning red.
 #   * fauna-sync-agent — the .dmg channel's agent source; `LaunchdSyncAgentSpawner`
 #     resolves `Contents/MacOS/fauna-sync-agent` and self-installs its LaunchAgent
 #     (sync-agent.md § Packaging + lifecycle). Absent, file sync silently never runs
@@ -47,7 +43,6 @@ pytestmark = [pytest.mark.tier_4, pytest.mark.macos]
 #   * Fauna-Widget.appex — the home-screen widget (apps/common.md § Home-screen
 #     widget). Absent, the widget gallery offers no Fauna widget at all.
 _REQUIRED_BUNDLE_CONTENTS = (
-    "Contents/Frameworks/Sparkle.framework",
     "Contents/MacOS/fauna-sync-agent",
     "Contents/Resources/AppIcon.icns",
     "Contents/Info.plist",
@@ -65,31 +60,8 @@ def test_the_bundle_carries_everything_it_needs_at_runtime(macos_artifact_bundle
         if not (macos_artifact_bundle / rel).exists()
     ]
     assert not missing, (
-        f"{macos_artifact_bundle} is missing {missing}. `just mac-app` prints only a "
-        f"WARNING for an absent Sparkle.framework and assembles the bundle anyway, so "
-        f"a bundle that ships without one looks like a successful build."
-    )
-
-
-def test_the_bundle_resolves_its_embedded_sparkle_at_runtime(macos_artifact_bundle):
-    """Present-in-the-bundle is not the same as loadable.
-
-    The app links `@rpath/Sparkle.framework/...`, so the framework only resolves
-    if the runpath actually landed — the project's `LD_RUNPATH_SEARCH_PATHS`
-    since the bundle moved to xcodebuild (2026-08-28), `mac-app`'s
-    `install_name_tool -add_rpath` before that. Either way, embedding the
-    framework and losing the rpath produces a bundle that passes the
-    file-presence check above and then dies at launch with a dyld error — which
-    is why this is a separate assertion on the Mach-O load commands rather than a
-    second `exists()`, and why it asserts the OUTCOME rather than the mechanism
-    that produced it.
-    """
-    exe = bundle_executable(macos_artifact_bundle)
-    load_commands = run("otool", "-l", str(exe)).stdout
-    assert "@executable_path/../Frameworks" in load_commands, (
-        f"{exe} carries no `@executable_path/../Frameworks` LC_RPATH, so the "
-        f"embedded Sparkle.framework cannot be resolved at launch:\n"
-        f"{[ln.strip() for ln in load_commands.splitlines() if 'path ' in ln]}"
+        f"{macos_artifact_bundle} is missing {missing}: a bundle that ships without "
+        f"one launches, and looks like a successful build."
     )
 
 
@@ -146,7 +118,7 @@ def test_release_and_debug_bundles_are_packaged_by_the_same_steps():
     packaging = [
         ln for ln in config_lines
         if any(step in ln for step in ("Info.plist", "AppIcon", "PkgInfo",
-                                       "Sparkle", "install_name_tool", "codesign"))
+                                       "install_name_tool", "codesign"))
     ]
     assert not packaging, (
         f"`just mac-app` now branches its PACKAGING on {{config}}:\n"

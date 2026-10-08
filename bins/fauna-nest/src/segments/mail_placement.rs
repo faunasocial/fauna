@@ -72,6 +72,14 @@ impl super::PlacementKind for MailPlacementKind {
     fn tombstone_deleted_at(t: &Self::Tombstone) -> Option<i64> {
         Some(t.deleted_at)
     }
+
+    fn note_pruned(m: &mut Self::Manifest, pruned: &[Self::Tombstone]) {
+        for t in pruned {
+            if let Some(s) = m.mailboxes.iter_mut().find(|s| s.name == t.mailbox) {
+                s.pruned_modseq = s.pruned_modseq.max(t.modseq);
+            }
+        }
+    }
 }
 
 /// The mail journal is part of the backed-up mail corpus, so a rebuilt nest can
@@ -187,6 +195,7 @@ fn apply_record_to_manifest(record: &MailPlacementRecord, m: &mut MailPlacementM
                 uid_next: 1,
                 highestmodseq: 1,
                 attrs: attrs.clone(),
+                pruned_modseq: 0,
             });
         }
         MailPlacementRecord::Delete { mailbox } => {

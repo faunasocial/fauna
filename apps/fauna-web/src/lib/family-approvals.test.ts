@@ -41,7 +41,15 @@ function fakeRaw(
   peerAddress: string,
   peerHandle: string,
   summary: string,
+  bridgeId: string,
+  operation: string,
+  target: string,
 ): string | null {
+  if (kind === 'feed_source') {
+    const key = [bridgeId, operation, target].filter((p) => p !== '');
+    if (key.length === 0) return null;
+    return key.join(' · ') + (summary === '' ? '' : ` — “${summary}”`);
+  }
   const text = kind === 'mail_hold' || kind === 'dm_hold'
     ? peerAddress
     : kind === 'contact_request'
@@ -86,4 +94,23 @@ Deno.test('every kind falls back to the localized label rather than a blank row'
   for (const kind of ['mail_hold', 'dm_hold', 'contact_request', 'contact', 'feed_source']) {
     eq(approvalText(entry({ kind }), fakeRaw), t.family.approval_no_sender, `${kind} row text`);
   }
+});
+
+// family-safety.md § Feed-source approvals — the grant matches
+// `(bridge_id, operation, target)`, never the label, so the card names the
+// target the Approve button grants and quotes the ward's label after it. This
+// pins that the web call site passes the whole key through, not just `summary`.
+Deno.test('a feed_source renders the grant key, not only the ward label', () => {
+  const ask = entry({
+    kind: 'feed_source',
+    summary: "Grandma's photos",
+    bridge_id: 'bluesky',
+    operation: 'follow',
+    target: 'did:plc:somethingelse',
+  });
+  eq(
+    approvalText(ask, fakeRaw),
+    "bluesky · follow · did:plc:somethingelse — “Grandma's photos”",
+    'feed_source row text',
+  );
 });

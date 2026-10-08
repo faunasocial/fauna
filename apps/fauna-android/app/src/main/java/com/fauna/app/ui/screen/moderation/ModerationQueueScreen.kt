@@ -7,9 +7,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -17,10 +18,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -34,10 +37,13 @@ import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.FaunaGateVerdict
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.ModerationQueueVM
+import com.fauna.ffi.FfiReportLedgerRow
 import com.fauna.ffi.obligationActionLabel
 import com.fauna.ffi.shortId
 import uniffi.fauna_client_moderation.QueueRow
+import uniffi.fauna_core.LocalizedText
 import uniffi.fauna_client_moderation.QueueRowSource
 import social.fauna.generated.Ids
 
@@ -74,10 +80,18 @@ fun ModerationQueueScreen(
     // (moderation.md § Errors & edge cases) — the queue is never faked green.
     LaunchedEffect(errorMessage) { errorMessage?.let { appMessages.showError(it) } }
 
+    val reports by vm.reports.collectAsState()
+    val reportsLoaded by vm.reportsLoaded.collectAsState()
+    val reportStatus by vm.reportStatus.collectAsState()
+
     ModerationQueueContent(
         queue = queue,
         isLoading = isLoading,
         onCorrect = { row -> vm.correct(row.contentId, row.source == QueueRowSource.LOCAL) },
+        reports = reports,
+        reportsLoaded = reportsLoaded,
+        reportStatus = reportStatus,
+        onWithdrawReport = vm::withdrawReport,
     )
 }
 
@@ -93,8 +107,17 @@ fun ModerationQueueContent(
     queue: List<QueueRow>,
     isLoading: Boolean,
     onCorrect: (QueueRow) -> Unit,
+    // The reporter's ledger (defaults keep the queue-only harnesses unchanged).
+    reports: List<FfiReportLedgerRow> = emptyList(),
+    reportsLoaded: Boolean = false,
+    reportStatus: LocalizedText? = null,
+    onWithdrawReport: (String) -> Unit = {},
 ) {
-    Column(modifier = Modifier.fillMaxSize()) {
+    // One scrolling page: the enforcement queue, then the reporter's own ledger
+    // beneath it (moderation.md § User-initiated reporting → *What the reporter is
+    // told*). The queue is the user's OWN flagged content, so it is short enough
+    // to lay out inline rather than as a virtualized list.
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         // Section caption above the queue (mirrors linux + windows'
         // "Enforcement Actions").
         Text(
@@ -109,7 +132,8 @@ fun ModerationQueueContent(
             // when empty.
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
+                    .fillMaxWidth()
+                    .heightIn(min = 96.dp)
                     .testTag(Ids.MODERATION_QUEUE),
                 contentAlignment = Alignment.Center,
             ) {
@@ -124,15 +148,85 @@ fun ModerationQueueContent(
                 }
             }
         } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .testTag(Ids.MODERATION_QUEUE),
-            ) {
-                items(queue, key = { it.contentId }) { row ->
-                    ModerationQueueRow(row = row, onCorrect = { onCorrect(row) })
-                    HorizontalDivider()
+            Column(modifier = Modifier.fillMaxWidth().testTag(Ids.MODERATION_QUEUE)) {
+                queue.forEach { row ->
+                    key(row.contentId) {
+                        ModerationQueueRow(row = row, onCorrect = { onCorrect(row) })
+                        HorizontalDivider()
+                    }
                 }
+            }
+        }
+
+        ReportLedgerSection(
+            reports = reports,
+            loaded = reportsLoaded,
+            status = reportStatus,
+            onWithdraw = onWithdrawReport,
+        )
+    }
+}
+
+/**
+ * The reporter's own ledger (`moderation-reports-section`, moderation.md §
+ * User-initiated reporting → *What the reporter is told*): one flat
+ * `moderation-report-item[i]` per report filed, each carrying
+ * `reason · status · short subject id · outcome — where it went` (the line web's
+ * `ledgerLine`, tui's `ledger_elements` and apple's `ledgerLine` paint — the e2e
+ * reads this text on every app), with a `moderation-report-withdraw-button[i]` on
+ * an OPEN row. The empty line paints only off the `loaded` bit, so a slow first
+ * read never claims "You have not reported anything" (`ui/README.md` § List
+ * pages: loading is not empty).
+ */
+@Composable
+private fun ReportLedgerSection(
+    reports: List<FfiReportLedgerRow>,
+    loaded: Boolean,
+    status: LocalizedText?,
+    onWithdraw: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    Column(modifier = Modifier.fillMaxWidth().testTag(Ids.MODERATION_REPORTS_SECTION)) {
+        Text(
+            stringResource(R.string.moderation_report_ledger_title),
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 6.dp),
+        )
+        localized(status)?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+        }
+        if (loaded && reports.isEmpty()) {
+            Text(
+                stringResource(R.string.moderation_report_ledger_empty),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+        }
+        reports.forEach { row ->
+            key(row.reportId) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        ModerationQueueVM.ledgerLine(row) { resolveLocalized(context, it).orEmpty() },
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f).testTag(Ids.MODERATION_REPORT_ITEM),
+                    )
+                    if (row.canWithdraw) {
+                        TextButton(
+                            onClick = { onWithdraw(row.reportId) },
+                            modifier = Modifier.testTag(Ids.MODERATION_REPORT_WITHDRAW_BUTTON),
+                        ) { Text(stringResource(R.string.moderation_report_withdraw)) }
+                    }
+                }
+                HorizontalDivider()
             }
         }
     }

@@ -28,6 +28,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.fauna.app.BuildConfig
 import com.fauna.app.core.AppMessages
 import com.fauna.app.core.AppState
+import com.fauna.app.ui.components.ReportHost
 import com.fauna.app.ui.screen.LaunchAccountIndexUnreadableScreen
 import com.fauna.app.ui.screen.LaunchIdentityChangedScreen
 import com.fauna.app.ui.screen.LaunchNeedsUpdateScreen
@@ -649,10 +650,12 @@ fun FaunaNavHost(
         // the same door and the same re-entry — the launch surface with no
         // relaunch (`onboarding.md` § App-launch routing, the
         // previously-signed-in row; `security.md` § Post-auth surfacing).
+        // A supersession THIS device's own stolen-identity ceremony caused is
+        // held back while that ceremony owns the Account page
+        // (`AppLaunchVM.routeSessionEnding`, `StolenCeremonyHold`).
         LaunchedEffect(Unit) {
             launchVmPostAuth.sessionEnding.collect { verdict ->
-                launchVmPostAuth.escalateSessionEnding(verdict)
-                appState.isOnboarding = true
+                launchVmPostAuth.routeSessionEnding(verdict) { appState.isOnboarding = true }
             }
         }
 
@@ -834,6 +837,26 @@ fun FaunaNavHost(
                         MessageBanner()
                         CriticalAlertsBanner()
                         SupervisedIndicator(navController)
+                        // The one shared report sheet + its acknowledgement
+                        // (moderation.md § User-initiated reporting): mounted
+                        // once, over whatever page is showing, so a report filed
+                        // from a card the reporter-side hide then replaces still
+                        // paints `report-status`.
+                        ReportHost()
+                        // A succession's successor lands on Settings → Account
+                        // FIRST, and only then does the Recovery kit section
+                        // claim and mint its owed kit (`identity-succession.md`
+                        // § The RecoveryKey → *At succession*: navigate
+                        // synchronously, mint after — entering Account clears any
+                        // kit on screen, so navigating after the mint would wipe
+                        // the very thing the step exists to show). A peek: it
+                        // claims nothing. Effects launch after this composition
+                        // applies, so the NavHost below already holds its graph.
+                        LaunchedEffect(Unit) {
+                            if (launchVmPostAuth.owesSuccessorKitHere()) {
+                                navController.navigateToDrawerRoute("settings/account")
+                            }
+                        }
                         // The screen-time lock (family-safety.md § Screen
                         // time) covers the page content only, not the chrome
                         // above (supervised-indicator stays reachable) — a

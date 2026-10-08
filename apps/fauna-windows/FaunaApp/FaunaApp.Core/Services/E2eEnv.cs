@@ -102,6 +102,13 @@ internal static class E2eEnv
     /// </summary>
     internal static string? SyncAgentBin => Environment.GetEnvironmentVariable("FAUNA_E2E_SYNC_AGENT_BIN");
 
+    /// <summary>
+    /// The harness's stub release feed, whose origin <see cref="UpdateCheck"/> passes
+    /// in place of production's GitHub API (<c>helpers/release_feed_stub.py</c>). Only
+    /// the origin moves; the path, the JSON shape and the semver rule stay shared Rust.
+    /// </summary>
+    internal static string? ReleaseFeedUrl => Environment.GetEnvironmentVariable("FAUNA_E2E_RELEASE_FEED_URL");
+
 #else
 
     // Production twins. Same signatures, all null — indistinguishable to every
@@ -117,6 +124,7 @@ internal static class E2eEnv
     internal static string? RealSyncAgent => null;
     internal static string? SyncPipe => null;
     internal static string? SyncAgentBin => null;
+    internal static string? ReleaseFeedUrl => null;
 
 #endif
 }

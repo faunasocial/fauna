@@ -22,6 +22,7 @@ import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.AdminNestVM
 import com.fauna.ffi.FfiAdminRegionView
 import com.fauna.ffi.FfiIssuerForcedArm
@@ -85,6 +86,8 @@ fun AdminNestScreen(
     val seedRotateStatus by vm.seedRotateStatus.collectAsState()
     val takedownArmed by vm.takedownArmed.collectAsState()
     val takedownStatus by vm.takedownStatus.collectAsState()
+    val reports by vm.reports.collectAsState()
+    val takedownPrefill by vm.takedownPrefill.collectAsState()
     // ONE flow for the whole sign-in key section, so a dispatch's verdict,
     // re-read key set and released in-flight guard recompose together.
     val oauth by vm.oauth.collectAsState()
@@ -136,6 +139,11 @@ fun AdminNestScreen(
         onCancelOauthForced = vm::cancelOauthForced,
         onConfirmOauthForced = vm::confirmOauthForced,
         onFactoryReset = { vm.factoryReset(onFactoryResetComplete) },
+        reports = reports,
+        takedownPrefill = takedownPrefill,
+        onResolveReport = vm::resolveReport,
+        onOpenReportTakedown = vm::openReportTakedown,
+        onConsumeTakedownPrefill = vm::consumeTakedownPrefill,
     )
 }
 
@@ -208,6 +216,15 @@ fun AdminNestContent(
         { row, nowSecs -> com.fauna.ffi.issuerKeyRowLabel(row, nowSecs) },
     issuerKeyRotateCost: (FfiIssuerKeyView) -> LocalizedText =
         { view -> com.fauna.ffi.issuerKeyRotateCost(view) },
+    // The open abuse reports (`admin-nest-reports-section`; moderation.md §
+    // User-initiated reporting → *Where it lands*) and the takedown console's
+    // one-shot prefill from a row's *open takedown*. Defaults keep the existing
+    // Robolectric harnesses unchanged.
+    reports: AdminNestVM.ReportsState = AdminNestVM.ReportsState(),
+    takedownPrefill: com.fauna.ffi.FfiTakedownPrefill? = null,
+    onResolveReport: (com.fauna.ffi.FfiReportQueueRow, Boolean) -> Unit = { _, _ -> },
+    onOpenReportTakedown: (com.fauna.ffi.FfiReportQueueRow) -> Unit = {},
+    onConsumeTakedownPrefill: () -> Unit = {},
 ) {
     Scaffold(
         topBar = {
@@ -372,6 +389,19 @@ fun AdminNestContent(
                 onArm = onArmTakedown,
                 onCancel = onCancelTakedown,
                 onConfirm = onConfirmTakedown,
+                prefill = takedownPrefill,
+                onPrefillConsumed = onConsumeTakedownPrefill,
+            )
+
+            HorizontalDivider()
+
+            // ── Reports queue (admin-nest-reports-*; moderation.md § User-initiated
+            // reporting → *Where it lands*) — directly after the takedown console it
+            // pre-fills, as ui.yaml's admin-nest element order declares.
+            ReportsQueueSection(
+                reports = reports,
+                onResolve = onResolveReport,
+                onOpenTakedown = onOpenReportTakedown,
             )
 
             HorizontalDivider()
@@ -1085,6 +1115,8 @@ private fun TakedownSection(
     onArm: (String, Boolean, String, Boolean, com.fauna.ffi.FfiTakedownFormView) -> Unit,
     onCancel: () -> Unit,
     onConfirm: () -> Unit,
+    prefill: com.fauna.ffi.FfiTakedownPrefill? = null,
+    onPrefillConsumed: () -> Unit = {},
 ) {
     var contentId by remember { mutableStateOf("") }
     var conversation by remember { mutableStateOf(false) }
@@ -1092,6 +1124,17 @@ private fun TakedownSection(
     var restore by remember { mutableStateOf(false) }
     val view = remember(contentId, conversation, reference, restore) {
         takedownFormView(contentId, conversation, reference, restore)
+    }
+
+    // A report row's *open takedown* pre-fills the console (the draft fields are
+    // local state, so the request arrives as a one-shot): the content id and kind
+    // only — NO citation, so the console's own legal-reference guard still stands.
+    LaunchedEffect(prefill) {
+        prefill?.let {
+            contentId = it.contentId
+            conversation = it.conversation
+            onPrefillConsumed()
+        }
     }
 
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_NEST_TAKEDOWN_SECTION)) {
@@ -1202,6 +1245,88 @@ private fun TakedownSection(
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.testTag(Ids.ADMIN_NEST_TAKEDOWN_STATUS),
                 )
+            }
+        }
+    }
+}
+
+// ── Reports queue (moderation.md § User-initiated reporting → Where it lands) ──
+// The open abuse reports, local and forwarded, oldest first — already worded by
+// the shared `queue_row_view`. One flat `admin-nest-report-item` per row with its
+// three levers: *open takedown* (posts and messages only — the shared
+// `can_open_takedown`) pre-fills the console above with NO citation; *acted* /
+// *dismiss* only RECORD the outcome (the reporter is told nothing more), over
+// `fauna.moderation.abuse_report.resolve` — OnlineOnly, so each declares it.
+// The empty line paints only off the `loaded` bit (loading is not empty,
+// `ui/README.md` § List pages).
+
+@Composable
+private fun ReportsQueueSection(
+    reports: AdminNestVM.ReportsState,
+    onResolve: (com.fauna.ffi.FfiReportQueueRow, Boolean) -> Unit,
+    onOpenTakedown: (com.fauna.ffi.FfiReportQueueRow) -> Unit,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    Card(modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_NEST_REPORTS_SECTION)) {
+        Column(
+            modifier = Modifier.padding(16.dp).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                stringResource(R.string.admin_nest_page_reports_label),
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                stringResource(R.string.admin_nest_page_reports_desc),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (!reports.loaded) {
+                Text(
+                    stringResource(R.string.admin_nest_page_reports_loading),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else if (reports.rows.isEmpty()) {
+                Text(
+                    stringResource(R.string.admin_nest_page_reports_empty),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            reports.rows.forEach { row ->
+                key(row.reportId) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            AdminNestVM.reportLine(row) { resolveLocalized(context, it).orEmpty() },
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.testTag(Ids.ADMIN_NEST_REPORT_ITEM),
+                        )
+                        val gate = faunaGate("fauna.moderation.abuse_report.resolve")
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (row.canOpenTakedown) {
+                                OutlinedButton(
+                                    onClick = { onOpenTakedown(row) },
+                                    modifier = Modifier.testTag(Ids.ADMIN_NEST_REPORT_OPEN_TAKEDOWN_BUTTON),
+                                ) { Text(stringResource(R.string.admin_nest_page_reports_open_takedown)) }
+                            }
+                            OutlinedButton(
+                                onClick = { onResolve(row, true) },
+                                enabled = gate.enabled,
+                                modifier = Modifier.testTag(Ids.ADMIN_NEST_REPORT_ACTED_BUTTON),
+                            ) { Text(stringResource(R.string.admin_nest_page_reports_acted)) }
+                            OutlinedButton(
+                                onClick = { onResolve(row, false) },
+                                enabled = gate.enabled,
+                                modifier = Modifier.testTag(Ids.ADMIN_NEST_REPORT_DISMISS_BUTTON),
+                            ) { Text(stringResource(R.string.admin_nest_page_reports_dismiss)) }
+                        }
+                        DisabledControlReasonText(gate.reason)
+                    }
+                }
+            }
+            reports.status?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall)
             }
         }
     }

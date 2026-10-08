@@ -41,6 +41,7 @@ mod offline_share;
 mod p2p;
 #[cfg(test)]
 mod packaging_identity_test;
+mod push;
 mod qr_widget;
 mod region;
 mod rows;
@@ -991,6 +992,9 @@ fn register_sign_out_handler(application: &adw::Application) {
         // module itself is compiled out of release builds (e2e-conventions.md
         // § point 15), so every call site must be too, or `just linux-release`
         // fails to link.
+        // The departing session's stolen-identity ceremony, if any, can no
+        // longer own a supersession (`settings::stolen_hold`).
+        settings::stolen_ceremony_teardown();
         #[cfg(any(debug_assertions, feature = "e2e-agent"))]
         automation::link::record_session_teardown();
         // Defer teardown so the dialog whose response handler triggered us
@@ -1147,6 +1151,9 @@ fn register_launch_escalation_handler(application: &adw::Application) {
         // deferred closure is too late for a barrier that is a glib idle).
         // This mid-session escalation is a session teardown exactly like
         // those three and was the one arm that skipped it (tui's identical finding on the same class of arm).
+        // The departing session's stolen-identity ceremony, if any, can no
+        // longer own a supersession (`settings::stolen_hold`).
+        settings::stolen_ceremony_teardown();
         #[cfg(any(debug_assertions, feature = "e2e-agent"))]
         automation::link::record_session_teardown();
         let app = app_for_identity.clone();
@@ -1224,6 +1231,9 @@ fn register_factory_reset_handler(application: &adw::Application) {
         // A factory reset drops the authenticated session too — counted
         // synchronously here, before the deferral, for the same reason as the
         // switch and sign-out arms (`automation::link::record_session_teardown`).
+        // The departing session's stolen-identity ceremony, if any, can no
+        // longer own a supersession (`settings::stolen_hold`).
+        settings::stolen_ceremony_teardown();
         #[cfg(any(debug_assertions, feature = "e2e-agent"))]
         automation::link::record_session_teardown();
         let app = app_for_reset.clone();
@@ -1337,6 +1347,9 @@ fn register_switch_account_handler(application: &adw::Application) {
         // only once the switch is certain to happen. After the re-entrancy
         // guard, so the ignored duplicate trigger does not count a second
         // teardown that never happens.
+        // The departing session's stolen-identity ceremony, if any, can no
+        // longer own a supersession (`settings::stolen_hold`).
+        settings::stolen_ceremony_teardown();
         #[cfg(any(debug_assertions, feature = "e2e-agent"))]
         {
             automation::link::record_session_teardown();
@@ -2321,6 +2334,7 @@ fn handle_launch_phase(
                 let machine_for_naming = onboarding.machine.clone();
                 let nest_url = node_url.clone();
                 let secret = secret_hex.clone();
+                let secret_for_adoption = secret_hex.clone();
                 crate::async_helper::run_on_tokio(
                     async move { client::verify_succession_successor(&nest_url, &secret).await },
                     move |successor| {
@@ -2329,8 +2343,20 @@ fn handle_launch_phase(
                         // verify can land after the user navigated away, and
                         // re-asserting a supersession over whatever they are doing
                         // now would be a banner from a flow they already handled.
+                        //
+                        // Save in the one case with nothing left to import: this
+                        // device already holds the PROVEN successor's key — the
+                        // state a lost succession reply leaves behind, whose
+                        // message promised that reopening the app signs in as it.
+                        // Then the screen is not upgraded but replaced, by the
+                        // switch (`settings::adopt_held_successor`).
                         if machine_for_naming.step()
                             == fauna_onboarding_machine::OnboardingStep::IdentityImport
+                            && !client::actor_id_from_secret_hex(&secret_for_adoption).is_some_and(
+                                |predecessor| {
+                                    crate::settings::adopt_held_successor(&predecessor, &successor)
+                                },
+                            )
                         {
                             machine_for_naming.begin_import_identity_with_reason(
                                 crate::i18n::strings::onboarding::launch::IDENTITY_SUPERSEDED_VERIFIED
@@ -4107,7 +4133,30 @@ fn handle_test_command(
             // identity-changed e2e re-seeds the pin on the LIVE session). Try the
             // shared free dispatcher first; only a `NeedsMachine` result falls
             // through to the machine path below.
-            let result = match fauna_onboarding_machine::call_machine_free_method(name, &json_arg) {
+            // The **registry** arms first (`refuse_secret_writes_for_test`,
+            // `set_account_reach_for_test`, …). They need this app's own
+            // `AccountRegistry`, which no free dispatcher can reach, so shared
+            // Rust holds the name table and the semantics and linux hands over
+            // only the registry — tui's delegation, one arm. The fault is a
+            // reserved row in the store's backing, so the fresh store object
+            // `account_registry()` builds here reaches the ceremony's registry
+            // too. A registry hit reads as the free dispatcher's `Handled`.
+            // (This whole handler is compiled out of a release build without
+            // `e2e-agent`, as the shared fn is — convention 15.)
+            let registry = fauna_client_accounts::call_registry_method_for_test(
+                &crate::account_registry(),
+                name,
+                &json_arg,
+            );
+            let free = match registry {
+                fauna_client_accounts::RegistryMethodOutcome::Handled(v) => {
+                    fauna_onboarding_machine::FreeMethodOutcome::Handled(v)
+                }
+                fauna_client_accounts::RegistryMethodOutcome::NotMine => {
+                    fauna_onboarding_machine::call_machine_free_method(name, &json_arg)
+                }
+            };
+            let result = match free {
                 fauna_onboarding_machine::FreeMethodOutcome::Handled(v) => v,
                 fauna_onboarding_machine::FreeMethodOutcome::NeedsMachine => {
                     let Some(m) = current_onboarding_machine.borrow().clone() else {

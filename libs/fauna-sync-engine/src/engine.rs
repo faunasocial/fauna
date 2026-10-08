@@ -231,6 +231,16 @@ pub struct PlaceholderFold {
     /// (`docs/goal/behavior/delete-propagation.md` § *The floor on an on-demand
     /// root*, decision (f)).
     pub created: Vec<crate::enumerate::PlaceholderRow>,
+    /// The rows among [`recorded`](Self::recorded) whose head MOVED under an existing
+    /// `Placeholder` row — re-pointed at the new version, sorted by path, each carrying that
+    /// version's size and mtime. The row is all this fold writes; a placeholder already on
+    /// the disk still describes the OLD version. A host whose platform keeps a placeholder's
+    /// size and mtime on the disk (Windows cfapi, which asks for exactly `[0, that size)` on
+    /// the next open) re-describes these, or a remote edit that changed the size reaches
+    /// this device truncated or short (`on-demand-files.md` § On-Demand Files: a placeholder
+    /// shows the right size and modification time). A host that reads both from the rows
+    /// (FUSE, the File Provider) ignores it.
+    pub repointed: Vec<crate::enumerate::PlaceholderRow>,
     /// Hydrated rows the fold refused to touch, sorted by path. Empty on every
     /// platform that keeps its folders always-resident; non-empty only on an
     /// on-demand host whose local copy the nest has superseded.
@@ -691,6 +701,10 @@ pub fn default_format_registry() -> fauna_core::format::FormatRegistry {
 struct EngineBlobFetcher<'a> {
     client: &'a SyncClient,
     transfer_pool: &'a crate::transfer::TransferPool,
+    /// This host's sibling devices and the folder's `FolderRef` wire string —
+    /// asked for chunk bodies before the nest (the same-account peer data
+    /// plane). `None` fetches from the nest alone.
+    siblings: Option<(&'a dyn crate::sibling_source::SiblingChunkSource, String)>,
 }
 
 #[async_trait::async_trait]
@@ -699,14 +713,33 @@ impl fauna_core::file_download::BlobFetcher for EngineBlobFetcher<'_> {
         self.client.download_manifest(hash).await
     }
 
+    /// Sibling first, the nest for the rest (`p2p.md` § Goal: a transfer never
+    /// fails for want of a direct path). Whatever a sibling served is kept;
+    /// only what it did not is fetched from the nest, so a cut part-way costs
+    /// the remainder and never a re-fetch.
     async fn fetch_chunks(
         &self,
         store_keys: &[ContentHash],
         relative_path: &str,
     ) -> Result<Vec<Vec<u8>>> {
-        self.transfer_pool
-            .download_chunks(self.client, store_keys, relative_path)
-            .await
+        let Some((source, folder)) = &self.siblings else {
+            return self
+                .transfer_pool
+                .download_chunks(self.client, store_keys, relative_path)
+                .await;
+        };
+        crate::sibling_source::sibling_first(
+            *source,
+            folder,
+            store_keys,
+            relative_path,
+            |rest| async move {
+                self.transfer_pool
+                    .download_chunks(self.client, &rest, relative_path)
+                    .await
+            },
+        )
+        .await
     }
 }
 
@@ -1218,6 +1251,10 @@ pub struct SyncEngine {
     /// `None` on a host that drives its own edges (the control-inverted File
     /// Provider host re-reads the row before every seal) or none at all.
     binding_edge: Option<crate::binding_edge::BindingEdge>,
+    /// Where a download looks for chunk bodies before the nest
+    /// ([`Self::with_sibling_chunks`]; the same-account peer data plane).
+    /// `None` — a host with no peer leg — fetches from the nest alone.
+    sibling_chunks: Option<std::sync::Arc<dyn crate::sibling_source::SiblingChunkSource>>,
     /// The row basis the refresh edge last saw — seeded from the edge's build-time
     /// basis, advanced by every read. A basis MOVE asks the host to re-resolve
     /// once; an engine whose keys the re-resolve left unchanged (an access edit,
@@ -1501,6 +1538,7 @@ impl SyncEngine {
             seal_floor: std::sync::RwLock::new(crate::binding_edge::SealFloor::Unarmed),
             read_only: false,
             binding_edge: None,
+            sibling_chunks: None,
             seen_basis: std::sync::RwLock::new(None),
             change_signing: std::sync::RwLock::new(None),
             warned_unsigned: std::sync::atomic::AtomicBool::new(false),
@@ -2264,6 +2302,18 @@ impl SyncEngine {
         *this.seen_basis.write().unwrap() = Some(edge.basis.clone());
         this.binding_edge = Some(edge);
         this
+    }
+
+    /// Fetch chunk bodies from this host's admitted sibling devices before the
+    /// nest (`p2p.md` § Goal; the source's module owns the contract). Reached
+    /// only on an engine whose folder the host names ([`Self::with_binding_edge`]),
+    /// since a sibling is asked by the folder's `FolderRef`.
+    pub fn with_sibling_chunks(
+        mut self,
+        source: std::sync::Arc<dyn crate::sibling_source::SiblingChunkSource>,
+    ) -> Self {
+        self.sibling_chunks = Some(source);
+        self
     }
 
     /// The content-key generation this engine seals under — `None` for an
@@ -8872,25 +8922,34 @@ impl SyncEngine {
         Ok(None)
     }
 
-    /// Answer one relay ask the host routed to this folder's engine: serve the
-    /// key from the bound file and `POST` it, or `DELETE` when this seat holds
-    /// none (`file-sync.md` § Relay serving, step (3)). A serve that errs — a
-    /// DB or seal failure — declines like a miss: the relay moves on to the
-    /// next seat rather than waiting out its deadline on this one.
-    pub async fn answer_relay_ask(&self, ask: crate::relay_seat::ServeAsk) {
+    /// Answer one serve ask the host routed to this folder's engine, through
+    /// the one serve core ([`Self::serve_chunk`]). A relay ask's answer is
+    /// `POST`ed back, or `DELETE`d when this seat holds none (`file-sync.md`
+    /// § Relay serving, step (3)); a sibling's goes back to the peer serve side
+    /// waiting on it. A serve that errs — a DB or seal failure — declines like
+    /// a miss: the asker moves on rather than waiting out its deadline here.
+    pub async fn answer_serve_ask(&self, ask: crate::relay_seat::ServeAsk) {
         let served = match self.serve_chunk(&ask.store_key).await {
             Ok(served) => served,
             Err(e) => {
-                tracing::warn!(error = %e, "relay serve failed; declining the ask");
+                tracing::warn!(error = %e, "chunk serve failed; declining the ask");
                 None
             }
         };
-        if let Err(e) = self
-            .client
-            .answer_relay_ask(ask.request_id, served.as_deref())
-            .await
-        {
-            tracing::debug!(error = %e, "relay answer did not reach the nest");
+        match ask.route {
+            crate::relay_seat::AskRoute::Relay { request_id } => {
+                if let Err(e) = self
+                    .client
+                    .answer_relay_ask(request_id, served.as_deref())
+                    .await
+                {
+                    tracing::debug!(error = %e, "relay answer did not reach the nest");
+                }
+            }
+            // The waiting side gave up (its deadline) — nothing to tell.
+            crate::relay_seat::AskRoute::Peer(answer) => {
+                let _ = answer.send(served);
+            }
         }
     }
 
@@ -11470,6 +11529,7 @@ impl SyncEngine {
 
         let mut recorded = 0usize;
         let mut created: Vec<crate::enumerate::PlaceholderRow> = Vec::new();
+        let mut repointed: Vec<crate::enumerate::PlaceholderRow> = Vec::new();
         let mut stale_hydrated: Vec<StaleHydratedRow> = Vec::new();
         for (path, folded) in &latest {
             // Latest state is a delete (`manifest_hash = None`).
@@ -11502,6 +11562,8 @@ impl SyncEngine {
             // newer head resurrects (below) — either way its directory may already be
             // listed, so it is materialized eagerly like any other create.
             let mut is_new = existing.is_none();
+            // An existing `Placeholder` re-pointed at a moved head (not the 0-byte stamp below).
+            let mut head_moved = false;
             if let Some(existing) = existing {
                 // The head comparison is over the *content* identity only —
                 // deliberately not `remote_mtime`: a device that recorded its own
@@ -11576,6 +11638,7 @@ impl SyncEngine {
                 {
                     continue;
                 }
+                head_moved = !head_matches;
             }
             // A 0-byte file has no bytes to fetch, so on an on-demand root cfapi fires **no**
             // FETCH_DATA when it is opened (measured on a live cfapi root, 2026-07-15 — opening
@@ -11608,12 +11671,15 @@ impl SyncEngine {
                 folded.content_key_version, // the generation to decrypt this version
             )?;
             recorded += 1;
+            let row = || crate::enumerate::PlaceholderRow {
+                rel: path.clone(),
+                size: u64::try_from(folded.size).unwrap_or(0),
+                mtime: folded.mtime,
+            };
             if is_new {
-                created.push(crate::enumerate::PlaceholderRow {
-                    rel: path.clone(),
-                    size: u64::try_from(folded.size).unwrap_or(0),
-                    mtime: folded.mtime,
-                });
+                created.push(row());
+            } else if head_moved {
+                repointed.push(row());
             }
         }
 
@@ -11656,9 +11722,11 @@ impl SyncEngine {
         // stable test assertions, stable apply order).
         stale_hydrated.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
         created.sort_by(|a, b| a.rel.cmp(&b.rel));
+        repointed.sort_by(|a, b| a.rel.cmp(&b.rel));
         Ok(PlaceholderFold {
             recorded,
             created,
+            repointed,
             stale_hydrated,
             overlay,
         })
@@ -11928,6 +11996,11 @@ impl SyncEngine {
         EngineBlobFetcher {
             client: &self.client,
             transfer_pool: &self.transfer_pool,
+            siblings: self
+                .sibling_chunks
+                .as_deref()
+                .zip(self.binding_edge.as_ref())
+                .map(|(source, edge)| (source, edge.folder_ref.to_wire())),
         }
     }
 

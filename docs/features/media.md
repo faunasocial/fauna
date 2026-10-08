@@ -89,7 +89,7 @@ Stamped 2026-09-19 at 8ac16765e4.
 | 9 | app | `tests/e2e-unified/tests/test_media.py::test_media_item_shows_its_picture_or_a_placeholder` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_version_prune_recovery.py::test_version_prune_soft_prunes_and_the_ui_recovers` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_media.py::test_media_upload_with_no_file_chosen_says_so` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_media_source_status.py::test_media_item_says_whether_its_folder_can_be_reached_apart_from_its_sync_state` | web (linux): failed, linux (linux): failed, tui (linux): failed |
+| 12 | app | `tests/e2e-unified/tests/test_media_source_status.py::test_media_item_says_whether_its_folder_can_be_reached_apart_from_its_sync_state` | web (linux): failed, linux (linux): failed, macos (macos): passed, ios (macos): passed, tui (linux): failed, tui (macos): passed |
 | 12 | app | `tests/e2e-unified/tests/test_media_source_status.py::test_media_item_in_a_full_folder_is_reachable_with_no_seat_connected` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_media.py::test_upload_into_a_metadata_only_folder_is_refused_with_its_reason` | tui (linux): passed |
 <!-- features-render:end -->

@@ -11,14 +11,25 @@
 //! machine, which is the whole point: an account whose apps are all closed still
 //! walks its scopes, drains its outbox and publishes its endpoints.
 //!
-//! Nothing here decides *whether* it pumps. The runtime's own W5.1 election
-//! (`account_runtime::elect_at_start` — `flock` on `<store dir>/engine.lock`)
-//! settles that inside `start`, so a running app keeps the role it already holds
-//! and this host comes up as a plain reader/writer beside it; when that app
-//! exits, the kernel drops its lock and this host takes the role on its next
-//! backstop tick. **Priority is behavioral, never protocol** (T9): desktops
-//! *ensure the agent*, so in steady state the agent is the process holding the
-//! lock — but nothing in this file asserts that, and nothing may.
+//! **This host is what gives the agent the engine role** (`account-runtime.md`
+//! § Multi-instance concurrency → *The agent holds the role when present*,
+//! ruled 2026-10-08). The election itself is first-come — the runtime's W5.1
+//! `elect_at_start`, `flock` on `<store dir>/engine.lock` — and T9's "priority
+//! is behavioral" premise did not hold: every desktop app starts its own
+//! runtime at the post-auth hook that provisions the agent, so the app usually
+//! won and kept the role. So the mount takes the store's **agent presence
+//! lock** (`<store dir>/agent.lock`, exclusive, blocking) *before* the runtime
+//! starts and holds it for the stint ([`Mounted`]); every seed-holding runtime
+//! probes it — at assembly and at each re-try it does not contend while the
+//! agent is present, and one that holds the role hands it over between passes
+//! (legs down, its lock released, the role fact flipped). This runtime is
+//! seedless, so it never probes and never takes the lock itself: it contends
+//! as a non-holder until the app beside it yields, and takes the free role on
+//! its tick or its `reconcile_now`. When the agent exits or crashes the kernel
+//! drops both its locks and an app takes the role back at its next re-try. A
+//! presence acquire that fails mounts anyway — the lock states priority,
+//! `engine.lock` keeps exclusivity, and the apps then see the first-come
+//! election.
 //!
 //! # Why it lives beside the renewal + custodian loops
 //!
@@ -47,8 +58,9 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 use fauna_sync_engine::account_runtime::{
-    AccountRuntimeParams, AccountStoreHandle, AccountStoreRuntime, DEFAULT_BACKSTOP_INTERVAL,
-    RuntimePrincipal, StoreRoot, production_credential_store,
+    AccountRuntimeParams, AccountStoreHandle, AccountStoreRuntime, AgentPresenceLock,
+    AgentPresenceLockOutcome, DEFAULT_BACKSTOP_INTERVAL, RuntimePrincipal, StoreRoot,
+    production_credential_store,
 };
 use fauna_sync_engine::principal_bundle::load_writer_key;
 
@@ -363,12 +375,17 @@ impl StintMount for Mounted {
             handle,
             device,
             push_arm,
+            presence,
         } = self;
         push_arm.abort();
         // Deterministic teardown, never a drop: `shutdown` drains the pump's
         // in-flight pass before the store closes, which is what keeps a
         // mid-pass exit from leaving the outbox half-drained.
         handle.shutdown().await;
+        // Presence goes only once the runtime — and with it `engine.lock` — is
+        // gone: an app that read the agent absent any earlier would contend
+        // against a holder that is still pumping.
+        drop(presence);
 
         // The stint's own nest leg goes with it. This client is minted per stint and
         // owned by nothing else, so if the stint ends without closing it its
@@ -425,6 +442,11 @@ struct Mounted {
     /// The `ws-device` push arm posting this account's banners
     /// ([`crate::push_arm`]); aborted with the stint.
     push_arm: tokio::task::JoinHandle<()>,
+    /// The agent presence lock on this account's store dir, taken before the
+    /// runtime started and dropped after it shut down — what makes an app beside
+    /// this stint hand it the engine role (module docs). `None` after a degraded
+    /// acquire: the stint mounts anyway.
+    presence: Option<AgentPresenceLock>,
 }
 
 /// The stint's own nest leg: the device-principal client and the task bringing
@@ -527,6 +549,12 @@ async fn assemble(state: &SyncServiceState, inputs: &HostInputs) -> anyhow::Resu
         }
     };
 
+    // Presence before the runtime's election, for the stint's lifetime (module
+    // docs). Blocking, and bounded by construction: the only other takers are
+    // the apps' momentary probes. A failure states no priority and mounts
+    // anyway.
+    let presence = take_presence(&store_root, &inputs.actor_id_hex);
+
     let reconnects = rpc.subscribe_reconnects();
     // The runtime *borrows* the stint's device client; the stint keeps the
     // owning handle so teardown can close it.
@@ -540,6 +568,7 @@ async fn assemble(state: &SyncServiceState, inputs: &HostInputs) -> anyhow::Resu
         process_rpc,
         Some(reconnects),
         Some(rpc.subscribe_pushes()),
+        Some(state.peer_files.binding()),
     );
 
     let handle = AccountStoreRuntime::start(params).await?;
@@ -561,7 +590,34 @@ async fn assemble(state: &SyncServiceState, inputs: &HostInputs) -> anyhow::Resu
         handle,
         device,
         push_arm,
+        presence,
     })
+}
+
+/// Take the agent presence lock on `actor_id_hex`'s store dir under
+/// `store_root` — `None`, logged, when it cannot be taken (the stint mounts
+/// anyway; the apps then see the first-come election).
+fn take_presence(store_root: &StoreRoot, actor_id_hex: &str) -> Option<AgentPresenceLock> {
+    let store_dir = match store_root.store_dir(actor_id_hex) {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!(
+                "account host: no store dir for the presence lock ({e:#}) — mounting without \
+                 it; an app beside this agent keeps the first-come election"
+            );
+            return None;
+        }
+    };
+    match AgentPresenceLock::acquire(&store_dir) {
+        AgentPresenceLockOutcome::Held(lock) => Some(lock),
+        AgentPresenceLockOutcome::Degraded(e) => {
+            tracing::warn!(
+                "account host: agent presence lock unavailable ({e}) — mounting without it; \
+                 an app beside this agent keeps the first-come election"
+            );
+            None
+        }
+    }
 }
 
 /// The key the stint's device-principal leg signs with — or `None` when the
@@ -590,6 +646,7 @@ fn runtime_params<R>(
     process_rpc: Option<R>,
     reconnects: Option<watch::Receiver<u64>>,
     pushes: Option<tokio::sync::broadcast::Receiver<fauna_protocol::PushEvent>>,
+    file_sync: Option<fauna_sync_engine::account_runtime::PeerFileSync>,
 ) -> AccountRuntimeParams<R> {
     AccountRuntimeParams {
         store_root,
@@ -643,8 +700,13 @@ fn runtime_params<R>(
         // Nor the road: a succession is delivered by a seed holder, which can
         // sign in as a retired identity where a chain must be replayed.
         owed_nests: None,
+        //
+        // The binding also carries this host's file-sync engines onto the leg
+        // (`crate::peer_files`): the agent holds the bodies, so it is the
+        // process that serves a sibling's chunk want and asks a sibling first.
         peer_transport: Some(std::sync::Arc::new(
-            |inputs: fauna_sync_engine::account_runtime::PeerLegFactoryInputs| {
+            move |inputs: fauna_sync_engine::account_runtime::PeerLegFactoryInputs| {
+                let file_sync = file_sync.clone();
                 Box::pin(async move {
                     let (transport, bound_addrs) = fauna_iroh::peer_leg_transport(
                         inputs.writer_key.to_bytes(),
@@ -654,6 +716,7 @@ fn runtime_params<R>(
                     Ok(fauna_sync_engine::account_runtime::PeerLegBinding {
                         transport,
                         bound_addrs,
+                        file_sync,
                     })
                 })
             },
@@ -838,6 +901,7 @@ mod tests {
             production_credential_store(),
             &test_inputs(),
             (),
+            None,
             None,
             None,
             None,

@@ -174,6 +174,7 @@ async fn a_replica_walks_its_sibling_over_real_quic() {
             own_witness_kind: fauna_protocol::peer_sync::WITNESS_DEVICE_AUTHORIZATION.to_string(),
             custody_revoked: None,
             device_removed: None,
+            file_chunks: None,
             quotas: QuotaConfig::default(),
             now: now_fn,
         },

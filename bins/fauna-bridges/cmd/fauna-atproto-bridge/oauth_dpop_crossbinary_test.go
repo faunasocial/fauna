@@ -22,7 +22,7 @@ import (
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/xrpc"
 )
 
-// F4 slice 4's cross-binary agreement pin (findings 13 and 49).
+// F4 slice 4's cross-binary agreement pin.
 //
 // The in-package tests on either side prove each half against its OWN fixtures:
 // `libs/fauna-bridge-atproto/src/dpop.rs` builds proofs with serde_json and

@@ -72,25 +72,25 @@ Stamped 2026-10-01 at e5a7e5d758.
 |---|---|---|
 | web | ⚠ partial | 0.1.2-dev+cfad4af4 standalone |
 | linux |  no run recorded | |
-| windows |  no run recorded | |
-| macos |  no run recorded | |
-| ios |  no run recorded | |
+| windows | ⚠ partial | 0.1.3-dev+60888d4e standalone |
+| macos | ⚠ partial | 0.1.3-dev+a5d2dc2b standalone |
+| ios | ⚠ partial | 0.1.3-dev+a5d2dc2b standalone |
 | android |  no run recorded | |
 | tui | ⚠ partial | 0.1.2-dev+b265ecfe.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_an_account_report_shows_in_the_ledger_and_can_be_withdrawn` | web (linux): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_an_account_report_shows_in_the_ledger_and_can_be_withdrawn` | web (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | (none) | — |
 | 4 | app | (none) | — |
 | 5 | app | (none) | — |
 | 6 | app | (none) | — |
-| 7 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | (none) | — |
-| 9 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | (none) | — |
-| 11 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | nest | (none) | — |
 | 13 | nest | (none) | — |
 | 14 | nest | (none) | — |

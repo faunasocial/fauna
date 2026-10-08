@@ -4,11 +4,13 @@
 //! `config-dissolution.md` § Phases and gates → *Bounded rows* → *The mail
 //! plane* owns the two-family shape).
 //!
-//! **Two row families:** `self`, the ONE `MailStateRow` (the MSEK, its grace
-//! window, the burns, the rotation sentinel, the flags), and
-//! `credential/<credential_id>`, one `MailCredential` each. The composite
+//! **Three row families:** `self`, the ONE `MailStateRow` (the MSEK, the
+//! burns, the rotation sentinel, the flags), `credential/<credential_id>`, one
+//! `MailCredential` each, and `generation/<fingerprint>`, one retired MSEK
+//! generation each — every one ever retired, uncapped. The composite
 //! `MailConfig` the mail stack works on is the READ fold ([`mail_of`]): the
-//! state row plus every credential that is not revoked, burned rows shown.
+//! state row, every generation as the priors, plus every credential that is
+//! not revoked, burned rows shown.
 //!
 //! **Every write is a read-join-put on the store thread**, per row: the
 //! stored row is read, the caller's intent is stamped strictly above it,
@@ -26,13 +28,16 @@
 //!
 //! Exposed through `fauna_sync_engine::account_runtime::AccountStoreHandle`'s
 //! typed doors (`mail`, `write_mail_state`, `put_mail_credential`,
-//! `mark_mail_credential_wrapped`, `revoke_mail_credential`).
+//! `mark_mail_credential_wrapped`, `revoke_mail_credential`,
+//! `retire_mail_generation`).
 
 use anyhow::{Context, Result, ensure};
 use fauna_account_store::backend::StoreBackend;
 use fauna_account_store::store::AccountStore;
 use fauna_account_store::types::StateEntry;
-use fauna_core::data::{MailConfig, MailCredential, MsekFingerprint, Timestamp};
+use fauna_core::data::{
+    MailConfig, MailCredential, MsekFingerprint, PriorMsekRetirement, Timestamp,
+};
 use fauna_core::mail_rows::{MailRecord, MailRowKey, MailRows, MailStateRow, decode_mail_row};
 use fauna_protocol::RpcRequester;
 use fauna_protocol::merge_policy::KIND_MAIL;
@@ -283,6 +288,25 @@ where
         MailRecord::Credential(intent),
     )
     .await
+}
+
+/// Record a retired MSEK generation at `generation/<fingerprint>` — a
+/// read-join-put: a row already there keeps the later instant
+/// (`fauna_core::mail_rows::merge_generation`), and nothing is written when it
+/// already holds this one. The row carries no stamp of its own: it is
+/// immutable but for that join. Whether anything was written.
+pub async fn put_generation<B, R>(
+    store: &AccountStore<B>,
+    fleet: &AccountStatePlane<'_, B, R>,
+    generation: &PriorMsekRetirement,
+) -> Result<bool>
+where
+    B: StoreBackend,
+    R: RpcRequester,
+{
+    let key = MailRowKey::Generation(MsekFingerprint::of(&generation.msek));
+    let stored = read_row(store, &key).await?;
+    join_and_put(fleet, stored, MailRecord::Generation(generation.clone())).await
 }
 
 #[cfg(test)]

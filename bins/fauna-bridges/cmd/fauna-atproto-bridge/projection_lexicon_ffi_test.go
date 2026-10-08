@@ -15,7 +15,7 @@
 //
 //   - The post/profile bytes come from the PRODUCTION builders the 7 apps
 //     compose with (faunaFfi.BuildPost* / BuildEditedProfile*), not from
-//     fixture literals written here. Findings 48/49: pin against what
+//     fixture literals written here. The rule: pin against what
 //     production emits, never against each side's own idea of it.
 //   - The rendering comes from ffiTranslator{} — the real shared-Rust
 //     translator over the real FFI boundary — and is encoded with the same

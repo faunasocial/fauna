@@ -334,6 +334,14 @@ public struct ProfileView: View {
                 value: { renderLocalizedText(contactToggleBlockLabel(isBlocked: isBlocked)) }
             ) { toggleBlock() }
 
+            // Report account — opens the shared report sheet on this OTHER profile
+            // (moderation.md § User-initiated reporting → *App surface*; the
+            // `ReportHost` the shell mounts paints it). An account has no text to
+            // attach, so the shared target offers no include-text checkbox.
+            Button(L.profile.report) { openReport() }
+                .accessibilityIdentifier(Ids.profileReportButton)
+                .automationActivate(Ids.profileReportButton) { openReport() }
+
             // Request contact — the knock, sent from the profile the user is already
             // looking at (`profile.md` § Layout & flow). The label flips to "Request
             // sent" once the nest accepts it, and the button disables with it. The
@@ -469,6 +477,13 @@ public struct ProfileView: View {
     /// and the label re-renders; on failure the state is unchanged so the user can
     /// retry. Shared by the `Button` + its `.automationActivate` (multi-statement
     /// `Task`, extracted per convention). The nest uses only `peerId` (the target).
+    /// The shared report sheet's state (held by the content-policy store).
+    @Environment(ContentPolicyStore.self) private var policyStore: ContentPolicyStore?
+
+    private func openReport() {
+        policyStore?.report.open(reportActorTarget(actorId: viewedActorId))
+    }
+
     private func toggleBlock() {
         guard let client, !blocking else { return }
         let wasBlocked = isBlocked
@@ -587,20 +602,24 @@ private struct SubscriptionTiersTab: View {
             EditableFieldRow(L.subscriptions.description, "subscription-tier-form-description",
                              $vm.formDescription, labelColor: .secondary, maxWidth: 240,
                              trailingAlign: false, rowAlignment: .center)
+            #if !FAUNA_EXCISE_PAYMENTS
+            // The editor's three money fields — the plane's author half,
+            // excised with §§4-5 below (dynamic-features.md § Platform-family
+            // surface excision → *The price-and-route class*). Omitting them
+            // on an edit keeps the stored values (`tiers.update`'s merge
+            // rule), so an excised editor never clears a priced tier.
             EditableFieldRow(L.subscriptions.priceHint, "subscription-tier-form-price-hint",
                              $vm.formPriceHint, labelColor: .secondary, maxWidth: 240,
                              trailingAlign: false, rowAlignment: .center)
-            #if !FAUNA_EXCISE_PAYMENTS
             // The machine-comparable threshold (monetization.md § The asking
-            // price) — the money plane's author half, excised with §§4-5
-            // below. Independent of price_hint above: never inferred from it.
+            // price). Independent of price_hint above: never inferred from it.
             EditableFieldRow(L.subscriptions.askingPrice, "subscription-tier-form-asking-price",
                              $vm.formAskingPrice, labelColor: .secondary, maxWidth: 240,
                              trailingAlign: false, rowAlignment: .center)
-            #endif
             EditableFieldRow(L.subscriptions.paymentUrl, "subscription-tier-form-payment-url",
                              $vm.formPaymentUrl, labelColor: .secondary, maxWidth: 240,
                              trailingAlign: false, rowAlignment: .center)
+            #endif
 
             HStack {
                 Text(L.subscriptions.autoApprove).foregroundStyle(.secondary)
@@ -886,7 +905,11 @@ private struct SubscriptionTierRow: View {
             automationText(Ids.subscriptionTierName, tier.name)
                 .frame(maxWidth: .infinity, alignment: .leading)
             automationText(Ids.subscriptionTierRank, String(tier.rank))
+            #if !FAUNA_EXCISE_PAYMENTS
+            // A price display is the money plane's (dynamic-features.md
+            // § Platform-family surface excision → *The price-and-route class*).
             automationText(Ids.subscriptionTierPrice, tier.priceHint ?? "")
+            #endif
 
             Button(L.subscriptions.edit) { vm.openEditForm(tier) }
                 .accessibilityIdentifier(Ids.subscriptionTierEditButton)
@@ -1060,11 +1083,19 @@ private struct SubscriptionOfferRow: View {
         VStack(alignment: .leading, spacing: 4) {
             automationText(Ids.subscriptionOfferName, offer.name)
                 .font(.headline)
+            #if !FAUNA_EXCISE_PAYMENTS
+            // The price and the external payment link are the money plane's
+            // buyer half (dynamic-features.md § Platform-family surface
+            // excision → *The price-and-route class*): a store-safe build shows
+            // a priced tier as an ordinary approval-gated one — name,
+            // description, Subscribe.
             automationText(Ids.subscriptionOfferPrice, offer.priceHint ?? "")
                 .font(.caption).foregroundStyle(.secondary)
+            #endif
             automationText(Ids.subscriptionOfferDescription, offer.description ?? "")
                 .font(.caption).foregroundStyle(.secondary)
 
+            #if !FAUNA_EXCISE_PAYMENTS
             // External checkout link — only when the tier carries a payment_url
             // (mirrors linux, which omits the row otherwise).
             if let url = offer.paymentUrl, !url.isEmpty {
@@ -1073,6 +1104,7 @@ private struct SubscriptionOfferRow: View {
                     .accessibilityIdentifier(Ids.subscriptionOfferPaymentLink)
                     .automationActivate(Ids.subscriptionOfferPaymentLink) { openPayment(url) }
             }
+            #endif
 
             HStack {
                 automationText(Ids.subscriptionOfferStatus, statusText)

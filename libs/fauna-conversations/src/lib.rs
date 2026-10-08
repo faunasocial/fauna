@@ -26,6 +26,7 @@ pub mod eviction;
 pub mod html_markdown;
 pub mod index_sink;
 pub mod keying;
+pub mod list_send;
 pub mod mail_read;
 pub mod manager;
 /// The unattested-member review's list-form join.
@@ -75,6 +76,7 @@ pub use compose::{
     ResolveState, SendState,
 };
 pub use keying::{ThreadKey, normalize_subject};
+pub use list_send::ListSendView;
 pub use manager::ConversationsManager;
 pub use member_review::member_review_flags;
 pub use message::{

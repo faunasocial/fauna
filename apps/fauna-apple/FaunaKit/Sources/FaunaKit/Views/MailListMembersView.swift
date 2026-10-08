@@ -28,6 +28,7 @@ public struct MailListMembersView: View {
 
     @State private var showingAddSheet = false
     @State private var showingImportSheet = false
+    @State private var importResultShown = false
 
     private let listIdHex: String
     private let listName: String
@@ -63,7 +64,7 @@ public struct MailListMembersView: View {
             MailListMemberAddSheet(vm: vm)
         }
         .sheet(isPresented: $showingImportSheet) {
-            MailListMemberImportSheet(vm: vm)
+            MailListMemberImportSheet(vm: vm, onImported: { importResultShown = true })
         }
     }
 
@@ -72,14 +73,37 @@ public struct MailListMembersView: View {
     private var summarySection: some View {
         VStack(alignment: .leading, spacing: 8) {
             automationText(Ids.mailListMembersSummary, summaryText)
+            // The nest's own counts for the last batch import (mailing-lists 9).
+            // The machine drops `last_import` on every later dispatch; opening
+            // the import sheet again hides it too (tui's `import_result_shown`).
+            if importResultShown, let tally = vm.snapshot?.lastImport {
+                automationText(Ids.mailListMembersImportResult, importTallyText(tally))
+                    .font(.callout)
+                    // A second batch changes the text without re-creating the
+                    // view; key identity on it so the registered value follows.
+                    .id(importTallyText(tally))
+            }
             Button(L.mailLists.addMemberButton) { showingAddSheet = true }
                 .accessibilityIdentifier(Ids.mailListMembersAddButton)
                 .automationActivate(Ids.mailListMembersAddButton) { showingAddSheet = true }
-            Button(L.mailLists.importButton) { showingImportSheet = true }
+            Button(L.mailLists.importButton) { openImportSheet() }
                 .accessibilityIdentifier(Ids.mailListMembersImportButton)
-                .automationActivate(Ids.mailListMembersImportButton) { showingImportSheet = true }
+                .automationActivate(Ids.mailListMembersImportButton) { openImportSheet() }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func openImportSheet() {
+        importResultShown = false
+        showingImportSheet = true
+    }
+
+    private func importTallyText(_ r: ImportResult) -> String {
+        L.mailLists.importResult(
+            added: "\(r.added)",
+            existed: "\(r.skippedDuplicate)",
+            invalid: "\(r.skippedInvalid)"
+        )
     }
 
     private var summaryText: String {
@@ -236,6 +260,9 @@ struct MailListMemberAddSheet: View {
 
 struct MailListMemberImportSheet: View {
     let vm: MailListMembersVM
+    /// Called once the batch landed, just before the sheet closes, so the page
+    /// behind paints the tally.
+    let onImported: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var addresses = ""
@@ -278,6 +305,11 @@ struct MailListMemberImportSheet: View {
         submitting = true
         defer { submitting = false }
         await vm.dispatch(.batchImport(addresses: addresses))
-        if let e = vm.errorMessage { error = e } else { dismiss() }
+        if let e = vm.errorMessage {
+            error = e
+        } else {
+            onImported()
+            dismiss()
+        }
     }
 }

@@ -30,6 +30,29 @@ mod load_error_classification_tests {
         }
     }
 
+    /// The cloud filter's other "no provider to ask" answer: a name lookup in a
+    /// root directory still awaiting population, after the provider dropped the
+    /// connection (an engine restart's window), fails
+    /// `ERROR_FLT_INVALID_NAME_REQUEST` — an HRESULT-shaped code, raw os error
+    /// -2145452027 — not one of the 362..=399 family. Pinned live, both halves
+    /// (absent → default, present → read), by `fauna-sync-agent`'s
+    /// `cfapi_live_integration::*_provider_dropped*`.
+    #[test]
+    fn the_filters_invalid_name_request_classifies_as_no_ignore_file() {
+        let e = std::io::Error::from_raw_os_error(ERROR_FLT_INVALID_NAME_REQUEST);
+        assert_eq!(ERROR_FLT_INVALID_NAME_REQUEST, -2_145_452_027);
+        assert!(io_error_means_no_ignore_file(&e));
+    }
+
+    #[test]
+    fn other_filter_manager_errors_still_fail_the_load() {
+        // ERROR_FLT_DISALLOW_FAST_IO (0x801F0004), the neighbouring code: the
+        // classification names the one filter answer that means "cannot look
+        // the name up now", never the whole facility.
+        let e = std::io::Error::from_raw_os_error(0x801F_0004_u32 as i32);
+        assert!(!io_error_means_no_ignore_file(&e));
+    }
+
     #[test]
     fn not_found_classifies_as_no_ignore_file() {
         let e = std::io::Error::from(std::io::ErrorKind::NotFound);
@@ -194,16 +217,23 @@ impl Default for IgnoreMatcher {
     }
 }
 
+/// `ERROR_FLT_INVALID_NAME_REQUEST` (winerror.h, HRESULT-shaped `0x801F0005`):
+/// the cloud filter's answer to a name lookup in a root directory still awaiting
+/// population when no provider is connected to populate it.
+const ERROR_FLT_INVALID_NAME_REQUEST: i32 = 0x801F_0005_u32 as i32;
+
 /// Does this IO error mean "there is no `.faunaignore` to load"?
 ///
 /// Two families qualify:
 /// - `NotFound` — the plain missing-file case.
-/// - The Windows cloud-files (cfapi) errors, `ERROR_CLOUD_FILE_*` = raw os error
-///   362..=399 (winerror.h). Inside an on-demand placeholder directory a lookup of a
-///   name with no on-disk entry must be answered by the sync provider; when the
-///   provider is not connected (engine build runs *before* the cfapi root connects,
-///   or the root is orphaned) the open fails with one of these instead of
-///   `NotFound`. Since dotfiles never enter a folder — the shared scan
+/// - The Windows cloud-files (cfapi) errors: `ERROR_CLOUD_FILE_*` = raw os error
+///   362..=399 (winerror.h), and the filter manager's
+///   [`ERROR_FLT_INVALID_NAME_REQUEST`]. Inside an on-demand placeholder directory a
+///   lookup of a name with no on-disk entry must be answered by the sync provider;
+///   when the provider is not connected (engine build runs *before* the cfapi root
+///   connects, an engine restart dropped the old connection before its directory
+///   was ever populated, or the root is orphaned) the open fails with one of these
+///   instead of `NotFound`. Since dotfiles never enter a folder — the shared scan
 ///   (`watcher::scan_recursive_filtered`) skips them, so `.faunaignore` is never
 ///   uploaded and can never come back as a placeholder — a `.faunaignore` that
 ///   exists is always an ordinary local file, readable without any provider. So a
@@ -219,7 +249,10 @@ fn io_error_means_no_ignore_file(e: &std::io::Error) -> bool {
     if e.kind() == std::io::ErrorKind::NotFound {
         return true;
     }
-    matches!(e.raw_os_error(), Some(362..=399))
+    matches!(
+        e.raw_os_error(),
+        Some(362..=399 | ERROR_FLT_INVALID_NAME_REQUEST)
+    )
 }
 
 /// Built-in default ignore patterns (`file-sync.md` § Built-in default ignores).

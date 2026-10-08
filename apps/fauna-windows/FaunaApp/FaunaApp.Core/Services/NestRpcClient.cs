@@ -779,6 +779,14 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     }
 
     /// <inheritdoc />
+    public async Task<IFfiPushRegistration> BuildPushRegistrationAsync(
+        string intentPath, string actorId, string deviceId)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return nest.PushRegistration(intentPath, actorId, deviceId);
+    }
+
+    /// <inheritdoc />
     public async Task<FfiReseedResult> ReseedCustodianStoreAsync(
         IFfiSyncAgentProvisioner agent, string thisDeviceId)
     {
@@ -2144,6 +2152,42 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
             .ConfigureAwait(false);
     }
 
+    // ── fauna.moderation.abuse_report.* (user-initiated reporting) ──────
+
+    public async Task<FfiReportSent> AbuseReportSubmitAsync(FfiReportTarget target, FfiReportForm form)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Moderation().AbuseReportSubmit(target, form).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<FfiReportLedgerRow>> AbuseReportMineAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Moderation().AbuseReportMine().ConfigureAwait(false);
+    }
+
+    public async Task AbuseReportWithdrawAsync(string reportId)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        await nest.Moderation().AbuseReportWithdraw(reportId).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<FfiReportQueueRow>> AbuseReportQueueAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Admin().AbuseReportQueue().ConfigureAwait(false);
+    }
+
+    public async Task AbuseReportResolveAsync(string reportId, bool acted)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        await nest.Admin().AbuseReportResolve(reportId, acted).ConfigureAwait(false);
+    }
+
+    public Task<string[]> HideReportedAsync(string id) => FaunaFfiMethods.HideReported(id);
+
+    public Task<string[]> LoadHiddenContentAsync() => FaunaFfiMethods.LoadHiddenContent();
+
     public async Task<uint?> SpamThresholdOverrideGetAsync()
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
@@ -3139,8 +3183,45 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         // merge, so it silently downgraded the builder's full (resolver + owner)
         // custody back to owner-only — correct for device labels (always the
         // account's own plane) but wrong for the conflict list's shared/bound
-        // folder paths, which need the resolver arm. Nothing to wire here.
-        return FaunaFfiMethods.BuildDevicesMachine(nest, observer);
+        // folder paths, which need the resolver arm.
+        var machine = FaunaFfiMethods.BuildDevicesMachine(nest, observer);
+
+        // READ-side custody for a successor (succession-aftermath.md § Re-key
+        // scope — the `BackupKey` corpus row): a succession re-points an owned
+        // set and re-seals nothing, so an owner-only set's name still rests under
+        // the predecessor's root, and without the paired chain the successor's
+        // Folders page drops every set it inherited. It WIDENS the custody the
+        // builder wired (read candidates only, never a seal root), so it comes
+        // after the build. Skipped when empty. Mirrors tui's `label_custody` and
+        // the Media build below.
+        var (chainActorIds, chainKeys) = PredecessorChainOrEmpty("devices");
+        if (chainActorIds.Length > 0)
+        {
+            machine.SetPredecessorChain(chainActorIds, chainKeys);
+        }
+        return machine;
+    }
+
+    /// <summary>
+    /// The registry's paired predecessor chain for this session's actor — ids
+    /// and keys, nearest hop first, the registry's own walk (never an app-side
+    /// zip) — or two empty arrays when no registry is injected (unit tests), the
+    /// identity never succeeded, or the read fails (logged under
+    /// <paramref name="surface"/>). One read for every reader seam that takes the
+    /// chain (Media, Devices), so they cannot drift.
+    /// </summary>
+    private (byte[][] actorIds, byte[][] keys) PredecessorChainOrEmpty(string surface)
+    {
+        try
+        {
+            var chain = _accountRegistry?.Invoke().PredecessorChain(_crypto.ActorIdHex);
+            return (chain?.actorIds ?? Array.Empty<byte[]>(), chain?.keys ?? Array.Empty<byte[]>());
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("NestRpcClient", $"[{surface}] predecessor-chain resolve failed (empty fallback): {ex.Message}");
+            return (Array.Empty<byte[]>(), Array.Empty<byte[]>());
+        }
     }
 
     /// <inheritdoc />
@@ -3238,29 +3319,23 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         // under a retired identity reads as the successor's own) and the PAIRED
         // id/key chain (a bare key above never opens a predecessor-signed row, so
         // without the pair the inherited corpus lists but cannot open). Both off
-        // the registry — `PredecessorChain` is the registry's own walk, never an
-        // app-side zip of the ids and keys. Each skipped when empty, like the key
-        // injection. Mirrors tui's `media::init` / linux's `build_media_view` /
-        // android's MediaVM.ensureMachine.
+        // the registry — `PredecessorChain` is the registry's own walk
+        // (`PredecessorChainOrEmpty`), never an app-side zip of the ids and keys.
+        // Each skipped when empty, like the key injection. Mirrors tui's
+        // `media::init` / linux's `build_media_view` / android's
+        // MediaVM.ensureMachine.
         byte[][] predecessorActorIds;
-        byte[][] chainActorIds;
-        byte[][] chainKeys;
         try
         {
-            var registry = _accountRegistry?.Invoke();
-            predecessorActorIds = registry?.AttestedPredecessorActorIds(_crypto.ActorIdHex)
+            predecessorActorIds = _accountRegistry?.Invoke().AttestedPredecessorActorIds(_crypto.ActorIdHex)
                 ?? Array.Empty<byte[]>();
-            var chain = registry?.PredecessorChain(_crypto.ActorIdHex);
-            chainActorIds = chain?.actorIds ?? Array.Empty<byte[]>();
-            chainKeys = chain?.keys ?? Array.Empty<byte[]>();
         }
         catch (Exception ex)
         {
-            ShellLog.Warn("NestRpcClient", $"[media] predecessor-chain resolve failed (empty fallback): {ex.Message}");
+            ShellLog.Warn("NestRpcClient", $"[media] attested-predecessor-ids resolve failed (empty fallback): {ex.Message}");
             predecessorActorIds = Array.Empty<byte[]>();
-            chainActorIds = Array.Empty<byte[]>();
-            chainKeys = Array.Empty<byte[]>();
         }
+        var (chainActorIds, chainKeys) = PredecessorChainOrEmpty("media");
         if (predecessorActorIds.Length > 0)
         {
             machine.SetPredecessorActorIds(predecessorActorIds);
@@ -3647,7 +3722,7 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     }
 
     /// <inheritdoc />
-    public async Task<FfiLandedSuccession> SuccessionSucceedWithHeldKitAsync(string kitInput)
+    public async Task<FfiStolenOutcome> SuccessionSucceedWithHeldKitAsync(string kitInput)
     {
         // The CONNECTED client, deliberately — not a throwaway. The ceremony reads
         // the old identity's live MLS engine off this instance's own stashed
@@ -3663,17 +3738,10 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         // must fail before anything is written (recovery.rs § The two things the
         // app still supplies).
         var storePath = new SuccessorStorePath();
-        var outcome = await FaunaFfiMethods
+        return await FaunaFfiMethods
             .SuccessionSucceedWithHeldKit(
                 nest, _nestUrl, _crypto.SecretBytes, kitInput, registry, storePath)
             .ConfigureAwait(false);
-        // Interim bridge: the driver returns the typed FfiStolenOutcome
-        // (identity-succession.md § Implementation status today, the typed-outcome
-        // ruling); until the view model adopts it, every
-        // non-landed arm surfaces as the shared sentence, resolved and unwrapped.
-        if (outcome.@landed is { } landed) return landed;
-        throw new FfiException.General(
-            outcome.@message is { } message ? Strings.Resolve(message) : outcome.@kind);
     }
 
     /// <inheritdoc />

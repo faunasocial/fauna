@@ -232,6 +232,20 @@ impl PeerNode {
         let dropped: HashMap<u64, InboundPeer> = std::mem::take(&mut *self.inbound.lock().unwrap());
         dropped.len()
     }
+
+    /// Stop the node and **wait until its listener is gone**: the accept loop
+    /// is aborted and joined — so the transport's accept stream it held is
+    /// dropped by the time this returns — and every inbound connection is
+    /// dropped with it. Dropping the node instead only requests the abort, and
+    /// the loop ends a scheduling beat later.
+    ///
+    /// For a caller handing the machine's one NodeId to another process: the
+    /// account runtime's yield to the sync agent releases the engine role only
+    /// after this returns, so no instant has two listeners on one identity.
+    pub async fn shutdown(mut self) {
+        self.accept.abort_and_wait().await;
+        self.close_inbound();
+    }
 }
 
 /// The base `fauna.peer.*` serve set — just `fauna.peer.node_info` (the

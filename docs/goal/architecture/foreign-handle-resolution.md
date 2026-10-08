@@ -153,7 +153,12 @@ Last verified: 2026-09-28 (the split; every ruling date, pin and residual below 
   already treated a transport fault as an error, because the home domain is
   always known; the two hops now agree. One refinement: a same-nest transport
   fault on a typed *foreign* domain still runs the foreign probe (the peer may be
-  up while the home nest hiccups) rather than erroring outright. The security
+  up while the home nest hiccups) rather than erroring outright. A same-nest
+  *answer* that the home domain has no such handle is final the other way: the
+  address is not a Fauna handle, and the probe declines so the picker reaches
+  mail (an alias or a mailing list lives there — `../behavior/mail-mass-mailing.md`
+  § Composing a list message) instead of re-probing the home domain as foreign,
+  where a failed hop on an always-known domain would read as an error. The security
   framing is § Security's *TLS is the floor*: a hop that fails must never
   produce a *less* confidential send than the one the user asked for. The UX
   arm — what the picker shows and refuses — is owned by

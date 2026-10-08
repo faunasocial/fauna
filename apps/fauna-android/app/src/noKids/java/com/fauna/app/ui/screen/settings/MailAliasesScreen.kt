@@ -13,6 +13,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -20,6 +23,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.components.rememberCopyToClipboard
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.resolveLocalized
@@ -66,6 +70,7 @@ fun MailAliasesScreen(
         hydrated = hydrated,
         working = snapshot.status == AliasesStatus.WORKING,
         lastImportResult = snapshot.lastImportResult,
+        lastMintedAddress = snapshot.lastMintedAddress,
         // Kind badge via shared `alias_kind_badge` (mail-aliases.md § Shared
         // alias_kind_badge formatter); FFI lives here, off the testable Content.
         kindLabel = { kind -> resolveLocalized(context, aliasKindBadge(kind)).orEmpty() },
@@ -115,6 +120,11 @@ fun MailAliasesContent(
     hydrated: Boolean = true,
     working: Boolean,
     lastImportResult: ImportResultView?,
+    // The full address the last disposable mint produced (`MailAliasesSnapshot.
+    // last_minted_address`): copied to the clipboard, confirmed on the page, and
+    // published as the generate button's `copied` attr (the copy-button contract
+    // `account-actor-id-copy-btn` set) so a test asserts what was copied.
+    lastMintedAddress: String? = null,
     kindLabel: (AliasKind) -> String,
     hitsLabel: (AliasView) -> String,
     // Add-sheet numeric-field validators via shared fauna_core::format — parse_count
@@ -142,6 +152,8 @@ fun MailAliasesContent(
     // other dispatch also clears the underlying snapshot field server-side.
     var importResultDismissed by remember { mutableStateOf(false) }
     val canAdd = defaultDomain != null && !working
+    val copyToClipboard = rememberCopyToClipboard()
+    LaunchedEffect(lastMintedAddress) { lastMintedAddress?.let(copyToClipboard) }
 
     Scaffold(
         topBar = {
@@ -202,7 +214,17 @@ fun MailAliasesContent(
                 OutlinedButton(
                     onClick = onGenerateDisposable,
                     enabled = generateGate.enabled,
-                    modifier = Modifier.testTag(Ids.MAIL_ALIASES_GENERATE_DISPOSABLE_BUTTON),
+                    modifier = Modifier
+                        .testTag(Ids.MAIL_ALIASES_GENERATE_DISPOSABLE_BUTTON)
+                        // `copied` rides the stateDescription, this app's one
+                        // string-attribute carrier (`AutomationSemantics.attrValue`).
+                        .then(
+                            if (lastMintedAddress != null) {
+                                Modifier.semantics { stateDescription = lastMintedAddress }
+                            } else {
+                                Modifier
+                            },
+                        ),
                 ) { Text(stringResource(R.string.mail_aliases_generate_button)) }
                 OutlinedButton(
                     onClick = { importResultDismissed = true; sheet = SheetMode.Import },
@@ -211,6 +233,13 @@ fun MailAliasesContent(
                 ) { Text(stringResource(R.string.mail_aliases_import_button)) }
             }
             DisabledControlReasonText(generateGate.reason)
+            // The mint's copy confirmation, beside the button that minted it.
+            lastMintedAddress?.let { address ->
+                Text(
+                    "${stringResource(R.string.mail_aliases_copied)} $address",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
 
             // ── Add / edit sheet (inline reveal) ──
             when (val mode = sheet) {
@@ -320,8 +349,12 @@ private fun AliasSheet(
             )
 
             // Kind picker. Read-only on edit (the kind is immutable).
+            // On edit the node reports `disabled` = "true" (read-only, not merely
+            // inert), the contract tui's `.enabled(!editing)` meets.
             Row(
-                modifier = Modifier.testTag(Ids.MAIL_ALIASES_ADD_SHEET_KIND_PICKER),
+                modifier = Modifier
+                    .testTag(Ids.MAIL_ALIASES_ADD_SHEET_KIND_PICKER)
+                    .then(if (editing != null) Modifier.semantics { disabled() } else Modifier),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 if (editing == null) {

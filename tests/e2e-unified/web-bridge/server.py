@@ -191,6 +191,56 @@ def _forget_downloads() -> None:
     _download_dirs.clear()
 
 
+def _push_stand_in_js(endpoint: str) -> str:
+    """An init script standing in for the browser vendor's push service.
+
+    Headless Chromium has no push service: `Notification.permission` reads
+    `denied` even after `grant_permissions(["notifications"])`, so
+    `PushManager.subscribe()` always rejects ("Registration failed - permission
+    denied", probed 2026-10-08). The service is not ours to test — what is under
+    test is everything after it: the app's toggle, the shared registration
+    machine, the nest row and the install bit. So this script answers exactly
+    the two questions the app asks the platform — the permission, and
+    `subscribe()` / `getSubscription()` — with what a real browser hands back:
+    `endpoint` (a URL the test chose, such as a loopback listener a test-hooks
+    nest may dial) and a real P-256 public key + 16-byte auth secret from
+    WebCrypto, so the nest can encrypt to the row if it ever dials it. Each page
+    load mints a fresh subscription, like a browser whose push registration
+    was renewed; the row upsert replaces it under the same device id.
+    """
+    return """(() => {
+  const ENDPOINT = %s;
+  try {
+    Object.defineProperty(Notification, 'permission', { get: () => 'granted', configurable: true });
+    Notification.requestPermission = async () => 'granted';
+  } catch (_) {}
+  if (typeof PushManager === 'undefined') return;
+  const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)))
+    .replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+  let current = null;
+  async function mint() {
+    const pair = await crypto.subtle.generateKey(
+      { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+    const raw = await crypto.subtle.exportKey('raw', pair.publicKey);
+    const keys = { p256dh: b64u(raw), auth: b64u(crypto.getRandomValues(new Uint8Array(16))) };
+    return {
+      endpoint: ENDPOINT,
+      expirationTime: null,
+      options: { userVisibleOnly: true },
+      toJSON: () => ({ endpoint: ENDPOINT, expirationTime: null, keys }),
+      getKey: () => null,
+      unsubscribe: async () => { current = null; return true; },
+    };
+  }
+  PushManager.prototype.subscribe = async function () {
+    if (!current) current = await mint();
+    return current;
+  };
+  PushManager.prototype.getSubscription = async function () { return current; };
+  PushManager.prototype.permissionState = async function () { return 'granted'; };
+})();""" % json.dumps(endpoint)
+
+
 def _attach_console_capture(page: Page, pid: str, *, tag: str = "") -> None:
     """Record console messages and uncaught page errors (incl. unhandled
     promise rejections) for page `pid`. Handlers never raise and never call
@@ -1032,6 +1082,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # every other caller's context is byte-identical to before this
         # field existed.
         locale = req.get("locale")
+        # Optional push-service stand-in endpoint (`_push_stand_in_js`): absent
+        # by default, so every other caller's context is unchanged.
+        push_endpoint = req.get("push_service_stand_in")
 
         # Close any existing session
         self._close_all_pages()
@@ -1046,6 +1099,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if locale:
             context_kwargs["locale"] = locale
         _contexts["1"] = _browser.new_context(**context_kwargs)
+        if push_endpoint:
+            _contexts["1"].add_init_script(_push_stand_in_js(push_endpoint))
         _pages["1"] = _contexts["1"].new_page()
         _console_logs.pop("1", None)  # a fresh session starts a fresh log
         _attach_console_capture(_pages["1"], "1")

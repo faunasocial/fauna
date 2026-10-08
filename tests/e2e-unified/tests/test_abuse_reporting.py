@@ -28,8 +28,9 @@ named budgets over deadline polls (convention 14); every feed-exclusion assert
 rides a re-selected feed, the one reload a user can drive.
 
 App arm: **tui** (the lead app — ``testing.md`` § Default app and nest mode),
-then **web**. The other five join their trickle-down by extending
-``_BUILT_APPS`` and carrying their marker.
+then **web**, then **macos** and **ios** (one shared FaunaKit paint), then
+**windows** and **android**. The remaining app (linux) joins its trickle-down by
+extending ``_BUILT_APPS`` and carrying its marker.
 """
 
 import time
@@ -43,9 +44,17 @@ from helpers.app_surface import app_name, skip_unbuilt
 from helpers.e2e_session import E2E_LOGIN_DEVICE_ID, login_as
 from helpers.mail_dedicated_nest import login_as_nest_admin
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.web]
+pytestmark = [
+    pytest.mark.tier_3,
+    pytest.mark.tui,
+    pytest.mark.web,
+    pytest.mark.macos,
+    pytest.mark.ios,
+    pytest.mark.windows,
+    pytest.mark.android,
+]
 
-_BUILT_APPS = ("tui", "web")
+_BUILT_APPS = ("tui", "web", "macos", "ios", "windows", "android")
 
 # The shared words every app renders (i18n `moderation.report.*`,
 # `notifications.row_abuse_report_*`, en.yaml).

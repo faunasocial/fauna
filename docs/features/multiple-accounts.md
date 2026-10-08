@@ -87,8 +87,12 @@ Stamped 2026-09-25 at efcea449ea.
    - `tests/e2e-unified/tests/test_account_switcher_linux.py::test_linux_switching_identity_keeps_device_settings_and_moves_drafts`
    - `tests/e2e-unified/tests/test_account_switcher_apple.py::test_apple_switching_identity_keeps_device_settings_and_moves_drafts`
    - `tests/e2e-unified/tests/test_account_switcher_windows.py::test_windows_switching_identity_keeps_device_settings_and_moves_drafts`
+   - `tests/e2e-unified/tests/test_account_switcher_web.py::test_web_switching_identity_keeps_device_settings_and_moves_drafts`
 11. [app] Switching identity leaves this device's notifications on or off, exactly as you set them — `docs/goal/architecture/apps/account-scoping.md` § The scoping taxonomy (iron-clad for new app state)
    - `tests/e2e-unified/tests/test_push_settings.py::test_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting`
+   - `tests/e2e-unified/tests/test_push_settings.py::test_windows_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting`
+   - `tests/e2e-unified/tests/test_push_settings.py::test_linux_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting`
+   - `tests/e2e-unified/tests/test_push_settings.py::test_web_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting`
 12. [app] An identity another Fauna window on this device is using cannot be removed — nothing is erased and you are told to close that window first — and the identity this window is using is never offered for removal — `docs/goal/architecture/apps/account-scoping.md` § Concurrent instances
    - `tests/e2e-unified/tests/test_remove_account_refused_other_tab_web.py::test_web_remove_account_refuses_an_account_another_tab_serves`
    - `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_remove_account_refuses_while_another_instance_serves_it`
@@ -172,7 +176,11 @@ Stamped 2026-09-25 at efcea449ea.
 | 10 | app | `tests/e2e-unified/tests/test_account_switcher_linux.py::test_linux_switching_identity_keeps_device_settings_and_moves_drafts` | linux (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_account_switcher_apple.py::test_apple_switching_identity_keeps_device_settings_and_moves_drafts` | macos (macos): passed, ios (macos): passed |
 | 10 | app | `tests/e2e-unified/tests/test_account_switcher_windows.py::test_windows_switching_identity_keeps_device_settings_and_moves_drafts` | windows (windows): passed |
-| 11 | app | `tests/e2e-unified/tests/test_push_settings.py::test_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_account_switcher_web.py::test_web_switching_identity_keeps_device_settings_and_moves_drafts` | web (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_push_settings.py::test_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | tui (linux): passed, tui (windows): passed |
+| 11 | app | `tests/e2e-unified/tests/test_push_settings.py::test_windows_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | windows (windows): passed |
+| 11 | app | `tests/e2e-unified/tests/test_push_settings.py::test_linux_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | — |
+| 11 | app | `tests/e2e-unified/tests/test_push_settings.py::test_web_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | web (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_remove_account_refused_other_tab_web.py::test_web_remove_account_refuses_an_account_another_tab_serves` | web (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_remove_account_refuses_while_another_instance_serves_it` | linux (linux): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_add_account_provisioning.py::test_an_add_account_provisioning_run_holds_custody_without_hijacking_the_live_session` | linux (linux): passed, tui (linux): passed |

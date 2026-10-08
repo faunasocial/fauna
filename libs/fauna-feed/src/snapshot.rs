@@ -328,8 +328,14 @@ pub struct PostSummary {
     /// (`fauna_client_subscriptions::UNLOCK_TIER_PREFIX`), the `resolve_media`
     /// pattern. `None` until resolved, or when the nest answers no offer for
     /// this post (any error degrades the same way) — the teaser then renders no price, and
-    /// claim-code redemption (§5) stays the fallback purchase path. Drives
-    /// `gated-post-price` / `gated-post-payment-link` / `gated-post-buy-button`.
+    /// claim-code redemption (§5) stays the fallback purchase path.
+    // `payments`-gated doc line — see the note on `PostSummary::tips`: the ids
+    // are the price-and-route class (`dynamic-features.md` § Platform-family
+    // surface excision), and a UniFFI record's docstrings ride every artifact.
+    #[cfg_attr(
+        feature = "payments",
+        doc = " Drives `gated-post-price` / `gated-post-payment-link` / `gated-post-buy-button`."
+    )]
     pub unlock_offer: Option<UnlockOfferView>,
     /// `Some(reference)` when this post has been **taken down under a legal
     /// obligation** (`moderation.md` § Categories & enforcement item 1): the
@@ -525,8 +531,13 @@ pub struct TipSenderView {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct UnlockOfferView {
-    /// The unlock tier's name (`post-unlock-<16 hex>`) — what
-    /// `gated-post-buy-button` subscribes against.
+    /// The unlock tier's name (`post-unlock-<16 hex>`) — what the buy
+    /// affordance subscribes against.
+    // `payments`-gated doc line — see the note on `PostSummary::tips`.
+    #[cfg_attr(
+        feature = "payments",
+        doc = " That affordance is `gated-post-buy-button`."
+    )]
     pub tier_name: String,
     pub price_hint: Option<String>,
     pub payment_url: Option<String>,

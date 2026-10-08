@@ -18,15 +18,20 @@ use fauna_core::load_cache::Finished;
 use super::post_detail::build_post_detail;
 #[cfg(feature = "payments")]
 use crate::i18n::strings::tips;
-use crate::i18n::strings::{c2pa, common, composer, family, feed, subscriptions, web_publish};
+use crate::i18n::strings::{c2pa, common, composer, family, feed, web_publish};
+// Read only by the sold-post teaser's payment link — the money plane's.
+#[cfg(feature = "payments")]
+use crate::i18n::strings::subscriptions;
 use crate::views::document;
 use fauna_core::obligation::RenderVerdict;
 use fauna_core::render::{AuthoringOriginStatus, VerificationStatus};
 #[cfg(feature = "payments")]
+use fauna_feed::SellComposeState;
+#[cfg(feature = "payments")]
 use fauna_feed::TipView;
 use fauna_feed::{
-    AttachedFile, FeedEmptyState, FeedSnapshot, FeedStatus, PostSummary, SellComposeState,
-    TrainVerb, classify_sources,
+    AttachedFile, FeedEmptyState, FeedSnapshot, FeedStatus, PostSummary, TrainVerb,
+    classify_sources,
 };
 
 /// The open detail's last-painted embed signature — see
@@ -71,6 +76,10 @@ enum GateAnswer {
     Tier(String),
     /// A room by its hex channel id.
     Room(String),
+    /// "Sell this post…" — the paywall-designation gesture, the money plane's
+    /// author half (`dynamic-features.md` § Platform-family surface excision →
+    /// *The price-and-route class*): a store-safe build never offers it.
+    #[cfg(feature = "payments")]
     Sell,
 }
 
@@ -80,6 +89,7 @@ impl GateOptions {
         let mut labels = vec![feed::post::GATE_PUBLIC.to_string()];
         labels.extend(self.tiers.iter().cloned());
         labels.extend(self.rooms.iter().map(|r| feed::post::gate_room(&r.label)));
+        #[cfg(feature = "payments")]
         labels.push(feed::post::GATE_SELL.to_string());
         labels
     }
@@ -97,11 +107,11 @@ impl GateOptions {
         if let Some(room) = self.rooms.get(i) {
             return GateAnswer::Room(room.room.clone());
         }
+        #[cfg(feature = "payments")]
         if i == self.rooms.len() {
-            GateAnswer::Sell
-        } else {
-            GateAnswer::Public
+            return GateAnswer::Sell;
         }
+        GateAnswer::Public
     }
 
     /// Where `answer` sits in this model — so a rebuilt option list keeps the
@@ -116,6 +126,7 @@ impl GateOptions {
                 .iter()
                 .position(|x| &x.room == r)
                 .map(|i| i + 1 + self.tiers.len()),
+            #[cfg(feature = "payments")]
             GateAnswer::Sell => Some(1 + self.tiers.len() + self.rooms.len()),
         };
         position.unwrap_or(0) as u32
@@ -136,8 +147,13 @@ struct AudienceControls {
     /// the handlers' index→answer map.
     options: Rc<RefCell<GateOptions>>,
     preview: gtk::Entry,
+    // The three sale fields are the money plane's, with the Sell answer that
+    // reveals them.
+    #[cfg(feature = "payments")]
     price: gtk::Entry,
+    #[cfg(feature = "payments")]
     asking_price: gtk::Entry,
+    #[cfg(feature = "payments")]
     subscribers_free: gtk::CheckButton,
 }
 
@@ -146,6 +162,7 @@ impl AudienceControls {
         self.options.borrow().answer(self.select.selected())
     }
 
+    #[cfg(feature = "payments")]
     fn sell_fields(&self) -> SellComposeState {
         SellComposeState {
             price: self.price.text().to_string(),
@@ -163,6 +180,7 @@ impl AudienceControls {
     fn forward(&self, manager: &LinuxFeedManager) {
         let preview = self.preview.text().to_string();
         match self.answer() {
+            #[cfg(feature = "payments")]
             GateAnswer::Sell => manager.update_compose_sell(Some(self.sell_fields()), preview),
             GateAnswer::Room(room) => manager.update_compose_room(Some(room), preview),
             GateAnswer::Tier(tier) => manager.update_compose_gate(Some(tier), preview),
@@ -173,15 +191,21 @@ impl AudienceControls {
     /// Show `compose`'s audience. Diff-guarded per widget; the caller holds the
     /// composer's `refreshing` flag so no handler forwards this write back.
     fn paint(&self, compose: &fauna_feed::FeedComposeState) {
-        let answer = if compose.sell.is_some() {
-            GateAnswer::Sell
-        } else if let Some(room) = &compose.gate_room {
+        #[cfg_attr(not(feature = "payments"), allow(unused_mut))]
+        let mut answer = if let Some(room) = &compose.gate_room {
             GateAnswer::Room(room.clone())
         } else if let Some(tier) = &compose.gate_tier {
             GateAnswer::Tier(tier.clone())
         } else {
             GateAnswer::Public
         };
+        // A sale outranks the other answers. One staged on a full client and
+        // synced in is not a store-safe build's to show: its select reads as
+        // the answer the shared state otherwise carries.
+        #[cfg(feature = "payments")]
+        if compose.sell.is_some() {
+            answer = GateAnswer::Sell;
+        }
         // A tier or room the option list does not offer yet (the reload that
         // fills `own_tiers` still in flight) shows as Public until it does;
         // the manager keeps the answer meanwhile, and the next paint lands it.
@@ -192,16 +216,19 @@ impl AudienceControls {
         if self.preview.text().as_str() != compose.gate_preview.as_str() {
             self.preview.set_text(&compose.gate_preview);
         }
-        let sell = compose.sell.clone().unwrap_or_default();
-        if self.price.text().as_str() != sell.price.as_str() {
-            self.price.set_text(&sell.price);
-        }
-        if self.asking_price.text().as_str() != sell.asking_price.as_str() {
-            self.asking_price.set_text(&sell.asking_price);
-        }
-        if self.subscribers_free.is_active() != sell.subscribers_get_it_free {
-            self.subscribers_free
-                .set_active(sell.subscribers_get_it_free);
+        #[cfg(feature = "payments")]
+        {
+            let sell = compose.sell.clone().unwrap_or_default();
+            if self.price.text().as_str() != sell.price.as_str() {
+                self.price.set_text(&sell.price);
+            }
+            if self.asking_price.text().as_str() != sell.asking_price.as_str() {
+                self.asking_price.set_text(&sell.asking_price);
+            }
+            if self.subscribers_free.is_active() != sell.subscribers_get_it_free {
+                self.subscribers_free
+                    .set_active(sell.subscribers_get_it_free);
+            }
         }
     }
 }
@@ -1221,7 +1248,10 @@ fn build_compose_post_wired(
     // the last entry; see [`GateOptions`]) and the public-teaser entry shown
     // while any restricted answer is selected.
     let gate_options: Rc<RefCell<GateOptions>> = Rc::new(RefCell::new(GateOptions::default()));
+    #[cfg(feature = "payments")]
     let gate_model = gtk::StringList::new(&[feed::post::GATE_PUBLIC, feed::post::GATE_SELL]);
+    #[cfg(not(feature = "payments"))]
+    let gate_model = gtk::StringList::new(&[feed::post::GATE_PUBLIC]);
     let gate_select = gtk::DropDown::new(Some(gate_model), gtk::Expression::NONE);
     gate_select.set_tooltip_text(Some(feed::post::GATE_AUDIENCE));
     crate::testid::set_test_id(&gate_select, ids::COMPOSE_GATE_TIER_SELECT);
@@ -1234,41 +1264,56 @@ fn build_compose_post_wired(
 
     // "Sell this post…" controls (`monetization.md` § Per-post pay-to-unlock;
     // IDs user-approved 2026-07-29) — visible only while the select's LAST
-    // option (Sell, always one past the tier list) is chosen.
-    let sell_price_entry = gtk::Entry::new();
-    sell_price_entry.set_placeholder_text(Some(feed::post::SELL_PRICE_PLACEHOLDER));
-    sell_price_entry.set_hexpand(true);
-    sell_price_entry.set_visible(false);
-    crate::testid::set_test_id(&sell_price_entry, ids::COMPOSE_SELL_PRICE);
+    // option (Sell, always one past the tier list) is chosen. The money
+    // plane's author half (`dynamic-features.md` § Platform-family surface
+    // excision → *The price-and-route class*): a store-safe build constructs
+    // none of the sale controls, here or below.
+    #[cfg(feature = "payments")]
+    let (sell_price_entry, sell_asking_price_entry, sell_subscribers_free_check) = {
+        let sell_price_entry = gtk::Entry::new();
+        sell_price_entry.set_placeholder_text(Some(feed::post::SELL_PRICE_PLACEHOLDER));
+        sell_price_entry.set_hexpand(true);
+        sell_price_entry.set_visible(false);
+        crate::testid::set_test_id(&sell_price_entry, ids::COMPOSE_SELL_PRICE);
 
-    // The machine-comparable price (`monetization.md` § The asking price) —
-    // independent of `sell_price_entry` above (the free-text hint); no
-    // parsing ever infers one from the other. Empty means no machine price:
-    // the minted tier stays a tip target forever.
-    let sell_asking_price_entry = gtk::Entry::new();
-    sell_asking_price_entry.set_placeholder_text(Some(feed::post::SELL_ASKING_PRICE_PLACEHOLDER));
-    sell_asking_price_entry.set_hexpand(true);
-    sell_asking_price_entry.set_visible(false);
-    crate::testid::set_test_id(&sell_asking_price_entry, ids::COMPOSE_SELL_ASKING_PRICE);
+        // The machine-comparable price (`monetization.md` § The asking price) —
+        // independent of `sell_price_entry` above (the free-text hint); no
+        // parsing ever infers one from the other. Empty means no machine
+        // price: the minted tier stays a tip target forever.
+        let sell_asking_price_entry = gtk::Entry::new();
+        sell_asking_price_entry
+            .set_placeholder_text(Some(feed::post::SELL_ASKING_PRICE_PLACEHOLDER));
+        sell_asking_price_entry.set_hexpand(true);
+        sell_asking_price_entry.set_visible(false);
+        crate::testid::set_test_id(&sell_asking_price_entry, ids::COMPOSE_SELL_ASKING_PRICE);
 
-    // Defaults CHECKED (user-ratified 2026-07-29): an existing paying
-    // subscriber is not charged twice for a post their subscription would
-    // reasonably cover, so pay-per-view is the deliberate opt-in.
-    let sell_subscribers_free_check =
-        gtk::CheckButton::with_label(feed::post::SELL_SUBSCRIBERS_FREE);
-    sell_subscribers_free_check.set_active(true);
-    sell_subscribers_free_check.set_visible(false);
-    crate::testid::set_test_id(
-        &sell_subscribers_free_check,
-        ids::COMPOSE_SELL_SUBSCRIBERS_FREE,
-    );
+        // Defaults CHECKED (user-ratified 2026-07-29): an existing paying
+        // subscriber is not charged twice for a post their subscription would
+        // reasonably cover, so pay-per-view is the deliberate opt-in.
+        let sell_subscribers_free_check =
+            gtk::CheckButton::with_label(feed::post::SELL_SUBSCRIBERS_FREE);
+        sell_subscribers_free_check.set_active(true);
+        sell_subscribers_free_check.set_visible(false);
+        crate::testid::set_test_id(
+            &sell_subscribers_free_check,
+            ids::COMPOSE_SELL_SUBSCRIBERS_FREE,
+        );
+        (
+            sell_price_entry,
+            sell_asking_price_entry,
+            sell_subscribers_free_check,
+        )
+    };
 
     let audience = AudienceControls {
         select: gate_select,
         options: gate_options,
         preview: gate_preview_entry,
+        #[cfg(feature = "payments")]
         price: sell_price_entry,
+        #[cfg(feature = "payments")]
         asking_price: sell_asking_price_entry,
+        #[cfg(feature = "payments")]
         subscribers_free: sell_subscribers_free_check,
     };
 
@@ -1281,11 +1326,14 @@ fn build_compose_post_wired(
         let refreshing = Rc::clone(&refreshing);
         audience.select.connect_selected_notify(move |_| {
             let answer = a.answer();
-            let is_sell = answer == GateAnswer::Sell;
             a.preview.set_visible(answer != GateAnswer::Public);
-            a.price.set_visible(is_sell);
-            a.asking_price.set_visible(is_sell);
-            a.subscribers_free.set_visible(is_sell);
+            #[cfg(feature = "payments")]
+            {
+                let is_sell = answer == GateAnswer::Sell;
+                a.price.set_visible(is_sell);
+                a.asking_price.set_visible(is_sell);
+                a.subscribers_free.set_visible(is_sell);
+            }
             if !refreshing.get() {
                 a.forward(&m);
             }
@@ -1303,17 +1351,18 @@ fn build_compose_post_wired(
         });
     }
     // The three sale fields re-stage the sale while it is the answer.
-    for entry in [&audience.price, &audience.asking_price] {
-        let a = audience.clone();
-        let m = Arc::clone(manager);
-        let refreshing = Rc::clone(&refreshing);
-        entry.connect_changed(move |_| {
-            if !refreshing.get() && a.answer() == GateAnswer::Sell {
-                a.forward(&m);
-            }
-        });
-    }
+    #[cfg(feature = "payments")]
     {
+        for entry in [&audience.price, &audience.asking_price] {
+            let a = audience.clone();
+            let m = Arc::clone(manager);
+            let refreshing = Rc::clone(&refreshing);
+            entry.connect_changed(move |_| {
+                if !refreshing.get() && a.answer() == GateAnswer::Sell {
+                    a.forward(&m);
+                }
+            });
+        }
         let a = audience.clone();
         let m = Arc::clone(manager);
         let refreshing = Rc::clone(&refreshing);
@@ -1416,11 +1465,14 @@ fn build_compose_post_wired(
 
     // Sell row: price + asking price + subscribers-free toggle, visible only
     // in sell mode.
-    let sell_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    sell_row.append(&audience.price);
-    sell_row.append(&audience.asking_price);
-    sell_row.append(&audience.subscribers_free);
-    compose_area.append(&sell_row);
+    #[cfg(feature = "payments")]
+    {
+        let sell_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        sell_row.append(&audience.price);
+        sell_row.append(&audience.asking_price);
+        sell_row.append(&audience.subscribers_free);
+        compose_area.append(&sell_row);
+    }
 
     compose_area.append(&tags_entry);
     compose_area.append(&file_ready_marker);
@@ -2425,6 +2477,12 @@ fn build_post_card_body(
         top_line.append(&badge);
     }
 
+    // The price, the external payment link and the buy affordance are the
+    // money plane's buyer half (`dynamic-features.md` § Platform-family surface
+    // excision → *The price-and-route class*): a store-safe build shows a sold
+    // post as an ordinary gated post — the badge and nothing more. The resolve
+    // feeding it is an ungated read, so the render carries its own gate.
+    //
     // Buyer's price read (gap (2c), `monetization.md` § Per-post pay-to-unlock
     // → the buyer's price read is post-addressed) — resolved lazily off
     // `fauna.subscriptions.post_unlock.get` once `gated_tier` names a
@@ -2432,6 +2490,7 @@ fn build_post_card_body(
     // `None` covers both "not yet resolved" and "the nest answered no offer"
     // (a failed read included): both leave the priceless
     // teaser, with claim-code redemption (§5) as the fallback purchase path.
+    #[cfg(feature = "payments")]
     if let Some(offer) = &post.unlock_offer {
         let price = gtk::Label::new(Some(offer.price_hint.as_deref().unwrap_or("")));
         price.add_css_class("caption");
@@ -3644,16 +3703,18 @@ mod tests {
             tiers: vec!["gold".into()],
             rooms: vec![room("aa", "Book club"), room("bb", "Crew")],
         };
-        assert_eq!(
-            options.labels(),
-            vec![
-                feed::post::GATE_PUBLIC.to_string(),
-                "gold".to_string(),
-                feed::post::gate_room("Book club"),
-                feed::post::gate_room("Crew"),
-                feed::post::GATE_SELL.to_string(),
-            ]
-        );
+        // Sell is the money plane's answer: a store-safe build has no such
+        // position, so the list ends at the last room.
+        #[cfg_attr(not(feature = "payments"), allow(unused_mut))]
+        let mut expected = vec![
+            feed::post::GATE_PUBLIC.to_string(),
+            "gold".to_string(),
+            feed::post::gate_room("Book club"),
+            feed::post::gate_room("Crew"),
+        ];
+        #[cfg(feature = "payments")]
+        expected.push(feed::post::GATE_SELL.to_string());
+        assert_eq!(options.labels(), expected);
         assert_eq!(options.answer(0), GateAnswer::Public);
         assert_eq!(
             options.answer(gtk::INVALID_LIST_POSITION),
@@ -3662,7 +3723,10 @@ mod tests {
         assert_eq!(options.answer(1), GateAnswer::Tier("gold".into()));
         assert_eq!(options.answer(2), GateAnswer::Room("aa".into()));
         assert_eq!(options.answer(3), GateAnswer::Room("bb".into()));
+        #[cfg(feature = "payments")]
         assert_eq!(options.answer(4), GateAnswer::Sell);
+        #[cfg(not(feature = "payments"))]
+        assert_eq!(options.answer(4), GateAnswer::Public);
         assert_eq!(options.answer(5), GateAnswer::Public);
     }
 

@@ -1556,7 +1556,8 @@ public struct FaunaApp: App {
                     // SAME painted text the element read returns (PostCardView's
                     // `renderDocumentToPlaintext`) so the state-read
                     // fallback matches every other app (render-model.md § D6).
-                    "body": renderDocumentToPlaintext(document: post.document),
+                    // `""` for a post the viewer reported (same as macOS).
+                    "body": appState.contentPolicy.inputs.paintedBody(of: post),
                     "timestamp": post.timestamp,
                     "tags": post.tags,
                     "has_media": post.hasMedia,

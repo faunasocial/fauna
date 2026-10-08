@@ -44,7 +44,7 @@ Stamped 2026-09-19 at e9152e3330.
 |---|---|---|
 | web | ⚠ partial | |
 | linux | ✅ full | 0.1.2-dev+c4a95c20 standalone |
-| windows | ⚠ partial | |
+| windows | ✅ full | 0.1.3-dev+8b195137 standalone |
 | macos | ⚠ partial | |
 | ios | ⚠ partial | |
 | android |  no run recorded | |
@@ -64,5 +64,5 @@ Stamped 2026-09-19 at e9152e3330.
 | 3 | app | `tests/e2e-unified/tests/test_subject_divider.py::test_divider_appears_on_subject_change` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_conversations_reply_chrome.py::test_reply_preview_shows_the_message_answered_and_cancel_clears_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_conversations_reply_chrome.py::test_mail_header_chips_are_informational` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_mail_client_send.py::test_client_driven_send_relays_to_external_mx` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_mail_client_send.py::test_client_driven_send_relays_to_external_mx` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

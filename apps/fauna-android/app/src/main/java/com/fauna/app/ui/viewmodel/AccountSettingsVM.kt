@@ -41,6 +41,12 @@ class AccountSettingsVM @Inject constructor(
     private val accountStores: AccountStores,
     // For the widget re-fold on switch/sign-out only.
     @ApplicationContext private val context: Context,
+    /** The stolen-identity ceremony's hold on the Account page: every other
+     *  writer of the page's `error-message` asks it first
+     *  ([com.fauna.app.core.StolenCeremonyHold.admits]), so a parked
+     *  persist-failure message — the only copy of the new key — survives them
+     *  (`settings.md` § Recovery kit). */
+    val ceremonyHold: com.fauna.app.core.StolenCeremonyHold,
 ) : ViewModel() {
 
     val newHandle = MutableStateFlow("")

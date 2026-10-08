@@ -119,7 +119,21 @@ impl SnapshotScheduler {
         let folders = db.list_folders().await?;
         let mut created = 0usize;
         for fs in &folders {
-            if db.folder_needs_snapshot(fs.id, self.quiet_secs).await? {
+            // One folder's failed check costs that folder's snapshot, never the
+            // pass: a `?` here let one row stop every other folder's snapshot
+            // (2026-10-08).
+            let needs = match db.folder_needs_snapshot(fs.id, self.quiet_secs).await {
+                Ok(needs) => needs,
+                Err(e) => {
+                    tracing::warn!(
+                        folder = %fauna_core::log_redact::log_folder_name(&fs.name),
+                        error = %e,
+                        "auto-snapshot check failed"
+                    );
+                    continue;
+                }
+            };
+            if needs {
                 let parent_id = db
                     .list_snapshots(fs.id)
                     .await
@@ -621,5 +635,60 @@ mod tests {
             snaps.iter().all(|s| !s.deletion_pending && !s.soft_deleted),
             "no policy = keep everything"
         );
+    }
+
+    /// One user's own resting
+    /// `nest_snapshot_quiet_secs`, written past the handler's ceiling, must not
+    /// take the nest-wide scheduler down — the task that also carries every
+    /// other folder's snapshot and the nest's own database backups.
+    #[tokio::test]
+    async fn one_users_over_ceiling_quiet_period_leaves_the_scheduler_alive() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let mallory = [7u8; 32];
+        let alice = [1u8; 32];
+        db.create_folder("mallory-set", &mallory).await.unwrap();
+        db.update_folder_for_user(
+            "mallory-set",
+            &mallory,
+            crate::db::FolderUpdate {
+                nest_snapshot_quiet_secs: Some(Some(i64::MAX)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        db.create_folder("alice-set", &alice).await.unwrap();
+        let fs = db.get_folder("alice-set").await.unwrap().unwrap();
+        let ph: [u8; 32] = *blake3::hash(b"photo.jpg").as_bytes();
+        db.record_sync_change(
+            &alice,
+            &ph,
+            Some(&[0xAAu8; 32]),
+            100,
+            "create",
+            Some(fs.id),
+            None,
+            Some("photo.jpg"),
+        )
+        .await
+        .unwrap();
+
+        let svc = make_svc(db.clone(), tmp.path());
+        let scheduler = Arc::new(SnapshotScheduler::new(svc, Duration::from_millis(20), 0));
+        let handle = scheduler.spawn();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        assert!(
+            !handle.is_finished(),
+            "the nest-wide scheduler task died on another user's folder policy"
+        );
+        assert_eq!(
+            db.list_snapshots(fs.id).await.unwrap().len(),
+            1,
+            "alice's changed folder got no automatic snapshot"
+        );
+        handle.abort();
     }
 }

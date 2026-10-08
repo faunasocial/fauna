@@ -294,6 +294,34 @@ pub trait OutboundMailSink: MaybeSendSync {
     /// human-readable reason on transport failure or partial delivery
     /// (`SendEmailReply.remote_errors` non-empty).
     async fn submit(&self, recipients: Vec<String>, raw_rfc5322: Vec<u8>) -> Result<(), String>;
+
+    /// The account's own mailing lists and today's per-account list meter
+    /// (`fauna.bridges.list_account_lists`) — what lets a compose addressed to
+    /// a list send as a list send (`mail-mass-mailing.md` § Composing a list
+    /// message). Default: no lists, for a sink with no list rail.
+    async fn own_lists(&self) -> Result<crate::list_send::OwnMailLists, String> {
+        Ok(crate::list_send::OwnMailLists::default())
+    }
+
+    /// Send a composed RFC 5322 message to one of the account's own lists
+    /// (`fauna.bridges.send_list_message` — the nest fans it out, one copy per
+    /// subscribed member). Default: refused, for a sink with no list rail.
+    async fn submit_to_list(
+        &self,
+        _list_id_hex: &str,
+        _raw_rfc5322: Vec<u8>,
+    ) -> Result<(), String> {
+        Err("this app cannot send to a mailing list".to_string())
+    }
+
+    /// The newest send to a list, as a whole
+    /// (`fauna.bridges.list_list_send_history`). Default: none.
+    async fn latest_list_send(
+        &self,
+        _list_id_hex: &str,
+    ) -> Result<Option<crate::list_send::ListSendProgress>, String> {
+        Ok(None)
+    }
 }
 
 /// One of the two server-side mailboxes the mail receive path reads
@@ -3613,6 +3641,17 @@ pub trait RailBackend: MaybeSendSync {
     /// Default no-op. Cheap by construction (one pass over the participant
     /// list), and idempotent.
     fn observe_participants(&self, _participants: &[TypedAddress]) {}
+
+    /// The compose form's list-send view for a compose addressed to
+    /// `recipients`, when this rail sends it to one of the account's own
+    /// mailing lists (`mail-mass-mailing.md` § Composing a list message). Only
+    /// the SMTP rail has lists; every other rail answers `None`.
+    async fn list_send_view(
+        &self,
+        _recipients: &[TypedAddress],
+    ) -> Option<crate::list_send::ListSendView> {
+        None
+    }
 
     /// Identities this rail wants the peer-anchor harvest sweep to walk beyond
     /// the thread rosters — read by `ConversationsManager::harvest_walk_actors`

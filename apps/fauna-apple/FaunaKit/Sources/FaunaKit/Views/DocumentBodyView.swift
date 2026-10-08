@@ -125,7 +125,7 @@ private struct RenderBlockView: View {
             // `.proxiedImage` (a bridged post's nest-served picture, render-model.md § D6c) is the
             // feed page's `post-image` slot too, extracted by `documentMediaProxiedImagePath`.
             // `.proxiedVideo` (its video twin, § D6c → Proxied video) belongs to the
-            // `video-thumbnail` slot; apple's paint of it is a trickle-down lift.
+            // `video-thumbnail` slot, extracted by `documentMediaProxiedVideoPath`.
             //
             // Embeds (trusted media / attachment / feed quoted-post / in-bubble reply-quote) —
             // first-class blocks the manager folds in, but rendered as their own elements
@@ -333,6 +333,17 @@ public func documentMediaImageHash(_ document: RenderDocument) -> String? {
 public func documentMediaProxiedImagePath(_ document: RenderDocument) -> String? {
     guard documentMediaImageHash(document) == nil else { return nil }
     return renderDocumentProxiedImages(document: document).first?.path
+}
+
+/// The nest-relative path of the document's first folded `ProxiedVideo` block — a bridged
+/// post's video (render-model.md § D6c → *Proxied video*) — or `nil` when the post has a blob
+/// `Video`, which takes the one `video-thumbnail` slot first. The strict twin of
+/// ``documentMediaProxiedImagePath`` and of `RenderDocument::proxied_post_video`, over the shared
+/// `renderDocumentProxiedVideos` face (which recurses, like its siblings). The slot paints the
+/// play glyph + this path as text; nothing fetches or parses it.
+public func documentMediaProxiedVideoPath(_ document: RenderDocument) -> String? {
+    guard documentMediaVideoHash(document) == nil else { return nil }
+    return renderDocumentProxiedVideos(document: document).first?.path
 }
 
 /// The content hash of the document's folded trusted-media `Video` block, or `nil` — the exact

@@ -214,14 +214,25 @@ public struct MailSettingsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("\(L.settings.mail.bannerTitle) \(L.settings.mail.bannerSubtitle)")
                     .font(.callout)
-                Button(L.settings.mail.resume) { Task { await vm.dispatch(.resumeRotation) } }
+                Button(L.settings.mail.resume) { resumeRotation() }
                     .accessibilityIdentifier(Ids.mailSettingsPendingRotationResumeButton)
+                    .automationActivate(Ids.mailSettingsPendingRotationResumeButton) {
+                        resumeRotation()
+                    }
             }
             // `.contain` keeps both this container id and the child resume-button
             // id queryable (same clobber guard as the disable-confirm overlay).
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier(Ids.mailSettingsPendingRotationBanner)
+            // A container is invisible to the in-process registry without its own
+            // value read; the banner's text is its title (the subtitle rides the
+            // visible line).
+            .automationValue(Ids.mailSettingsPendingRotationBanner, text: { L.settings.mail.bannerTitle })
         }
+    }
+
+    private func resumeRotation() {
+        Task { await vm.dispatch(.resumeRotation) }
     }
 
     // MARK: - Manage (add / rotate / keys-info)
@@ -360,7 +371,11 @@ public struct MailSettingsView: View {
         mailStatusText(enabled: vm.enabled, status: vm.snapshot?.status ?? .idle)
     }
 
+    /// A rotation is running, or one was interrupted and is waiting to be resumed:
+    /// the rotate button stays disabled for both (`mail-settings.md` § Architectural
+    /// rules 5) — the shared machine already refuses a second `StartRotation`.
     private var isRotating: Bool {
+        if vm.snapshot?.pendingRotation != nil { return true }
         if case .rotationInProgress = vm.snapshot?.status { return true }
         return false
     }
@@ -675,11 +690,17 @@ struct MailRotateKeysSheet: View {
                 ForEach(vm.snapshot?.credentials ?? [], id: \.credentialId) { cred in
                     Toggle(cred.displayName, isOn: Binding(
                         get: { excluded.contains(cred.credentialId) },
-                        set: { on in
-                            if on { excluded.insert(cred.credentialId) }
-                            else { excluded.remove(cred.credentialId) }
-                        }
+                        set: { on in setExcluded(cred.credentialId, on) }
                     ))
+                    // One id per row, flat-indexed in the credentials' order; its
+                    // text is the password's display name, which the journey
+                    // matches on (`actions/mail_settings.py::rotate_keys`).
+                    .accessibilityIdentifier(Ids.mailRotateKeysExcludeItem)
+                    .automationActivate(
+                        Ids.mailRotateKeysExcludeItem,
+                        text: { cred.displayName },
+                        value: { excluded.contains(cred.credentialId) ? "on" : "off" }
+                    ) { setExcluded(cred.credentialId, !excluded.contains(cred.credentialId)) }
                 }
             }
             .accessibilityIdentifier(Ids.mailRotateKeysExcludeList)
@@ -712,6 +733,10 @@ struct MailRotateKeysSheet: View {
                     .automationActivate(Ids.mailRotateKeysCancelButton) { onClose() }
             }
         }
+    }
+
+    private func setExcluded(_ credentialId: String, _ on: Bool) {
+        if on { excluded.insert(credentialId) } else { excluded.remove(credentialId) }
     }
 
     /// Run the rotation. Shared by the confirm `Button` and its

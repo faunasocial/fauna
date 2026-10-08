@@ -23,15 +23,28 @@ public struct FileProviderCredentials: Sendable {
     public let deviceId: Data
     public let deviceLabel: String
     /// 32-byte owner `BackupKey` (the content-seal root; opens the owner's
-    /// owner-only chunks — the only key the extension is handed).
+    /// owner-only chunks — the only owner key the extension is handed).
     public let backupKey: Data
+    /// The account's attested predecessors PAIRED with their retired owner keys
+    /// (`FfiAccountRegistry.predecessorChain`) — key material, so it rides the
+    /// same Keychain access group and protection as `backupKey`. The extension
+    /// holds no registry, so the app provisions the chain: a row a retired
+    /// identity signed then opens under that identity's own root
+    /// (`writer-signed-change-records.md` ruling (8)(c)). `nil` — a store written
+    /// before the chain was provisioned — still verifies such a row by the
+    /// statement walk and opens it under no retired root.
+    public let predecessorChain: FfiPredecessorChain?
 
-    public init(nestURL: String, actorId: Data, deviceId: Data, deviceLabel: String, backupKey: Data) {
+    public init(
+        nestURL: String, actorId: Data, deviceId: Data, deviceLabel: String, backupKey: Data,
+        predecessorChain: FfiPredecessorChain? = nil
+    ) {
         self.nestURL = nestURL
         self.actorId = actorId
         self.deviceId = deviceId
         self.deviceLabel = deviceLabel
         self.backupKey = backupKey
+        self.predecessorChain = predecessorChain
     }
 }
 
@@ -53,6 +66,8 @@ public enum FileProviderCredentialStore {
         static let deviceId = "device_id"
         static let deviceLabel = "device_label"
         static let backupKey = "backup_key"
+        static let predecessorActorIds = "predecessor_actor_ids"
+        static let predecessorKeys = "predecessor_keys"
         static let bearer = "bearer"
         static let writerSecret = "writer_secret"
         static let deviceAuthorization = "device_authorization"
@@ -87,7 +102,10 @@ public enum FileProviderCredentialStore {
             actorId: actorId,
             deviceId: deviceId,
             deviceLabel: deviceLabel,
-            backupKey: backupKey
+            backupKey: backupKey,
+            predecessorChain: predecessorChain(
+                actorIds: loadData(Account.predecessorActorIds),
+                keys: loadData(Account.predecessorKeys))
         )
     }
 
@@ -121,6 +139,29 @@ public enum FileProviderCredentialStore {
             writerSecret: writerSecret, deviceAuthorization: deviceAuthorization)
     }
 
+    /// The chain as its two Keychain items: each list's 32-byte entries
+    /// concatenated in chain order.
+    static func predecessorChainItems(_ chain: FfiPredecessorChain) -> (actorIds: Data, keys: Data) {
+        (chain.actorIds.reduce(Data(), +), chain.keys.reduce(Data(), +))
+    }
+
+    /// The chain the two Keychain items make together — both, or none: a
+    /// missing item (a store written before the chain was provisioned, a crash
+    /// between the two writes) or a pair that does not split into equally many
+    /// 32-byte entries is no chain, never one identity paired with another's
+    /// key. The Rust host re-checks the pairing before it offers any root.
+    static func predecessorChain(actorIds: Data?, keys: Data?) -> FfiPredecessorChain? {
+        guard let actorIds, let keys,
+            actorIds.count == keys.count, actorIds.count % 32 == 0
+        else { return nil }
+        func entries(_ data: Data) -> [Data] {
+            stride(from: 0, to: data.count, by: 32).map {
+                Data(data[data.startIndex + $0..<data.startIndex + $0 + 32])
+            }
+        }
+        return FfiPredecessorChain(actorIds: entries(actorIds), keys: entries(keys))
+    }
+
     // MARK: Writer (app)
 
     /// Write the capability + bearer into the shared Keychain (app side, at first
@@ -136,6 +177,17 @@ public enum FileProviderCredentialStore {
         save(Account.deviceId, creds.deviceId)
         save(Account.deviceLabel, Data(creds.deviceLabel.utf8))
         save(Account.backupKey, creds.backupKey)
+        // An empty chain (an identity that never succeeded) is stored as none:
+        // the host carries no retired root either way, and the Keychain is
+        // never asked to hold a zero-length item.
+        if let chain = creds.predecessorChain, !chain.actorIds.isEmpty {
+            let items = predecessorChainItems(chain)
+            save(Account.predecessorActorIds, items.actorIds)
+            save(Account.predecessorKeys, items.keys)
+        } else {
+            delete(Account.predecessorActorIds)
+            delete(Account.predecessorKeys)
+        }
         save(Account.bearer, Data(bearer.utf8))
         provisionSigner(signer)
     }
@@ -164,7 +216,8 @@ public enum FileProviderCredentialStore {
     public static func revoke() {
         for account in [
             Account.nestURL, Account.actorId, Account.deviceId,
-            Account.deviceLabel, Account.backupKey, Account.bearer,
+            Account.deviceLabel, Account.backupKey, Account.predecessorActorIds,
+            Account.predecessorKeys, Account.bearer,
             Account.writerSecret, Account.deviceAuthorization,
         ] {
             delete(account)

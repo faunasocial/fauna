@@ -149,6 +149,7 @@ async fn the_runtime_assembled_listener_admits_and_refuses_over_real_quic() {
                     Ok(PeerLegBinding {
                         transport: Arc::new(transport),
                         bound_addrs,
+                        file_sync: None,
                     })
                 })
             },

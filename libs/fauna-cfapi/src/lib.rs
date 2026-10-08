@@ -904,6 +904,98 @@ pub fn dehydrate_placeholder(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Re-describe a placeholder as a NEWER version of its file — `size` bytes, last written at
+/// `mtime` (Unix seconds) — and free whatever bytes of the old version are on the disk, in one
+/// `CfUpdatePlaceholder`: the new `FsMetadata` with `CF_UPDATE_FLAG_DEHYDRATE`. It is how a copy
+/// another device's edit superseded is invalidated, hydrated or cloud-only alike.
+///
+/// **Why not [`dehydrate_placeholder`].** `CfDehydratePlaceholder` frees the bytes and KEEPS the
+/// placeholder's logical size and times, and cfapi asks the provider for exactly
+/// `[0, that size)` on the next open. A grown file was therefore served as a prefix of its new
+/// version — which the engine then recorded, read back as a local edit and uploaded over the
+/// real one — and a shrunk one was asked for bytes past its end.
+///
+/// **The dirty-file refusal stands.** `CF_UPDATE_FLAG_VERIFY_IN_SYNC` refuses the update unless
+/// the placeholder is in sync, and under this crate's `CF_INSYNC_POLICY_TRACK_ALL` a local write
+/// clears that bit — so a file carrying an unsynced local edit is refused, as
+/// `CfDehydratePlaceholder` refuses it, and nothing about it changes. `CF_UPDATE_FLAG_MARK_IN_SYNC`
+/// then asserts the freed placeholder in sync: it holds no bytes, and its metadata is the
+/// provider's stored version, so there is nothing local to vouch for — and a placeholder left
+/// NOT in sync would refuse the next remote edit's update for ever.
+///
+/// **`CF_UPDATE_FLAG_PASSTHROUGH_FS_METADATA`, so a version of 0 bytes can be described.**
+/// Without it the platform skips every `FsMetadata` field that is 0 — `FileSize` included
+/// (measured: a file emptied on another device kept its old size,
+/// `cfapi_live_integration::a_remote_edit_that_empties_a_hydrated_file_reaches_it`). Passed
+/// through, every field is applied, so the creation time and the attributes — the pin bits
+/// among them — are read from the file first and handed back unchanged.
+///
+/// A plain Win32 handle, as [`convert_to_placeholder_anchored`] takes: the oplock-protected
+/// handle of [`open_file_handle`] is refused `0x80070006` (measured,
+/// `cfapi_live_integration::supersede_placeholder_redescribes_a_hydrated_file`). Opened
+/// `FILE_SHARE_READ` alone, as [`set_in_sync`] is, so no other handle may write the file while
+/// the update runs; a file another process holds open for writing refuses the update (it is
+/// not settled content), and the caller retries on the next pull.
+pub fn supersede_placeholder(path: &Path, size: u64, mtime: i64) -> Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Storage::FileSystem::{FileBasicInfo, GetFileInformationByHandleEx};
+    /// `FILE_SHARE_READ` alone: no other handle may write, delete or rename while ours is open.
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "open {} excluding writers (held open for writing elsewhere?)",
+                path.display()
+            )
+        })?;
+    let handle = HANDLE(file.as_raw_handle());
+    let mut current = FILE_BASIC_INFO::default();
+    unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileBasicInfo,
+            &mut current as *mut FILE_BASIC_INFO as *mut core::ffi::c_void,
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    }
+    .with_context(|| format!("read the basic info of {}", path.display()))?;
+    let ft = unix_to_filetime(mtime);
+    let metadata = CF_FS_METADATA {
+        BasicInfo: FILE_BASIC_INFO {
+            CreationTime: current.CreationTime,
+            LastAccessTime: ft,
+            LastWriteTime: ft,
+            ChangeTime: ft,
+            FileAttributes: current.FileAttributes,
+        },
+        FileSize: i64::try_from(size).context("placeholder size overflows i64")?,
+    };
+    let result = unsafe {
+        CfUpdatePlaceholder(
+            handle,
+            Some(&metadata),
+            None, // the identity stays
+            0,
+            None, // with DEHYDRATE: the whole file
+            CF_UPDATE_FLAG_VERIFY_IN_SYNC
+                | CF_UPDATE_FLAG_DEHYDRATE
+                | CF_UPDATE_FLAG_MARK_IN_SYNC
+                | CF_UPDATE_FLAG_PASSTHROUGH_FS_METADATA,
+            None, // no USN output
+            None, // no overlapped
+        )
+    };
+    drop(file);
+    result.context("CfUpdatePlaceholder(new version, dehydrate, verify in sync) failed")?;
+    tracing::debug!(path = %path.display(), size, mtime, "placeholder superseded");
+    Ok(())
+}
+
 /// Set or clear the pinned state on a file.
 ///
 /// Pinned files are kept hydrated (always available offline).

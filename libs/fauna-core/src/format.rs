@@ -274,20 +274,26 @@ mod reach_policy_format_tests {
         assert_eq!(lines[4].value.key, "family.value_allow");
     }
 
-    /// `contact` and `feed_source` render `summary`; the two envelope-class
-    /// kinds (`mail_hold`, `dm_hold`) render `peer_address` and a
-    /// `contact_request` its `peer_handle` — never `summary`, which is always
-    /// empty for all three (a subject line or preview is content; an ask names
-    /// *who*, never *why*).
+    /// `contact` renders `summary`; the two envelope-class kinds (`mail_hold`,
+    /// `dm_hold`) render `peer_address` and a `contact_request` its
+    /// `peer_handle` — never `summary`, which is always empty for all three (a
+    /// subject line or preview is content; an ask names *who*, never *why*). A
+    /// `feed_source` is pinned in `approval_display_text_tests`: it names the
+    /// grant's key, never the label alone.
     #[test]
     fn non_mail_hold_kinds_render_summary_never_peer_address() {
         assert_eq!(
-            approval_display_text("contact", "irrelevant@example.com", "", "a knock summary"),
+            approval_display_text(
+                "contact",
+                "irrelevant@example.com",
+                "",
+                "a knock summary",
+                "",
+                "",
+                ""
+            )
+            .as_deref(),
             Some("a knock summary")
-        );
-        assert_eq!(
-            approval_display_text("feed_source", "", "", "petname"),
-            Some("petname")
         );
     }
 
@@ -296,7 +302,8 @@ mod reach_policy_format_tests {
     #[test]
     fn mail_hold_renders_peer_address_not_summary() {
         assert_eq!(
-            approval_display_text("mail_hold", "stranger@example.com", "", ""),
+            approval_display_text("mail_hold", "stranger@example.com", "", "", "", "", "")
+                .as_deref(),
             Some("stranger@example.com")
         );
     }
@@ -308,7 +315,10 @@ mod reach_policy_format_tests {
     /// (see `approval_display_text_tests`).
     #[test]
     fn a_null_path_mail_hold_returns_none_for_the_caller_to_localize() {
-        assert_eq!(approval_display_text("mail_hold", "", "", ""), None);
+        assert_eq!(
+            approval_display_text("mail_hold", "", "", "", "", "", ""),
+            None
+        );
     }
 
     // --- content-floor catalog (family-safety.md § Content policy, Slice C) ---
@@ -3341,8 +3351,14 @@ pub fn usage_today_line(used_minutes: u32, budget_minutes: Option<u16>) -> Polic
 ///   *who*, never *why*, so it deliberately carries no message text at all and
 ///   rides the nest-joined `peer_handle` instead (`family-safety.md`
 ///   § Child-initiated contact requests).
-/// - **Everything else (`contact`, `feed_source`) → `summary`:** the knock's own
-///   text, and the ward's own label for the source being approved.
+/// - **`feed_source` → the grant's own key, `(bridge_id, operation, target)`,**
+///   composed by [`feed_source_display_text`]: the card names what Approve
+///   actually authorizes. The ward's `summary` (its free-text label) follows in
+///   quotes as the ward's own description and never stands in for the target —
+///   the grant matches the triple, never the label (`family-safety.md`
+///   § Feed-source approvals), so a label-only card let a ward have a harmless
+///   name approved and redeem it for an object the guardian never saw.
+/// - **Everything else (`contact`) → `summary`:** the knock's own text.
 ///
 /// **An empty field yields `None` for every kind**, not just the SMTP
 /// null-reverse-path `mail_hold` that first motivated the rule
@@ -3362,13 +3378,68 @@ pub fn approval_display_text<'a>(
     peer_address: &'a str,
     peer_handle: &'a str,
     summary: &'a str,
-) -> Option<&'a str> {
+    bridge_id: &str,
+    operation: &str,
+    target: &str,
+) -> Option<std::borrow::Cow<'a, str>> {
     let text = match kind {
         "mail_hold" | "dm_hold" => peer_address,
         "contact_request" => peer_handle,
+        "feed_source" => {
+            return feed_source_display_text(bridge_id, operation, target, summary)
+                .map(std::borrow::Cow::Owned);
+        }
         _ => summary,
     };
-    if text.is_empty() { None } else { Some(text) }
+    if text.is_empty() {
+        None
+    } else {
+        Some(std::borrow::Cow::Borrowed(text))
+    }
+}
+
+/// Per-part character cap on a `feed_source` card. Generous: the nest already
+/// length-caps every part at `fauna.family.feed_source.request`; this only
+/// bounds what a row paints.
+const FEED_SOURCE_PART_MAX_CHARS: usize = 512;
+
+/// The `feed_source` arm of [`approval_display_text`]: `bridge · operation ·
+/// target`, then the ward's label in quotes — `bluesky · follow ·
+/// did:plc:abc — “Grandma's photos”`. A `link` ask carries an empty target by
+/// construction (approving it approves connecting the bridge), so it reads
+/// `bluesky · link`.
+///
+/// Every part is ward-supplied and goes through
+/// [`crate::control_chars::sanitize_plain_line`], so a newline or bidi override
+/// cannot forge a second line or reorder the target under the label. The
+/// composition is deliberately language-neutral — wire identifiers and a
+/// quoted label, as the envelope kinds show a raw address — so the one string
+/// reaches all 7 apps with no per-app formatting. `None` when the key itself is
+/// empty: a card that cannot name what Approve grants must not render the
+/// label alone.
+pub fn feed_source_display_text(
+    bridge_id: &str,
+    operation: &str,
+    target: &str,
+    label: &str,
+) -> Option<String> {
+    use crate::control_chars::sanitize_plain_line;
+    let key: Vec<String> = [bridge_id, operation, target]
+        .iter()
+        .map(|part| sanitize_plain_line(part, FEED_SOURCE_PART_MAX_CHARS))
+        .filter(|part| !part.is_empty())
+        .collect();
+    if key.is_empty() {
+        return None;
+    }
+    let mut text = key.join(" · ");
+    let label = sanitize_plain_line(label, FEED_SOURCE_PART_MAX_CHARS);
+    if !label.is_empty() {
+        text.push_str(" — “");
+        text.push_str(&label);
+        text.push('”');
+    }
+    Some(text)
 }
 
 /// One arm of `personalization-trained-factor-publish-kind-select`: the
@@ -3660,22 +3731,25 @@ mod approval_display_text_tests {
     #[test]
     fn mail_hold_renders_peer_address_not_the_empty_summary() {
         assert_eq!(
-            approval_display_text("mail_hold", "stranger@example.com", "", ""),
-            Some("stranger@example.com"),
+            approval_display_text("mail_hold", "stranger@example.com", "", "", "", "", ""),
+            Some("stranger@example.com".into()),
         );
     }
 
     #[test]
     fn contact_renders_its_summary() {
         assert_eq!(
-            approval_display_text("contact", "", "", "hi from bob"),
-            Some("hi from bob"),
+            approval_display_text("contact", "", "", "hi from bob", "", "", ""),
+            Some("hi from bob".into()),
         );
     }
 
     #[test]
     fn a_null_path_mail_hold_yields_none() {
-        assert_eq!(approval_display_text("mail_hold", "", "", "anything"), None);
+        assert_eq!(
+            approval_display_text("mail_hold", "", "", "anything", "", "", ""),
+            None
+        );
     }
 
     /// `family-safety.md` § Child-initiated contact requests — the entry
@@ -3686,8 +3760,8 @@ mod approval_display_text_tests {
     #[test]
     fn contact_request_renders_its_peer_handle_not_the_empty_summary() {
         assert_eq!(
-            approval_display_text("contact_request", "", "alice", ""),
-            Some("alice"),
+            approval_display_text("contact_request", "", "alice", "", "", "", ""),
+            Some("alice".into()),
         );
     }
 
@@ -3698,8 +3772,8 @@ mod approval_display_text_tests {
     #[test]
     fn dm_hold_renders_its_peer_address_not_the_empty_summary() {
         assert_eq!(
-            approval_display_text("dm_hold", "npub1stranger", "", ""),
-            Some("npub1stranger"),
+            approval_display_text("dm_hold", "npub1stranger", "", "", "", "", ""),
+            Some("npub1stranger".into()),
         );
     }
 
@@ -3719,11 +3793,80 @@ mod approval_display_text_tests {
             "a_kind_this_client_does_not_know",
         ] {
             assert_eq!(
-                approval_display_text(kind, "", "", ""),
+                approval_display_text(kind, "", "", "", "", "", ""),
                 None,
                 "{kind} must not render an empty row",
             );
         }
+    }
+
+    /// `family-safety.md` § Feed-source approvals — the grant matches
+    /// `(bridge_id, operation, target)`, never the label. A ward labelling a
+    /// follow of an object the guardian would refuse as something harmless
+    /// must not get a card that shows only the harmless name: the target the
+    /// Approve button grants is on the card, and the label is quoted as the
+    /// ward's own words.
+    #[test]
+    fn feed_source_names_the_target_the_grant_authorizes_not_only_the_label() {
+        let text = approval_display_text(
+            "feed_source",
+            "",
+            "",
+            "Grandma's photos",
+            "bluesky",
+            "follow",
+            "did:plc:somethingelse",
+        )
+        .expect("a feed_source ask always names its key");
+        assert_eq!(
+            text,
+            "bluesky · follow · did:plc:somethingelse — “Grandma's photos”"
+        );
+    }
+
+    /// A `link` ask has an empty target by construction — approving it
+    /// approves connecting the bridge — and an unlabelled ask still names its
+    /// key.
+    #[test]
+    fn feed_source_link_and_unlabelled_asks_name_their_key() {
+        assert_eq!(
+            approval_display_text("feed_source", "", "", "", "bluesky", "link", "").as_deref(),
+            Some("bluesky · link"),
+        );
+        assert_eq!(
+            approval_display_text("feed_source", "", "", "my feed", "rss", "feed", "").as_deref(),
+            Some("rss · feed — “my feed”"),
+        );
+    }
+
+    /// A label alone never fills the card: with no key there is nothing the
+    /// guardian could be shown that Approve grants.
+    #[test]
+    fn feed_source_with_an_empty_key_yields_none_even_with_a_label() {
+        assert_eq!(
+            approval_display_text("feed_source", "", "", "harmless", "", "", ""),
+            None,
+        );
+    }
+
+    /// Every ward-supplied part is one plain line: a newline cannot forge a
+    /// second line under the key, and a bidi override cannot reorder it.
+    #[test]
+    fn feed_source_parts_are_sanitized() {
+        let text = approval_display_text(
+            "feed_source",
+            "",
+            "",
+            "ok\nApproved by parent",
+            "bluesky",
+            "follow",
+            "did:plc:\u{202E}evil",
+        )
+        .unwrap();
+        assert_eq!(
+            text,
+            "bluesky · follow · did:plc:evil — “ok Approved by parent”"
+        );
     }
 }
 

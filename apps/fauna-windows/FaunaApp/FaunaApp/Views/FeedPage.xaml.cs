@@ -543,7 +543,9 @@ public sealed partial class FeedPage : Page
             }
             // Trigger the sold-post buyer teaser resolve (gap (2c), monetization.md § Per-post
             // pay-to-unlock): the manager folds a resolved offer into `unlock_offer` + re-emits
-            // → next Refresh paints gated-post-price/-payment-link/-buy-button. Fire-once on
+            // → next Refresh paints the card's SoldPostTeaser (a payments build's only; the
+            // resolve itself is a subscriptions read every flavor makes, as on tui and apple,
+            // and FeedPostItem's offer fields stay ungated inert data). Fire-once on
             // unresolved — the shared resolve_post_unlock_offer itself no-ops (no I/O, no
             // re-emit) unless gatedTier names a post-unlock-* tier, so gating on "any gated
             // post with no offer yet" (rather than duplicating the tier-prefix check here) is
@@ -582,10 +584,11 @@ public sealed partial class FeedPage : Page
         }
 
 #if PAYMENTS
-        // Tip state that arrived on THIS pass (the resolve above) must reach cards whose
-        // container was loaded on an earlier one — PostTipDisplay.Bind snapshots, and a
-        // non-recycling container is loaded once. See RefreshTipDisplays.
-        RefreshTipDisplays();
+        // Tip state or an unlock offer that arrived on THIS pass (the resolves above) must
+        // reach cards whose container was loaded on an earlier one — PostTipDisplay.Bind and
+        // SoldPostTeaser.Bind snapshot, and a non-recycling container is loaded once. See
+        // RefreshCardPayments.
+        RefreshCardPayments();
 #endif   // PAYMENTS
     }
 
@@ -891,48 +894,6 @@ public sealed partial class FeedPage : Page
             _viewModel.RevealRemoteImages(item.PostId);
     }
 
-    // ── Sold-post buyer teaser (gap (2c), monetization.md § Per-post pay-to-unlock) ──────
-
-    /// <summary>Open the sold-post offer's external payment_url (<c>gated-post-payment-link</c>)
-    /// — mirrors <c>ProfilePage.OfferPaymentLink_Click</c>, plus the shared
-    /// <c>uniffi.fauna_core.FaunaCoreMethods.IsSafePaymentUrl</c> guard (F-CL2
-    /// anti-phishing-redirect class — the nest/author-supplied url is
-    /// untrusted): a non-https url shows <c>subscriptions/unsafe_payment_url</c> on
-    /// `error-message` instead of launching.</summary>
-    private void UnlockOfferPaymentLink_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is not Button { Tag: FeedPostItem post } || string.IsNullOrEmpty(post.UnlockOfferPaymentUrl))
-            return;
-        if (!uniffi.fauna_core.FaunaCoreMethods.IsSafePaymentUrl(post.UnlockOfferPaymentUrl))
-        {
-            var msg = S.Get("subscriptions/unsafe_payment_url");
-            ErrorBar.Message = msg; ErrorBar.IsOpen = true;
-            App.CurrentErrorMessage = msg;
-            return;
-        }
-        FaunaApp.Services.UrlOpener.Open(post.UnlockOfferPaymentUrl, "Feed");
-    }
-
-    /// <summary>Buy the sold post's unlock tier off the resolved teaser offer
-    /// (<c>gated-post-buy-button</c>) — the existing subscribe flow against the resolved offer's
-    /// tier, queued pending the author's own §2 approve. A successful call mutates the
-    /// manager's own snapshot + notifies (mirrors <see cref="DispatchTrainAsync"/>'s
-    /// error-surfacing convention).</summary>
-    private async void BuyUnlockOffer_Click(object sender, RoutedEventArgs e)
-    {
-        if (_viewModel is null || sender is not Button { Tag: FeedPostItem post }) return;
-        try
-        {
-            await _viewModel.BuyUnlockOfferAsync(post.PostId);
-        }
-        catch (Exception ex)
-        {
-            var msg = S.Format("feed/error_buy_unlock", ex.Message);
-            ErrorBar.Message = msg; ErrorBar.IsOpen = true;
-            App.CurrentErrorMessage = msg;
-        }
-    }
-
     /// <summary>Per-card <c>TipDisplayHost</c> fill, driven by the host's own
     /// <c>Loaded</c> (see the ContentControl's comment in FeedPage.xaml for why that
     /// and not <c>ContainerContentChanging</c>).
@@ -949,7 +910,80 @@ public sealed partial class FeedPage : Page
 #endif   // PAYMENTS
     }
 
+    /// <summary>Per-card <c>SoldPostTeaserHost</c> fill — the sold-post buyer teaser
+    /// (gap (2c), monetization.md § Per-post pay-to-unlock), <see cref="TipDisplayHost_Loaded"/>'s
+    /// shape and for the same reasons.</summary>
+    private void SoldPostTeaserHost_Loaded(object sender, RoutedEventArgs e)
+    {
 #if PAYMENTS
+        if (sender is ContentControl host && host.DataContext is FeedPostItem post)
+            BindSoldPostTeaser(host, post);
+#endif   // PAYMENTS
+    }
+
+#if PAYMENTS
+    /// <summary>Fill (or first-create) one realized post-card's <c>SoldPostTeaserHost</c>
+    /// with a bound <see cref="Views.Payments.SoldPostTeaser"/> — <see cref="BindTipDisplay"/>'s
+    /// twin. Idempotent: the control is created once per host and re-bound thereafter.</summary>
+    private void BindSoldPostTeaser(ContentControl host, FeedPostItem post)
+    {
+        if (host.Content is not Views.Payments.SoldPostTeaser teaser)
+        {
+            teaser = new Views.Payments.SoldPostTeaser();
+            teaser.PaymentLinkRequested += (_, item) => OpenUnlockOfferPaymentLink(item);
+            teaser.BuyRequested += (_, item) => BuyUnlockOffer(item);
+            host.Content = teaser;
+        }
+        teaser.Bind(post);
+    }
+
+    /// <summary>Open the sold-post offer's external payment_url (the teaser's payment
+    /// link) — mirrors <c>ProfilePage.OpenOfferPaymentLink</c>, plus the shared
+    /// <c>uniffi.fauna_core.FaunaCoreMethods.IsSafePaymentUrl</c> guard (F-CL2
+    /// anti-phishing-redirect class — the nest/author-supplied url is
+    /// untrusted): a non-https url shows <c>subscriptions/unsafe_payment_url</c> on
+    /// `error-message` instead of launching.</summary>
+    private void OpenUnlockOfferPaymentLink(FeedPostItem post)
+    {
+        if (string.IsNullOrEmpty(post.UnlockOfferPaymentUrl)) return;
+        if (!uniffi.fauna_core.FaunaCoreMethods.IsSafePaymentUrl(post.UnlockOfferPaymentUrl))
+        {
+            var msg = S.Get("subscriptions/unsafe_payment_url");
+            ErrorBar.Message = msg; ErrorBar.IsOpen = true;
+            App.CurrentErrorMessage = msg;
+            return;
+        }
+        FaunaApp.Services.UrlOpener.Open(post.UnlockOfferPaymentUrl, "Feed");
+    }
+
+    /// <summary>Buy the sold post's unlock tier off the resolved teaser offer (the teaser's
+    /// buy button) — the existing subscribe flow against the resolved offer's tier, queued
+    /// pending the author's own §2 approve. A successful call mutates the manager's own
+    /// snapshot + notifies (mirrors <see cref="DispatchTrainAsync"/>'s error-surfacing
+    /// convention).</summary>
+    private async void BuyUnlockOffer(FeedPostItem post)
+    {
+        if (_viewModel is null) return;
+        try
+        {
+            await _viewModel.BuyUnlockOfferAsync(post.PostId);
+        }
+        catch (Exception ex)
+        {
+            var msg = S.Format("feed/error_buy_unlock", ex.Message);
+            ErrorBar.Message = msg; ErrorBar.IsOpen = true;
+            App.CurrentErrorMessage = msg;
+        }
+    }
+
+    /// <summary>Fill both per-card payments hosts of one realized card's template root —
+    /// what <see cref="RefreshCardPayments"/> and the dormant virtualizing path share.</summary>
+    private void BindCardPayments(FrameworkElement root, FeedPostItem post)
+    {
+        if (root.FindName("TipDisplayHost") is ContentControl tipHost) BindTipDisplay(tipHost, post);
+        if (root.FindName("SoldPostTeaserHost") is ContentControl teaserHost) BindSoldPostTeaser(teaserHost, post);
+    }
+
     /// <summary>Fill (or first-create) one realized post-card's <c>TipDisplayHost</c>
     /// with a bound <see cref="Views.Payments.PostTipDisplay"/> — the per-card twin of
     /// <c>ProfilePage.Page_Loaded</c>'s single <c>PaymentsSectionsHost</c> fill, done
@@ -966,24 +1000,24 @@ public sealed partial class FeedPage : Page
         display.Bind(post);
     }
 
-    /// <summary>Re-bind every ALREADY-REALIZED card's tip display, after a snapshot pass
-    /// has reconciled <see cref="Posts"/>.
+    /// <summary>Re-bind every ALREADY-REALIZED card's tip display and sold-post teaser,
+    /// after a snapshot pass has reconciled <see cref="Posts"/>.
     ///
     /// <para>This is the half <c>Loaded</c> cannot cover. <see cref="Views.Payments.PostTipDisplay.Bind"/>
-    /// SNAPSHOTS its item's values into <c>Text</c>/<c>Visibility</c> rather than binding
-    /// them, and a container on a non-recycling panel is loaded exactly once — so a tip
-    /// state that arrives LATER (the `ResolvePostTipsAsync` round trip in
-    /// <see cref="SyncPosts"/>, which is the whole live path) would paint nothing without
-    /// a pass like this. Containers not yet generated are simply skipped; their own
+    /// and <see cref="Views.Payments.SoldPostTeaser.Bind"/> SNAPSHOT their item's values
+    /// into <c>Text</c>/<c>Visibility</c> rather than binding them, and a container on a
+    /// non-recycling panel is loaded exactly once — so a tip state or an unlock offer that
+    /// arrives LATER (the `ResolvePostTipsAsync` / `ResolvePostUnlockOfferAsync` round
+    /// trips in <see cref="SyncPosts"/>, which are the whole live path) would paint nothing
+    /// without a pass like this. Containers not yet generated are simply skipped; their own
     /// <c>Loaded</c> binds them with the same fresh item.</para></summary>
-    private void RefreshTipDisplays()
+    private void RefreshCardPayments()
     {
         foreach (var post in Posts)
         {
             if (PostsList.ContainerFromItem(post) is not ContentControl container) continue;
             if (container.ContentTemplateRoot is not FrameworkElement root) continue;
-            if (root.FindName("TipDisplayHost") is not ContentControl host) continue;
-            BindTipDisplay(host, post);
+            BindCardPayments(root, post);
         }
     }
 
@@ -997,8 +1031,7 @@ public sealed partial class FeedPage : Page
     {
         if (args.Item is not FeedPostItem post) return;
         if (args.ItemContainer?.ContentTemplateRoot is not FrameworkElement root) return;
-        if (root.FindName("TipDisplayHost") is not ContentControl host) return;
-        BindTipDisplay(host, post);
+        BindCardPayments(root, post);
     }
 
     /// <summary>Open the tip attribution window (monetization.md § Tips) for one
@@ -1108,6 +1141,18 @@ public sealed partial class FeedPage : Page
         AddVerb(TrainVerb.MoreLikeThis, "feed/more_like_this", "feed-post-more-like-this");
         AddVerb(TrainVerb.LessLikeThis, "feed/less_like_this", "feed-post-less-like-this");
 
+        // The report verb (moderation.md § User-initiated reporting → App surface),
+        // gated !is_own: nobody reports their own post. The target is built by the
+        // shared report_post_target, which carries the sealed rule once (a gated or
+        // room post is sealed — the nest holds no readable bytes for it).
+        if (!isOwn && _rpc is not null)
+        {
+            var report = new MenuFlyoutItem { Text = S.Get("feed/report_post") };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(report, Ids.FeedPostReportButton);
+            report.Click += async (_, _) => await OpenReportSheetAsync(post);
+            menu.Items.Add(report);
+        }
+
         if (isOwn)
         {
             var del = new MenuFlyoutItem { Text = S.Get("feed/delete_post") };
@@ -1119,6 +1164,30 @@ public sealed partial class FeedPage : Page
         }
 
         menu.ShowAt(btn);
+    }
+
+    /// <summary>Open the shared report sheet on <paramref name="post"/> (the ⋯ menu's
+    /// <c>feed-post-report-button</c>). A landed report is acknowledged OUTSIDE the
+    /// closed sheet (<c>report-status</c>); its reporter-side hide has already been
+    /// stored by the sheet, so the re-sync below makes the card read "You reported
+    /// this" at once. A failed send keeps the sheet open and reports on
+    /// <c>error-message</c>; a failed block/hide lands there BESIDE the
+    /// acknowledgement (moderation.md § Corollary — never silent).</summary>
+    private async Task OpenReportSheetAsync(FeedPostItem post)
+    {
+        if (_rpc is null) return;
+        ReportStatusText.Visibility = Visibility.Collapsed;
+        var target = FaunaFfiMethods.ReportPostTarget(
+            post.PostId, post.AuthorHex, post.BodyText,
+            post.GatedTier is { Length: > 0 } || !string.IsNullOrEmpty(post.RoomLabel));
+        var outcome = await Controls.ReportSheetDialog.ShowAsync(
+            this.XamlRoot, _rpc, target, ReportPageError);
+        if (outcome is null) return;
+        ReportStatusText.Text = outcome.Acknowledgement ?? "";
+        ReportStatusText.Visibility = Visibility.Visible;
+        if (outcome.FollowUpError is { } followUp) ReportPageError(followUp);
+        // The hide list changed: re-read the rows (each verdict is read at construction).
+        Refresh();
     }
 
     /// <summary>The own-post web-publishing verbs (web-content-hosting.md
@@ -1690,14 +1759,17 @@ public sealed partial class FeedPage : Page
         // Video thumbnail (video-thumbnail) — the D6b `Video` sibling of `Image`
         // (render-model.md § Implementation status today), the detail-dialog twin of the
         // list card's XAML render above: play glyph + hash text, no poster frame (none
-        // exists to paint — see the list card's own note).
-        if (DocumentRenderer.MediaVideoHash(item.Document) is { } videoHash)
+        // exists to paint — see the list card's own note). A bridged post's `ProxiedVideo`
+        // paints its nest-relative path where the hash goes (render-model.md § D6c →
+        // Proxied video) and is never byte-loaded.
+        if ((DocumentRenderer.MediaVideoHash(item.Document)
+                ?? DocumentRenderer.MediaProxiedVideoPath(item.Document)) is { } videoText)
         {
             var videoRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Margin = new Thickness(0, 4, 0, 0) };
             AutomationProperties.SetAutomationId(videoRow, Ids.VideoThumbnail);
-            AutomationProperties.SetName(videoRow, videoHash);
+            AutomationProperties.SetName(videoRow, videoText);
             videoRow.Children.Add(new TextBlock { Text = "\uE768", FontFamily = new Microsoft.UI.Xaml.Media.FontFamily("Segoe MDL2 Assets"), FontSize = 14, VerticalAlignment = VerticalAlignment.Center });
-            videoRow.Children.Add(new TextBlock { Text = videoHash, FontSize = 12, Opacity = 0.7, VerticalAlignment = VerticalAlignment.Center });
+            videoRow.Children.Add(new TextBlock { Text = videoText, FontSize = 12, Opacity = 0.7, VerticalAlignment = VerticalAlignment.Center });
             panel.Children.Add(videoRow);
         }
 
@@ -1827,22 +1899,74 @@ public sealed partial class FeedPage : Page
     /// no media (most posts). The one construction site for BOTH the initial
     /// <see cref="BuildPostDetailPanel"/> build and <see cref="UnlockGatedDetailAsync"/>'s
     /// post-unlock insert, so a gated post's pre-unlock teaser (no Image block) and its
-    /// unsealed document (one now folded in) paint through the identical element.</summary>
-    private static Image? BuildPostDetailImageElement(uniffi.fauna_core.RenderDocument document)
+    /// unsealed document (one now folded in) paint through the identical element.
+    /// <para>A bridged post's <c>ProxiedImage</c> (render-model.md § D6c) paints here too
+    /// when the document has no blob image: an Image loaded by its nest-relative path, over
+    /// a placeholder that stands in until the bytes land, both inside a Button that carries
+    /// the <c>post-image</c> id — the list card's own shape (<c>PostImageButton</c> over
+    /// <c>PostImagePlaceholder</c>). The id cannot sit on the Image there, as it does for a
+    /// blob: an Image with no picture has no size, so UIA would read the slot offscreen for
+    /// exactly as long as the placeholder stands in. The Button has no click: the lightbox
+    /// is a page overlay, which the dialog covers.</para></summary>
+    private static FrameworkElement? BuildPostDetailImageElement(uniffi.fauna_core.RenderDocument document)
     {
-        if (DocumentRenderer.MediaImageHash(document) is not { } mediaHash || GetImageLoader() is not { } loader)
-            return null;
+        if (GetImageLoader() is not { } loader) return null;
+        var mediaHash = DocumentRenderer.MediaImageHash(document);
+        var proxiedPath = mediaHash is null ? DocumentRenderer.MediaProxiedPath(document) : null;
+        if (mediaHash is null && proxiedPath is null) return null;
+
         var postImage = new Image
         {
             MaxHeight = 300,
             Stretch = Microsoft.UI.Xaml.Media.Stretch.Uniform,
             HorizontalAlignment = HorizontalAlignment.Left,
-            Margin = new Thickness(0, 4, 0, 4),
         };
-        AutomationProperties.SetAutomationId(postImage, Ids.PostImage);
         ImageHashBind.SetLoader(postImage, loader);
-        ImageHashBind.SetHash(postImage, mediaHash);
-        return postImage;
+        if (mediaHash is not null)
+        {
+            postImage.Margin = new Thickness(0, 4, 0, 4);
+            AutomationProperties.SetAutomationId(postImage, Ids.PostImage);
+            ImageHashBind.SetHash(postImage, mediaHash);
+            return postImage;
+        }
+
+        var placeholder = new Border
+        {
+            Width = 160,
+            Height = 100,
+            CornerRadius = new CornerRadius(4),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Background = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["SystemControlBackgroundBaseLowBrush"],
+            Visibility = Visibility.Collapsed,
+            Child = new TextBlock
+            {
+                Text = "\uE8B9",
+                FontFamily = new Microsoft.UI.Xaml.Media.FontFamily("Segoe MDL2 Assets"),
+                FontSize = 24,
+                Opacity = 0.5,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+            },
+        };
+        var slot = new Grid();
+        slot.Children.Add(placeholder);
+        slot.Children.Add(postImage);
+        var button = new Button
+        {
+            Content = slot,
+            Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent),
+            BorderThickness = new Thickness(0),
+            Padding = new Thickness(0),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+            Margin = new Thickness(0, 4, 0, 4),
+            Visibility = Visibility.Collapsed,
+        };
+        AutomationProperties.SetAutomationId(button, Ids.PostImage);
+        ImageHashBind.SetVisibilityTarget(postImage, button);
+        ImageHashBind.SetPlaceholder(postImage, placeholder);
+        ImageHashBind.SetProxiedPath(postImage, proxiedPath);
+        return button;
     }
 
     // Shows the post_detail dialog for the ordinary post-card-click path — the
@@ -2396,12 +2520,19 @@ public sealed partial class FeedPage : Page
     /// <summary>Stage <paramref name="audience"/> on the shared manager through the ONE setter
     /// its answer names — the three clear each other, so exactly one answer lands. Shared by
     /// the as-picked forward and the submit's step 1, so the two can never stage one answer
-    /// differently.</summary>
+    /// differently. The sale arm exists only where the payments plane does: a store-safe
+    /// composer offers no "Sell this post…" answer, so its audience never carries one
+    /// (dynamic-features.md § Platform-family surface excision → The price-and-route class).</summary>
     private static void StageAudience(FeedViewModel vm, Controls.ComposeAudience audience)
     {
+#if PAYMENTS
         if (audience.Sell is { } s)
+        {
             vm.UpdateComposeSell(s.Price, s.AskingPrice, s.SubscribersGetItFree, audience.GatePreview);
-        else if (audience.GateRoom is not null)
+            return;
+        }
+#endif
+        if (audience.GateRoom is not null)
             vm.UpdateComposeRoom(audience.GateRoom, audience.GatePreview);
         else
             vm.UpdateComposeGate(audience.GateTier, audience.GatePreview);
@@ -2424,7 +2555,9 @@ public sealed partial class FeedPage : Page
     private async System.Threading.Tasks.Task<bool> OnComposePostRequested(
         string text, string tags, byte[]? bytes, Controls.ComposeAudience audience)
     {
+#if PAYMENTS
         var sell = audience.Sell;
+#endif
         if (_viewModel is null) return false;
         // Guard the submit (async void → a swallowed throw is invisible). Page-/form-
         // level failures already land in the snapshot (compose.error → compose-error);
@@ -2445,6 +2578,7 @@ public sealed partial class FeedPage : Page
             // also DROP any stashed seal id, which is the other reason they must run first: a
             // seal minted before them is dead and `prepare_gated_blob` would refuse the submit.
             StageAudience(_viewModel, audience);
+#if PAYMENTS
             if (sell is { } s)
             {
                 // A SOLD post's photo seals under the tier the sale itself mints, and that
@@ -2456,6 +2590,7 @@ public sealed partial class FeedPage : Page
                     await _viewModel.StageSellTierAsync(s.SubscribersGetItFree, s.AskingPrice);
                 }
             }
+#endif
 
             // ── 2. Seal the attachment for that audience, THEN upload it ──
             // Public compose ⇒ plaintext passthrough, byte-identical to the pre-2026-09-07
@@ -2505,6 +2640,7 @@ public sealed partial class FeedPage : Page
             // null price_hint (matches linux's exact shape — a blank field commits to "no price
             // shown", not the literal empty string).
             byte[]? sealedBlob;
+#if PAYMENTS
             if (sell is { } sellFields)
             {
                 var priceHint = string.IsNullOrWhiteSpace(sellFields.Price) ? null : sellFields.Price;
@@ -2512,6 +2648,7 @@ public sealed partial class FeedPage : Page
                     priceHint, sellFields.AskingPrice, sellFields.SubscribersGetItFree);
             }
             else
+#endif
             {
                 sealedBlob = await _viewModel.PrepareGatedBlobAsync();
             }
@@ -2586,13 +2723,15 @@ public sealed partial class FeedPage : Page
     /// Takes the resolved gates, so the block-beats-muted ordering is not
     /// re-derived here (it lives in <c>SocialRenderGate</c>).</summary>
     public static string PostCardAccessibleName(
-        string regionNotice, bool showContentBlockedNotice, bool showMutedCollapse,
-        bool showContentCollapse, string bodyText)
+        string regionNotice, bool showContentBlockedNotice, string contentBlockedNotice,
+        bool showMutedCollapse, bool showContentCollapse, string bodyText)
     {
         // The region arm paints ahead of every other (region-blocking.md § The
         // blocked render), so its frame is the Name whenever it is withholding.
         if (regionNotice.Length > 0) return regionNotice;
-        if (showContentBlockedNotice) return S.Get("family/content_blocked_notice");
+        // The notice's own words: the family-policy sentence, or "You reported this"
+        // when the viewer's report hid the post (FeedPostItem.ContentBlockedNoticeText).
+        if (showContentBlockedNotice) return contentBlockedNotice;
         if (showMutedCollapse) return S.Get("feed/post_muted_placeholder");
         if (showContentCollapse) return S.Get("family/content_collapsed_notice");
         return bodyText;
@@ -2721,10 +2860,14 @@ public sealed partial class FeedPage : Page
     // UIA Invoke on a nested Button is direct, not pointer-routed (post-card's own
     // comment on load-remote-content-button/feed-post-actions-button), so this never
     // double-fires the post-card's own Click. Reuses the already-loaded bitmap — no
-    // second fetch, matching how the card itself painted the image.
+    // second fetch, matching how the card itself painted the image. The Image sits in
+    // a Grid beside the bridged-picture placeholder; with no bitmap loaded (that
+    // placeholder standing in) there is nothing to enlarge and the click does nothing.
     private void PostImage_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is Button { Content: Image { Source: Microsoft.UI.Xaml.Media.Imaging.BitmapImage bmp } })
+        if (sender is Button { Content: Panel content }
+            && content.Children.OfType<Image>().FirstOrDefault()
+                is { Source: Microsoft.UI.Xaml.Media.Imaging.BitmapImage bmp })
         {
             ShowImageLightbox(bmp);
         }

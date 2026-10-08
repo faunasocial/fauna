@@ -1,6 +1,7 @@
 //! DB methods for the pending_actions table.
 
 use anyhow::{Context, Result, bail};
+use rusqlite::OptionalExtension;
 
 use super::{CacheDb, now_epoch_secs};
 use crate::db::chain_version::{self, ChainVersion};
@@ -559,28 +560,79 @@ impl CacheDb {
 
     // ==================== Status transitions ====================
 
-    /// Mark a pending action as executed (called by the background executor).
-    pub async fn mark_pending_action_executed(&self, id: i64) -> Result<()> {
+    /// Claim a ready action for the executor: `pending` → `executing`, in one
+    /// conditional write. Returns the row as the claim left it, or `None` when
+    /// it is no longer `pending` — a cancel, a succession disarm or another
+    /// transition landed after the executor's batch read, and that one wins
+    /// (`nest/common.md` § Pending Actions System → *The executor claims
+    /// before it acts*). Every later step acts on the returned row, never on
+    /// the batch read's copy.
+    pub async fn claim_pending_action(&self, id: i64) -> Result<Option<PendingActionRow>> {
         let conn = self.conn.lock().await;
-        let now = now_epoch_secs();
-        conn.execute(
-            "UPDATE pending_actions SET status = 'executed', executed_at = ?1 WHERE id = ?2",
-            rusqlite::params![now, id],
+        conn.query_row(
+            "UPDATE pending_actions SET status = 'executing'
+              WHERE id = ?1 AND status = 'pending'
+              RETURNING id, action_type, actor_id, target, payload, status, created_at,
+                    execute_after, executed_at, cancelled_by, cancelled_at,
+                    requires_quorum, approvals, ip_address, chain_hash",
+            rusqlite::params![id],
+            parse_row,
         )
-        .context("mark_pending_action_executed")?;
+        .optional()
+        .context("claim_pending_action")
+    }
+
+    /// Hand a claimed action back to the queue after its run failed:
+    /// `executing` → `pending`, so the next tick retries it. A row something
+    /// else moved meanwhile (the succession disarm) is left as it is.
+    pub async fn release_pending_action_claim(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE pending_actions SET status = 'pending'
+              WHERE id = ?1 AND status = 'executing'",
+            rusqlite::params![id],
+        )
+        .context("release_pending_action_claim")?;
         Ok(())
     }
 
-    /// Mark a pending action as expired (e.g. too old without quorum).
-    pub async fn mark_pending_action_expired(&self, id: i64) -> Result<()> {
+    /// Boot reconcile: return every row a crash left `executing` to `pending`,
+    /// so the executor retries it rather than stranding it. Runs before the
+    /// executor starts, when no claim can be live. Returns how many it moved.
+    pub async fn requeue_stranded_pending_actions(&self) -> Result<usize> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE pending_actions SET status = 'pending' WHERE status = 'executing'",
+            [],
+        )
+        .context("requeue_stranded_pending_actions")
+    }
+
+    /// Mark a claimed action executed (called by the background executor).
+    /// Moves only an `executing` row, so it never overwrites a terminal
+    /// status; returns `false` when the row was no longer `executing` — or no
+    /// longer exists, because an account deletion's run purged its own row.
+    pub async fn mark_pending_action_executed(&self, id: i64) -> Result<bool> {
+        self.finish_claimed_action(id, "executed").await
+    }
+
+    /// Mark a claimed action expired (its quorum fell short). Moves only an
+    /// `executing` row, as [`Self::mark_pending_action_executed`].
+    pub async fn mark_pending_action_expired(&self, id: i64) -> Result<bool> {
+        self.finish_claimed_action(id, "expired").await
+    }
+
+    async fn finish_claimed_action(&self, id: i64, terminal: &str) -> Result<bool> {
         let conn = self.conn.lock().await;
         let now = now_epoch_secs();
-        conn.execute(
-            "UPDATE pending_actions SET status = 'expired', executed_at = ?1 WHERE id = ?2",
-            rusqlite::params![now, id],
-        )
-        .context("mark_pending_action_expired")?;
-        Ok(())
+        let updated = conn
+            .execute(
+                "UPDATE pending_actions SET status = ?1, executed_at = ?2
+                  WHERE id = ?3 AND status = 'executing'",
+                rusqlite::params![terminal, now, id],
+            )
+            .with_context(|| format!("mark pending action {terminal}"))?;
+        Ok(updated == 1)
     }
 
     // ==================== Test helpers ====================

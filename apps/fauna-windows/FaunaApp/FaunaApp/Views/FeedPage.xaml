@@ -163,8 +163,14 @@
                     ToolTipService.ToolTip="{loc:Localize Key=common/refresh}" />
         </Grid>
 
-        <!-- Feed search bar -->
-        <Grid Grid.Row="1" Padding="16,0,16,4">
+        <!-- Feed search bar + the report acknowledgement beneath it (`report-status`,
+             moderation.md § User-initiated reporting → What the reporter is told). The
+             acknowledgement lives OUTSIDE the report sheet — the sheet is closed by
+             the time a landed report is acknowledged — and is present only after a
+             send landed (collapsed → no UIA peer). AutomationId only, no static Name,
+             so get_text reads the sentence. -->
+        <StackPanel Grid.Row="1">
+        <Grid Padding="16,0,16,4">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
@@ -179,6 +185,12 @@
                     Click="FeedSearchClear_Click" Padding="8"
                     Visibility="Collapsed" Margin="4,0,0,0" />
         </Grid>
+        <TextBlock x:Name="ReportStatusText"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.ReportStatus}"
+                   Margin="16,0,16,4" TextWrapping="Wrap"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                   Visibility="Collapsed" />
+        </StackPanel>
 
         <!-- Post list -->
         <!-- No IsItemClickEnabled: each post-card DataTemplate root is itself a
@@ -225,7 +237,7 @@
                          Invoke opens the detail without double-firing (Invoke is direct, not
                          pointer-routed). Padding=0 so the inner rows keep their own padding. -->
                     <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.PostCard}"
-                            AutomationProperties.Name="{x:Bind local:FeedPage.PostCardAccessibleName(RegionAccessibleNotice, ShowContentBlockedNotice, ShowMutedCollapse, ShowContentCollapse, BodyText), Mode=OneWay}"
+                            AutomationProperties.Name="{x:Bind local:FeedPage.PostCardAccessibleName(RegionAccessibleNotice, ShowContentBlockedNotice, ContentBlockedNoticeText, ShowMutedCollapse, ShowContentCollapse, BodyText), Mode=OneWay}"
                             Tag="{x:Bind}" Click="PostCard_Click"
                             Loaded="PostCard_Loaded" Unloaded="PostCard_Unloaded"
                             Background="Transparent" BorderThickness="0" Padding="0"
@@ -289,8 +301,8 @@
                         <StackPanel Grid.Row="0" Spacing="4" Padding="8,12"
                                     Visibility="{x:Bind local:FeedPage.BoolToVisibility(ShowContentBlockedNotice), Mode=OneWay}">
                             <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.ContentPolicyBlockedNotice}"
-                                       AutomationProperties.Name="{loc:Localize Key=family/content_blocked_notice}"
-                                       Text="{loc:Localize Key=family/content_blocked_notice}"
+                                       AutomationProperties.Name="{x:Bind ContentBlockedNoticeText}"
+                                       Text="{x:Bind ContentBlockedNoticeText}"
                                        FontStyle="Italic" Opacity="0.6" FontSize="12"
                                        TextWrapping="Wrap" />
                         </StackPanel>
@@ -393,30 +405,17 @@
                             </Border>
 
                             <!-- Sold-post buyer teaser (gap (2c), monetization.md § Per-post
-                                 pay-to-unlock → the buyer's price read is post-addressed): price +
-                                 optional external payment link + buy affordance, present iff
-                                 fauna.subscriptions.post_unlock.get resolved an offer for this post
-                                 (FeedPage.SyncPosts's fire-once resolve trigger). Mirrors linux's
-                                 post_list.rs top_line group (same row as the badge). The payment
-                                 link's https-only guard fires on click (
-                                 same check ProfilePage's subscription-offer-payment-link intends),
-                                 not on visibility — a non-https url still shows the button, matching
-                                 the reference. -->
-                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.GatedPostPrice}"
-                                       Text="{x:Bind UnlockOfferPriceText, Mode=OneWay}"
-                                       FontSize="10" Opacity="0.7" VerticalAlignment="Center"
-                                       Visibility="{x:Bind local:FeedPage.BoolToVisibility(HasUnlockOffer), Mode=OneWay}" />
-                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.GatedPostPaymentLink}"
-                                    Tag="{x:Bind}" Click="UnlockOfferPaymentLink_Click"
-                                    Content="{loc:Localize Key=subscriptions/payment_url}"
-                                    FontSize="10" Padding="4,1" VerticalAlignment="Center"
-                                    Visibility="{x:Bind local:FeedPage.BoolToVisibility(HasUnlockPaymentLink), Mode=OneWay}" />
-                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.GatedPostBuyButton}"
-                                    Tag="{x:Bind}" Click="BuyUnlockOffer_Click"
-                                    Content="{loc:Localize Key=feed/post/buy_button}"
-                                    Style="{StaticResource AccentButtonStyle}"
-                                    FontSize="10" Padding="4,1" VerticalAlignment="Center"
-                                    Visibility="{x:Bind local:FeedPage.BoolToVisibility(HasUnlockOffer), Mode=OneWay}" />
+                                 pay-to-unlock): the price, the optional external payment link and
+                                 the buy affordance, on the badge's row. Inside the payments plane
+                                 (dynamic-features.md § Platform-family surface excision → The
+                                 price-and-route class), so its markup lives in
+                                 Views/Payments/SoldPostTeaser.xaml and this host is filled from
+                                 code only, under `#if PAYMENTS`, exactly like TipDisplayHost
+                                 below (whose comments say why Loaded and why no element of the
+                                 plane may be named here). A store-safe build shows a sold post as
+                                 an ordinary gated post: the badge above, nothing more. -->
+                            <ContentControl x:Name="SoldPostTeaserHost" VerticalAlignment="Center"
+                                            Loaded="SoldPostTeaserHost_Loaded" />
 
                             <!-- The tip display surface (monetization.md § Tips) — excised in a
                                  store-safe build (dynamic-features.md § Platform-family surface
@@ -441,7 +440,7 @@
                                  behind.
                                  Loaded fires per realized container under ANY panel, which is
                                  exactly what a non-recycling list needs; the page's post-Reconcile
-                                 RefreshTipDisplays covers the later re-bind that recycling would
+                                 RefreshCardPayments covers the later re-bind that recycling would
                                  otherwise have driven. The handler is declared unconditionally
                                  (XAML resolves it at compile time and has no #if), with only its
                                  body under PAYMENTS. -->
@@ -531,7 +530,15 @@
                              before Source was set, silently no-op'ing (post-card's own click
                              would then win instead, opening post_detail unexpectedly). feed.md
                              § Element IDs, image-lightbox: five other apps already open the
-                             lightbox from this same list-card image. -->
+                             lightbox from this same list-card image.
+                             A bridged post's picture (render-model.md § D6c) has no hash: it is
+                             the nest-relative MediaProxiedPath, fetched with the session bearer.
+                             It is the one case where the Button shows before a picture has
+                             loaded — behind PostImagePlaceholder, with the path as its
+                             automation Name until the bytes land (they may never: the remote
+                             host can be gone), so the slot stays addressable. PostImage_Click
+                             opens the lightbox only for a loaded bitmap, so a click on the
+                             placeholder does nothing. -->
                         <Button x:Name="PostImageButton" Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="2"
                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.PostImage}"
                                 Click="PostImage_Click"
@@ -539,10 +546,21 @@
                                 HorizontalAlignment="Left" HorizontalContentAlignment="Left"
                                 Margin="0,4,0,4"
                                 Visibility="Collapsed">
-                            <Image MaxHeight="300" Stretch="Uniform"
-                                   helpers:ImageHashBind.VisibilityTarget="{x:Bind PostImageButton, Mode=OneTime}"
-                                   helpers:ImageHashBind.Hash="{x:Bind MediaHashHex, Mode=OneWay}"
-                                   helpers:ImageHashBind.Loader="{x:Bind local:FeedPage.GetImageLoader(), Mode=OneTime}" />
+                            <Grid>
+                                <Border x:Name="PostImagePlaceholder" Width="160" Height="100" CornerRadius="4"
+                                        Background="{ThemeResource SystemControlBackgroundBaseLowBrush}"
+                                        Visibility="Collapsed">
+                                    <TextBlock Text="&#xE8B9;" FontFamily="Segoe MDL2 Assets"
+                                               FontSize="24" Opacity="0.5"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                </Border>
+                                <Image MaxHeight="300" Stretch="Uniform"
+                                       helpers:ImageHashBind.VisibilityTarget="{x:Bind PostImageButton, Mode=OneTime}"
+                                       helpers:ImageHashBind.Placeholder="{x:Bind PostImagePlaceholder, Mode=OneTime}"
+                                       helpers:ImageHashBind.Hash="{x:Bind MediaHashHex, Mode=OneWay}"
+                                       helpers:ImageHashBind.ProxiedPath="{x:Bind MediaProxiedPath, Mode=OneWay}"
+                                       helpers:ImageHashBind.Loader="{x:Bind local:FeedPage.GetImageLoader(), Mode=OneTime}" />
+                            </Grid>
                         </Button>
                         <!-- C2PA provenance badge (media.md § C2PA provenance): overlays the
                              post image's bottom-right corner once FeedPage.SyncPosts's
@@ -642,15 +660,19 @@
                              a poster frame either). A DataTemplate layout Panel that sets only
                              AutomationId is UIA-pruned, so bind a non-empty Name (the hash) to
                              keep it discoverable (memory reference_winui_flaui_datatemplate_name),
-                             exactly as quoted-post binds Name below. -->
+                             exactly as quoted-post binds Name below.
+                             A bridged post's `ProxiedVideo` (render-model.md § D6c → Proxied
+                             video) paints in this same element: VideoThumbnailText is the hash
+                             for a `Video`, the nest-relative path for a `ProxiedVideo`. Text
+                             only — a proxied video is never byte-loaded for its thumbnail. -->
                         <StackPanel Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="2"
                                     Orientation="Horizontal" Spacing="4" Margin="0,4,0,0"
                                     AutomationProperties.AutomationId="{x:Bind ids:Ids.VideoThumbnail}"
-                                    AutomationProperties.Name="{x:Bind VideoHashHex, Mode=OneWay}"
+                                    AutomationProperties.Name="{x:Bind VideoThumbnailText, Mode=OneWay}"
                                     Visibility="{x:Bind local:FeedPage.BoolToVisibility(HasVideo), Mode=OneWay}">
                             <TextBlock Text="&#xE768;" FontFamily="Segoe MDL2 Assets"
                                        FontSize="14" VerticalAlignment="Center" />
-                            <TextBlock Text="{x:Bind VideoHashHex, Mode=OneWay}" FontSize="12"
+                            <TextBlock Text="{x:Bind VideoThumbnailText, Mode=OneWay}" FontSize="12"
                                        Opacity="0.7" VerticalAlignment="Center" />
                         </StackPanel>
                         <!-- Quoted-post embed (render-model.md § D6). A bare layout Border inside a

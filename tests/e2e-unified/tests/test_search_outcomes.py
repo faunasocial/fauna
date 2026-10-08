@@ -8,9 +8,11 @@ tui first (the lead app). The other six apps paint the same shared
 here as each is run, never a second copy of these journeys. How a row's kind is
 read and how the nest arm is made to fail: `helpers/search_journeys.py`.
 
-Web carries outcomes 5 and 7 only: it has no local arm (`content-index.md`
-§ Where queries run), so outcome 6's "keeps what it found" has nothing local to
-keep there — an open question for the catalog's gap driver, not this module.
+Web has no local arm (`content-index.md` § Where queries run), so outcome 6's
+"keeps what it found" has nothing local to keep there. Web's outcome-6 witness
+is the other half of the promise: a failed search says so, and it never claims
+that nothing matched (`feature-catalog.md` § Implementation status today, the
+2026-09-26 marked-witness settlement).
 iOS runs 5 and 7 (nest-arm only) as the other apps do. Outcome 6's found half
 is a draft this seat wrote, and a phone builds no index of its own
 (`content-index.md` § Build vs. query), so iOS has its own witness for it, in
@@ -360,3 +362,78 @@ def test_a_failed_search_on_a_phone_keeps_the_draft_a_desktop_seat_indexed(
     finally:
         reset_search_page(phone)
         discard_new_thread_draft(phone)
+
+
+@pytest.mark.web
+@pytest.mark.feature("search")
+def test_a_failed_search_on_web_says_so_instead_of_going_blank(
+    logged_in_app, nest_instance, test_user
+):
+    """`search` outcome 6 on web, which has no local arm (`content-index.md`
+    § Where queries run): the nest arm is the whole search, so when it fails
+    there is nothing found to keep, and the promise left is the other half.
+    The page says the search failed. It does not claim nothing matched
+    (`search-no-results`), and it does not go blank (`search.md` § Errors &
+    edge cases). The next healthy search recovers.
+
+    The needle is a post the nest DOES hold, so a page with no rows for it
+    under the failing arm can only be the failure, never an honest miss."""
+    app = logged_in_app
+    port = nest_instance["port"]
+    post = S.search_page.badge_post
+    needle = f"webfail{uuid.uuid4().hex[:10]}"
+    _seed_a_post_and_a_profile_sharing(needle, nest_instance, test_user)
+
+    app.search.navigate()
+    try:
+        # 1. Healthy: the nest finds the post.
+        wait_until(
+            lambda: found(app, needle, post),
+            NEST_HIT_S,
+            diagnose=lambda: (
+                f"a healthy search for {needle!r} should find the seeded post; "
+                f"rows={rows(app)} error={app.error_text()!r}"
+            ),
+        )
+
+        # 2. Empty the page, so the failing search's commit is the only thing
+        #    that can paint an error after this.
+        empty_the_page(app)
+        assert not app.has_error(), (
+            f"precondition: nothing has failed yet; error={app.error_text()!r}"
+        )
+
+        # 3. The same search with the nest arm failing.
+        with FailingNestArm(port):
+            app.search.query(needle)
+            wait_until(
+                app.has_error,
+                FAILED_SEARCH_SETTLE_S,
+                diagnose=lambda: (
+                    "with the nest arm failing, the page must say the search "
+                    f"failed; error={app.error_text()!r} rows={rows(app)} "
+                    f"no-results={app.search.has_no_results()}"
+                ),
+            )
+            assert S.search_page.search_failed in app.error_text(), (
+                f"the page must say the search failed; error={app.error_text()!r}"
+            )
+            assert app.driver.is_absent("search-no-results"), (
+                "a search that could not look must not claim nothing matched; "
+                f"error={app.error_text()!r}"
+            )
+            assert app.search.result_count() == 0, (
+                f"the failed search has nothing of its own to show; rows={rows(app)}"
+            )
+
+        # 4. Healthy again: the next search finds the post and clears the error.
+        wait_until(
+            lambda: found(app, needle, post) and not app.has_error(),
+            NEST_HIT_S,
+            diagnose=lambda: (
+                f"the next healthy search must recover; rows={rows(app)} "
+                f"error={app.error_text()!r}"
+            ),
+        )
+    finally:
+        reset_search_page(app)

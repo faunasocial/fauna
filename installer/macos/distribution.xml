@@ -38,7 +38,7 @@ function appComponentSupported() {
             title="Fauna Desktop App"
             start_enabled="appComponentSupported()"
             start_selected="appComponentSupported()"
-            description="The native macOS Fauna app. Installs Fauna.app to your Applications folder; updates automatically via Sparkle. Requires macOS 15 or later.">
+            description="The native macOS Fauna app. Installs Fauna.app to your Applications folder; tells you when a newer version is out. Requires macOS 15 or later.">
         <pkg-ref id="social.fauna.app"/>
     </choice>
     <!-- Nest + Bridge are SERVER components: default UNSELECTED (start_selected="false").

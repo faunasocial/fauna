@@ -92,6 +92,14 @@ public enum E2eEnv {
 
     /// Run-scoped sink every `DISABLED-ACTUATION` marker is appended to.
     public static var actuationLog: String? { env["FAUNA_E2E_ACTUATION_LOG"] }
+
+    /// The harness's stub release feed, standing in for the production origin
+    /// (`release_feed_origin()`) under the newer-version check and the
+    /// once-per-sign-in look (`installers/README.md` § Knowing a newer version
+    /// is out). Read only behind `FaunaE2E.isActive`.
+    public static var releaseFeedUrl: String? {
+        env["FAUNA_E2E_RELEASE_FEED_URL"].flatMap { $0.isEmpty ? nil : $0 }
+    }
     #else
     // Production twins. Same signatures, constant answers, no variable names in
     // the artifact — the half a `strings -a` of a Release build has to see.
@@ -104,6 +112,7 @@ public enum E2eEnv {
     public static var realSyncAgent: Bool { false }
     public static var permissiveActuation: Bool { false }
     public static var actuationLog: String? { nil }
+    public static var releaseFeedUrl: String? { nil }
     #endif
 }
 
@@ -114,7 +123,7 @@ public enum E2eEnv {
 /// Use this — never a bare `FAUNA_E2E_BRIDGE` check — for behavior that must hold
 /// for **both** apple driving backends: the deterministic mock conversation
 /// backends (`ConversationsVM.init`), authenticate-only login
-/// (`applySessionPatch`), the in-memory keychain, suppressing the auto-updater.
+/// (`applySessionPatch`), the in-memory keychain, the stub release feed.
 /// Gating only on `FAUNA_E2E_BRIDGE` silently excludes the in-process path — the
 /// exact drift that left the whole conversation cluster's injected threads empty
 /// in-process (a `FAUNA_E2E_BRIDGE`-only gate that was never broadened when the

@@ -3988,7 +3988,7 @@ mod tests {
         assert_eq!(g.scope_descriptions, expected);
     }
 
-    /// Finding 112's class, on the surface that inherited it. `client_name`
+    /// The label-injection class, on the surface that inherited it. `client_name`
     /// comes from a document at a URL the *requesting client* chose, and every
     /// app paints this row as one label — so newlines in the name would let an
     /// attacker own rows in a list the user reads as the nest's own structure.

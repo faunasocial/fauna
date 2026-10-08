@@ -114,6 +114,8 @@ def _await_wire_verdicts(nest_instance, secret_key: str, folder: str, want: tupl
 # plaintext-only match `_in_folder` replaced read the record as missing. They
 # join with their own run; android joins with its venue.
 @pytest.mark.tui
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.timeout(int(SEAT_READY_BUDGET_S + RECORD_BUDGET_S + 4 * ITEM_BUDGET_S + 180))
 @pytest.mark.feature("media")
 def test_media_item_says_whether_its_folder_can_be_reached_apart_from_its_sync_state(

@@ -194,8 +194,13 @@ async fn execute_ready_actions() {
         "action should appear in ready list after execute_after is in the past"
     );
 
-    // Mark as executed and verify it drops from the ready list
-    db.mark_pending_action_executed(id).await.unwrap();
+    // Claim it, as the executor does, then mark it executed: it drops from
+    // the ready list at the claim and stays out.
+    db.claim_pending_action(id)
+        .await
+        .unwrap()
+        .expect("claimable");
+    assert!(db.mark_pending_action_executed(id).await.unwrap());
     let ready = db.list_ready_pending_actions().await.unwrap();
     assert!(
         ready.iter().all(|r| r.id != id),

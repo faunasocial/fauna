@@ -43,6 +43,7 @@ use std::sync::Arc;
 
 use fauna_client_mail_settings::{
     ListDraft, ListView, MailListsAction, MailListsMachine, MailListsSnapshot,
+    archive_url_needs_confirm,
 };
 use fauna_i18n::strings::mail_lists as t;
 
@@ -99,6 +100,13 @@ pub struct MailListsState {
     /// member row, so it gets the two-click gate `actions/mail_lists.py::
     /// delete_list` drives (it clicks the same button twice).
     pub delete_armed: Option<String>,
+    /// The List-Archive URL the sheet's Submit is armed for. A link off the
+    /// user's own server is published to every recipient, so the first Submit
+    /// relabels with `mail_lists.archive_off_server_confirm` and saves nothing
+    /// (`mail-mass-mailing.md` § Don't do these; the decision is the shared
+    /// `archive_url_needs_confirm`). Keyed by the URL, so editing the link after
+    /// arming disarms without any extra bookkeeping.
+    pub archive_confirm_armed: Option<String>,
 }
 
 impl MailListsState {
@@ -170,6 +178,26 @@ impl MailListsState {
         self.list_archive_url_input.clear();
         self.per_send_cap_input.clear();
         self.delete_armed = None;
+        self.archive_confirm_armed = None;
+    }
+
+    /// The List-Archive URL a submit must confirm first, or `None` when it saves
+    /// on the first press — the shared machine's decision, fed the user's own
+    /// domains and (when editing) the URL the list already stores.
+    pub(super) fn archive_needing_confirm(&self) -> Option<String> {
+        let url = self.list_archive_url_input.trim().to_string();
+        let saved = self
+            .editing
+            .as_deref()
+            .and_then(|id| self.list(id))
+            .map(|v| v.list_archive_url.clone());
+        archive_url_needs_confirm(url.clone(), saved, self.domains().to_vec()).then_some(url)
+    }
+
+    /// Whether the sheet's Submit is armed for the URL it currently holds.
+    pub(super) fn archive_confirm_is_armed(&self) -> bool {
+        self.archive_confirm_armed.is_some()
+            && self.archive_confirm_armed == self.archive_needing_confirm()
     }
 
     /// The draft the sheet's inputs currently describe.
@@ -303,9 +331,15 @@ pub(super) fn mail_lists_elements(state: &SettingsState) -> Vec<Element> {
             )
             .labelled(t::PER_SEND_PLACEHOLDER),
         );
+        // The off-server archive confirm relabels Submit in place — the two-click
+        // confirm's only visible affordance (`common.md` § Two-click confirm).
         els.push(Element::gesture_button(
             ids::MAIL_LISTS_ADD_SHEET_SUBMIT_BUTTON,
-            t::SUBMIT,
+            if l.archive_confirm_is_armed() {
+                t::ARCHIVE_OFF_SERVER_CONFIRM
+            } else {
+                t::SUBMIT
+            },
             true,
             Gesture::Settings(Action::MailListsSubmit { editing }),
         ));
@@ -708,5 +742,57 @@ mod tests {
             state.mail_lists.delete_armed.is_none(),
             "an armed delete must never survive a nav-away"
         );
+    }
+
+    fn submit_label(state: &SettingsState) -> String {
+        mail_lists_elements(state)
+            .into_iter()
+            .find(|e| e.id == ids::MAIL_LISTS_ADD_SHEET_SUBMIT_BUTTON)
+            .expect("submit button")
+            .text
+    }
+
+    #[test]
+    fn an_off_server_archive_link_relabels_submit_only_while_armed_for_it() {
+        let mut state = state_with(vec![], vec!["example.com".into()]);
+        state.mail_lists.open_add_form();
+        state.mail_lists.local_part_input = "news".into();
+        state.mail_lists.list_archive_url_input = "https://archive.example.net/news".into();
+        assert_eq!(
+            state.mail_lists.archive_needing_confirm().as_deref(),
+            Some("https://archive.example.net/news")
+        );
+        assert_eq!(submit_label(&state), t::SUBMIT, "unarmed until pressed");
+        state.mail_lists.archive_confirm_armed = Some("https://archive.example.net/news".into());
+        assert_eq!(submit_label(&state), t::ARCHIVE_OFF_SERVER_CONFIRM);
+        // Editing the link after arming disarms: the arm was for the old link.
+        state.mail_lists.list_archive_url_input = "https://other.example.net/news".into();
+        assert_eq!(submit_label(&state), t::SUBMIT);
+        // A link on the user's own server never asks.
+        state.mail_lists.list_archive_url_input = "https://example.com/news".into();
+        assert!(state.mail_lists.archive_needing_confirm().is_none());
+    }
+
+    #[test]
+    fn re_saving_the_off_server_link_a_list_already_stores_does_not_ask_again() {
+        let v = ListView::from_parts(
+            &hex::decode("a1".repeat(16)).unwrap(),
+            "News",
+            "news",
+            "example.com",
+            "",
+            3,
+            None,
+            0,
+            0,
+            "",
+            "https://archive.example.net/news",
+            None,
+        );
+        let mut state = state_with(vec![v.clone()], vec!["example.com".into()]);
+        state.mail_lists.open_edit_form(&v);
+        assert!(state.mail_lists.archive_needing_confirm().is_none());
+        state.mail_lists.list_archive_url_input = "https://elsewhere.example.net/news".into();
+        assert!(state.mail_lists.archive_needing_confirm().is_some());
     }
 }

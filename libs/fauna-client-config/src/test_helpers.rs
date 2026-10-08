@@ -48,6 +48,8 @@ struct FakeLedgerInner {
     accept_budget: Option<usize>,
     merges: usize,
     not_ready: bool,
+    publish_refuses: bool,
+    publishes: usize,
 }
 
 impl FakeLedgerInner {
@@ -91,6 +93,8 @@ impl FakeSuccessionLedgerStore {
                 accept_budget: None,
                 merges: 0,
                 not_ready: false,
+                publish_refuses: false,
+                publishes: 0,
             })),
         }
     }
@@ -142,6 +146,18 @@ impl FakeSuccessionLedgerStore {
     pub fn merges(&self) -> usize {
         self.inner.lock().unwrap().merges
     }
+
+    /// Refuse every publish (or stop) — the bound nest offline, or refusing
+    /// the push, so [`SuccessionLedgerStore::publish_ledger`] answers
+    /// `StoreError::Save` and `merge_published` releases no grant.
+    pub fn publish_refuses(&self, refuses: bool) {
+        self.inner.lock().unwrap().publish_refuses = refuses;
+    }
+
+    /// How many publishes the nest acknowledged.
+    pub fn publishes(&self) -> usize {
+        self.inner.lock().unwrap().publishes
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -171,6 +187,20 @@ impl SuccessionLedgerStore for FakeSuccessionLedgerStore {
         inner.ledger = inner.ledger.merge(&replica);
         inner.merges += 1;
         Ok(inner.ledger.clone())
+    }
+
+    async fn publish_ledger(&self) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.not_ready {
+            return Err(StoreError::Save(crate::LEDGER_NOT_READY.into()));
+        }
+        if inner.publish_refuses {
+            return Err(StoreError::Save(
+                "fake publish: the bound nest did not acknowledge the ledger rows".into(),
+            ));
+        }
+        inner.publishes += 1;
+        Ok(())
     }
 
     async fn repoint(&self, retired: ActorId) -> Result<bool, StoreError> {
@@ -459,6 +489,12 @@ impl FakeMailStore {
         };
         for c in &mail.credentials {
             rows.credentials.insert(c.credential_id.clone(), c.clone());
+        }
+        for g in mail
+            .generation_rows()
+            .expect("a seeded prior generation carries its retirement instant")
+        {
+            rows.join_generation(g);
         }
         inner.rows = rows;
     }
@@ -850,6 +886,21 @@ impl MailStore for FakeMailStore {
             ..stored
         };
         let moved = inner.join_credential(intent);
+        if moved {
+            inner.landed();
+        }
+        Ok(moved)
+    }
+
+    async fn retire_generation(
+        &self,
+        generation: fauna_core::data::PriorMsekRetirement,
+    ) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.refused()?;
+        let before = inner.rows.generations.clone();
+        inner.rows.join_generation(generation);
+        let moved = inner.rows.generations != before;
         if moved {
             inner.landed();
         }

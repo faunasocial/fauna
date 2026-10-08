@@ -949,6 +949,14 @@ pub struct MailRecordOpener {
     /// `MAIL_EPOCH_ROOT_DERIVE_CONTEXT`). Never crosses the FFI boundary;
     /// zeroized alongside `keypairs`.
     epoch_roots: Mutex<Option<Vec<Zeroizing<[u8; 32]>>>>,
+    /// Each prior generation's retirement instant from the snapshot's
+    /// `generation_retired_at_unix` (newest first, aligned with
+    /// `keypairs[1..]` and the grace roots) — what [`Self::open_mail`] selects
+    /// a record's generation by, trialing the one current at its seal basis
+    /// first (`owner-key-material.md` § Path B-sibling-2 → *Pre-rotation mail
+    /// at rest*). Public timing metadata, not key material; empty (an older
+    /// snapshot) walks the whole ring.
+    generation_retired_at_unix: Vec<u64>,
 }
 
 impl std::fmt::Debug for MailRecordOpener {
@@ -967,7 +975,7 @@ impl std::fmt::Debug for MailRecordOpener {
 /// [`MailRecordOpener::new_with_msek`].
 fn parse_leaf_keypairs(
     snapshot_plaintext_bytes: &[u8],
-) -> Result<Vec<StandingMailKeypair>, FfiError> {
+) -> Result<(Vec<StandingMailKeypair>, Vec<u64>), FfiError> {
     let snapshot =
         MlsSnapshotPlaintext::from_canonical_bytes(snapshot_plaintext_bytes).map_err(|e| {
             FfiError::General {
@@ -1003,7 +1011,14 @@ fn parse_leaf_keypairs(
             msg: "no usable leaf keypairs in snapshot".into(),
         });
     }
-    Ok(keypairs)
+    // A skipped (malformed) entry would shift the alignment: carry the
+    // instants only when every entry parsed.
+    let instants = if keypairs.len() == snapshot.leaf_init_keypairs.len() {
+        snapshot.generation_retired_at_unix.clone()
+    } else {
+        Vec::new()
+    };
+    Ok((keypairs, instants))
 }
 
 impl MailRecordOpener {
@@ -1021,7 +1036,7 @@ impl MailRecordOpener {
         snapshot_plaintext_bytes: &[u8],
         msek: Zeroizing<[u8; 32]>,
     ) -> Result<std::sync::Arc<Self>, FfiError> {
-        let keypairs = parse_leaf_keypairs(snapshot_plaintext_bytes)?;
+        let (keypairs, generation_retired_at_unix) = parse_leaf_keypairs(snapshot_plaintext_bytes)?;
         // Re-parse for the grace roots; parse_leaf_keypairs already proved
         // the bytes decode. Current generation's root first, then the
         // snapshot's prior-generation grace roots in their carried order
@@ -1044,6 +1059,7 @@ impl MailRecordOpener {
         Ok(std::sync::Arc::new(Self {
             keypairs: Mutex::new(Some(keypairs)),
             epoch_roots: Mutex::new(Some(epoch_roots)),
+            generation_retired_at_unix,
         }))
     }
 }
@@ -1061,18 +1077,21 @@ impl MailRecordOpener {
     /// `MlsSnapshotPlaintext`, or the snapshot carries no leaf keypairs.
     #[uniffi::constructor]
     pub fn new(snapshot_plaintext_bytes: Vec<u8>) -> Result<std::sync::Arc<Self>, FfiError> {
-        let keypairs = parse_leaf_keypairs(&snapshot_plaintext_bytes)?;
+        let (keypairs, generation_retired_at_unix) =
+            parse_leaf_keypairs(&snapshot_plaintext_bytes)?;
         Ok(std::sync::Arc::new(Self {
             keypairs: Mutex::new(Some(keypairs)),
             epoch_roots: Mutex::new(None),
+            generation_retired_at_unix,
         }))
     }
 
     /// Open a sealed `MailRecordEnvelope` (either suite — classical
     /// X25519, or hybrid X-Wing when the snapshot entry carries the
     /// MSEK-derived ML-KEM decapsulation key). Each leaf keypair is
-    /// tried in order (current + grace rotations), exactly the
-    /// `MlsCapability::open_mail_record` semantics.
+    /// tried newest first (current, then every prior generation — no seal
+    /// basis is known here), exactly the `MlsCapability::open_mail_record`
+    /// semantics.
     ///
     /// # Errors
     ///
@@ -1081,8 +1100,7 @@ impl MailRecordOpener {
     /// - `"decode mail-record envelope: ..."` for a non-envelope input
     ///   (an unsealed payload — refused, never passed through);
     /// - `"HPKE open failed: no matching leaf keypair in snapshot"` when
-    ///   every keypair fails (wrong recipient, rotation past the grace
-    ///   window, or tampered envelope).
+    ///   every keypair fails (wrong recipient or tampered envelope).
     pub fn open(&self, envelope_bytes: Vec<u8>) -> Result<Vec<u8>, FfiError> {
         let guard = self.keypairs.lock().map_err(|e| FfiError::General {
             msg: format!("mail-record opener lock poisoned: {e}"),
@@ -1095,7 +1113,7 @@ impl MailRecordOpener {
                 msg: format!("decode mail-record envelope: {e}"),
             }
         })?;
-        open_mail_record_standing(&envelope, keypairs).ok_or_else(|| FfiError::General {
+        open_mail_record_standing(&envelope, keypairs, &[], None).ok_or_else(|| FfiError::General {
             msg: "HPKE open failed: no matching leaf keypair in snapshot".into(),
         })
     }
@@ -1105,7 +1123,10 @@ impl MailRecordOpener {
     /// design § 4). `record_unix_secs` is the record's own seal instant
     /// (the Go MDA's `FetchedCiphertext.SealEpochBasisUnix()` — the nest's
     /// `stored_at`; `0` when unknown, a standing-sealed record),
-    /// used to compute its candidate sealing epoch. Trial order: the
+    /// used to compute its candidate sealing epoch AND to select its MSEK
+    /// generation: every per-generation step below runs the generation
+    /// current at that instant first, then outward, by the snapshot's
+    /// `generation_retired_at_unix` (`generation_trial_order`). Trial order: the
     /// record's target epoch key then the immediately-prior epoch key
     /// (boundary/clock-skew tolerance) — for the CURRENT generation's root
     /// first, then each MSEK-rotation grace root from the snapshot's
@@ -1160,11 +1181,15 @@ impl MailRecordOpener {
         // The standing closure is this opener's own leaf-keypair trial —
         // standing-key + degraded-schedule content, exactly Self::open's chain,
         // and the client receive path's (`open_inbound_record_with_keys`).
-        let standing = |env: &MailRecordEnvelope| open_mail_record_standing(env, keypairs);
+        let retired = &self.generation_retired_at_unix;
+        let basis = (record_unix_secs != 0).then_some(record_unix_secs);
+        let standing =
+            |env: &MailRecordEnvelope| open_mail_record_standing(env, keypairs, retired, basis);
 
         fauna_mls::wrapped_blob::open_mail_epoch_chain(
             &envelope,
             &epoch_roots,
+            retired,
             record_unix_secs,
             standing,
         )
@@ -3189,7 +3214,7 @@ pub fn encode_mls_snapshot_plaintext_from_mseks(mseks: Vec<Vec<u8>>) -> Result<V
         })?;
         arrs.push(a);
     }
-    fauna_mls::wrapped_blob::build_mls_snapshot_plaintext(&arrs)
+    fauna_mls::wrapped_blob::build_mls_snapshot_plaintext(&arrs, &[])
         .to_canonical_bytes()
         .map_err(|e| FfiError::General {
             msg: format!("encode mls-snapshot plaintext: {e}"),

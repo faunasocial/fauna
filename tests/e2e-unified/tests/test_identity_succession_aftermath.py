@@ -1619,6 +1619,15 @@ def test_the_successors_conversations_unlock_without_a_user_command(
 
 
 @pytest.mark.feature("take-your-account-back")
+# The production launch composition on the native apps: what this journey
+# reads after the ceremony is decided by the successor's launch reconcile (the
+# succession cut, `succession-cut.md` ruling (11)), which on windows, macOS and
+# iOS runs only inside the real conversations receive loop's post-restore hook
+# (`fauna_client_folders::FolderRemovalResume`). Without the marker a native
+# seat never runs it and the journey reads a corpus the cut would have made
+# history — measured green on windows on 2026-10-07 for exactly that reason,
+# while tui (which always runs the real session) reads `[]`.
+@pytest.mark.real_conversations
 def test_the_successor_can_read_the_corpus_it_inherited(
     ungranted_app, nest_instance, tmp_path
 ):
@@ -1719,17 +1728,30 @@ def test_the_successor_can_read_the_corpus_it_inherited(
     # successor still *owns* the container whose contents the next two
     # assertions then try to read. Kept deliberately ahead of them so a lost
     # container and an unreadable corpus cannot present as the same failure.
-    app.backups.navigate_folders()
+    #
+    # Each poll is a fresh VISIT (`revisit_folders`), never a re-read of one
+    # visit's paint — the config journey's rule above, for the same cause. The
+    # page renders a set only once custody opens its sealed name, and the
+    # successor's account runtime mounts after the actor id switches (all
+    # `_run_succession` waits for); on an app that does not consume the
+    # store-change notice yet, a visit landing before it paints an empty list
+    # and keeps it. The name itself still rests under the PREDECESSOR's owner
+    # root (a succession re-seals nothing), so the successor's Devices machine
+    # must also be handed the paired predecessor chain
+    # (`DevicesMachine::set_predecessor_chain`): without it every visit lists
+    # nothing — measured on windows 2026-10-07, re-visits included.
     wait_until(
-        lambda: app.backups.folder_count() >= 1,
+        lambda: len(app.backups.revisit_folders()) >= 1,
         _CORPUS_READ_S,
         diagnose=lambda: (
             "the succession must leave the successor owning the folder it "
             "inherited — the nest re-points corpus ownership in its succession "
             f"transaction — got count={app.backups.folder_count()} "
             f"error={app.error_text()!r}. This failing means the container is "
-            "gone, which is a different (nest-side) break from the corpus "
-            "being unreadable; the two assertions below cover that half."
+            "gone, or that custody never opened its name, which are different "
+            "breaks from the corpus being unreadable; the two assertions below "
+            "cover that half."
+            f"\n  account runtime: {_account_plane_log(app)}"
         ),
     )
 

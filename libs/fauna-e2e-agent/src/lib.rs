@@ -811,15 +811,17 @@ pub const PHOTO_BACKUP_SEED_LIBRARY: &str = "photo_backup_seed_library";
 pub const PHOTO_BACKUP_REQUEST_ACCESS: &str = "photo_backup_request_access";
 
 /// State key: the home-screen widget's **background-refresh pass counters** —
-/// `{"passes_started": N, "passes_completed": M, "last_pass_count": C}`, iOS-only
-/// (the one app whose widget currency rests on an OS-scheduled task; macOS keeps
-/// the app resident instead and publishes nothing — convention 11).
+/// `{"passes_started": N, "passes_completed": M, "last_pass_count": C}`, iOS and
+/// android (the apps whose widget currency rests on an OS-scheduled task — iOS's
+/// `BGAppRefreshTask`, android's WorkManager `WidgetDataWorker`; macOS keeps the
+/// app resident instead and publishes nothing — convention 11).
 ///
 /// **Why counters of its own.** The pass is one conversations receive pass whose
 /// ingest ticks the same observer every foreground arrival ticks, so neither the
 /// widget snapshot nor [`CONV_RECEIVE_CYCLES_KEY`] can attribute anything to the
 /// scheduled entry point. These counters are bumped by
-/// `BackgroundScheduler.runWidgetRefreshPass` and nothing else: read
+/// `BackgroundScheduler.runWidgetRefreshPass` (iOS) and `WidgetDataWorker.doWork`
+/// (android) and nothing else: read
 /// `passes_completed` before [`WIDGET_REFRESH_SCHEDULED_PASS_NOW`], wait for it to
 /// pass the baseline. `last_pass_count` is the unread total the last completed
 /// pass left behind — the count the widget shows — or `null` when that pass had
@@ -830,13 +832,16 @@ pub const WIDGET_REFRESH_KEY: &str = "widget_refresh";
 /// The home-screen widget's **scheduled-pass poke** — convention 14's `run_now`
 /// for the iOS `social.fauna.widget.refresh` `BGAppRefreshTask`, a schedule the
 /// OS alone owns and a task type with no public initializer
-/// ([`PHOTO_BACKUP_SCHEDULED_PASS_NOW`]'s situation exactly).
+/// ([`PHOTO_BACKUP_SCHEDULED_PASS_NOW`]'s situation exactly), and for android's
+/// 15-minute periodic `WidgetDataWorker`, which WorkManager alone schedules.
 ///
 /// **Contract.** The command drives `BackgroundScheduler.runWidgetRefreshPass` —
 /// the *production* body of the handler, extracted so the poke and the OS take
 /// the identical path. Fire-and-forget: the barrier is [`WIDGET_REFRESH_KEY`]'s
 /// `passes_completed`, not this ack; a poke before a session exists is a quiet
-/// no-op the consumer's own deadline poll fails on. iOS-only; macOS refuses it.
+/// no-op the consumer's own deadline poll fails on. On android the command
+/// enqueues one `WidgetDataWorker` through WorkManager, so the poke constructs and
+/// runs the identical worker the schedule does. iOS and android; macOS refuses it.
 pub const WIDGET_REFRESH_SCHEDULED_PASS_NOW: &str = "widget_refresh_scheduled_pass_now";
 
 /// State key: the shared feed manager's reload triple — `{"started": N,

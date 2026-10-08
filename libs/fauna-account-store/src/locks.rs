@@ -5,8 +5,9 @@
 //! The charter's store contract names **three genuinely exclusive critical
 //! sections** for concurrent same-account processes sharing one store dir,
 //! and this module owns them all, so a cold read finds them together. Beside
-//! them sits the store's one **presence** lock, which excludes nobody from
-//! the store and exists only so an erase can ask who is running out of it:
+//! them sit two **presence** locks, which exclude nobody from the store: one
+//! so an erase can ask who is running out of it, one so an app can ask
+//! whether the sync agent hosts it:
 //!
 //! | Lock | Section | Shape |
 //! |---|---|---|
@@ -14,9 +15,10 @@
 //! | [`SeedLegLock`] | the **seed-leg role** — one seed-holding process runs the legs only a signed-in app can run (escrow recovery, the linked-nest secondary leg), in its pass when it also pumps and in a seed pass beside a seedless engine holder | **try**-acquire, held for the role's lifetime; a seedless process never asks |
 //! | [`MigrationLock`] (W5.3) | **schema migration/adoption** at store open | **blocking** acquire, held only across the section |
 //! | [`ServingLock`] | **presence, not exclusion** — "an app instance is serving this account out of this root" | **shared** for a serving instance's lifetime; a momentary **exclusive try** is the erase's question |
+//! | [`AgentPresenceLock`] | **presence, not exclusion** — "the sync agent hosts this store", which gives it the engine role over any app | **exclusive, blocking** for the agent mount's lifetime; a momentary **shared try** is a seed-holding app's question — [`ServingLock`]'s sides swapped |
 //!
-//! So the count of exclusive sections is unchanged by the last row: three in
-//! the store, and the conversations-engine role outside it. The serving lock
+//! So the count of exclusive sections is unchanged by the last two rows: three
+//! in the store, and the conversations-engine role outside it. The serving lock
 //! is the cross-app twin of `fauna_client_accounts::AccountInstanceLock`, keyed
 //! on the one directory every app on an OS login shares instead of on each
 //! app's own install base (`account-scoping.md` § Concurrent instances → *An
@@ -71,7 +73,7 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use crate::store::{engine_lock_path, migration_lock_path, seed_legs_lock_path};
+use crate::store::{agent_lock_path, engine_lock_path, migration_lock_path, seed_legs_lock_path};
 
 /// The serving lock's path for one actor —
 /// `<store root>/serving-<actor-id-hex>.lock`, reserved at the store **root**
@@ -293,6 +295,86 @@ impl ServingLock {
             return false;
         };
         matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+    }
+}
+
+/// Result of [`AgentPresenceLock::acquire`].
+///
+/// There is deliberately **no `Refused`**: the acquire blocks, and the only
+/// other takers are the apps' momentary probes, so a live holder is a wait of
+/// one probe's length, not an outcome.
+#[derive(Debug)]
+pub enum AgentPresenceLockOutcome {
+    /// The agent is now visibly hosting the store; the lock releases when the
+    /// value drops (or the process dies).
+    Held(AgentPresenceLock),
+    /// The lock could not be taken. The agent mounts anyway (`account-runtime.md`
+    /// § Multi-instance concurrency → *The agent holds the role when present*,
+    /// part 1): this lock states priority, `engine.lock` keeps exclusivity, and
+    /// the apps then see the first-come election.
+    Degraded(std::io::Error),
+}
+
+/// What [`AgentPresenceLock::is_present`] found.
+#[derive(Debug)]
+pub enum AgentPresence {
+    /// The agent holds the lock — it hosts this store.
+    Present,
+    /// Nobody holds it.
+    Absent,
+    /// The probe could not ask. The caller owns what that means: a seed-holding
+    /// runtime reads it as `Absent` before a try (degrade open — a lone app
+    /// must pump) and keeps the role it holds (a degrade is never a yield).
+    Degraded(std::io::Error),
+}
+
+/// Held agent presence lock; RAII — dropping releases.
+#[derive(Debug)]
+pub struct AgentPresenceLock {
+    /// Held (and thereby exclusively locked) until drop; never read.
+    _file: File,
+}
+
+impl AgentPresenceLock {
+    /// Declare that the sync agent hosts the store rooted at `store_dir`, for
+    /// as long as the returned lock lives. The agent's mount takes it before
+    /// its engine election; a seedless runtime never takes it itself — its
+    /// host does.
+    ///
+    /// An **exclusive blocking** acquire, and the wait is bounded by
+    /// construction: the agent is single-instance per user, so no second
+    /// exclusive taker exists, and every other taker is [`Self::is_present`],
+    /// which holds a shared lock for the length of one `try_lock_shared`. A
+    /// `try` here would instead read a probe's instant as "another agent" —
+    /// the race the blocking acquire exists to close ([`ServingLock::acquire`]
+    /// with the sides swapped).
+    pub fn acquire(store_dir: &Path) -> AgentPresenceLockOutcome {
+        let file = match open_lock_file(store_dir, &agent_lock_path(store_dir)) {
+            Ok(f) => f,
+            Err(e) => return AgentPresenceLockOutcome::Degraded(e),
+        };
+        match file.lock() {
+            Ok(()) => AgentPresenceLockOutcome::Held(Self { _file: file }),
+            Err(e) => AgentPresenceLockOutcome::Degraded(e),
+        }
+    }
+
+    /// **Does the sync agent host the store rooted at `store_dir`?** — the
+    /// question a seed-holding runtime asks before every engine try and while
+    /// it holds the role.
+    ///
+    /// A shared try, dropped at once: winning it proves no exclusive holder,
+    /// and holding nothing afterwards restores what the probe found.
+    pub fn is_present(store_dir: &Path) -> AgentPresence {
+        let file = match open_lock_file(store_dir, &agent_lock_path(store_dir)) {
+            Ok(f) => f,
+            Err(e) => return AgentPresence::Degraded(e),
+        };
+        match file.try_lock_shared() {
+            Ok(()) => AgentPresence::Absent,
+            Err(std::fs::TryLockError::WouldBlock) => AgentPresence::Present,
+            Err(std::fs::TryLockError::Error(e)) => AgentPresence::Degraded(e),
+        }
     }
 }
 
@@ -584,6 +666,93 @@ mod tests {
         assert!(
             lock_path.exists(),
             "the whole-root sweep unlinked the guard"
+        );
+    }
+
+    fn agent(outcome: AgentPresenceLockOutcome) -> AgentPresenceLock {
+        match outcome {
+            AgentPresenceLockOutcome::Held(lock) => lock,
+            other => panic!("expected Held, got {other:?}"),
+        }
+    }
+
+    /// The presence pin: an agent holding the lock is seen by the probe, a
+    /// dropped one is not — and the probe itself leaves nothing held behind,
+    /// or it would read as an agent to the next probe.
+    #[test]
+    fn an_agent_holder_is_seen_until_it_drops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("store");
+
+        assert!(matches!(
+            AgentPresenceLock::is_present(&store_dir),
+            AgentPresence::Absent
+        ));
+        assert!(
+            matches!(
+                AgentPresenceLock::is_present(&store_dir),
+                AgentPresence::Absent
+            ),
+            "a probe must release what it took"
+        );
+        let held = agent(AgentPresenceLock::acquire(&store_dir));
+        assert!(
+            matches!(
+                AgentPresenceLock::is_present(&store_dir),
+                AgentPresence::Present
+            ),
+            "an exclusive holder refuses the probe's shared try"
+        );
+        drop(held);
+        assert!(
+            matches!(
+                AgentPresenceLock::is_present(&store_dir),
+                AgentPresence::Absent
+            ),
+            "a dropped holder admits the probe"
+        );
+    }
+
+    /// The acquire **blocks** behind a probe rather than refusing — causal, the
+    /// migration pin's shape: a shared holder stands in for a probe caught
+    /// mid-flight, the acquiring thread signals before it blocks, and the join
+    /// can finish only once the shared holder is gone.
+    #[test]
+    fn the_agent_acquire_waits_out_a_probe_instead_of_refusing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("store");
+
+        let probe = fauna_core::fs_lock::open_lock_file(&agent_lock_path(&store_dir)).unwrap();
+        probe.try_lock_shared().unwrap();
+        let (about_to_block_tx, about_to_block_rx) = std::sync::mpsc::channel();
+        let waiter_dir = store_dir.clone();
+        let waiter = std::thread::spawn(move || {
+            about_to_block_tx.send(()).unwrap();
+            agent(AgentPresenceLock::acquire(&waiter_dir))
+        });
+        about_to_block_rx.recv().unwrap();
+        drop(probe);
+        let _held = waiter.join().expect("the agent acquires after the probe");
+    }
+
+    /// The reserved name, independent of every other lock, never deleted. The
+    /// agent holds presence beside the engine role — or beside an app's — so
+    /// neither may refuse the other.
+    #[test]
+    fn the_agent_lock_is_the_reserved_file_independent_and_never_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("not-yet").join("store");
+
+        let presence = agent(AgentPresenceLock::acquire(&store_dir));
+        let lock_path = agent_lock_path(&store_dir);
+        assert!(lock_path.ends_with("agent.lock"));
+        assert!(lock_path.exists(), "acquire mints the lock file");
+        let _engine = held(EngineLock::try_acquire(&store_dir));
+        let _seed_legs = held_seed_legs(SeedLegLock::try_acquire(&store_dir));
+        drop(presence);
+        assert!(
+            lock_path.exists(),
+            "release must not unlink the lock file (unlinking re-opens the race)"
         );
     }
 

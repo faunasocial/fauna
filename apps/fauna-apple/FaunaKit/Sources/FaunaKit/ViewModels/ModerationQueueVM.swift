@@ -26,6 +26,16 @@ public final class ModerationQueueVM {
     public private(set) var rows: [QueueRow] = []
     public private(set) var isLoading = false
     public var errorMessage: String?
+    /// The reporter's own ledger — every abuse report this user filed, newest
+    /// first (`moderation-reports-section`; moderation.md § User-initiated
+    /// reporting → *What the reporter is told*).
+    public private(set) var reports: [FfiReportLedgerRow] = []
+    /// Whether the ledger has been read at least once — the empty line paints
+    /// only off this bit, so a slow first read never claims "You have not
+    /// reported anything" (`ui/README.md` § List pages: loading is not empty).
+    public private(set) var reportsLoaded = false
+    /// The line the last withdraw painted (`""` before one).
+    public private(set) var reportStatus = ""
 
     private var moderation: FfiModerationClient?
     /// The client half of the queue — `nil` when no conversations session is
@@ -70,6 +80,9 @@ public final class ModerationQueueVM {
         rows = []
         isLoading = false
         errorMessage = nil
+        reports = []
+        reportsLoaded = false
+        reportStatus = ""
     }
 
     #if DEBUG
@@ -131,6 +144,50 @@ public final class ModerationQueueVM {
             guard self.api === api else { return }
             errorMessage = DisplayError.message(error)
         }
+        // The reporter's ledger rides every Moderation entry beside the queue —
+        // its own failure never hides the queue rows above.
+        await loadReports()
+    }
+
+    /// Read the reporter's ledger (`fauna.moderation.abuse_report.mine`).
+    public func loadReports() async {
+        guard let moderation, let api else { return }
+        do {
+            let mine = try await moderation.abuseReportMine()
+            guard self.api === api else { return }   // the in-flight clause
+            reports = mine
+            reportsLoaded = true
+        } catch {
+            guard self.api === api else { return }
+            errorMessage = DisplayError.message(error)
+        }
+    }
+
+    /// Withdraw one open report and re-read the ledger. The verdict line comes
+    /// from the shared fold (success names what was deleted everywhere).
+    public func withdrawReport(reportId: String) async {
+        guard let moderation, let api else { return }
+        do {
+            try await moderation.abuseReportWithdraw(reportId: reportId)
+            guard self.api === api else { return }
+            reportStatus = renderLocalizedText(reportWithdrawVerdict(error: nil))
+        } catch {
+            guard self.api === api else { return }
+            reportStatus = renderLocalizedText(reportWithdrawVerdict(error: String(describing: error)))
+        }
+        await loadReports()
+    }
+
+    /// One ledger row's line — `reason · status · short subject id · outcome —
+    /// where it went` (web's `ledgerLine`, tui's `ledger_elements`: the e2e
+    /// reads this text on every app).
+    public nonisolated static func ledgerLine(_ row: FfiReportLedgerRow) -> String {
+        var parts = [renderLocalizedText(row.reason), renderLocalizedText(row.status)]
+        if let id = ReportSheetStore.subjectId(of: row.subject) {
+            parts.append(shortId(hex: id))
+        }
+        if let outcome = row.outcome { parts.append(renderLocalizedText(outcome)) }
+        return "\(parts.joined(separator: " · ")) — \(renderLocalizedText(row.routedTo))"
     }
 
     /// Submit a `train-correction-button` correction for one merged row. A

@@ -191,6 +191,7 @@ async fn replica(
                     *acct == account() && removed.read().unwrap().contains(device_key)
                 })
             }),
+            file_chunks: None,
             quotas,
             now: now_fn,
         },
@@ -885,6 +886,7 @@ async fn the_top_up_pass_un_partitions_a_later_enrolled_replica() {
             &built.generation_id,
             &signing_key(DEVICE_B),
             None,
+            None,
         )
         .await
         .unwrap()
@@ -931,6 +933,7 @@ async fn the_top_up_pass_un_partitions_a_later_enrolled_replica() {
         &b.store,
         &built.generation_id,
         &signing_key(DEVICE_B),
+        None,
         None,
     )
     .await
@@ -1124,6 +1127,7 @@ async fn the_cannot_key_signal_un_partitions_an_in_member_corrupted_wrap() {
             &built.generation_id,
             &signing_key(DEVICE_B),
             None,
+            None,
         )
         .await
         .unwrap()
@@ -1220,6 +1224,7 @@ async fn the_cannot_key_signal_un_partitions_an_in_member_corrupted_wrap() {
             &b.store,
             &built.generation_id,
             &signing_key(DEVICE_B),
+            None,
             None,
         )
         .await
@@ -1713,6 +1718,7 @@ async fn the_fleet_brake_refuses_to_start_the_leg() {
             own_witness_kind: fauna_protocol::peer_sync::WITNESS_DEVICE_AUTHORIZATION.to_string(),
             custody_revoked: None,
             device_removed: None,
+            file_chunks: None,
             quotas: QuotaConfig::default(),
             now: now_fn,
         },
@@ -4848,15 +4854,17 @@ enum MailWrite<'a> {
     Put(&'a fauna_core::data::MailCredential),
     Mark(&'a str, fauna_core::data::MsekFingerprint),
     Revoke(&'a str),
+    Generation(&'a fauna_core::data::PriorMsekRetirement),
 }
 
 /// Drive one mail door (`mail_rows::{write_mail_state, put_credential,
-/// mark_credential_wrapped, revoke_credential}`) on `replica` over its fleet
+/// mark_credential_wrapped, revoke_credential, put_generation}`) on `replica` over its fleet
 /// plane at the instant `at`, then the runtime's publish step. Whether the
 /// door wrote.
 async fn mail_door(replica: &Replica, write: MailWrite<'_>, at: u64) -> anyhow::Result<bool> {
     use fauna_sync_engine::mail_rows::{
-        mark_credential_wrapped, put_credential, revoke_credential, write_mail_state,
+        mark_credential_wrapped, put_credential, put_generation, revoke_credential,
+        write_mail_state,
     };
     let requester = NoNest;
     let sk = signing_key(replica.device);
@@ -4878,6 +4886,7 @@ async fn mail_door(replica: &Replica, write: MailWrite<'_>, at: u64) -> anyhow::
         MailWrite::Put(credential) => put_credential(store, &plane, credential, now).await?,
         MailWrite::Mark(id, fp) => mark_credential_wrapped(store, &plane, id, fp, now).await?,
         MailWrite::Revoke(id) => revoke_credential(store, &plane, id, now).await?,
+        MailWrite::Generation(g) => put_generation(store, &plane, g).await?,
     };
     plane.publish_pending().await.expect("publish step");
     Ok(wrote)
@@ -5027,15 +5036,19 @@ async fn a_fresh_device_reads_the_mail_custody_back() {
     let prior = SecretArray32::new([0x70; 32]);
     let state = MailStateRow {
         msek: Some(msek.clone()),
-        prior_mseks: vec![prior.clone()],
-        prior_msek_retirements: vec![PriorMsekRetirement {
-            msek: prior.clone(),
-            retired_at_unix: 1_700_000_000,
-        }],
         mail_enabled: Some(true),
         ..MailStateRow::default()
     };
     assert!(mail_door(&a, MailWrite::State(&state), 100).await.unwrap());
+    let generation = PriorMsekRetirement {
+        msek: prior.clone(),
+        retired_at_unix: 1_700_000_000,
+    };
+    assert!(
+        mail_door(&a, MailWrite::Generation(&generation), 100)
+            .await
+            .unwrap()
+    );
     let credential = fauna_core::data::MailCredential {
         wrapped_under: Some(MsekFingerprint::of(&msek)),
         ..a_mail_credential("default", "correct horse", 1)
@@ -5078,11 +5091,11 @@ async fn a_fresh_device_reads_the_mail_custody_back() {
 /// write restates no key material and a restatement of the key a replica
 /// already holds joins to no change (the door writes nothing). The state row's
 /// join is a deliberate-rotation latest-wins on the stamp, so after the walks
-/// both replicas hold MSEK″ — and MSEK′ is in neither `msek` nor the grace
-/// window (the join unions only the two sides' priors): the residual the
-/// finalize's read back exists to catch. A's re-drive — the same swap, stamped
-/// strictly above what it now reads — lands MSEK′ on both, the old key in the
-/// window.
+/// both replicas hold MSEK″ — and MSEK′ is in neither `msek` nor a
+/// generation row (a generation row is written only for the key a finalize
+/// retires): the residual the finalize's read back exists to catch. A's
+/// re-drive — the same swap, stamped strictly above what it now reads — lands
+/// MSEK′ on both, the old key a prior generation.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reverted_mail_key_swap_is_caught_on_read_back_and_re_driven() {
     use fauna_core::data::PriorMsekRetirement;
@@ -5106,15 +5119,19 @@ async fn a_reverted_mail_key_swap_is_caught_on_read_back_and_re_driven() {
     );
     b.walk_peer_scope(&ba, fleet).await;
 
-    // A's finalize swap: MSEK′ in, the old key into the window, the sentinel
-    // kept until the read back confirms it.
+    // A's finalize: the old key's generation row FIRST, then the swap —
+    // MSEK′ in, the sentinel kept until the read back confirms it.
+    let retired = PriorMsekRetirement {
+        msek: old.clone(),
+        retired_at_unix: 1_700_000_300,
+    };
+    assert!(
+        mail_door(&a, MailWrite::Generation(&retired), 300)
+            .await
+            .unwrap()
+    );
     let swap = MailStateRow {
         msek: Some(new.clone()),
-        prior_mseks: vec![old.clone()],
-        prior_msek_retirements: vec![PriorMsekRetirement {
-            msek: old.clone(),
-            retired_at_unix: 1_700_000_300,
-        }],
         pending_rotation: Some(MailRotationSentinel {
             new_msek: new.clone(),
         }),
@@ -5126,10 +5143,18 @@ async fn a_reverted_mail_key_swap_is_caught_on_read_back_and_re_driven() {
     let other = SecretArray32::new([0x03; 32]);
     let concurrent = MailStateRow {
         msek: Some(other.clone()),
-        prior_mseks: vec![old.clone()],
         mail_enabled: Some(true),
         ..MailStateRow::default()
     };
+    let b_retired = PriorMsekRetirement {
+        msek: old.clone(),
+        retired_at_unix: 1_700_000_400,
+    };
+    assert!(
+        mail_door(&b, MailWrite::Generation(&b_retired), 400)
+            .await
+            .unwrap()
+    );
     assert!(
         mail_door(&b, MailWrite::State(&concurrent), 400)
             .await
@@ -5158,7 +5183,12 @@ async fn a_reverted_mail_key_swap_is_caught_on_read_back_and_re_driven() {
         assert_eq!(
             mail.prior_mseks,
             vec![old.clone()],
-            "{side}: the old key is in the window"
+            "{side}: the old key is a prior generation"
+        );
+        assert_eq!(
+            mail.prior_msek_retired_at(&old),
+            Some(1_700_000_400),
+            "{side}: two records of one retirement join on the later instant"
         );
     }
     assert_mail_rows_identical(&a, &b).await;

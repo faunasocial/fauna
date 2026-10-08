@@ -2059,10 +2059,10 @@ async fn retry_sweep_op(
     secret_hex: &str,
     old_secret_hex: Option<&str>,
     successor_engine: Option<Arc<fauna_mls::engine::MlsEngine>>,
-) -> Result<SweepStatus, String> {
+) -> fauna_client_recovery::ceremony::SweepRetryAnswer {
     let flat =
         crate::session::config_dir().unwrap_or_else(|| std::env::temp_dir().join("fauna-tui"));
-    let answer = fauna_client_recovery::ceremony::retry_sweep_as_successor(
+    fauna_client_recovery::ceremony::retry_sweep_as_successor(
         nest,
         secret_hex,
         old_secret_hex,
@@ -2081,19 +2081,63 @@ async fn retry_sweep_op(
         successor_db_path,
         successor_engine.as_deref(),
     )
-    .await;
-    match answer {
-        fauna_client_recovery::ceremony::SweepRetryAnswer::Swept(report) => {
-            Ok(SweepStatus::Ran(report))
-        }
-        // The three terminal answers and the transport arm, each already a
-        // sentence the shared projection chose — tui only resolves the key,
-        // exactly as it does for the sweep's own lines.
-        answered => Err(answered
-            .message()
-            .map(|line| line.resolve(fauna_i18n::strings::lookup))
-            .unwrap_or_default()),
-    }
+    .await
+}
+
+/// The sentence a sweep-retry answer renders as — the shared projection's
+/// choice, tui only resolving the key exactly as it does for the sweep's own
+/// lines. `None` for `Swept`, whose outcome renders through the sweep's lines.
+fn sweep_answer_sentence(
+    answer: &fauna_client_recovery::ceremony::SweepRetryAnswer,
+) -> Option<String> {
+    answer
+        .message()
+        .map(|line| line.resolve(fauna_i18n::strings::lookup))
+}
+
+/// The op behind `recovery-kit-sweep-retry-button` — one builder for the press
+/// and for the relaunch adoption's unbidden one
+/// ([`crate::session::take_succession_obligations`]). `owed` picks the fold:
+/// a press reports a non-swept answer verbatim over the report it was pressed
+/// under; an owed discharge has no report to keep, so it parks the one the
+/// answer chooses. `None` with no nest yet.
+pub(crate) fn sweep_retry_op(
+    app: &App,
+    old_secret_hex: Option<fauna_core::secret::SecretString>,
+    owed: bool,
+) -> Option<Op> {
+    Some(Op::RecoverySweepRetry {
+        nest: app.settings.nest.clone()?,
+        secret_hex: app.settings.secret_hex.as_str().to_string(),
+        old_secret_hex,
+        // The LIVE successor engine when conversations are up, for the
+        // one-engine-per-store rule the ceremony's own sweep obeys
+        // (`Op::RecoveryStolen::old_engine` carries the full reasoning: two
+        // engines over one `mls_state.db` is user-irrecoverable corruption).
+        // `None` when conversations never came up — the op then constructs one
+        // over the successor's own scope, exactly as the ceremony did.
+        successor_engine: app
+            .conversations
+            .real_session
+            .as_ref()
+            .map(|session| session.engine()),
+        owed,
+    })
+}
+
+/// The retired identity the sweep retry sweeps from, off the shared resolution
+/// (`ceremony::retry_predecessor` — the DIRECT hop only, for the reason its own
+/// doc gives). `None` when no succession into this identity is recorded here.
+pub(crate) fn sweep_retry_predecessor(
+    app: &App,
+) -> Option<(String, Option<fauna_core::secret::SecretString>)> {
+    let keypair =
+        fauna_core::identity::ActorKeypair::from_secret_hex(app.settings.secret_hex.as_str())
+            .ok()?;
+    fauna_client_recovery::ceremony::retry_predecessor(
+        &crate::session::registry(app),
+        &keypair.actor_id_hex(),
+    )
 }
 
 /// The sweep retry's re-park: a retried sweep that ran re-reports its roster,
@@ -2211,7 +2255,7 @@ fn profile_predecessors_for(app: &App, secret_hex: &str) -> Vec<ActorId> {
 }
 
 /// The successor's closing kit mint — the op behind
-/// [`crate::session::discharge_succession_kit`], built here because `nest` and
+/// [`crate::session::discharge_succession_obligations`], built here because `nest` and
 /// `secret_hex` are this module's own state (the `nav_enter_op` /
 /// [`atproto_resync_op`] builder shape).
 ///
@@ -2227,7 +2271,7 @@ fn profile_predecessors_for(app: &App, secret_hex: &str) -> Vec<ActorId> {
 /// in that window restores the account with its corpus sealed to a key that
 /// exists nowhere (`succession-aftermath.md` § Re-key scope). The caller
 /// resolves it from the account registry — see
-/// `crate::session::discharge_succession_kit`. `profile_predecessors` is the
+/// `crate::session::discharge_succession_obligations`. `profile_predecessors` is the
 /// same registry's predecessor ids, which the closing act's profile mirror
 /// admits the inherited profile against ([`Op::RecoveryCreateKit`]).
 pub fn succession_kit_op(
@@ -2264,6 +2308,23 @@ pub fn atproto_resync_op(state: &SettingsState) -> Option<Op> {
         .machine
         .clone()
         .map(|machine| Op::HydrateAtproto { machine, nest })
+}
+
+/// Re-read the Spam sub-page's training history off a *push* (or a reconnect)
+/// rather than a visit — `fauna_protocol::StaleSurfaces::mail_spam`: an undo or
+/// a reset on another device (`mail-spam.md` § Reset step 6, § Undo step 4).
+///
+/// The visit's own hydrate op, minus the visit's `reset_form` — a push must
+/// never disarm a confirm the user is looking at. `None` unless the Spam
+/// sub-page is the one shown (the flag is page-gated; a visit re-reads anyway)
+/// or before login (no machine).
+pub fn mail_spam_resync_op(state: &SettingsState) -> Option<Op> {
+    if state.sub != SubPage::MailSpam {
+        return None;
+    }
+    let machine = state.mail_spam.machine.clone()?;
+    let nest = state.nest.clone()?;
+    Some(Op::HydrateMailSpam { machine, nest })
 }
 
 /// Re-read the Connected apps page off the same push — the consent card moved
@@ -5834,18 +5895,8 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // may well have destroyed after the ceremony told them to.
         Action::RecoverySweepRetry => {
             app.errors.remove(&Page::Settings);
-            let nest = app.settings.nest.clone()?;
-            let secret_hex = app.settings.secret_hex.as_str().to_string();
-            // The retired identity this account came from, off the shared
-            // resolution (`ceremony::retry_predecessor` — the DIRECT hop only,
-            // for the reason its own doc gives).
-            let found = match fauna_core::identity::ActorKeypair::from_secret_hex(&secret_hex) {
-                Ok(keypair) => fauna_client_recovery::ceremony::retry_predecessor(
-                    &crate::session::registry(app),
-                    &keypair.actor_id_hex(),
-                ),
-                Err(_) => None,
-            };
+            app.settings.nest.as_ref()?;
+            let found = sweep_retry_predecessor(app);
             // No predecessor at all means this identity never succeeded from
             // anything, so there is no sweep to finish. Reachable only by an
             // agent driving the id directly (the render gates on a sweep report
@@ -5858,23 +5909,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 return None;
             };
             app.settings.recovery.busy = true;
-            Some(Op::RecoverySweepRetry {
-                nest,
-                secret_hex,
-                old_secret_hex,
-                // The LIVE successor engine when conversations are up, for the
-                // one-engine-per-store rule the ceremony's own sweep obeys
-                // (`Op::RecoveryStolen::old_engine` carries the full reasoning:
-                // two engines over one `mls_state.db` is user-irrecoverable
-                // corruption). `None` when conversations never came up — the op
-                // then constructs one over the successor's own scope, exactly as
-                // the ceremony did.
-                successor_engine: app
-                    .conversations
-                    .real_session
-                    .as_ref()
-                    .map(|session| session.engine()),
-            })
+            sweep_retry_op(app, old_secret_hex, false)
         }
         // Cancel a pending seed-alone replacement, on proof of the CURRENT kit.
         // Renders only while a window is open, so reaching it otherwise means an
@@ -7574,9 +7609,22 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             app.settings.mail_lists.reset_form();
             None
         }
+        // A List-Archive link off the user's own server arms Submit first (the
+        // two-click shape below, reused for a save that destroys nothing —
+        // `mail-mass-mailing.md` § Don't do these): the first press saves
+        // nothing, a second press on the same link saves.
         Action::MailListsSubmit { .. } => {
-            let machine = app.settings.mail_lists.machine.clone()?;
-            let action = app.settings.mail_lists.submit_action()?;
+            let l = &mut app.settings.mail_lists;
+            let machine = l.machine.clone()?;
+            let action = l.submit_action()?;
+            if let Some(url) = l.archive_needing_confirm()
+                && l.archive_confirm_armed.as_deref() != Some(url.as_str())
+            {
+                l.archive_confirm_armed = Some(url);
+                l.delete_armed = None;
+                return None;
+            }
+            l.archive_confirm_armed = None;
             Some(Op::MailListsDispatch { machine, action })
         }
         // The two-click inline confirm, the `MailAliasesDelete` shape: arming is
@@ -7586,6 +7634,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             let l = &mut app.settings.mail_lists;
             if l.delete_armed.as_deref() != Some(list_id_hex.as_str()) {
                 l.delete_armed = Some(list_id_hex);
+                l.archive_confirm_armed = None;
                 return None;
             }
             let machine = l.machine.clone()?;
@@ -8819,6 +8868,12 @@ pub enum Op {
         /// reason, mirrored post-switch: two `MlsEngine`s over one
         /// `mls_state.db` means two divergent OpenMLS states writing one file.
         successor_engine: Option<Arc<fauna_mls::engine::MlsEngine>>,
+        /// `true` for the relaunch adoption's unbidden press
+        /// ([`App::succession_sweep_owed`]): the answer folds as
+        /// [`Outcome::RecoveryOwedSweepDischarged`], which parks a report for
+        /// every answer, rather than as a press's
+        /// [`Outcome::RecoverySweepRetried`].
+        owed: bool,
     },
     /// Re-point the account to a freshly minted successor identity —
     /// `fauna_client_recovery::succeed_with_held_kit`, the composed ceremony
@@ -10027,6 +10082,11 @@ pub enum Outcome {
     /// that already says what happened and what is left to do, so the fold
     /// surfaces it verbatim rather than prefixing it.
     RecoverySweepRetried(Result<Box<SweepStatus>, String>),
+    /// The relaunch adoption's owed sweep answered (`succession-propagation.md`
+    /// § Propagation → *Own device fleet*, the relaunch-adoption clause). Carries
+    /// the raw answer because, unlike a press, there is no report to keep: the
+    /// fold parks the one `SweepRetryAnswer::into_owed_status` chooses.
+    RecoveryOwedSweepDischarged(Box<fauna_client_recovery::ceremony::SweepRetryAnswer>),
     /// The veto ceremony's answer: whether a replacement was actually cancelled,
     /// plus the re-read status. `false` is an idempotent **success** — nothing
     /// was pending, and the vetoer's goal state holds either way — so it must
@@ -10978,16 +11038,26 @@ impl Op {
                 secret_hex,
                 old_secret_hex,
                 successor_engine,
-            } => Outcome::RecoverySweepRetried(
-                retry_sweep_op(
+                owed,
+            } => {
+                let answer = retry_sweep_op(
                     nest,
                     &secret_hex,
                     old_secret_hex.as_deref(),
                     successor_engine,
                 )
-                .await
-                .map(Box::new),
-            ),
+                .await;
+                if owed {
+                    Outcome::RecoveryOwedSweepDischarged(Box::new(answer))
+                } else {
+                    Outcome::RecoverySweepRetried(match answer {
+                        fauna_client_recovery::ceremony::SweepRetryAnswer::Swept(report) => {
+                            Ok(Box::new(SweepStatus::Ran(report)))
+                        }
+                        answered => Err(sweep_answer_sentence(&answered).unwrap_or_default()),
+                    })
+                }
+            }
             Op::RecoveryStolen {
                 secret_hex,
                 phrase,
@@ -13181,6 +13251,7 @@ fn apply_mail_lists_snapshot(app: &mut App, snapshot: MailListsSnapshot) {
     // click after a completed delete must not fall through onto a re-ordered
     // list — and this one cascades every member row.
     l.delete_armed = None;
+    l.archive_confirm_armed = None;
     l.snapshot = Some(snapshot);
 }
 
@@ -13458,6 +13529,27 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 // rather than the answer to what was pressed.
                 Err(msg) => {
                     app.errors.insert(Page::Settings, msg);
+                }
+            }
+        }
+        // The unbidden press settled. Unlike a press, no report was on screen
+        // to keep, so EVERY answer parks one — the shared `into_owed_status`
+        // decides which, and never an empty `Ran`: `Swept` renders the sweep's
+        // two lines and the review pass as after any ceremony, while every
+        // other answer parks an arm that still owes work, so the retry button
+        // renders and the answer's own sentence (verbatim, as a press's) says
+        // why the groups were not re-pointed.
+        Outcome::RecoveryOwedSweepDischarged(answer) => {
+            let sentence = sweep_answer_sentence(&answer);
+            let status = answer.into_owed_status();
+            repark_retried_roster(app, &status);
+            app.succession_sweep = Some(status);
+            match sentence {
+                Some(sentence) => {
+                    app.errors.insert(Page::Settings, sentence);
+                }
+                None => {
+                    app.errors.remove(&Page::Settings);
                 }
             }
         }
@@ -19864,7 +19956,7 @@ mod tests {
         app.settings.nest = Some(nest_for_test());
         app.page = crate::pages::Page::Feed;
 
-        crate::session::discharge_succession_kit(&mut app);
+        crate::session::discharge_succession_obligations(&mut app);
         assert_eq!(
             app.page,
             crate::pages::Page::Feed,
@@ -19872,7 +19964,7 @@ mod tests {
         );
 
         app.succession_kit_owed = true;
-        crate::session::discharge_succession_kit(&mut app);
+        crate::session::discharge_succession_obligations(&mut app);
         assert!(
             !app.succession_kit_owed,
             "discharged once — a later re-auth must not re-mint, which would retire \
@@ -20241,7 +20333,7 @@ mod tests {
     /// leaves a total-device-loss restore recovering the account with its
     /// corpus sealed to a key that exists nowhere. The op is where that gets
     /// decided, so the op is what this asserts on — a green
-    /// `discharge_succession_kit` proves navigation, not payload.
+    /// `discharge_succession_obligations` proves navigation, not payload.
     #[test]
     fn the_owed_kit_seals_the_predecessor_seed_from_the_registry() {
         let mut app = crate::app::tests::authed_app();
@@ -20368,11 +20460,93 @@ mod tests {
         app.settings.nest = None;
         app.succession_kit_owed = true;
 
-        crate::session::discharge_succession_kit(&mut app);
+        crate::session::discharge_succession_obligations(&mut app);
 
         assert!(
             app.succession_kit_owed,
             "nothing was minted, so nothing was discharged — the next authenticated \
+             session must retry"
+        );
+    }
+
+    /// **The owed sweep is discharged BEFORE the kit, and folds like a retry
+    /// press** (`succession-propagation.md` § Propagation → *Own device
+    /// fleet*, the relaunch-adoption clause): the ceremony's own order is
+    /// sweep then kit, and the discharge is an unbidden press of
+    /// `recovery-kit-sweep-retry-button` — so `Swept` parks the report as
+    /// after any ceremony, and every other answer parks an arm that still
+    /// owes work, so the button renders and the answer's sentence says why.
+    ///
+    /// ⚠ The second half is the one an "unchanged press" fold gets wrong: the
+    /// press reports a non-swept answer to the error line only, which at
+    /// relaunch — `succession_sweep` still `None` — would leave the button
+    /// gated off and the obligation silently dropped.
+    #[tokio::test]
+    async fn the_owed_sweep_is_discharged_before_the_kit_and_folds_like_a_retry_press() {
+        use fauna_client_recovery::ceremony::SweepRetryAnswer;
+        let mut app = crate::app::tests::authed_app();
+        app.settings.nest = Some(nest_for_test());
+        app.succession_sweep_owed = true;
+        app.succession_kit_owed = true;
+
+        let ops = crate::session::take_succession_obligations(&mut app);
+        assert!(
+            matches!(
+                ops.as_slice(),
+                [
+                    Op::RecoverySweepRetry { owed: true, .. },
+                    Op::RecoveryCreateKit { .. }
+                ]
+            ),
+            "sweep first, then kit — the ceremony's own order"
+        );
+        assert!(!app.succession_sweep_owed, "discharged once");
+        assert!(
+            crate::session::take_succession_obligations(&mut app).is_empty(),
+            "a later re-auth owes nothing"
+        );
+
+        // A non-swept answer parks the owing arm and says why.
+        apply_outcome(
+            &mut app,
+            Outcome::RecoveryOwedSweepDischarged(Box::new(SweepRetryAnswer::NoOldState)),
+        );
+        assert!(
+            matches!(app.succession_sweep, Some(SweepStatus::NoEngine)),
+            "nothing swept, so nothing may read as done — never an empty `Ran`"
+        );
+        assert!(
+            app.succession_sweep
+                .as_ref()
+                .is_some_and(SweepStatus::owes_work),
+            "the retry button's gate must open, or the obligation is silently dropped"
+        );
+        assert!(
+            app.errors.contains_key(&Page::Settings),
+            "the answer's own sentence says why the sweep did not run"
+        );
+
+        // A swept answer replaces it, as after any ceremony.
+        apply_outcome(
+            &mut app,
+            Outcome::RecoveryOwedSweepDischarged(Box::new(SweepRetryAnswer::Swept(Box::default()))),
+        );
+        assert!(matches!(app.succession_sweep, Some(SweepStatus::Ran(_))));
+        assert!(!app.errors.contains_key(&Page::Settings));
+    }
+
+    /// The owed sweep survives a session with no nest to sweep against, as the
+    /// owed kit does — the next authenticated session retries.
+    #[test]
+    fn an_owed_sweep_with_no_nest_yet_stays_owed() {
+        let mut app = crate::app::tests::authed_app();
+        app.settings.nest = None;
+        app.succession_sweep_owed = true;
+
+        assert!(crate::session::take_succession_obligations(&mut app).is_empty());
+        assert!(
+            app.succession_sweep_owed,
+            "nothing ran, so nothing was discharged — the next authenticated \
              session must retry"
         );
     }

@@ -22,6 +22,7 @@ import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.MailListMembersVM
+import uniffi.fauna_client_mail_settings.ImportResult
 import uniffi.fauna_client_mail_settings.MemberStatus
 import uniffi.fauna_client_mail_settings.MemberView
 import uniffi.fauna_client_mail_settings.memberStatusLabel
@@ -61,6 +62,7 @@ fun MailListMembersScreen(
         hydrated = hydrated,
         subscribedCount = snapshot.subscribedCount,
         unsubscribedCount = snapshot.unsubscribedCount,
+        lastImport = snapshot.lastImport,
         // Resolve the status label through the shared single-source map
         // (fauna_client_mail_settings::member_status_label → LocalizedText key),
         // kept in the stateful Screen so the Content stays Robolectric-safe (no FFI).
@@ -83,6 +85,10 @@ fun MailListMembersContent(
     hydrated: Boolean = true,
     subscribedCount: UInt,
     unsubscribedCount: UInt,
+    // The last import's tally (`MailListMembersSnapshot.last_import`), painted as
+    // the shared `mail_lists.import_result` line on `mail-list-members-import-result`
+    // and hidden again when the import sheet reopens (tui's `import_result_shown`).
+    lastImport: ImportResult? = null,
     statusLabel: (MemberStatus) -> String,
     onBack: () -> Unit,
     onAddMember: (String) -> Unit,
@@ -94,6 +100,9 @@ fun MailListMembersContent(
     var showImport by remember { mutableStateOf(false) }
     var addAddress by remember { mutableStateOf("") }
     var importText by remember { mutableStateOf("") }
+    // The tally the user already dismissed by reopening the sheet; cleared at
+    // submit so a second import with identical counts still paints.
+    var dismissedImport by remember { mutableStateOf<ImportResult?>(null) }
 
     Scaffold(
         topBar = {
@@ -139,7 +148,7 @@ fun MailListMembersContent(
                     modifier = Modifier.testTag(Ids.MAIL_LIST_MEMBERS_ADD_BUTTON),
                 ) { Text(stringResource(R.string.mail_lists_add_member_button)) }
                 OutlinedButton(
-                    onClick = { showImport = true; importText = "" },
+                    onClick = { showImport = true; importText = ""; dismissedImport = lastImport },
                     modifier = Modifier.testTag(Ids.MAIL_LIST_MEMBERS_IMPORT_BUTTON),
                 ) { Text(stringResource(R.string.mail_lists_import_button)) }
             }
@@ -180,6 +189,19 @@ fun MailListMembersContent(
                 }
             }
 
+            if (lastImport != null && lastImport != dismissedImport) {
+                Text(
+                    stringResourceFmt(
+                        R.string.mail_lists_import_result,
+                        lastImport.added.toString(),
+                        lastImport.skippedDuplicate.toString(),
+                        lastImport.skippedInvalid.toString(),
+                    ),
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.testTag(Ids.MAIL_LIST_MEMBERS_IMPORT_RESULT),
+                )
+            }
+
             if (showImport) {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -198,7 +220,11 @@ fun MailListMembersContent(
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(
-                                onClick = { onBatchImport(importText); showImport = false },
+                                onClick = {
+                                    dismissedImport = null
+                                    onBatchImport(importText)
+                                    showImport = false
+                                },
                                 enabled = importGate.enabled,
                                 modifier = Modifier.testTag(Ids.MAIL_LIST_MEMBERS_IMPORT_SHEET_SUBMIT_BUTTON),
                             ) { Text(stringResource(R.string.mail_lists_import_submit)) }

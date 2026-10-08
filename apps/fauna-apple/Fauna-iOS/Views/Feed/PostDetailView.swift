@@ -162,6 +162,9 @@ struct PostDetailView: View {
                 // place off the shared `playback_source` (§ D6c → Inline playback).
                 if let hash = documentMediaVideoHash(livePost.document) {
                     VideoThumbnailView(hash: hash, resolve: { await vm.videoPlaybackURL(hash) })
+                } else if let path = documentMediaProxiedVideoPath(livePost.document) {
+                    // A bridged post's `ProxiedVideo` (§ D6c → Proxied video): glyph + path, inert.
+                    VideoThumbnailView(proxiedPath: path)
                 }
 
                 // Quoted post — the document's folded `QuotedPost` block (render-model.md § D6).

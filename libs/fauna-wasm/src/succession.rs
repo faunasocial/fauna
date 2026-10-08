@@ -385,6 +385,73 @@ pub(crate) fn rearm_owed_succession_kit(successor_actor_hex: &str) {
     park_kit_owed(successor_actor_hex);
 }
 
+/// The `sessionStorage` key for the owed-sweep obligation a **relaunch
+/// adoption** records — one per successor, the seat guard by construction, for
+/// [`kit_owed_key`]'s reason.
+fn sweep_owed_key(successor_actor_hex: &str) -> String {
+    format!("fauna_succession_sweep_owed:{successor_actor_hex}")
+}
+
+/// A launch refused as superseded whose **chain-verified** successor this
+/// browser holds: adopt it (`identity-succession.md` § Implementation status
+/// today, *a lost submit reply no longer destroys the account*). `true` means
+/// the caller switches to `verified_successor` now.
+///
+/// Whether to adopt — and the succession link — is the shared
+/// `AccountRegistry::adopt_held_successor`. What is parked here is what the
+/// lost ceremony never reached, carried across the document swap beside its own
+/// slots: the successor's kit ([`park_kit_owed`]) and the group sweep
+/// (`succession-propagation.md` § Propagation → *Own device fleet*, the
+/// relaunch-adoption clause), discharged by [`discharge_owed_sweep`]. tui's
+/// `App::adopt_held_successor`, apple's `recordRelaunchAdoption` and windows'
+/// `SuccessionHandoff.RecordRelaunchAdoption` are the twins.
+///
+/// ⚠ `verified_successor` must be `resolveVerifiedSuccessor`'s answer — the
+/// registration chain's, never the nest's claim.
+pub(crate) fn adopt_held_successor(predecessor: &str, verified_successor: &str) -> bool {
+    if !account_registry().adopt_held_successor(predecessor, verified_successor) {
+        return false;
+    }
+    park_kit_owed(verified_successor);
+    let Some(store) = session_storage() else {
+        tracing::warn!(
+            "[wasm/succession] no sessionStorage to record the owed sweep in — the adopted \
+             successor's groups will show no sweep line until the retry is pressed"
+        );
+        return true;
+    };
+    if let Err(e) = store.set_item(&sweep_owed_key(verified_successor), "1") {
+        tracing::warn!(?e, "[wasm/succession] recording the owed sweep failed");
+    }
+    true
+}
+
+/// Discharge the sweep a relaunch adoption owes — the unbidden press of
+/// `recovery-kit-sweep-retry-button`, claimed once and seat-bound by the key.
+/// `None` when nothing was owed (every ordinary sign-in); otherwise the press's
+/// sentence, for `error-message` as a press's would go.
+///
+/// The answer is [`succession_sweep_retry`]'s — on web always `NoOldState`, for
+/// the reason that function gives — and what it parks is shared Rust's call
+/// (`SweepRetryAnswer::into_owed_status`): an arm that still owes work, so the
+/// retry button renders and the groups are never reported swept. Parked as the
+/// view the Settings page paints and as the e2e state, exactly as a ceremony's
+/// own report is.
+pub(crate) fn discharge_owed_sweep(
+    successor_actor_hex: &str,
+) -> Option<fauna_core::localized::LocalizedText> {
+    let store = session_storage()?;
+    let key = sweep_owed_key(successor_actor_hex);
+    store.get_item(&key).ok().flatten()?;
+    let _ = store.remove_item(&key);
+    let answer = fauna_client_recovery::ceremony::SweepRetryAnswer::NoOldState;
+    let sentence = answer.message();
+    let parked = answer.into_owed_status();
+    publish_sweep_state_for_e2e(&parked);
+    park_sweep_view(successor_actor_hex, &parked.render_view());
+    sentence
+}
+
 /// The `sessionStorage` key for [`park_sweep_view`] — one per successor, same
 /// scoping reason as [`PendingCeremony::storage_key`]: an unrelated account
 /// activated in the same tab must not paint a sweep that was not its own.

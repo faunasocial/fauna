@@ -6721,9 +6721,18 @@ impl RailBackend for FaunaMlsBackend {
         // two different actors on two pages of one app (priorities #1/#3/#4).
         // `same`'s echoed `domain` IS this nest's handle domain; a `None` reply
         // volunteers none, which the rule reads as "probe the typed domain".
+        // The home domain the typed one is compared against: the nest's echo
+        // when it found the handle, else this account's own domain — a "no
+        // such handle" from the home nest about its own domain is that nest's
+        // answer, never a cue to probe the domain as foreign (an alias or a
+        // list there is mail; `mail-mass-mailing.md` § Composing a list message).
+        let home_domain = same
+            .as_ref()
+            .map(|r| r.echoed_domain.clone())
+            .or_else(|| self.self_domain());
         let foreign = fauna_core::resolve::is_foreign_handle_domain(
             typed_domain.as_deref(),
-            same.as_ref().map(|r| r.echoed_domain.as_str()),
+            home_domain.as_deref(),
         );
         if foreign {
             let d = typed_domain

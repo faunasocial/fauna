@@ -454,3 +454,54 @@ def test_integration_growing_the_list_is_clean(ratified_repo: Path):
     _git(ratified_repo, "commit", "-aqm", "grow the list")
     result = _run_gate(ratified_repo)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# ── The 0.1.x compat-free window (version-compatibility.md § Dimension 2,
+# the fifth ratified exception) ─────────────────────────────────────────
+
+
+def test_product_version_reads_the_workspace_package_section_only():
+    toml = (
+        '[package]\nversion = "9.9.9"\n\n'
+        '[workspace.package]\nedition = "2024"\nversion = "0.1.3"\n\n'
+        '[workspace.dependencies]\nversion = "7"\n'
+    )
+    assert gate.product_version(toml) == "0.1.3"
+    assert gate.product_version('[package]\nversion = "1.0.0"\n') is None
+
+
+def test_the_compat_free_window_is_exactly_0_1_x():
+    for v in ("0.1.0", "0.1.3", "0.1.99"):
+        assert gate.in_compat_free_window(v), v
+    for v in ("0.2.0", "0.10.0", "1.1.0", "0.0.9", "1.0.0"):
+        assert not gate.in_compat_free_window(v), v
+
+
+def _remove_bar_x(repo: Path, version: str) -> subprocess.CompletedProcess:
+    (repo / "Cargo.toml").write_text(f'[workspace.package]\nversion = "{version}"\n')
+    (repo / gate.SCHEMAS_DIR / "foo.cddl").write_text("Bar = {\n}\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "remove Bar.x")
+    return _run_gate(repo)
+
+
+def test_integration_a_break_inside_0_1_x_is_reported_not_refused(ratified_repo: Path):
+    result = _remove_bar_x(ratified_repo, "0.1.3")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "compat-free window" in result.stdout, result.stdout
+    assert "note:" in result.stdout, result.stdout
+
+
+def test_integration_the_same_break_at_0_2_0_is_refused(ratified_repo: Path):
+    result = _remove_bar_x(ratified_repo, "0.2.0")
+    assert result.returncode == 1, result.stdout + result.stderr
+
+
+def test_integration_the_list_still_only_grows_inside_the_window(ratified_repo: Path):
+    (ratified_repo / "Cargo.toml").write_text('[workspace.package]\nversion = "0.1.3"\n')
+    (ratified_repo / gate.RATIFIED_BREAKS_PATH).write_text("")
+    _git(ratified_repo, "add", "-A")
+    _git(ratified_repo, "commit", "-qm", "drop the ratified entry inside the window")
+    result = _run_gate(ratified_repo)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "missing from HEAD" in result.stdout, result.stdout

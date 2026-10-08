@@ -816,10 +816,12 @@ table bridge_imap_mailbox_state
   col uid_validity INTEGER notnull=1 default=1 pk=0 hidden=0
   col uid_next INTEGER notnull=1 default=1 pk=0 hidden=0
   col highestmodseq INTEGER notnull=1 default=1 pk=0 hidden=0
+  col pruned_modseq INTEGER notnull=1 default=0 pk=0 hidden=0
   item PRIMARY KEY (actor_id, mailbox)
   item actor_id BLOB NOT NULL
   item highestmodseq INTEGER NOT NULL DEFAULT 1
   item mailbox TEXT NOT NULL
+  item pruned_modseq INTEGER NOT NULL DEFAULT 0
   item uid_next INTEGER NOT NULL DEFAULT 1
   item uid_validity INTEGER NOT NULL DEFAULT 1
 table bridge_imap_messages

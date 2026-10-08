@@ -1027,7 +1027,14 @@ mod tests {
                 thread_id: Some("t1".into()),
             },
         );
-        assert!(op.is_none());
+        // The only follow-up is re-deriving the opened thread's list-send view
+        // (`refresh_list_send`), exactly as a `conversation-item` click runs it.
+        assert!(matches!(
+            op,
+            Some(crate::app::PageOp::Conversations(
+                crate::conversations::Op::RefreshListSend { .. }
+            ))
+        ));
         assert_eq!(app.page, Page::Conversations);
         assert_eq!(
             app.conversations.mode,

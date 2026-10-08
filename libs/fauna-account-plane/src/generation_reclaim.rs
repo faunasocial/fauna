@@ -16,6 +16,12 @@
 //!
 //! # What one pass does, in order
 //!
+//! Throughout, a generation reads `Shredded` only when its shred is
+//! **authored** at this replica's view (`GenerationMintRecord::shred_is_authored`;
+//! `account-data-taxonomy.md` § *Fleet-scope reclamation* → *the authored
+//! shred*): an unauthored one is out of candidacy, the resolver's act, and no
+//! step below retires, sweeps, forgets or drops anything because of it.
+//!
 //! 1. **Reach.** Publish this device's `fauna.state.device-reach` row when the
 //!    set of live `Minted` generations it can key has changed — the possession
 //!    evidence every retirement below rests on. Never on a cadence: a row
@@ -266,6 +272,7 @@ where
                     id,
                     writer_key,
                     fleet.generation_custody(),
+                    Some(view),
                 )
                 .await?
                 .is_some()
@@ -531,11 +538,16 @@ where
                 continue;
             }
             {
-                let record = GenerationMintRecord::Shredded {
-                    core: core.clone(),
-                    shredded_at_ms: fauna_core::data::Timestamp::now_millis_or_zero() as i64,
-                    shredded_by: me,
-                };
+                // Authored: signed by this device over the recomputed id, the
+                // ONE production shape since the ruling — a
+                // consumer drops a key or retires a row only on a row
+                // `shred_is_authored` admits (`GenerationMintRecord::Shredded`
+                // docs).
+                let record = fauna_core::generation::sign_shred(
+                    writer_key,
+                    core.clone(),
+                    fauna_core::data::Timestamp::now_millis_or_zero() as i64,
+                )?;
                 fleet
                     .put(
                         &ItemId {
@@ -562,6 +574,13 @@ where
     }
     let receipts = live_rows(store, KIND_ESCROW_RECEIPT).await?;
     for g in shredded {
+        // The device-side half of the crypto-shred, eventual: the walk's hook
+        // drops the key as the shred merges, but may have judged it before
+        // the shredder's own enrollment merged (per-writer frontiers
+        // interleave). Idempotent.
+        if let Some(custody) = fleet.generation_custody() {
+            custody.drop_generation_key(g);
+        }
         let g_hex = fauna_core::hex32::encode(g);
         retirer
             .retire_gen0(KIND_GENERATION_MINT, &g_hex, None, Belt::Dataless(g))
@@ -649,6 +668,7 @@ pub(crate) struct ReclaimState {
     coverage: WrapCoverage,
     /// Live generations: canonical, id-bound cores.
     minted: BTreeMap<[u8; 32], MintCore>,
+    /// Generations merged state reads **authored** `Shredded` at `view`.
     shredded: BTreeSet<[u8; 32]>,
     /// Every edge of the mint DAG, shredded generations' included.
     parents: BTreeMap<[u8; 32], Vec<[u8; 32]>>,
@@ -686,9 +706,18 @@ impl ReclaimState {
                         minted.insert(id, core);
                     }
                 }
-                GenerationMintRecord::Shredded { core, .. } => {
+                ref shred @ GenerationMintRecord::Shredded { ref core, .. } => {
                     parents.insert(id, core.parents.clone());
-                    shredded.insert(id);
+                    // Only an AUTHORED shred makes a generation dead here
+                    // (`account-data-taxonomy.md` § *Fleet-scope
+                    // reclamation* → *the authored shred*): this one set is
+                    // every destructive arm's — step 7's retires, receipt
+                    // sweep and key drop, step 8's relay residue, the
+                    // publish diff's dead rows. An unauthored one is out of
+                    // candidacy (the resolver's act) and nothing more.
+                    if shred.shred_is_authored(&view) == Ok(id) {
+                        shredded.insert(id);
+                    }
                 }
             }
         }
@@ -1477,7 +1506,16 @@ where
                     continue;
                 };
                 belt_generation = g;
-                match mint_licence(store, fleet, me, &plaintext, &belt_generation, shredded).await?
+                match mint_licence(
+                    store,
+                    fleet,
+                    me,
+                    retirer.view,
+                    &plaintext,
+                    &belt_generation,
+                    shredded,
+                )
+                .await?
                 {
                     Some(MintLicence::Carried) => Belt::None,
                     Some(MintLicence::Shredded) => Belt::Dataless(&belt_generation),
@@ -1512,7 +1550,7 @@ enum MintLicence {
     /// published as the pass saw it — the row the walk's carry wrote.
     Carried,
     /// The opened record, or this replica's merged state, reads `g`
-    /// `Shredded`.
+    /// **authored** `Shredded`.
     Shredded,
 }
 
@@ -1520,6 +1558,7 @@ async fn mint_licence<B, R>(
     store: &AccountStore<B>,
     fleet: &AccountStatePlane<'_, B, R>,
     me: [u8; 32],
+    view: &FleetView,
     plaintext: &fauna_core::account_entry_crypto::EntryPlaintext,
     g: &[u8; 32],
     shredded: &BTreeSet<[u8; 32]>,
@@ -1529,11 +1568,11 @@ where
     R: RpcRequester + Clone,
     R::Error: RpcErrorClass,
 {
+    // Authored at this replica's view, over `g` itself — an unauthored shred
+    // licenses no retire (the authored shred; `shredded` is filtered alike).
     let record_shredded = !plaintext.tombstone
-        && matches!(
-            fauna_core::encoding::canonical_decode::<GenerationMintRecord>(&plaintext.value),
-            Ok(GenerationMintRecord::Shredded { .. })
-        );
+        && fauna_core::encoding::canonical_decode::<GenerationMintRecord>(&plaintext.value)
+            .is_ok_and(|record| record.shred_is_authored(view) == Ok(*g));
     if record_shredded || shredded.contains(g) {
         return Ok(Some(MintLicence::Shredded));
     }
@@ -3129,15 +3168,15 @@ mod tests {
         f.put(machinery_row(
             KIND_GENERATION_MINT,
             g1_hex,
-            &GenerationMintRecord::Shredded {
-                core,
-                shredded_at_ms: 9_000,
-                shredded_by: device_id_of(US),
-            },
+            &fauna_core::generation::sign_shred(&device_key(US), core, 9_000).unwrap(),
         ))
         .await;
         let nest = Recorder::default();
-        let p = plane(&f, &nest);
+        // A retained key the walk's hook never saw dropped (the shred was
+        // staged as merged state): the pass drops it, eventually.
+        let bundle = Bundle::default();
+        crate::generation_tip::RetainedKeyCustody::record_generation_key(&bundle, &g1, &k1);
+        let p = plane(&f, &nest).with_generation_custody(&bundle);
 
         p.set_listing(Some(crate::account_state_plane::Listing::new()));
         let diff = crate::publish_diff::publish_diff(&f.store, &p, &f.trust, &f.writer_key)
@@ -3154,6 +3193,105 @@ mod tests {
             "the pass forgot the copy the diff skipped: {pass:?}"
         );
         assert!(holds_relay_row(&f, sib, &k2, &custody).await);
+        assert!(
+            crate::generation_tip::RetainedKeyCustody::retained_generation_key(&bundle, &g1)
+                .is_none(),
+            "the pass drops an authored shred's retained key"
+        );
+    }
+
+    /// **An unauthored shred is no deletion** (`account-data-taxonomy.md`
+    /// § *Fleet-scope reclamation* → *the authored shred*): a
+    /// sig-less `Shredded` for generation 1 — what any `BackupKey` holder can
+    /// write — or one signed by a device that is no verified member leaves
+    /// everything the authored twin above destroys: the publish diff calls
+    /// no row dead, the pass retires neither the mint row nor the receipt
+    /// (so the holder's escrow wrap stays), forgets no relay residue, and the
+    /// retained key stays in custody. Red-verified: with `ReclaimState::read`
+    /// inserting on `Shredded { .. }` again, every assertion here fails.
+    #[tokio::test]
+    async fn an_unauthored_shred_retires_nothing_sweeps_nothing_and_keeps_the_key() {
+        use crate::generation_tip::RetainedKeyCustody as _;
+        let f = trusting_fixture().await;
+        let sib = lower_seed();
+        f.put(enrollment_row(sib)).await;
+        let members = [member_of(US), member_of(sib)];
+        let (g1, k1) = mint_acked(&f, &members, vec![], US, 7_000).await;
+        let (g2, k2) = mint_acked(&f, &members, vec![g1], US, 8_000).await;
+        let custody = entry(KIND_CUSTODIES_HELD, "grant", b"held", 3, false);
+        sealed_under(&f, sib, 2, &g1, &k1, &custody).await;
+        sealed_under(&f, sib, 3, &g2, &k2, &custody).await;
+        let g1_hex = fauna_core::hex32::encode(&g1);
+        let receipt_key = format!(
+            "{g1_hex}/{}",
+            fauna_core::hex32::encode(&holder_key().verifying_key().to_bytes())
+        );
+        let core = match fauna_core::encoding::canonical_decode::<GenerationMintRecord>(
+            &f.store
+                .state(KIND_GENERATION_MINT, &g1_hex)
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+        )
+        .unwrap()
+        {
+            GenerationMintRecord::Minted { core, .. } => core,
+            GenerationMintRecord::Shredded { .. } => unreachable!("minted above"),
+        };
+        let nest = Recorder::default();
+        let bundle = Bundle::default();
+        bundle.record_generation_key(&g1, &k1);
+        let p = plane(&f, &nest).with_generation_custody(&bundle);
+        let mint_item = p.gen0_item_key(KIND_GENERATION_MINT, &g1_hex).unwrap();
+        let receipt_item = p.gen0_item_key(KIND_ESCROW_RECEIPT, &receipt_key).unwrap();
+
+        for forged in [
+            GenerationMintRecord::Shredded {
+                core: core.clone(),
+                shredded_at_ms: 9_000,
+                shredded_by: device_id_of(US),
+                shredder_sig: vec![],
+            },
+            // THEM was never enrolled here: no verified member.
+            fauna_core::generation::sign_shred(&device_key(THEM), core.clone(), 9_000).unwrap(),
+        ] {
+            f.put(machinery_row(KIND_GENERATION_MINT, g1_hex.clone(), &forged))
+                .await;
+            p.set_listing(Some(crate::account_state_plane::Listing::new()));
+            let diff = crate::publish_diff::publish_diff(&f.store, &p, &f.trust, &f.writer_key)
+                .await
+                .unwrap();
+            assert_eq!(
+                diff.dead, 0,
+                "no row is dead under an unauthored shred: {diff:?}"
+            );
+
+            let pass = ensure_reclaimed(&f.store, &p, &f.trust, &f.writer_key)
+                .await
+                .unwrap();
+            let asked = |item: [u8; 32]| nest.0.lock().unwrap().iter().any(|(i, _, _)| *i == item);
+            assert!(
+                !asked(mint_item) && !asked(receipt_item),
+                "neither the mint row nor its receipt is retired: {pass:?}"
+            );
+            assert!(
+                f.store
+                    .state(KIND_ESCROW_RECEIPT, &receipt_key)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "the receipt — and so the holder's escrow wrap — stays"
+            );
+            assert!(
+                holds_relay_row(&f, sib, &k1, &custody).await,
+                "no relay residue is forgotten: {pass:?}"
+            );
+            assert!(
+                bundle.retained_generation_key(&g1).is_some(),
+                "the retained key stays"
+            );
+        }
     }
 
     /// A `fauna.state.generation-closed` row for `generation`, as the remover
@@ -3270,11 +3408,7 @@ mod tests {
         f.put(machinery_row(
             KIND_GENERATION_MINT,
             g1_hex,
-            &GenerationMintRecord::Shredded {
-                core,
-                shredded_at_ms: 9_000,
-                shredded_by: device_id_of(US),
-            },
+            &fauna_core::generation::sign_shred(&device_key(US), core, 9_000).unwrap(),
         ))
         .await;
         p.set_listing(Some(crate::account_state_plane::Listing::new()));
@@ -3518,6 +3652,19 @@ mod tests {
         kind: &str,
         key: &str,
     ) -> [u8; 32] {
+        retired_schedule_row_of(f, backup_key, writer_seed, seq, kind, key, vec![0xA5; 8]).await
+    }
+
+    /// [`retired_schedule_row`] carrying `value`.
+    async fn retired_schedule_row_of(
+        f: &Fixture,
+        backup_key: &fauna_core::crypto::BackupKey,
+        writer_seed: [u8; 32],
+        seq: u64,
+        kind: &str,
+        key: &str,
+        value: Vec<u8>,
+    ) -> [u8; 32] {
         let schedule = fauna_core::crypto::AccountStateKeySchedule::derive(backup_key);
         let writer_key = device_key(writer_seed);
         let coords = EntryCoordinates {
@@ -3532,7 +3679,7 @@ mod tests {
                 kind: kind.into(),
                 key: key.into(),
                 merge_meta: None,
-                value: vec![0xA5; 8].into(),
+                value: value.into(),
                 tombstone: false,
             },
             &writer_key,
@@ -3663,5 +3810,78 @@ mod tests {
                 .is_none(),
             "and nothing the arm opened was merged"
         );
+    }
+    /// **The predecessor arm's shred licence is an authored shred only**
+    /// (`account-data-taxonomy.md` § *Fleet-scope reclamation* → *the
+    /// authored shred*): a predecessor device's mint row that
+    /// opens under the retired keys to a sig-less `Shredded` — what any
+    /// holder of the retired `BackupKey` can seal — licenses no retire and
+    /// stays; one that opens to a shred a verified member signed is retired.
+    /// Red-verified: with `mint_licence` back on `Shredded { .. }` alone, the
+    /// unauthored row is retired.
+    #[tokio::test]
+    async fn the_predecessor_arms_shred_licence_is_an_authored_shred_only() {
+        let f = fixture().await;
+        f.put(enrollment_row(US)).await;
+        let retired = retired_backup_key();
+        let attested = crate::attested_predecessors::AttestedPredecessors::from_backup_keys([(
+            fauna_core::identity::ActorId([0xA1; 32]),
+            &retired,
+        )]);
+        let core_of = |salt: u8| MintCore {
+            parents: vec![],
+            member_ids: vec![device_id_of(US)],
+            minter: device_id_of(PREDECESSOR_DEVICE),
+            key_commitment: [salt; 32],
+            minted_at_ms: 1_000,
+        };
+        let (unsigned_core, signed_core) = (core_of(0x5A), core_of(0x5B));
+        let unsigned_g = fauna_core::generation::generation_id(&unsigned_core).unwrap();
+        let signed_g = fauna_core::generation::generation_id(&signed_core).unwrap();
+        let unsigned = retired_schedule_row_of(
+            &f,
+            &retired,
+            PREDECESSOR_DEVICE,
+            5,
+            KIND_GENERATION_MINT,
+            &fauna_core::hex32::encode(&unsigned_g),
+            fauna_core::encoding::canonical_encode(&GenerationMintRecord::Shredded {
+                core: unsigned_core,
+                shredded_at_ms: 9_000,
+                shredded_by: device_id_of(US),
+                shredder_sig: vec![],
+            })
+            .unwrap(),
+        )
+        .await;
+        let signed = retired_schedule_row_of(
+            &f,
+            &retired,
+            PREDECESSOR_DEVICE,
+            6,
+            KIND_GENERATION_MINT,
+            &fauna_core::hex32::encode(&signed_g),
+            fauna_core::encoding::canonical_encode(
+                &fauna_core::generation::sign_shred(&device_key(US), signed_core, 9_000).unwrap(),
+            )
+            .unwrap(),
+        )
+        .await;
+
+        let nest = Recorder::default();
+        let p = plane(&f, &nest).with_predecessor_machinery_keys(attested.retired_machinery_keys());
+        let pass = ensure_reclaimed(&f.store, &p, &f.trust, &f.writer_key)
+            .await
+            .unwrap();
+        let asked = |item: [u8; 32]| nest.0.lock().unwrap().iter().any(|(i, _, _)| *i == item);
+        assert!(
+            asked(signed),
+            "an authored shred licenses the retire: {pass:?}"
+        );
+        assert!(
+            !asked(unsigned),
+            "an unauthored shred licenses nothing: {pass:?}"
+        );
+        assert_eq!(p.relay_rows_at(&unsigned).await.unwrap().len(), 1);
     }
 }

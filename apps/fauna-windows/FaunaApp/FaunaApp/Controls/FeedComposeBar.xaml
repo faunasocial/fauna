@@ -80,32 +80,19 @@
                  AcceptsReturn="False" MaxLength="3000"
                  Visibility="Collapsed" />
 
-        <!-- Sell-this-post fields (monetization.md § Per-post pay-to-unlock):
-             "Sell this post…" is the always-last compose-gate-tier-select answer
-             (SetGateTiers). Visible only in sell mode (UpdateSellFieldsVisibility). -->
-        <TextBox x:Name="SellPriceBox"
-                 AutomationProperties.AutomationId="{x:Bind ids:Ids.ComposeSellPrice}"
-                 AcceptsReturn="False" MaxLength="200"
-                 Visibility="Collapsed" />
-
-        <!-- The gated asking-price field (dynamic-features.md section
-             Platform-family surface excision, "A gated plane's user-facing INPUTS
-             excise with it"): payments:AskingPriceInput lives in Views/Payments/
-             and is hosted through this ContentControl exactly like ProfilePage's
-             TierAskingPriceHost, so a store-safe build renders no price input at
-             all, never a bare TextBox here. Its AutomationId is set in this
-             file's own #if PAYMENTS block, never spelled here: XAML has no
-             preprocessor to strip a comment, so the literal id must never appear
-             outside the #if guarded C#, measured 2026-09-06. -->
-        <ContentControl x:Name="SellAskingPriceHost"
+        <!-- Sell-this-post fields (monetization.md § Per-post pay-to-unlock), shown only
+             in sell mode (UpdateSellFieldsVisibility). The sell composer is inside the
+             payments plane (dynamic-features.md section Platform-family surface
+             excision, The price-and-route class): its fields live in
+             Views/Payments/SellComposeFields and are hosted through this ContentControl
+             exactly like ProfilePage's TierMoneyFieldsHost, and the "Sell this post…"
+             answer itself is added only under this file's #if PAYMENTS, so a store-safe
+             build can stage no sale at all. No id of the plane may be spelled here: XAML
+             has no preprocessor to strip a comment, measured 2026-09-06. -->
+        <ContentControl x:Name="SellFieldsHost"
                         HorizontalAlignment="Stretch"
                         HorizontalContentAlignment="Stretch"
                         Visibility="Collapsed" />
-
-        <CheckBox x:Name="SellSubscribersFreeCheck"
-                  AutomationProperties.AutomationId="{x:Bind ids:Ids.ComposeSellSubscribersFree}"
-                  IsChecked="True"
-                  Visibility="Collapsed" />
 
         <!-- Tags field -->
         <TextBox x:Name="TagsBox"

@@ -1,117 +1,98 @@
-import { pushVapidKey, pushSubscribe, pushUnsubscribe } from './rpc';
+import { pushVapidKey, pushEnable, pushDisable, pushRearm, pushDropActorRow } from './rpc';
+import type { BrowserPushSubscription } from './rpc';
 import { toArrayBufferView } from './bytes';
-import { actorIdFromSecret } from './wasm';
-import {
-  isSubscribed,
-  markSubscribed,
-  clearSubscribed,
-  clearSubscribedActorIf,
-  mayHoldRow,
-  needsReconcile,
-} from './push-actor';
-import { getDeviceId } from './device-id';
+import { pushOptedIn } from './wasm';
 import type { Identity } from './types';
 
-export { isSubscribed };
+// Web push over the shared registration machine
+// (`fauna_client_push::registration`, reached through the session's wasm
+// `WsRpcClient`): the install opt-in bit, the which-actor record and the three
+// leave-shapes are the machine's (`docs/goal/architecture/apps/common.md`
+// § Registration), persisted install-scoped in `localStorage` wasm-side
+// (`account-scoping.md` class 2 — no sign-out or removal erase touches them).
+// What stays here is the one genuinely platform-only step: asking the browser's
+// `serviceWorker`/`PushManager` for a subscription to hand the machine.
 
-// The three nest hops ride WS-RPC (`fauna.push.{vapid_key,subscribe,
-// unsubscribe}`) via `$lib/rpc`; the browser `serviceWorker`/`PushManager`
-// work below is genuinely platform-only and stays here.
-export async function subscribeToPush(secretHex: string): Promise<boolean> {
+/** Why an Enable could not register: the browser has no push APIs, or the user
+ *  (or the browser) refused the notification permission. */
+export class PushUnavailableError extends Error {}
+
+/** Has this browser opted in? The stored bit, never `Notification.permission`
+ *  (`docs/goal/ui/settings.md` § Push notifications). */
+export { pushOptedIn };
+
+/** This browser's push subscription — `PushManager.subscribe()` on an
+ *  already-subscribed registration hands back the existing one without a
+ *  prompt. Throws `PushUnavailableError` when the browser cannot push. */
+async function browserSubscription(secretHex: string): Promise<BrowserPushSubscription> {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-    return false;
+    throw new PushUnavailableError('push is not available in this browser');
   }
-
   const registration = await navigator.serviceWorker.register('/service-worker.js');
-
   const publicKey = await pushVapidKey(secretHex);
-  if (!publicKey) return false;
-
-  const subscription = await registration.pushManager.subscribe({
-    userVisibleOnly: true,
-    applicationServerKey: toArrayBufferView(urlBase64ToUint8Array(publicKey)),
-  });
-
-  const keys = subscription.toJSON().keys!;
-
-  await pushSubscribe(secretHex, {
-    device_id: getDeviceId(actorIdFromSecret(secretHex)),
-    endpoint: subscription.endpoint,
-    key_p256dh: keys.p256dh,
-    key_auth: keys.auth,
-  });
-
-  return true;
+  if (!publicKey) throw new PushUnavailableError('this nest does not offer push');
+  let subscription: PushSubscription;
+  try {
+    subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: toArrayBufferView(urlBase64ToUint8Array(publicKey)),
+    });
+  } catch (e) {
+    // A refused permission surfaces as `NotAllowedError` (or an `AbortError`
+    // naming it): the platform said no, which the toggle reports as such.
+    throw new PushUnavailableError(e instanceof Error ? e.message : String(e));
+  }
+  const keys = subscription.toJSON().keys ?? {};
+  if (!keys.p256dh || !keys.auth) {
+    throw new PushUnavailableError('the browser returned a subscription without keys');
+  }
+  return { endpoint: subscription.endpoint, key_p256dh: keys.p256dh, key_auth: keys.auth };
 }
 
-export async function unsubscribeFromPush(secretHex: string): Promise<void> {
-  await pushUnsubscribe(secretHex, getDeviceId(actorIdFromSecret(secretHex)));
+/** The toggle switched on: subscribe, then set the bit. A failure leaves the
+ *  bit unset, so the toggle settles back off. */
+export async function enablePush(secretHex: string): Promise<void> {
+  await pushEnable(secretHex, await browserSubscription(secretHex));
 }
 
-export async function requestAndSubscribe(secretHex: string): Promise<boolean> {
-  const ok = await subscribeToPush(secretHex);
-  if (ok) markSubscribed(actorIdFromSecret(secretHex));
-  return ok;
-}
-
-export async function unsubscribe(secretHex: string): Promise<void> {
-  await unsubscribeFromPush(secretHex);
-  clearSubscribed();
+/** The toggle switched off: the bit clears the moment this is issued (off stays
+ *  off even offline), then the row goes. The OS permission is left alone. */
+export async function disablePush(secretHex: string): Promise<void> {
+  await pushDisable(secretHex);
 }
 
 /**
  * The leave-gesture half of "the subscription follows the signed-in identity"
- * (`docs/goal/architecture/apps/common.md` § Registration, ruled 2026-08-30):
- * drop the LEAVING actor's `push_subscriptions` row while its authority is
- * still in hand — the verbs are actor-scoped on the connection actor, so
- * nobody else ever can. Call sites: `performSwitch` (before the switch
- * commits), `identity.logout()` (before the credential erase can strand the
- * secret), and the add-account entry (the append wizard is the one switch
- * commit that no longer holds the outgoing authority).
- *
- * Unlike `unsubscribe` above (the user's Disable), this NEVER touches the
- * install intent bit — clearing it here would turn every sign-out into the
- * silent opt-out the re-arm rule forbids. Best-effort by ruling: a leave
- * gesture must complete offline, so failures are swallowed and the stranded
- * row is left to the ruling's three reapers (re-adopt, succession burn,
- * endpoint death). Only a drop that actually landed clears the which-actor
- * record — a failed one leaves the row live, so the record stays true.
+ * (`common.md` § Registration): drop the LEAVING actor's row while its
+ * authority is still in hand — the verbs are actor-scoped on the connection
+ * actor, so nobody else ever can. Call sites: `performSwitch` (before the
+ * switch commits), `identity.logout()` (before the credential erase can strand
+ * the secret), and the add-account entry. Never touches the opt-in bit, and
+ * best-effort by ruling: a leave gesture must complete offline.
  */
 export async function dropActorPushRow(secretHex: string): Promise<void> {
-  if (!mayHoldRow()) return;
   try {
-    await pushUnsubscribe(secretHex, getDeviceId(actorIdFromSecret(secretHex)));
-    clearSubscribedActorIf(actorIdFromSecret(secretHex));
+    await pushDropActorRow(secretHex);
   } catch (e) {
     console.warn('push row drop (leave-gesture, best-effort):', e);
   }
 }
 
 /**
- * Re-arm this browser's push subscription for whichever actor is signed in
- * now, when it was last armed for a *different* one — the successor's own
- * device never re-subscribing to push (`docs/goal/behavior/
- * succession-aftermath.md` § Implementation status today). A subscription is
- * install-scoped (this function's own `isSubscribed()` gate), but the nest's
- * `push_subscriptions` row it produced is actor-scoped: succession mints a
- * brand new actor id with no row of its own, and — by the same design that
- * makes the table unrevocable from any app — nothing ever moves the old row
- * over. Silently off is the symptom; this is the fix.
- *
- * Call on every identity settle (`onActorChange` in the root layout — fires
- * on first load too, which is deliberate: a page reload after a succession
- * must not require a Settings visit to notice). No-ops unless this browser
- * already completed the permission dance once: it must never *opt a device
- * into* push, only keep an existing subscription pointed at the right actor.
- * `subscribeToPush` replays the same P-256/auth keys and endpoint the browser
- * already holds — `PushManager.subscribe()` on an already-subscribed
- * registration returns the existing subscription rather than prompting again
- * — so this never surfaces a permission prompt.
+ * Identity settle (`onActorChange` in the root layout — first load included,
+ * so a reload after a switch or a succession needs no Settings visit):
+ * re-register this browser's row under whoever is signed in now, while the
+ * install is opted in. Never opts a browser in — an opted-out browser does not
+ * even ask `PushManager`. Best-effort: a failure is logged and the settle
+ * proceeds.
  */
-export async function reconcileSubscriptionActor(id: Identity): Promise<void> {
-  if (!needsReconcile(id.actorId)) return;
-  const ok = await subscribeToPush(id.secretHex);
-  if (ok) markSubscribed(id.actorId);
+export async function rearmPush(id: Identity): Promise<void> {
+  if (!pushOptedIn()) return;
+  try {
+    await pushRearm(id.secretHex, await browserSubscription(id.secretHex));
+  } catch (e) {
+    console.warn('push re-arm (identity settle, best-effort):', e);
+  }
 }
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {

@@ -2621,7 +2621,7 @@ fn sweep_expired_consents(conn: &rusqlite::Connection, now: i64) -> Result<usize
 /// journey-level "no two live rows share a code" assertion cannot fail against a
 /// deleted uniqueness check — at 30 bits over a table of a dozen rows a natural
 /// collision is a one-in-ten-million event, so the pin would report green with
-/// the mechanism gone (finding 61's class). Taking the generator as a parameter
+/// the mechanism gone (the vacuous-pin class). Taking the generator as a parameter
 /// makes the retry itself testable with a generator that *deliberately*
 /// collides, which is a pin that can actually go red.
 ///

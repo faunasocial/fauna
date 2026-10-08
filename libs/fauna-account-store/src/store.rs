@@ -75,6 +75,22 @@ pub fn seed_legs_lock_path(store_dir: &Path) -> PathBuf {
     store_dir.join(SEED_LEGS_LOCK_FILENAME)
 }
 
+/// The agent presence lock's filename — "the sync agent hosts this store"
+/// (`account-runtime.md` § Multi-instance concurrency → *The agent holds the
+/// role when present*, part 1). [`crate::locks::AgentPresenceLock`] takes and
+/// probes it; the name is owned here for the same reason its siblings are.
+///
+/// **A separate file from `engine.lock`**: this one states priority, that one
+/// arbitrates exclusivity. The agent holds this for its mount's lifetime
+/// whether or not it holds the role, which is what lets an app holder see it
+/// and hand the role over.
+pub const AGENT_LOCK_FILENAME: &str = "agent.lock";
+
+/// Where the agent presence lock lives for a store rooted at `store_dir`.
+pub fn agent_lock_path(store_dir: &Path) -> PathBuf {
+    store_dir.join(AGENT_LOCK_FILENAME)
+}
+
 /// How many entries the retire record keeps
 /// ([`AccountStore::record_issued_retire`]) — the newest; older ones are
 /// dropped. A constant, not a knob: no human chooses it. Sized for a machine
@@ -2778,6 +2794,24 @@ mod tests {
             Path::new("/x/actor/migration.lock")
         );
         assert_ne!(ENGINE_LOCK_FILENAME, MIGRATION_LOCK_FILENAME);
+    }
+
+    /// Presence and the role it gives priority for take two files: the agent
+    /// holds `agent.lock` for its mount's lifetime, holder or not.
+    #[test]
+    fn the_agent_lock_filename_is_reserved_and_distinct() {
+        assert_eq!(AGENT_LOCK_FILENAME, "agent.lock");
+        assert_eq!(
+            agent_lock_path(Path::new("/x/actor")),
+            Path::new("/x/actor/agent.lock")
+        );
+        for other in [
+            ENGINE_LOCK_FILENAME,
+            MIGRATION_LOCK_FILENAME,
+            SEED_LEGS_LOCK_FILENAME,
+        ] {
+            assert_ne!(AGENT_LOCK_FILENAME, other);
+        }
     }
 
     #[test]

@@ -2068,13 +2068,27 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         action: String,
         body: Option<String>,
     ) -> Result<(), String> {
+        self.interact_folding_counts(post_id, action, body)
+            .await
+            .map(|_| ())
+    }
+
+    /// [`interact`](Self::interact), answering whether the nest spoke for the
+    /// target's counters (`counts` present) — the signal a referencing compose
+    /// reads to know a post-act refresh means something.
+    async fn interact_folding_counts(
+        &self,
+        post_id: String,
+        action: String,
+        body: Option<String>,
+    ) -> Result<bool, String> {
         let posts = PostsClient::new(self.nest.clone());
         let reply = posts
             .posts_interact(post_id.clone(), action, body)
             .await
             .map_err(|e| e.to_string())?;
         let Some(counts) = reply.counts else {
-            return Ok(());
+            return Ok(false);
         };
         let mut changed = false;
         {
@@ -2101,7 +2115,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         if changed {
             self.notify();
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Reply to a post from the interaction bar (`feed-reply-button`).
@@ -2464,12 +2478,17 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                 )
             })
             .unwrap_or((false, false, ReferencedAudience::Public));
+        // Whether the post-act counter refresh below means anything: on a
+        // `fauna` native target always; on a bridged one exactly when its ack
+        // carried counts.
+        let mut nest_holds_counts = is_fauna_native;
         if !is_native {
-            // The eligibility ack. `interact` folds the ack's `counts` when
-            // the nest speaks for them (an AP/nostr target — a local row),
-            // and leaves the rendered numbers alone when it does not (a
-            // bluesky target — its counters live at the origin).
-            self.interact(post_id.clone(), kind.action().to_string(), None)
+            // The eligibility ack. It folds the ack's `counts` when the nest
+            // speaks for them (an AP/nostr target — a local row), and leaves
+            // the rendered numbers alone when it does not (a bluesky target —
+            // its counters live at the origin). Those counts are PRE-act.
+            nest_holds_counts = self
+                .interact_folding_counts(post_id.clone(), kind.action().to_string(), None)
                 .await?;
         }
 
@@ -2497,8 +2516,10 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         // nest's interact door refuses reply/repost/quote on any non-`fauna`
         // native token, so an archive-imported target's refresh is skipped
         // here — the count catches up on the caller's next natural reload
-        // instead.
-        if is_fauna_native {
+        // instead. A bridged target whose ack carried counts is re-asked the
+        // same way: its ack was pre-act, and the nest bumps the ingested row's
+        // counter as the referencing post lands.
+        if nest_holds_counts {
             let _ = self
                 .interact(post_id, kind.action().to_string(), None)
                 .await;
@@ -6493,6 +6514,11 @@ mod tests {
         /// bridged-source / `unrepost` case the client must treat
         /// as "leave the rendered counts alone".
         interact_counts: Option<fauna_protocol::posts::PostEngagementCounts>,
+        /// When set, `fauna.posts.create` moves these into `interact_counts` —
+        /// the nest bumping the target's counter as the referencing post lands
+        /// (`record_reference_engagements`), so an ack asked BEFORE the compose
+        /// reads the old values and one asked after reads the new.
+        interact_counts_after_create: Option<fauna_protocol::posts::PostEngagementCounts>,
         /// When set, `fauna.posts.get` answers a **legal-takedown** reply: the
         /// body is withheld (empty) and `legal_takedown` carries this reference
         /// (the taken-down-post wire shape — moderation.md § Categories item 1).
@@ -6613,6 +6639,16 @@ mod tests {
                     like_count: like,
                     reply_count: reply,
                     repost_count: repost,
+                    quote_count: quote,
+                    extra: Default::default(),
+                });
+        }
+        fn set_interact_counts_after_create(&self, reply: i64, quote: i64) {
+            self.inner.lock().unwrap().interact_counts_after_create =
+                Some(fauna_protocol::posts::PostEngagementCounts {
+                    like_count: 0,
+                    reply_count: reply,
+                    repost_count: 0,
                     quote_count: quote,
                     extra: Default::default(),
                 });
@@ -6928,6 +6964,9 @@ mod tests {
                         extra: Default::default(),
                     }),
                     "fauna.posts.create" => {
+                        if let Some(after) = g.interact_counts_after_create.take() {
+                            g.interact_counts = Some(after);
+                        }
                         fauna_protocol::encode_canonical(&fauna_protocol::posts::PostCreateReply {
                             post_id: "ab".repeat(32),
                             extra: Default::default(),
@@ -9404,6 +9443,66 @@ mod tests {
             m.snapshot().posts[0].reply_count,
             7,
             "the target's rendered reply_count must take the nest's post-act value"
+        );
+    }
+
+    /// The same counter move on a BRIDGED target whose counters the nest holds
+    /// (`activitypub`, `nostr` — an ingested local row, so the eligibility ack
+    /// carries `counts`): the ack is asked before the compose, so its counts
+    /// are the PRE-act values, and the target's count must still land at the
+    /// nest's post-act value — as on a native target, never left stale until
+    /// the next reload. A `bluesky` ack carries no counts (they live at the
+    /// origin), so nothing is re-asked and the rendered numbers stay alone.
+    #[test]
+    fn a_composed_reply_or_quote_on_a_bridged_post_refreshes_the_counter_the_nest_holds() {
+        for source in ["activitypub", "nostr"] {
+            for verb in ["reply", "quote"] {
+                let target = "cc".repeat(32);
+                let nest = MockNest::arc();
+                let mut bridged = post(&target, 2);
+                bridged.source = source.into();
+                nest.push_page(vec![bridged], None);
+                nest.set_interact_counts(0, 0, 0, 0);
+                nest.set_interact_counts_after_create(1, 1);
+                let m = mgr(nest.clone());
+                block_on(m.select_feed(None));
+
+                match verb {
+                    "reply" => block_on(m.reply(target.clone(), "hi".into())),
+                    _ => block_on(m.quote(target.clone(), String::new())),
+                }
+                .unwrap_or_else(|e| panic!("{verb} of a {source} post: {e}"));
+
+                let p = &m.snapshot().posts[0];
+                let count = if verb == "reply" {
+                    p.reply_count
+                } else {
+                    p.quote_count
+                };
+                assert_eq!(
+                    count, 1,
+                    "{verb} of a {source} post: the target's count must take the \
+                     nest's post-act value, not the pre-compose ack's"
+                );
+            }
+        }
+
+        let target = "cc".repeat(32);
+        let nest = MockNest::arc();
+        let mut bridged = post(&target, 2);
+        bridged.source = "bluesky".into();
+        nest.push_page(vec![bridged], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        block_on(m.reply(target, "hi".into())).expect("reply ok");
+        let acks = nest
+            .kinds()
+            .iter()
+            .filter(|k| *k == "fauna.posts.interact")
+            .count();
+        assert_eq!(
+            acks, 1,
+            "a bluesky ack carries no counts: nothing to re-ask"
         );
     }
 

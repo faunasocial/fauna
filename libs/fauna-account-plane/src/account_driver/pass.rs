@@ -244,6 +244,15 @@ pub struct PumpReport {
     /// escrow-recovery, secondary-leg and custody slots, the publish counts of
     /// its own publish step, their timings and errors.
     pub skipped_non_holder: bool,
+    /// True on the report of the `reconcile_now` whose presence re-read found
+    /// the sync agent hosting this store and handed it the engine role
+    /// (`account-runtime.md` § Multi-instance concurrency → *The agent holds
+    /// the role when present*, part 3): this runtime's legs came down, its
+    /// `engine.lock` was released, and it is a non-holder from here —
+    /// `skipped_non_holder` is set beside it. A yield on any other wake (the
+    /// presence poll, the backstop tick) is reported by the role fact
+    /// ([`super::PumpCycles::is_holder`]) alone.
+    pub yielded: bool,
     /// True when a step's failure chain carried the store's typed
     /// [`fauna_account_store::store::StaleWriter`] refusal: the writer was
     /// rotated away under this process (principal succession, charter § The

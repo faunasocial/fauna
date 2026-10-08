@@ -223,6 +223,13 @@ fn kind_payload_corpus_replays_ok_and_sweep_never_panics() {
             "peer_sync_blocks_pull_reply" => {
                 decode_strict::<PeerSyncBlocksPullReply>(&entry).is_ok()
             }
+            "peer_sync_chunks_pull_request" => {
+                decode_strict::<fauna_protocol::peer_sync::PeerSyncChunksPullRequest>(&entry)
+                    .is_ok()
+            }
+            "peer_sync_chunks_pull_reply" => {
+                decode_strict::<fauna_protocol::peer_sync::PeerSyncChunksPullReply>(&entry).is_ok()
+            }
             "sync_changes_list_request" => decode_strict::<SyncChangesListRequest>(&entry).is_ok(),
             "sync_changes_list_reply" => decode_strict::<SyncChangesListReply>(&entry).is_ok(),
             other => panic!("kind_payloads corpus entry {name} has unknown type prefix {other}"),

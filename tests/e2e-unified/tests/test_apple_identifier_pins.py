@@ -762,3 +762,91 @@ def test_the_e2e_ios_bundle_id_matches_the_shipping_app():
         "succeeds and simctl launch fails FBSOpenApplicationServiceError code=4, "
         "a message that never mentions a stale bundle. Observed 2026-08-12."
     )
+
+
+# ---------------------------------------------------------------------------
+# iOS App Store signing (installers/ios.md § Signing). The signed export runs
+# only on the macOS box that holds the profiles (test_ios_archive.py's export
+# leg); these pins run everywhere, so nobody can quietly turn the tracked
+# export options into an upload or the project into automatic signing — the
+# two shapes that would let a build talk to Apple's servers.
+# ---------------------------------------------------------------------------
+
+EXPORT_OPTIONS = "apps/fauna-apple/ExportOptions-AppStore.plist"
+#: The four iOS Release configs (Fauna-iOS, its File Provider pair, the widget)
+#: — the ONLY configs that may carry device signing.
+IOS_RELEASE_CONFIGS = (
+    "FB0000000000000000000021",
+    "FB0000000000000000000023",
+    "FC0000000000000000000033",
+    "FD0000000000000000000043",
+)
+_DEVICE_SIGNING_KEYS = (
+    "CODE_SIGN_IDENTITY[sdk=iphoneos*]",
+    "DEVELOPMENT_TEAM[sdk=iphoneos*]",
+    "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]",
+)
+
+
+def _app_store_profile_name(bundle_id: str) -> str:
+    return f"Fauna AppStore {bundle_id}"
+
+
+def _build_configs(pbxproj: str) -> dict[str, str]:
+    return dict(re.findall(
+        r"\t\t([0-9A-F]{24}) /\* \w+ \*/ = \{\n\t\t\tisa = XCBuildConfiguration;"
+        r"\n\t\t\tbuildSettings = \{\n(.*?)\n\t\t\t\};", pbxproj, re.S))
+
+
+def test_ios_export_options_never_upload_and_sign_manually():
+    opts = _read_plist(EXPORT_OPTIONS)
+    assert opts.get("method") == "app-store-connect", opts.get("method")
+    assert opts.get("destination") == "export", (
+        f"{EXPORT_OPTIONS} must export to disk; the store upload is a separate "
+        f"act from a recorded public commit with its OWN options file "
+        f"(installers/ios.md § Upload mechanics). Got {opts.get('destination')!r}."
+    )
+    assert opts.get("signingStyle") == "manual", opts.get("signingStyle")
+    assert opts.get("teamID") == TEAM_ID, opts.get("teamID")
+    assert opts.get("manageAppVersionAndBuildNumber") is False, (
+        "manageAppVersionAndBuildNumber must be false: true makes the exporter "
+        "query App Store Connect, and CFBundleVersion is pinned at 1 anyway."
+    )
+    assert opts.get("uploadSymbols") is False, opts.get("uploadSymbols")
+
+
+def test_ios_export_options_name_a_profile_for_every_bundle():
+    pbxproj = _read("apps/fauna-apple/Fauna.xcodeproj/project.pbxproj")
+    declared = set(re.findall(
+        r"PRODUCT_BUNDLE_IDENTIFIER = \"?([\w.]+)\"?;", pbxproj))
+    profiles = _read_plist(EXPORT_OPTIONS).get("provisioningProfiles", {})
+    assert profiles == {b: _app_store_profile_name(b) for b in declared}, (
+        f"{EXPORT_OPTIONS} must map every bundle the iOS app embeds to its App "
+        f"Store profile — an export signs each embedded bundle. Got {profiles}."
+    )
+
+
+def test_device_signing_lives_only_in_the_four_ios_release_configs():
+    pbxproj = _read("apps/fauna-apple/Fauna.xcodeproj/project.pbxproj")
+    configs = _build_configs(pbxproj)
+    for cid in IOS_RELEASE_CONFIGS:
+        body = configs[cid]
+        bundle = re.search(r"PRODUCT_BUNDLE_IDENTIFIER = \"?([\w.]+)\"?;", body).group(1)
+        assert '"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Distribution";' in body, cid
+        assert f'"DEVELOPMENT_TEAM[sdk=iphoneos*]" = {TEAM_ID};' in body, cid
+        assert (f'"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = '
+                f'"{_app_store_profile_name(bundle)}";') in body, cid
+    stray = sorted(
+        cid for cid, body in configs.items()
+        if cid not in IOS_RELEASE_CONFIGS and any(k in body for k in _DEVICE_SIGNING_KEYS))
+    assert not stray, (
+        f"device signing keys appear outside the four iOS Release configs: {stray}. "
+        f"Debug, simulator and macOS builds keep the project-level ad-hoc '-'."
+    )
+    assert "CODE_SIGN_STYLE = Automatic" not in pbxproj, (
+        "automatic signing needs an Apple account session on the build machine, "
+        "which installers/ios.md § Signing forbids."
+    )
+    assert pbxproj.count("CODE_SIGN_STYLE = Manual;") >= 2, (
+        "both project-level configs must keep CODE_SIGN_STYLE = Manual."
+    )

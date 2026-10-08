@@ -38,7 +38,7 @@ Stamped 2026-09-19 at 0bb8814071.
 | web |  no run recorded | |
 | linux | ⚠ partial | |
 | windows | ⚠ partial | 0.1.2-dev+2f8445a0 standalone |
-| macos | ⚠ partial | |
+| macos | ⚠ partial | 0.1.3-dev+1cd3bd62 standalone |
 | ios | ⚠ partial | |
 | android | ⚠ partial | |
 | tui | ⚠ partial | 0.1.2-dev+38eef7c4 standalone |

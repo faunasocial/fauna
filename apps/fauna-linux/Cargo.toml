@@ -152,6 +152,7 @@ e2e-agent = [
     # behind `fauna_e2e_agent::RECONNECT_BACKOFF`). A debug build reaches both
     # through `debug_assertions`; these forwards keep a RELEASE-profile e2e build
     # able to drive them (convention 15).
+    "fauna-client-accounts/test-helpers",
     "fauna-client-alert-sweep/test-helpers",
     "fauna-client/e2e-agent",
     "fauna-client-sync/test-helpers",
@@ -535,6 +536,10 @@ fauna-client-sync = { path = "../../libs/fauna-client-sync" }
 # subdomain toggle). web-content-hosting.md § Admin apex hosting / § Published-post management.
 fauna-client-web = { path = "../../libs/fauna-client-web" }
 fauna-client-spam = { path = "../../libs/fauna-client-spam" }
+# Settings → Push notifications: the shared registration state machine (the
+# install intent bit, the which-actor record, the leave-shape drops) the
+# `ws-device` row rides (`common.md` § Push Notifications → *Registration*).
+fauna-client-push = { path = "../../libs/fauna-client-push" }
 # Session-start critical-alert sweep (critical-alerts.md § Mechanism → Who runs
 # the detector) — the shared entry point tui's `session::establish` already
 # calls; this is linux's leg.

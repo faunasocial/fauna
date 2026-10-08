@@ -6572,6 +6572,31 @@ async fn resolve_address_home_nest_down_own_domain_or_bare_handle_is_error() {
     }
 }
 
+/// An address at the local actor's OWN domain that the home nest answers "no
+/// such handle" for is not a Fauna handle — the nest that owns the domain has
+/// answered for it (`foreign-handle-resolution.md` § Peer-auth model: the home
+/// domain is always known). It declines (`NotFound`) so the chain reaches the
+/// SMTP rail: an alias or a mailing list at the user's own mail domain is
+/// addressable as mail (`mail-mass-mailing.md` § Composing a list message).
+/// It is never re-probed as a foreign domain, whose failed hop on a known
+/// domain would read as a terminal `Error`.
+#[tokio::test]
+async fn resolve_address_own_domain_non_handle_declines_to_email() {
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let nest = Arc::new(MockNest::default());
+    *nest.remote_lookup_fault.lock().unwrap() = Some(transport_fault());
+    let alice_actor = alice.identity_actor_id();
+    let backend = FaunaMlsBackend::new(alice, nest, "alice@home.test", alice_actor);
+
+    for raw in ["news@home.test", "news@HOME.test"] {
+        assert_eq!(
+            backend.resolve_address(raw).await,
+            ResolveResult::NotFound,
+            "{raw}: the home nest disowned it, so it is mail"
+        );
+    }
+}
+
 /// Before identity resolution the local actor's domain is unknown, so a typed
 /// domain cannot be classified as foreign; the conservative answer while the
 /// home nest does not answer is `Error`, not an email guess.

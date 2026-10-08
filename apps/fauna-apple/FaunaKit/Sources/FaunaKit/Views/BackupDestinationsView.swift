@@ -100,11 +100,12 @@ public struct BackupDestinationsView: View {
     /// inside each `backup-destination-status-row` — the e2e reads it via a
     /// bare `driver.count("backup-audit-alert")`, no row scope. Built as a
     /// text list, not two `ForEach`s keyed on `destinationId` — a destination
-    /// could in principle carry both an owner-side and a self-reported
-    /// reason, and two `ForEach`s over the same id would collide.
+    /// can carry several owner-side reasons (`alertReasons`, the fifth
+    /// reason beside a standing verdict) and a self-reported one, and
+    /// `ForEach`s over the same id would collide.
     @ViewBuilder
     private var auditAlerts: some View {
-        let ownerSide = vm.destinations.compactMap { vm.alertText(for: $0) }
+        let ownerSide = vm.destinations.flatMap { vm.alertTexts(for: $0) }
         let texts = ownerSide + vm.selfReportedAlertTexts()
         if !texts.isEmpty {
             VStack(alignment: .leading, spacing: 4) {

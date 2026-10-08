@@ -3,7 +3,7 @@ folder view — the witness shape for an app with no bound local folder.
 
 `test_webdav_engine_cross_writer.py` proves `files-in-standard-apps` outcomes
 5, 8 and 9 through a location bound under the served set, which only the four
-desktop apps with a real sync agent have. On a phone "your folder" is the
+desktop apps with a real sync agent have. On a phone or on web "your folder" is the
 served set as the app itself lists it: the mount's delete, rename, move and
 copy are manifest-level re-records of that set (`webdav-server.md` § Protocol
 surface (v1) and deliberate deferrals), and the Media page's folder view lists
@@ -22,11 +22,15 @@ face of the same set, not a second one.
      same `sync_changes` plane the engine writes) opens through the mount
      byte-identically once the app serves it.
 
-Outcome 8 (a mount-written file still OPENS in the app after unserving) needs
-the app to read a file's bytes, which on apple is `media-item-detail-download-button`
-— spec'd for every app, not yet painted there; the
-Media seam holds the served set's retired generations since 2026-09-26, so its
-phone witness follows that button alone.
+  8. **readable after unserving** — a file saved through the mount still opens
+     in the app after the app stops serving the folder. Unserving rotates the
+     folder's key away from the one the mount sealed with, and the Media seam
+     keeps the served set's retired generations, so the app's own
+     `media-item-detail-download-button` hands back the same bytes.
+
+Each test names its own apps (the feature catalog reads the marks statically,
+`scripts/features_scan.py`). The outcome-8 leg is marked web only, because it
+has been run green only there; a phone gains its mark when a run there is green.
 
 Serving and unserving go through the app's own `folder-webdav-toggle`, as
 `test_webdav_mount_behaviours.py` does; the WebDAV side is the RFC-4918 client
@@ -45,15 +49,15 @@ from helpers.webdav_roundtrip import enable_mail_and_client, unthrottled, wait_s
 pytestmark = [
     pytest.mark.tier1,
     pytest.mark.tier_3,
-    pytest.mark.ios,
-    # android has no bound local folder either (`webdav-server.md` § Implementation
-    # status today), and paints every element these journeys drive
-    # (`media-folder-filter`, `media-item`, `folder-webdav-toggle`). Its outcome-9
-    # leg needs the Media upload, which `MediaActions.upload_file` declares
-    # unbuilt there.
-    pytest.mark.android,
     pytest.mark.real_conversations,
 ]
+
+# The apps are literal marks on each test. android has no bound local folder
+# either (`webdav-server.md` § Implementation status today), and paints every
+# element these journeys drive (`media-folder-filter`, `media-item`,
+# `folder-webdav-toggle`). Its outcome-9 leg needs the Media upload, which
+# `MediaActions.upload_file` declares unbuilt there. web lists the served set
+# nest-side, as the phones do.
 
 #: A mount write reaches the nest synchronously, but the folder view reads
 #: `fauna.media.list` only when the page is ENTERED (`MediaActions.reenter`), so
@@ -135,6 +139,9 @@ def _await_folder_view(app, folder: str, want, what: str) -> list[str]:
     return seen[0]
 
 
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.web
 @pytest.mark.feature("files-in-standard-apps")
 def test_mount_edits_show_in_the_apps_folder_view(app, dedicated_mail_nest, request):
     """Deleting, renaming, moving into a subfolder and copying a file through
@@ -194,6 +201,12 @@ def test_mount_edits_show_in_the_apps_folder_view(app, dedicated_mail_nest, requ
     assert not app.has_error(), f"the journey surfaced an error: {app.error_text()!r}"
 
 
+# Not web yet: web's Media upload records chunk-manifest heads, and the
+# pre-serve re-seal fails them on the content-address check ("the nest served a
+# different blob for the pre-serve upload"), so the file never reaches the
+# mount.
+@pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("files-in-standard-apps")
 def test_serving_a_folder_the_app_already_filled_reaches_its_files(
     app, dedicated_mail_nest, request, tmp_path
@@ -245,4 +258,64 @@ def test_serving_a_folder_the_app_already_filled_reaches_its_files(
     )
     listed = {e.name for e in client.propfind(f"{name}/", depth="1") if not e.is_collection}
     assert fname in listed, f"{fname!r} must list through the mount; listed {sorted(listed)}"
+    assert not app.has_error(), f"the journey surfaced an error: {app.error_text()!r}"
+
+
+@pytest.mark.web
+@pytest.mark.feature("files-in-standard-apps")
+def test_a_mount_written_file_still_opens_in_the_app_after_unserving(
+    app, dedicated_mail_nest, request
+):
+    """A file saved through the mount still opens in the app after the app
+    stops serving the folder: unserving rotates the folder's key away from the
+    one the mount sealed with, and the owner's back-catalogue still opens
+    (`webdav-server.md` § Key model). The app's own download hands back the
+    bytes the mount was given."""
+    handle = dedicated_mail_nest
+    handle.assert_mta_running()
+    client, _nest, _admin_addr = enable_mail_and_client(app, handle, request)
+
+    name = f"unserve-{uuid.uuid4().hex[:8]}"
+    _create_folder(app, name)
+    _serve(app, client, name)
+
+    fname = f"from-the-drive-{uuid.uuid4().hex[:8]}.txt"
+    body = f"written through the mount {uuid.uuid4().hex}\n".encode() * 200
+    _dav_ok(unthrottled(lambda: client.put(f"{name}/{fname}", body)), f"saving {fname}")
+
+    # MUTATION (UI): stop serving the folder.
+    b = app.backups
+    b.navigate_folders()
+    if not b.webdav_toggle_visible():
+        b.find_and_expand_folder_until(name, "folder-webdav-toggle")
+    b.toggle_webdav()
+    assert not app.has_error(), f"unserving {name!r} raised: {app.error_text()!r}"
+    gone = wait_status(lambda: client.propfind_raw(f"{name}/", depth="1"), 404)
+    assert gone.status_code == 404, (
+        f"the unserved folder must leave the mount first; got {gone.status_code}"
+    )
+
+    names = _await_folder_view(
+        app, name, lambda names: fname in names,
+        "the mount-written file must still list in the app after unserving",
+    )
+    media = app.media
+    media.open_item_detail(names.index(fname))
+    versions = media.wait_for_version_count(1, timeout=FOLDER_VIEW_S)
+    assert versions >= 1, (
+        f"{fname}'s version rows never loaded, so the download cannot paint; "
+        f"error={app.error_text()!r}"
+    )
+    try:
+        got = media.download_open_item(timeout=FOLDER_VIEW_S)
+    except Exception as exc:  # the click, the capture or the walk failed
+        pytest.fail(
+            f"the download of {fname!r} after unserving produced no file: {exc!r}. "
+            "A content-key miss for the retired served generation fails closed "
+            f"('lacks content-key generation N'); error={app.error_text()!r}"
+        )
+    assert got == body, (
+        f"{fname} must open byte-identical after unserving: "
+        f"{len(got)} bytes vs {len(body)}"
+    )
     assert not app.has_error(), f"the journey surfaced an error: {app.error_text()!r}"

@@ -257,13 +257,27 @@
                  `ConversationsError` outlier, which is why MainPage's
                  UpdateTestMessages — a FindName("ErrorBar") lookup — could never
                  reach it). -->
-            <controls:CopyableInfoBar
-                Grid.Row="1"
-                x:Name="ErrorBar"
-                Severity="Error"
-                IsOpen="False"
-                IsClosable="True"
-                Margin="16,4" />
+            <StackPanel Grid.Row="1">
+                <controls:CopyableInfoBar
+                    x:Name="ErrorBar"
+                    Severity="Error"
+                    IsOpen="False"
+                    IsClosable="True"
+                    Margin="16,4" />
+                <!-- The report acknowledgement (`report-status`, moderation.md §
+                     User-initiated reporting → What the reporter is told): OUTSIDE the
+                     report sheet — which is closed by the time a landed report is
+                     acknowledged — and present only after a send landed (collapsed →
+                     no UIA peer). AutomationId only, no static Name, so get_text reads
+                     the sentence. -->
+                <TextBlock
+                    x:Name="ReportStatusText"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ReportStatus}"
+                    Margin="16,0,16,4"
+                    TextWrapping="Wrap"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Visibility="Collapsed" />
+            </StackPanel>
         </Grid>
 
         <!-- Image Lightbox Dialog -->

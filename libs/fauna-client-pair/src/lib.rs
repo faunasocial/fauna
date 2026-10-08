@@ -1277,9 +1277,10 @@ impl LinkedNestsMachine {
     /// named nest (v1: the connected nest), picked by `holder_bridge_id`: derive
     /// the minimal per-scope key + seal a `GrantBlob` (`mint_grant`), record a
     /// signed `Mint` event (seam-signed — the raw key stays behind the signer
-    /// seam) through the succession-ledger seam, and only **then**
-    /// deposit the blob (`fauna.capabilities.mint`) — the record-then-deposit
-    /// order [`grant_log::UndepositedGrant`] enforces. Finally re-lists.
+    /// seam) through the succession-ledger seam's grant-mint door, and only
+    /// once the bound nest has acknowledged it deposit the blob
+    /// (`fauna.capabilities.mint`) — the record, publish, then deposit order
+    /// [`grant_log::UndepositedGrant`] enforces. Finally re-lists.
     /// `nest_id` is accepted
     /// for forward-compat (per-nest addressing) but v1 always targets the
     /// connected nest's roster. **Deliberately single-holder** — see
@@ -1339,17 +1340,17 @@ impl LinkedNestsMachine {
             now,
         );
         let signed = seams.signer.sign_grant_event(unsigned)?;
-        // Record-then-deposit, same rule as the batch above: at N=1 the window
-        // is one refused ledger write, and the orphan it strands is just as
-        // undiscoverable.
-        let stored = seams
+        // Record, publish, then deposit, same rule as the batch below: at N=1
+        // the window is one refused ledger write or one unacknowledged
+        // publish, and the orphan it strands is just as undiscoverable.
+        let published = seams
             .ledger
-            .merge(SuccessionLedger::events_replica(
+            .merge_published(SuccessionLedger::events_replica(
                 ActorId(seams.actor_id),
                 vec![signed],
             ))
             .await?;
-        let recorded = grant_log::RecordedGrants::from_stored(&stored);
+        let recorded = grant_log::PublishedGrants::from_published(&published);
         let deposited = match pending.release(&recorded) {
             Ok(blob_bytes) => self.nest.mint_grant(blob_bytes).await.map_err(Into::into),
             Err(e) => Err(PairDispatchError::from(e)),
@@ -1368,8 +1369,9 @@ impl LinkedNestsMachine {
     ///
     /// The batch is **not** atomic with the nest and cannot be — the deposit is
     /// a separate machine's commit point. What holds instead is the achievable
-    /// invariant: the whole log is durable before the first blob ships, so
-    /// whatever the nest ends up holding, the user's app can see and revoke it
+    /// invariant: the whole log is durable, and acknowledged by the bound nest,
+    /// before the first blob ships, so whatever the nest ends up holding, every
+    /// one of the user's apps can see and revoke it
     /// ([`grant_log::UndepositedGrant`]). Batching is what once made this
     /// dangerous — it widened the unrecorded window from one grant to N — and it
     /// is safe now only because of the ordering, not despite it.
@@ -1410,8 +1412,8 @@ impl LinkedNestsMachine {
             .filter(|g| g.window_end > now)
             .collect();
 
-        // Record-then-deposit: every signed event
-        // reaches durable storage BEFORE any blob goes live on the nest.
+        // Record-then-deposit: every signed event reaches durable storage, and the
+        // bound nest's acknowledgement, BEFORE any blob goes live on the nest.
         // `grant_log::UndepositedGrant` carries the rule and the asymmetry
         // behind it — it is the only way to reach these bytes.
         let mut pending: Vec<grant_log::UndepositedGrant> = Vec::new();
@@ -1476,8 +1478,10 @@ impl LinkedNestsMachine {
             let refreshed = self.refresh().await;
             return blessing.and(refreshed);
         }
-        let stored = seams.ledger.merge(intents).await?;
-        let recorded = grant_log::RecordedGrants::from_stored(&stored);
+        // The whole log, durable and acknowledged by the bound nest, before
+        // the first blob ships.
+        let published = seams.ledger.merge_published(intents).await?;
+        let recorded = grant_log::PublishedGrants::from_published(&published);
 
         // Now the deposits. A failure here — a refused blob, or a ledger write
         // that did not record one of our events — leaves a PHANTOM row: recorded, visible on
@@ -4872,6 +4876,11 @@ mod tests {
             self.inner.merge(replica).await
         }
 
+        async fn publish_ledger(&self) -> Result<(), fauna_client_config::StoreError> {
+            self.trace.lock().unwrap().push("ledger-publish");
+            self.inner.publish_ledger().await
+        }
+
         async fn repoint(&self, retired: ActorId) -> Result<bool, fauna_client_config::StoreError> {
             self.inner.repoint(retired).await
         }
@@ -6007,6 +6016,65 @@ mod tests {
         assert_eq!(home.trust_grants[0].holder, vec![7u8; 32]);
         assert_eq!(home.trust_grants[0].liveness, TrustLiveness::Active);
         assert_eq!(home.trust_grants[0].scope[0].class, "content.label-write");
+    }
+
+    /// **Record, publish, then deposit** (`ui/nests.md` § Trust facet —
+    /// grants → *Record-then-deposit*, the published form): a `Mint` the bound
+    /// nest has not acknowledged deposits no blob — a sibling replica could
+    /// not yet read the event its reconcile sweep judges the row by. The event
+    /// stays recorded locally (the recoverable phantom row), and the next tap,
+    /// once the nest takes the publish, deposits.
+    #[tokio::test]
+    async fn a_mint_whose_publish_the_nest_refuses_deposits_nothing() {
+        let kp = ActorKeypair::generate();
+        let nest = Arc::new(FakeNest::default());
+        nest.state.lock().unwrap().holders = vec![mda_holder()];
+        let (machine, store, _plat) = trust_machine(nest.clone(), &kp);
+        let mint = || LinkedNestsAction::Mint {
+            nest_id: "home".into(),
+            holder_bridge_id: "mda-1".into(),
+            scope: vec![label_write_scope()],
+            duration: Some(TrustGrantDuration::Standard),
+        };
+
+        store.ledger.publish_refuses(true);
+        machine
+            .dispatch(mint())
+            .await
+            .expect_err("an unacknowledged Mint refuses the gesture");
+        assert!(
+            nest.state.lock().unwrap().minted_blobs.is_empty(),
+            "no blob deposited behind an unpublished event"
+        );
+        assert_eq!(stored_events(&store).len(), 1, "the Mint stays recorded");
+
+        store.ledger.publish_refuses(false);
+        machine
+            .dispatch(mint())
+            .await
+            .expect("the nest acknowledges");
+        assert_eq!(nest.state.lock().unwrap().minted_blobs.len(), 1);
+    }
+
+    /// The batch twin: one-tap `MintDefaultSet` deposits nothing at all while
+    /// the nest refuses the publish — the whole log is acknowledged before the
+    /// first blob ships.
+    #[tokio::test]
+    async fn a_default_set_whose_publish_the_nest_refuses_deposits_nothing() {
+        let kp = ActorKeypair::generate();
+        let nest = Arc::new(FakeNest::default());
+        nest.state.lock().unwrap().holders = vec![mda_holder()];
+        let (machine, store, _plat) = trust_machine_with_mail(nest.clone(), &kp);
+
+        store.ledger.publish_refuses(true);
+        machine
+            .dispatch(LinkedNestsAction::MintDefaultSet)
+            .await
+            .expect_err("an unacknowledged batch refuses the tap");
+        assert!(
+            nest.state.lock().unwrap().minted_blobs.is_empty(),
+            "no blob of the batch deposited"
+        );
     }
 
     /// The one-tap "trust this box" default set (`onboarding.md` § 3b-ter):

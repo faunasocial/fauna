@@ -12,6 +12,8 @@ import com.fauna.app.core.OnboardingHost
 import com.fauna.app.core.SecureStorage
 import com.fauna.app.core.SignOutCredentialEraser
 import com.fauna.app.core.ShellLog
+import com.fauna.app.core.StolenCeremonyHold
+import com.fauna.app.core.SuccessionHandoff
 import com.fauna.ffi.FfiAccountRegistry
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -63,6 +65,9 @@ class AppLaunchVM @Inject constructor(
     private val registry: FfiAccountRegistry,
     private val secureStorage: SecureStorage,
     private val accountStores: AccountStores,
+    /** Holds back a supersession THIS device's own stolen-identity ceremony
+     *  caused while that ceremony owns the Account page ([routeSessionEnding]). */
+    private val ceremonyHold: StolenCeremonyHold,
 ) : ViewModel() {
 
     /** Observable snapshot the NavHost collects as state. */
@@ -273,12 +278,40 @@ class AppLaunchVM @Inject constructor(
      * launch flow (`appState.isOnboarding = true`). The re-run [machine] then
      * meets the verdict on its own challenge and owns the surface — the
      * refused surface for `SIGN_IN_REFUSED`, the identity-changed warning for
-     * `NEST_IDENTITY_CHANGED`. A supersession takes the same path; android has
-     * no stolen-identity ceremony to hold it back for.
+     * `NEST_IDENTITY_CHANGED`, the import route for `SUPERSEDED`.
      */
     fun escalateSessionEnding(verdict: com.fauna.ffi.FfiSessionEndingVerdict) {
         ShellLog.w("AppLaunchVM", "[post-auth] session-ending verdict $verdict — re-entering launch")
         actorScope.dropActorScopedState()
+    }
+
+    /** Whether the active account is a succession's successor still owed its
+     *  kit — the post-auth navigation's peek ([SuccessionHandoff.owesKitTo]). */
+    fun owesSuccessorKitHere(): Boolean =
+        SuccessionHandoff.owesKitTo(runCatching { registry.active() }.getOrNull())
+
+    /**
+     * Route a mid-session session-ending verdict to [escalateSessionEnding] and
+     * then [reenterLaunch] — apple's `escalateSessionEnding(_:ceremonyHold:)`.
+     * A supersession goes through the [StolenCeremonyHold]: this device's own
+     * stolen-identity ceremony is what supersedes the identity, so the
+     * reconnect supervisor's `SUPERSEDED` typically arrives before the
+     * ceremony's own result is handled, and escalating then would tear the
+     * Account page — and a parked key that is the only copy in existence —
+     * down with it (`settings.md` § Recovery kit → *The persist-failure message
+     * survives the page*). A nest-identity change or a refused sign-in is never
+     * the ceremony's doing, so it escalates at once.
+     */
+    fun routeSessionEnding(verdict: com.fauna.ffi.FfiSessionEndingVerdict, reenterLaunch: () -> Unit) {
+        val perform = {
+            escalateSessionEnding(verdict)
+            reenterLaunch()
+        }
+        if (verdict == com.fauna.ffi.FfiSessionEndingVerdict.SUPERSEDED) {
+            ceremonyHold.escalate(perform)
+        } else {
+            perform()
+        }
     }
 
     /**
@@ -315,18 +348,26 @@ class AppLaunchVM @Inject constructor(
      * registry's session material for the active account, never a legacy
      * mirror. Without them the claim-free message is final.
      *
-     * **No held-successor adoption here (yet).** apple and windows first ask the
-     * shared `adoptHeldSuccessor` whether this device already holds the verified
-     * successor's key — the state a lost succession reply from THIS device's own
-     * ceremony leaves behind. android runs no succession ceremony of its own
-     * until its Settings recovery-kit section lands, so it can never be in that
-     * state; the adoption arm (and the hand-off bookkeeping it owes) arrives with
-     * that section.
+     * **Adopt when this device already holds the verified successor's key** —
+     * the state a lost succession reply from THIS device's own ceremony leaves
+     * behind (`identity-succession.md` § Implementation status today, *a lost
+     * submit reply no longer destroys the account*): the ceremony persisted the
+     * successor without activating it, and its undecidable arm promised that
+     * reopening the app signs in as it. Then there is nothing to import. The
+     * shared `adoptHeldSuccessor` decides (and records the succession link);
+     * this records the kit and the group sweep the adoption owes
+     * ([SuccessionHandoff.recordRelaunchAdoption]) BEFORE handing the switch to
+     * [adopt] (`succession-propagation.md` § Propagation → *Own device fleet*,
+     * the relaunch-adoption clause). Both halves are proofs, never claims: the
+     * successor is the chain's answer, and the key is one this device minted
+     * and kept. apple's `SupersededLaunchRoute` and tui's
+     * `App::adopt_held_successor` are the twins.
      */
     suspend fun routeSupersededRefusal(
         claimedSuccessor: String,
         claimFreeReason: String,
         verifiedReason: (String) -> String,
+        adopt: suspend (String) -> Unit = ::adoptSuccessor,
         resolve: suspend (String, ByteArray) -> String? = { url, secret ->
             com.fauna.ffi.successionResolveVerifiedSuccessor(url, secret)
         },
@@ -356,7 +397,32 @@ class AppLaunchVM @Inject constructor(
         // supersession over whatever they are doing now would show a banner
         // from a flow they have already handled.
         if (host.machine.step() != com.fauna.ffi.onboarding.OnboardingStep.IDENTITY_IMPORT) return
+        val predecessor = runCatching { registry.active() }.getOrNull()
+        if (predecessor != null && registry.adoptHeldSuccessor(predecessor, verified)) {
+            ShellLog.i("AppLaunchVM", "[launch] this device holds the verified successor $verified; adopting it")
+            SuccessionHandoff.recordRelaunchAdoption(predecessor, verified)
+            adopt(verified)
+            return
+        }
         host.machine.beginImportIdentityWithReason(verifiedReason(verified))
+    }
+
+    /**
+     * The relaunch adoption's account switch — the launch-surface twin of
+     * `AccountSettingsVM.switchAccount`: activate the successor, drop whatever
+     * the refused identity left scoped, and re-run THIS launch machine, which
+     * re-reads the now-active account's material and routes it to
+     * `Authenticated` (the same re-route [resetAccountIndex] relies on).
+     */
+    private suspend fun adoptSuccessor(successor: String) {
+        try {
+            registry.setActive(successor)
+        } catch (e: Exception) {
+            ShellLog.e("AppLaunchVM", "[launch] activating the adopted successor failed: ${e.message}")
+            return
+        }
+        actorScope.dropActorScopedState()
+        machine.start()
     }
 
     /**

@@ -425,6 +425,95 @@ class AppLaunchVMTest {
         verify(f.apiClient, never()).setConversationsSelfAddress(anyString())
     }
 
+    // ── The held-successor adoption (`succession-propagation.md` § Propagation →
+    // *Own device fleet*, the relaunch-adoption clause): a lost succession
+    // reply left this device holding the verified successor's key, so the
+    // launch adopts it — recording the kit AND the sweep it owes BEFORE the
+    // switch — instead of sending the user to import a key they already hold.
+
+    @Test
+    fun aHeldVerifiedSuccessorIsAdoptedWithItsObligationsRecordedFirst() = runTest {
+        com.fauna.app.core.SuccessionHandoff.clearOnFactoryReset()
+        val f = makeVm(secretHex = SECRET, nestUrl = NEST)
+        whenever(f.host.machine.step()).thenReturn(OnboardingStep.IDENTITY_IMPORT)
+        whenever(f.registry.active()).thenReturn(PREDECESSOR)
+        whenever(f.registry.adoptHeldSuccessor(PREDECESSOR, VERIFIED)).thenReturn(true)
+        var owedAtAdopt: Pair<Boolean, String?>? = null
+        var adopted: String? = null
+
+        f.vm.routeSupersededRefusal(
+            CLAIMED, CLAIM_FREE, ::verifiedReason,
+            resolve = { _, _ -> VERIFIED },
+            adopt = { successor ->
+                owedAtAdopt = com.fauna.app.core.SuccessionHandoff.owesKitTo(successor) to
+                    com.fauna.app.core.SuccessionHandoff.sweepOwedTo
+                adopted = successor
+            },
+        )
+
+        assertEquals(VERIFIED, adopted)
+        // Both obligations were already recorded when the switch ran.
+        assertEquals(true to VERIFIED, owedAtAdopt)
+        assertEquals(PREDECESSOR, com.fauna.app.core.SuccessionHandoff.predecessorActorIdHex)
+        // Adopted, so there is nothing to import — no verified reason is painted.
+        verify(f.host.machine, never()).beginImportIdentityWithReason(verifiedReason(VERIFIED))
+        com.fauna.app.core.SuccessionHandoff.clearOnFactoryReset()
+    }
+
+    @Test
+    fun aSuccessorThisDeviceDoesNotHoldStaysOnTheImportRoute() = runTest {
+        com.fauna.app.core.SuccessionHandoff.clearOnFactoryReset()
+        val f = makeVm(secretHex = SECRET, nestUrl = NEST)
+        whenever(f.host.machine.step()).thenReturn(OnboardingStep.IDENTITY_IMPORT)
+        whenever(f.registry.active()).thenReturn(PREDECESSOR)
+        whenever(f.registry.adoptHeldSuccessor(PREDECESSOR, VERIFIED)).thenReturn(false)
+        var adopted = false
+
+        f.vm.routeSupersededRefusal(
+            CLAIMED, CLAIM_FREE, ::verifiedReason,
+            resolve = { _, _ -> VERIFIED },
+            adopt = { adopted = true },
+        )
+
+        assertEquals(false, adopted)
+        assertNull(com.fauna.app.core.SuccessionHandoff.sweepOwedTo)
+        assertEquals(false, com.fauna.app.core.SuccessionHandoff.kitOwed)
+        verify(f.host.machine).beginImportIdentityWithReason(verifiedReason(VERIFIED))
+    }
+
+    // ── The held-back own supersession (`settings.md` § Recovery kit → *The
+    // persist-failure message survives the page*). ─────────────────────────
+
+    @Test
+    fun aSupersessionDuringTheOwnCeremonyIsHeldUntilItEnds() {
+        val hold = com.fauna.app.core.StolenCeremonyHold()
+        val f = makeVm(hold = hold)
+        var reentered = 0
+        hold.ceremonyStarted()
+
+        f.vm.routeSessionEnding(com.fauna.ffi.FfiSessionEndingVerdict.SUPERSEDED) { reentered++ }
+
+        assertEquals(0, reentered)
+        verify(f.actorScope, never()).dropActorScopedState()
+        // Ended off Account with nothing parked → the owed escalation runs now.
+        hold.ceremonyEnded(adopted = false, messageParked = false)
+        assertEquals(1, reentered)
+        verify(f.actorScope).dropActorScopedState()
+    }
+
+    @Test
+    fun aVerdictThatIsNotTheCeremonysOwnEscalatesAtOnce() {
+        val hold = com.fauna.app.core.StolenCeremonyHold()
+        val f = makeVm(hold = hold)
+        var reentered = 0
+        hold.ceremonyStarted()
+
+        f.vm.routeSessionEnding(com.fauna.ffi.FfiSessionEndingVerdict.NEST_IDENTITY_CHANGED) { reentered++ }
+
+        assertEquals(1, reentered)
+        verify(f.actorScope).dropActorScopedState()
+    }
+
     /** [persistence] is the registry-backed `LaunchPersistence` `AppLaunchVM` reads
      *  the three wizard-resume records through; [store] is the read-only
      *  [SessionAccount] (the active account's session material). */
@@ -438,9 +527,16 @@ class AppLaunchVMTest {
             LaunchSnapshot(LaunchPhase.Boot, TokenStatus.None, null, null, false, null, null)
         ),
         val apiClient: ApiClient = mock(ApiClient::class.java),
+        val registry: com.fauna.ffi.FfiAccountRegistry = mock(com.fauna.ffi.FfiAccountRegistry::class.java),
+        val actorScope: com.fauna.app.core.ActorScope = mock(com.fauna.app.core.ActorScope::class.java),
+        val machine: LaunchMachine = mock(LaunchMachine::class.java),
     )
 
-    private fun makeVm(secretHex: String? = null, nestUrl: String? = null): Fixture {
+    private fun makeVm(
+        secretHex: String? = null,
+        nestUrl: String? = null,
+        hold: com.fauna.app.core.StolenCeremonyHold = com.fauna.app.core.StolenCeremonyHold(),
+    ): Fixture {
         val store = mock(SessionAccount::class.java)
         whenever(store.secretHex).thenReturn(secretHex)
         whenever(store.nestUrl).thenReturn(nestUrl)
@@ -459,12 +555,13 @@ class AppLaunchVMTest {
         val accountStores = mock(com.fauna.app.core.AccountStores::class.java)
         val vm = AppLaunchVM(
             machine, observer, host, store, apiClient, actorScope, persistence,
-            registry, secureStorage, accountStores,
+            registry, secureStorage, accountStores, hold,
         )
-        return Fixture(vm, host, store, persistence, snapshots, apiClient)
+        return Fixture(vm, host, store, persistence, snapshots, apiClient, registry, actorScope, machine)
     }
 
     private companion object {
+        val PREDECESSOR = "e3".repeat(32)
         val CLAIMED = "c1".repeat(32)
         val VERIFIED = "d2".repeat(32)
         val SECRET = "ab".repeat(32)

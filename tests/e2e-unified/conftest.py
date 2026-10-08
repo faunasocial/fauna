@@ -4374,7 +4374,7 @@ def mail_bridge_mta(mail_bridge_binary, seal_helper_binary, nest_instance, tmp_p
     # ── 4. Provision the recipient actor + its alias + MLS pubkey via
     # the production WS-RPC paths — no SQLite hand-pokes.
     #
-    # Findings #1 + #2 of the mail-bridge sealing review landed the writers:
+    # The mail-bridge sealing review landed the writers:
     #   - the member's own `fauna.bridges.create_account_alias`
     #     (`helpers.mail_aliases.add_exact_alias`) writes the `account_aliases`
     #     (kind='exact') row that `validate_recipient` resolves through;
@@ -4788,7 +4788,7 @@ class MailBridgeMDAHandle:
         self.x25519_pubkey = x25519_pubkey
         # The bridge's x25519 secret is exposed on the handle so tests
         # that pre-stage user-side wrapped blobs (Task D follow-up after
-        # the mail-bridge sealing review finding #5 lands) can seal directly
+        # the sealing review's seal-helper fix lands) can seal directly
         # to the bridge if a test needs the bridge to unseal data the
         # admin-uploaded path would normally seal.
         self.x25519_secret = x25519_secret
@@ -4892,9 +4892,9 @@ def _spawn_mda_bridge(
     has live grants).
 
     Owns *only* the per-bridge work two bridges can never share: a fresh
-    service-user keypair + its `register_user` (finding #3) + admin enrollment
+    service-user keypair + its `register_user` + admin enrollment
     (so the bridge's nest WS actor is unique), the x25519 SQLite hand-poke
-    (finding #3 / #5 production fix tracked in the `mail_bridge_mda` docstring),
+    (production fix tracked in the `mail_bridge_mda` docstring),
     a `fauna.bridges.provision_self_signed_cert` WS-RPC call that fans the
     domain cert out to *this* bridge's x25519, the four ephemeral bind ports,
     the operator-hatch, and the spawned
@@ -5001,7 +5001,7 @@ def _spawn_mda_bridge(
     # UI after the client claims the nest. (The MTA spawn gates its pre-approve
     # the same way.)
     if pre_approve:
-        # ── 2. Finding #3 workaround: register the bridge as a user so the
+        # ── 2. Workaround: register the bridge as a user so the
         # `fauna.auth.verify` WS-RPC kind resolves. Same pattern as
         # `_spawn_mta_bridge`. register_user takes only (port, actor_id)
         # positionally — credentials are keyword-only (admin_signing_key); the
@@ -5021,7 +5021,7 @@ def _spawn_mda_bridge(
         # production-path alternatives are in the `mail_bridge_mda` docstring;
         # tracked internally the same way the MTA fixture's
         # recipient_routes hand-poke is tracked internally in the
-        # mail-bridge sealing review finding #1.
+        # mail-bridge sealing review.
         conn = sqlite3.connect(nest_instance["db_path"], timeout=10.0)
         try:
             conn.execute(
@@ -5914,7 +5914,7 @@ def mail_bridge_mda(mail_bridge_binary, seal_helper_binary, nest_instance, tmp_p
         hand-poke of `bridge_service_users.x25519_pubkey` BEFORE the cert
         provisioning step — same workaround pattern as `mail_bridge_mta`'s
         `recipient_routes` hand-poke.
-        The mail-bridge sealing review, finding #3 / finding #5 between them,
+        The mail-bridge sealing review
         covers the right production shape (admin approve auto-inserts
         users row + seal-helper for admin-issued blobs). The enrollment
         kind already carries an optional `x25519_pubkey` (bound set-once at
@@ -8840,8 +8840,12 @@ def succession_member_app(request, succeedable_app, nest_instance):
     freshly registered actor's default refuses alice's Welcome with the opaque
     ``fauna.conversations.forbidden`` (``direct-messages.md`` § Reach policy).
 
-    Native-only (linux + tui — the two direct-Rust clients that wire the
-    in-process ``ConversationsSession``); skips under any other ``app`` param.
+    Runs on linux + tui (the two direct-Rust clients that wire the in-process
+    ``ConversationsSession``), on **web**, whose member seat is a twin PAGE
+    in its own ``BrowserContext`` (``alice_second_web_device``'s idiom) over
+    the wasm ``WebSuccessionChainSource`` dial, and on **macos**, whose
+    member seat is a second launch with bob's own real-rail witness; every
+    other ``app`` param is declared unbuilt below until its own run is green.
     """
     from helpers.app_surface import skip_unbuilt
 
@@ -8850,6 +8854,19 @@ def succession_member_app(request, succeedable_app, nest_instance):
         app_name = "linux"
     elif alice_app.driver.is_tui():
         app_name = "tui"
+    elif alice_app.driver.is_web():
+        # bob's seat is a twin PAGE in its own BrowserContext — isolated
+        # localStorage is the per-seat isolation a native arm gets from a
+        # second process, and a browser is far too heavy to launch twice
+        # (`alice_second_web_device`, `caldav_mailbox_less_attendee_app`).
+        # Widened 2026-10-08 on its own green run.
+        app_name = "web"
+    elif alice_app.driver.is_macos():
+        # apple's per-launch isolation (e2e-conventions.md point 10) gives bob
+        # a second, independently-authenticated process for free — the shape
+        # `_launch_second_real_faunamls_app` already proves.
+        # Widened 2026-10-08 on its own green run.
+        app_name = "macos"
     else:
         # Convention 7: unbuilt debt, declared as such rather than skipped
         # silently — a member seat here could not re-point whatever the harness
@@ -8857,8 +8874,8 @@ def succession_member_app(request, succeedable_app, nest_instance):
         #
         # ⚠ Deliberately NOT widened past linux+tui on 2026-09-03, when the four
         # FFI apps gained the witness and the sweep in Rust: what this fixture
-        # needs is a second *real-engine driver* seat, and that half is unproven
-        # on every app but these two — mechanism present is not the same claim as
+        # needs is a second *real-engine driver* seat, and that half was then
+        # unproven on every app but those two — mechanism present is not the same claim as
         # member seat demonstrated, and narrowing a ratchet on the first is how a
         # skip turns into a false green. Widen an app's arm when its own run is
         # green, not when its Rust lands.
@@ -8872,8 +8889,8 @@ def succession_member_app(request, succeedable_app, nest_instance):
                    "all register one as of 2026-09-03, off the shared "
                    "ChainWitness + NativeSuccessionChainSource + peer-anchor "
                    "sweep in fauna-client-recovery. What is unbuilt here is a "
-                   "member seat this fixture can drive — only linux and tui "
-                   "have one — plus web's own wasm dialer",
+                   "member seat this fixture can drive — only linux, tui, "
+                   "web and macOS have one",
             tracked="succession-aftermath.md § Implementation status today — "
                     "the ✅ witness bullet",
         )
@@ -8888,16 +8905,23 @@ def succession_member_app(request, succeedable_app, nest_instance):
         nest_instance["port"], bob, alice_user["actor_id_hex"]
     )
 
-    config = _build_app_config(app_name, nest_instance, request)
-
-    driver = create_driver(app_name)
-    driver.launch(config)
+    if app_name == "web":
+        # The twin page owns no process: no launch config, and nothing to tear
+        # down but the page itself (handled below). The browser reaches the
+        # nest through the SPA proxy, as `_login_app_as` logs alice in.
+        driver = alice_app.driver.open_twin_page()
+        node_url = request.getfixturevalue("spa_url")
+    else:
+        config = _build_app_config(app_name, nest_instance, request)
+        driver = create_driver(app_name)
+        driver.launch(config)
+        node_url = nest_instance["url"]
     try:
         secret_hex = bob["signing_key"].encode().hex()
         driver.set_state({
             "session": {
                 "authenticated": True,
-                "node_url": nest_instance["url"],
+                "node_url": node_url,
                 "secret_hex": secret_hex,
                 "handle": "bob-succession",
                 "actor_id": bob["actor_id_hex"],
@@ -8907,6 +8931,17 @@ def succession_member_app(request, succeedable_app, nest_instance):
         })
         bob_app = ActionLayer(driver)
         bob_app.conversations.enable_real_faunamls()
+        if driver.is_macos():
+            # On apple `enable_real_faunamls()` returns without asking bob
+            # anything (the launch-gate branch), so witness HIS real rail
+            # here, as `_launch_second_real_faunamls_app` does — a member seat
+            # left on the mock would read as a witness that never re-points.
+            from helpers import real_rail_control
+
+            real_rail_control.witness_real_rail(
+                driver,
+                context="the `succession_member_app` fixture (BOB, the member)",
+            )
         yield bob_app, bob
     finally:
         try:
@@ -10135,12 +10170,27 @@ def _serve_spa_proxy(static_dir, nest_url, abort_once_paths=None):
             self.send_error(405)
 
         def do_OPTIONS(self):
-            """Handle CORS preflight."""
+            """Handle CORS preflight. The shim grants whatever request headers
+            the browser asks for: it exists so a page on another harness origin
+            can reach this nest at all, and a fixed list here refused the
+            chunk upload's `X-Content-Hash` before the nest ever saw it."""
             self.send_response(200)
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+            self.send_header(
+                "Access-Control-Allow-Headers",
+                self.headers.get("Access-Control-Request-Headers")
+                or "Authorization, Content-Type",
+            )
             self.end_headers()
+
+        def _send_allow_origin_unless(self, upstream_headers):
+            """Add the shim's `Access-Control-Allow-Origin: *` only when the nest
+            sent none. The nest answers its open byte routes (`/api/v1/manifests/…`,
+            `/api/v1/chunks/…`) with its own `*`, and a second one reads `*, *`,
+            which a browser refuses, so a cross-origin download failed."""
+            if upstream_headers is None or upstream_headers.get("Access-Control-Allow-Origin") is None:
+                self.send_header("Access-Control-Allow-Origin", "*")
 
         def _proxy_to_nest(self):
             """Forward request to the nest API."""
@@ -10158,7 +10208,7 @@ def _serve_spa_proxy(static_dir, nest_url, abort_once_paths=None):
                 for k, v in resp.headers.items():
                     if k.lower() not in ("transfer-encoding",):
                         self.send_header(k, v)
-                self.send_header("Access-Control-Allow-Origin", "*")
+                self._send_allow_origin_unless(resp.headers)
                 self.end_headers()
                 self.wfile.write(resp.read())
             except urllib.error.HTTPError as e:
@@ -11415,9 +11465,11 @@ def _apply_release_feed_env(env: dict, request) -> None:
     environment before the first launch. The stub itself is the session
     fixture `release_feed_stub`, started here on demand.
 
-    Who reads it today: **tui** (`settings/about.rs::feed_origin`). The linux,
-    windows and macOS checks are built but read no seam yet; seeding them is harmless, so the
-    helper is called from every native branch rather than special-cased.
+    Who reads it: **tui** (`settings/about.rs::feed_origin`), **linux**
+    (`updater.rs::feed_origin`), **macOS** (`UpdateCheck.swift`,
+    `E2eEnv.releaseFeedUrl`) and **windows** (`UpdateCheck.cs`,
+    `E2eEnv.ReleaseFeedUrl`). The helper is called from every native branch;
+    seeding an app that never checks is harmless.
     """
     if not any(
         item.get_closest_marker("release_feed") for item in request.session.items
@@ -16681,6 +16733,9 @@ _REAL_SECOND_APP_FIXTURES = {
     "folder_share_stranger_app",
     # The Media read witnesses' member seat (tui external-open / web download).
     "media_member",
+    # The shared-and-served WebDAV journey's member seat
+    # (`test_webdav_shared_set.py`).
+    "served_share_member",
 }
 
 
@@ -17030,12 +17085,28 @@ def pytest_collection_modifyitems(config, items):
             if callspec is not None:
                 real_second_apps = {
                     v for k, v in callspec.params.items()
-                    if k in _REAL_SECOND_APP_FIXTURES and v in _KNOWN_APPS
+                    if k in _REAL_SECOND_APP_FIXTURES
+                    and isinstance(v, str) and v in _KNOWN_APPS
                 }
                 if real_second_apps and not real_second_apps <= selected:
                     deselected.append(item)
                     continue
-            params = _parametrized_clients(item)
+                # The FIRST seat of such a test (the run's cached `app`) is
+                # owed its own mark too: the second seat's arm mark joins the
+                # item's markers, so the any-of check below would let an `ios`
+                # owner through on a tui/macOS-marked module merely because its
+                # member arm is `tui` (`test_webdav_shared_set.py[ios-tui]`).
+                first_seat_apps = {
+                    v for k, v in callspec.params.items()
+                    if k not in _REAL_SECOND_APP_FIXTURES
+                    and isinstance(v, str) and v in _KNOWN_APPS
+                    and _is_real_fixture(item, k)
+                }
+                if (real_second_apps and marker_platforms
+                        and not first_seat_apps <= marker_platforms):
+                    deselected.append(item)
+                    continue
+            params =_parametrized_clients(item)
             if params:
                 # Parametrized by client: keep only matching client(s). The param
                 # client must be in --client AND — when the test declares client

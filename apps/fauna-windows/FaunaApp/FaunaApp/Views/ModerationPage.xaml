@@ -12,6 +12,7 @@
 
     <Page.Resources>
         <helpers:HexColorToBrushConverter x:Key="HexBrush" />
+        <local:BoolToVisibilityConverter x:Key="BoolToVis" />
     </Page.Resources>
 
     <ScrollViewer VerticalScrollBarVisibility="Auto">
@@ -84,6 +85,47 @@
                                TextAlignment="Center" Visibility="Collapsed"
                                IsHitTestVisible="False" />
                 </Grid>
+            </StackPanel>
+
+            <!-- The reporter's own ledger (`moderation-reports-section`; moderation.md §
+                 User-initiated reporting → What the reporter is told), read beside the
+                 queue on every entry. Rows are FLAT (`moderation-report-item[i]`,
+                 `moderation-report-withdraw-button[i]` — withdraw only on an OPEN row),
+                 in a non-virtualizing ItemsControl so count-all sees every row. The empty
+                 line paints only off the VM's `ReportsLoaded` bit, so a read in flight
+                 never reads as "you have not reported anything" (ui/README.md § List
+                 pages: loading is not empty). -->
+            <StackPanel x:Name="ReportsSection" Spacing="8"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ModerationReportsSection}">
+                <TextBlock x:Name="ReportsHeader" Style="{StaticResource SubtitleTextBlockStyle}" />
+                <ItemsControl x:Name="ReportsList">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <!-- Literal ids below — this DataTemplate has no x:DataType, so
+                                 `{x:Bind ids:Ids.…}` silently drops here; see
+                                 Controls/RecipientPicker.xaml. -->
+                            <Grid Padding="8" ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="{Binding Line}"
+                                           AutomationProperties.Name="{Binding Line}"
+                                           AutomationProperties.AutomationId="moderation-report-item"
+                                           TextWrapping="Wrap" VerticalAlignment="Center" />
+                                <Button Grid.Column="1" Content="{loc:Localize Key=moderation/report/withdraw}"
+                                        Tag="{Binding}" Click="WithdrawReport_Click"
+                                        Visibility="{Binding CanWithdraw, Converter={StaticResource BoolToVis}}"
+                                        VerticalAlignment="Center"
+                                        AutomationProperties.AutomationId="moderation-report-withdraw-button" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <TextBlock x:Name="ReportsEmptyText" Opacity="0.6" TextWrapping="Wrap"
+                           Visibility="Collapsed" />
+                <TextBlock x:Name="ReportWithdrawStatusText" Opacity="0.6" TextWrapping="Wrap"
+                           Visibility="Collapsed" />
             </StackPanel>
 
             <ProgressRing x:Name="LoadingRing" IsActive="False" Visibility="Collapsed"

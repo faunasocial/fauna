@@ -292,6 +292,85 @@ public class FeedPostItemTests
         Assert.False(unresolved.ContentEquals(resolved));
     }
 
+    // ── A bridged post's ProxiedImage / ProxiedVideo (render-model.md § D6c): the
+    // nest-served siblings of the Image / Video pairs above, addressed by a nest-relative
+    // path instead of a content hash.
+
+    private const string ProxiedPicture =
+        "/api/v1/bluesky/media?url=https%3A%2F%2Fcdn.bsky.app%2Fimg%2Ffeed_fullsize%2Fplain%2Fa%40jpeg";
+    private const string ProxiedClip =
+        "/api/v1/media/proxy?url=https%3A%2F%2Fr.example%2Fclip.mp4";
+
+    private static FeedPostItem ItemWith(params RenderBlock[] media) =>
+        new(MakePost(new RenderDocument(
+            new RenderBlock[] { new RenderBlock.Paragraph(new Inline[] { new Inline.Text("bridged") }) }
+                .Concat(media).ToArray())));
+
+    [Fact]
+    public void ProxiedImageBlock_DerivesMediaProxiedPath_AndNoBlobHash()
+    {
+        var item = ItemWith(new RenderBlock.ProxiedImage(ProxiedPicture, ""));
+
+        Assert.Equal(ProxiedPicture, item.MediaProxiedPath);
+        // The regression guard for what D6c closed: a bridged picture never becomes a
+        // blob hash, so post-image never asks for `/api/v1/blob/000…`.
+        Assert.Equal("", item.MediaHashHex);
+    }
+
+    [Fact]
+    public void BlobImage_WinsThePostImageSlotOverAProxiedImage()
+    {
+        var item = ItemWith(
+            new RenderBlock.Image("deadbeef", ""),
+            new RenderBlock.ProxiedImage(ProxiedPicture, ""));
+
+        Assert.Equal("deadbeef", item.MediaHashHex);
+        Assert.Equal("", item.MediaProxiedPath);
+    }
+
+    [Fact]
+    public void ProxiedVideoBlock_PaintsItsPathInVideoThumbnail_AndFetchesNothing()
+    {
+        var item = ItemWith(new RenderBlock.ProxiedVideo(ProxiedClip, ""));
+
+        Assert.True(item.HasVideo);
+        Assert.Equal(ProxiedClip, item.VideoThumbnailText);
+        Assert.Equal(ProxiedClip, item.VideoProxiedPath);
+        // No byte load: the only loaders on the card key on these two, and a proxied
+        // video hands neither of them anything (render-model.md § D6c → Proxied video,
+        // answer 2 — no app byte-loads one for its thumbnail).
+        Assert.Equal("", item.MediaHashHex);
+        Assert.Equal("", item.MediaProxiedPath);
+        Assert.Equal("", item.VideoHashHex);
+    }
+
+    [Fact]
+    public void BlobVideo_PaintsItsHashInVideoThumbnail()
+    {
+        var item = ItemWith(
+            new RenderBlock.Video("feedbeef", ""),
+            new RenderBlock.ProxiedVideo(ProxiedClip, ""));
+
+        Assert.Equal("feedbeef", item.VideoThumbnailText);
+        Assert.Equal("", item.VideoProxiedPath);
+    }
+
+    [Fact]
+    public void ContentEquals_ProxiedImageFold_False()
+    {
+        // resolve_media folds the ProxiedImage in after the first paint; the reconcile
+        // must rebuild the row or post-image never appears for a bridged post.
+        Assert.False(ItemWith().ContentEquals(
+            ItemWith(new RenderBlock.ProxiedImage(ProxiedPicture, ""))));
+    }
+
+    [Fact]
+    public void ContentEquals_ProxiedVideoFold_False()
+    {
+        Assert.False(ItemWith().ContentEquals(
+            ItemWith(new RenderBlock.ProxiedVideo(ProxiedClip, ""))));
+    }
+
     // ── Content-label badge (moderation.md § Per-row badge data path) ──
 
     [Fact]

@@ -550,12 +550,17 @@ fn list_messages_handler() -> crate::rpc_router::RpcHandler {
 
             let messages = rows_to_message_metas(&state, &target, rows).await?;
 
+            // Below the restore-carried prune floor the expunge log is
+            // incomplete: report no expunges rather than a partial list, so the
+            // MDA emits no VANISHED and the client keeps `OK [HIGHESTMODSEQ]`
+            // only (imap-server.md § QRESYNC — "it would be lying").
             let expunged_uids = if let Some(since) = req.since_modseq {
                 state
                     .db
                     .list_bridge_imap_expunged_since(&target, &req.mailbox, since)
                     .await
                     .map_err(internal)?
+                    .unwrap_or_default()
             } else {
                 vec![]
             };
@@ -12941,6 +12946,146 @@ mod tests {
             manifest.tombstones.iter().any(|t| t.uid == uid2),
             "the fresh tombstone survives"
         );
+    }
+
+    /// imap-server.md § QRESYNC `SELECT (QRESYNC ...)`: a client whose
+    /// `last_modseq` predates a pruned tombstone gets no VANISHED at all —
+    /// never a partial list. The live `bridge_imap_expunged` table keeps every
+    /// row, so only a restore (which rebuilds that table from the pruned
+    /// manifest) can lose one; the manifest's per-mailbox prune floor rides
+    /// the restore and `list_messages` refuses to enumerate below it.
+    #[tokio::test]
+    async fn list_messages_after_restore_refuses_a_partial_vanished_below_the_prune_floor() {
+        use fauna_protocol::bridge_routing::{
+            ExpungeRequest, ListMessagesRequest, StoreFlagsOp, StoreFlagsRequest,
+        };
+        let state = fixture_state().await;
+        let mda = [9u8; 32];
+        approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
+        let target = [0xF4u8; 32];
+        let list_since = |since: i64| ListMessagesRequest {
+            actor_id: target.to_vec(),
+            mailbox: "INBOX".into(),
+            since_modseq: Some(since),
+            limit: 0,
+            after_uid: None,
+        };
+        let expunge_one = |uid: u32| {
+            let state = state.clone();
+            async move {
+                call_store_flags(
+                    state.clone(),
+                    mda,
+                    StoreFlagsRequest {
+                        actor_id: target.to_vec(),
+                        mailbox: "INBOX".into(),
+                        uids: vec![uid],
+                        op: StoreFlagsOp::Set,
+                        flags: vec!["\\Deleted".into()],
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("store_flags ok");
+                call_expunge(
+                    state,
+                    mda,
+                    ExpungeRequest {
+                        actor_id: target.to_vec(),
+                        mailbox: "INBOX".into(),
+                        uids: vec![],
+                    },
+                )
+                .await
+                .expect("expunge ok");
+            }
+        };
+
+        let uid1 = call_append_message(
+            state.clone(),
+            mda,
+            sample_append_req(&target, "INBOX", vec![]),
+        )
+        .await
+        .expect("append ok")
+        .uid;
+        let uid2 = call_append_message(
+            state.clone(),
+            mda,
+            sample_append_req(&target, "INBOX", vec![]),
+        )
+        .await
+        .expect("append ok")
+        .uid;
+        // The client's QRESYNC checkpoint: both messages present.
+        let m0 = call_list_messages(state.clone(), mda, list_since(0))
+            .await
+            .highestmodseq;
+
+        expunge_one(uid1).await;
+        // Age uid1's tombstone past the retention window; the next EXPUNGE
+        // piggybacks the prune.
+        state
+            .mail_placement
+            .update_manifest(&target, |m| {
+                for t in &mut m.tombstones {
+                    t.deleted_at = 1;
+                }
+                true
+            })
+            .await
+            .expect("age tombstone");
+        expunge_one(uid2).await;
+
+        let manifest = state
+            .mail_placement
+            .current_manifest(&target)
+            .await
+            .expect("placement manifest");
+        let uid1_modseq = {
+            let pruned = !manifest.tombstones.iter().any(|t| t.uid == uid1);
+            assert!(pruned, "uid1's aged tombstone was pruned from the manifest");
+            let inbox = manifest.mailboxes.iter().find(|s| s.name == "INBOX");
+            inbox.expect("INBOX state").pruned_modseq
+        };
+        assert!(uid1_modseq > m0 as u64, "the prune floor is uid1's modseq");
+
+        // Live path unchanged: the live table still holds both tombstones.
+        let live = call_list_messages(state.clone(), mda, list_since(m0)).await;
+        assert_eq!(live.expunged_uids, vec![uid1, uid2]);
+
+        // Restore the mailbox from the (pruned) manifest, as the snapshot
+        // restore does (`filesync_handlers::restore_mail`).
+        {
+            let conn = state.db.conn().await;
+            let tx = conn.unchecked_transaction().unwrap();
+            for table in [
+                "bridge_imap_messages",
+                "bridge_imap_mailbox_state",
+                "bridge_imap_expunged",
+                "bridge_imap_subscriptions",
+            ] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE actor_id = ?1"),
+                    rusqlite::params![target.as_slice()],
+                )
+                .unwrap();
+            }
+            crate::restore::mail::replay_mail_manifest_into_sqlite(&tx, &target, &manifest)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let restored = call_list_messages(state.clone(), mda, list_since(m0)).await;
+        assert!(
+            restored.expunged_uids.is_empty(),
+            "below the prune floor the history is incomplete: no VANISHED, \
+             never the partial {:?}",
+            restored.expunged_uids
+        );
+        // At or above the floor the restored history is complete again.
+        let at_floor = call_list_messages(state.clone(), mda, list_since(uid1_modseq as i64)).await;
+        assert_eq!(at_floor.expunged_uids, vec![uid2]);
     }
 
     // ── T8 placement-journal wiring tests (move / copy) ─────────────────────

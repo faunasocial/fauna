@@ -113,11 +113,16 @@ public sealed partial class MailAliasesPanel : UserControl
         if (!string.IsNullOrEmpty(_vm.LastMintedAddress))
         {
             FaunaApp.Helpers.ClipboardHelper.CopyText(_vm.LastMintedAddress);
+            // The button carries a `copied` attr holding the exact string put on the
+            // clipboard (the account-actor-id-copy-btn contract; windows get_attr maps a
+            // non-`disabled` name to HelpText). Written AFTER the copy from the same value.
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(GenerateButton, _vm.LastMintedAddress);
             MintedToast.Text = $"{S.Get("mail_aliases/copied")} {_vm.LastMintedAddress}";
             MintedToast.Visibility = Visibility.Visible;
         }
         else
         {
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(GenerateButton, "");
             MintedToast.Visibility = Visibility.Collapsed;
         }
 

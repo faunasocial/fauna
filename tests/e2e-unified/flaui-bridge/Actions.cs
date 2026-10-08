@@ -140,37 +140,37 @@ class Actions
                     // `Select` already drives a ComboBox via ExpandCollapse.
                     el.Patterns.ExpandCollapse.Pattern.Expand();
                 }
+                else if (el.Patterns.Value.IsSupported && !el.Patterns.Value.Pattern.IsReadOnly.ValueOrDefault)
+                {
+                    // An editable control (TextBox, …). The cross-app "click an
+                    // editable to commit" contract (actions/backups.py's
+                    // `set_member_cap`, actions/custody.py's `set_held_budget`,
+                    // mirroring linux/tui's Entry/SpinButton-activate idiom) means
+                    // the caller wants the typed value COMMITTED, not a pixel struck,
+                    // so this commits ALWAYS rather than only when a physical click
+                    // finds no clickable point. That conditional version honoured the
+                    // contract by accident: `Type` writes through ValuePattern
+                    // without focusing the field, so a physical click on a box that
+                    // HAD a clickable point merely focused it and fired neither Enter
+                    // nor LostFocus. `custody-held-budget-input` never committed
+                    // (2026-10-08: the bridge log read
+                    // `foreground-taking: click on`, never `commit-by-focus-shift`),
+                    // while `folder-member-cap-input`, which happens to have no
+                    // clickable point after its `clear_and_type`, did. Nothing relies
+                    // on a click leaving focus in a field: `Type`'s physical path and
+                    // `PressKey` each take focus themselves.
+                    CommitEditable(el);
+                }
                 else
                 {
-                    try
-                    {
-                        // A physical click needs an on-screen point. A pattern-less
-                        // leaf inside a scrolled-away list row (a TextBlock in a
-                        // ListViewItem: the Events calendar list) has none, and
-                        // el.Click() throws NoClickablePointException.
-                        // Scroll its row into view first. When the element is
-                        // already on screen, this costs a single IsOffscreen read.
-                        BringRowIntoView(el);
-                        PhysicalOnly($"click on {Describe(el)}", () => el.Click());
-                    }
-                    catch (FlaUI.Core.Exceptions.NoClickablePointException)
-                        when (el.Patterns.Value.IsSupported && !el.Patterns.Value.Pattern.IsReadOnly.ValueOrDefault)
-                    {
-                        // An editable control (TextBox, …) with no clickable point —
-                        // e.g. mid-field right after a `clear_and_type` leaves the
-                        // caret with no stable click target. The cross-app "click an
-                        // editable to commit" contract (actions/backups.py's
-                        // `set_member_cap`, mirroring linux/tui's SpinButton-activate
-                        // idiom) means the caller wants the typed value COMMITTED,
-                        // not a specific pixel struck — send Enter instead (the
-                        // element is already focused from the preceding type), which
-                        // every commit-on-Enter/commit-on-blur WinUI handler treats
-                        // identically. Physical click stays the FIRST attempt for
-                        // every other case (focusing a field, moving the caret) —
-                        // this only fires on the exception a plain click already
-                        // couldn't recover from.
-                        CommitEditable(el);
-                    }
+                    // A physical click needs an on-screen point. A pattern-less
+                    // leaf inside a scrolled-away list row (a TextBlock in a
+                    // ListViewItem: the Events calendar list) has none, and
+                    // el.Click() throws NoClickablePointException.
+                    // Scroll its row into view first. When the element is
+                    // already on screen, this costs a single IsOffscreen read.
+                    BringRowIntoView(el);
+                    PhysicalOnly($"click on {Describe(el)}", () => el.Click());
                 }
                 break;
             }
@@ -2160,9 +2160,10 @@ class Actions
     /// path is a recorded foreground take (<see cref="RecordForegroundTake"/>): it
     /// needs no attached desktop, but it does take the keyboard focus. UIA has no
     /// focus-free way to fire <c>LostFocus</c>, and it is reached only from gestures
-    /// that already fell back to physical input (a <see cref="Click"/> on an
-    /// editable, <see cref="Type"/>'s newline path), so it stays one of e2e
-    /// convention 10's named foregrounding fallbacks rather than a UIA path.</para>
+    /// whose alternative is physical input (a <see cref="Click"/> on an editable,
+    /// which would otherwise strike a pixel; <see cref="Type"/>'s newline path), so
+    /// it stays one of e2e convention 10's named foregrounding fallbacks rather than
+    /// a UIA path.</para>
     /// </summary>
     private string? TryCommitByFocusShift(AutomationElement el)
     {

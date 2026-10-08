@@ -102,7 +102,6 @@ def test_the_dmg_carries_a_complete_bundle(installed_from_dmg):
     """
     for rel in ("Contents/MacOS/Fauna",
                 "Contents/MacOS/fauna-sync-agent",
-                "Contents/Frameworks/Sparkle.framework",
                 "Contents/Resources/AppIcon.icns",
                 "Contents/Info.plist"):
         assert (installed_from_dmg / rel).exists(), (

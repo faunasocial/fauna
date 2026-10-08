@@ -180,6 +180,33 @@ impl PredecessorSealKey {
             .collect()
     }
 
+    /// [`Self::chain`] from the two byte lists a foreign boundary hands it —
+    /// `actor_ids[i]` owns `keys[i]`, nearest hop first — the form the UniFFI
+    /// apps' reader seams take it in (Media's and Devices'
+    /// `set_predecessor_chain`), parsed in one place so they cannot drift.
+    /// `None` when the halves differ in length: a positional slip would hand
+    /// one identity another's root, so nothing is paired. A wrong-length half
+    /// skips its pair, and that ancestor's rows stay dark.
+    pub fn chain_from_wire(actor_ids: &[Vec<u8>], keys: &[Vec<u8>]) -> Option<Vec<Self>> {
+        if actor_ids.len() != keys.len() {
+            return None;
+        }
+        Some(
+            actor_ids
+                .iter()
+                .zip(keys)
+                .filter_map(|(id, key)| {
+                    let id = <[u8; 32]>::try_from(id.as_slice()).ok()?;
+                    let key = <[u8; 32]>::try_from(key.as_slice()).ok()?;
+                    Some(Self::named(
+                        crate::identity::ActorId(id),
+                        crate::crypto::BackupKey::from_bytes(key),
+                    ))
+                })
+                .collect(),
+        )
+    }
+
     /// The convergent chunk root of [`key`](Self::key).
     pub fn root(&self) -> [u8; 32] {
         self.key.convergent_chunk_root()

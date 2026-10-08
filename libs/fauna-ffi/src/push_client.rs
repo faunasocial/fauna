@@ -187,6 +187,36 @@ pub fn push_clear_opt_in(intent_path: String) -> Result<(), FfiError> {
         .map_err(crate::general_err)
 }
 
+/// FFI mirror of [`fauna_client_push::registration::StandingFailure`]: why a
+/// desktop's push banner cannot reach this machine right now.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiPushStandingFailure {
+    /// The sync agent, which posts the banner while the app is closed, did not
+    /// answer.
+    AgentUnreachable,
+    /// The agent answered and has no notification sink here.
+    NoSink,
+}
+
+/// The push control's standing inline line on a desktop — the shared rule
+/// tui renders (`fauna_client_push::registration::standing_failure`): `None`
+/// for an opted-out install, the unreachable agent first, then a sink the
+/// agent reports absent. `notification_sink` is the agent status's field
+/// (`FfiAgentStatus::notification_sink`); `agent_running` whether the agent
+/// answered at all.
+#[uniffi::export]
+pub fn push_standing_failure(
+    opted_in: bool,
+    agent_running: bool,
+    notification_sink: Option<bool>,
+) -> Option<FfiPushStandingFailure> {
+    use fauna_client_push::registration::{StandingFailure, standing_failure};
+    standing_failure(opted_in, agent_running, notification_sink).map(|failure| match failure {
+        StandingFailure::AgentUnreachable => FfiPushStandingFailure::AgentUnreachable,
+        StandingFailure::NoSink => FfiPushStandingFailure::NoSink,
+    })
+}
+
 /// UniFFI handle for one install's push registration under the signed-in
 /// actor. Construct via
 /// [`crate::nest_client::FfiNestClient::push_registration`].

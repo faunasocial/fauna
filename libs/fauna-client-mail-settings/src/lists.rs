@@ -183,6 +183,56 @@ pub fn derive_list_domains(list_domains: &[String], alias_domains: &[String]) ->
     out
 }
 
+/// Whether saving `archive_url` must first ask the user — the add/edit sheet's
+/// submit arms with `mail_lists.archive_off_server_confirm` instead of saving
+/// (`mail-mass-mailing.md` § Don't do these: an off-deployment List-Archive URL
+/// is published to every recipient, so "warn them once + persist").
+///
+/// Asks when the URL's host is neither one of `local_domains` (the user's own
+/// domains, the add-sheet picker's options) nor a subdomain of one. **Once** is
+/// per URL: re-saving the URL the list already stores (`saved_archive_url`, `None`
+/// on create) never asks again. An empty URL publishes nothing and never asks; a
+/// URL whose host cannot be read asks — an unknown destination is not "ours".
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn archive_url_needs_confirm(
+    archive_url: String,
+    saved_archive_url: Option<String>,
+    local_domains: Vec<String>,
+) -> bool {
+    let url = archive_url.trim();
+    if url.is_empty() || saved_archive_url.as_deref().map(str::trim) == Some(url) {
+        return false;
+    }
+    let Some(host) = url_host(url) else {
+        return true;
+    };
+    !local_domains.iter().any(|d| {
+        let d = d.trim().trim_end_matches('.').to_ascii_lowercase();
+        !d.is_empty() && (host == d || host.ends_with(&format!(".{d}")))
+    })
+}
+
+/// The lower-cased host of an `http(s)://…` or `mailto:…` URL (RFC 2369 allows
+/// both for List-Archive), or of a bare `host/path`; `None` when there is none.
+fn url_host(url: &str) -> Option<String> {
+    let lower = url.to_ascii_lowercase();
+    let host = if let Some(rest) = lower.strip_prefix("mailto:") {
+        let addr = rest.split(['?', ',']).next()?;
+        addr.rsplit_once('@')?.1.to_string()
+    } else {
+        let rest = lower.split_once("://").map_or(lower.as_str(), |(_, r)| r);
+        let authority = rest.split(['/', '?', '#']).next()?;
+        let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        // A bracketed IPv6 literal is never one of the user's domains.
+        if host_port.starts_with('[') {
+            return None;
+        }
+        host_port.split(':').next()?.to_string()
+    };
+    let host = host.trim_end_matches('.');
+    (!host.is_empty()).then(|| host.to_string())
+}
+
 /// The fields the add/edit sheet collects (`mail-lists-add-sheet-*`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -724,6 +774,54 @@ mod tests {
         // And the degenerate one — nothing to offer, an empty picker rather than
         // a fabricated domain.
         assert!(derive_list_domains(&[], &[]).is_empty());
+    }
+
+    fn needs(url: &str, saved: Option<&str>) -> bool {
+        archive_url_needs_confirm(
+            url.into(),
+            saved.map(Into::into),
+            vec!["example.com".into(), "second.example".into()],
+        )
+    }
+
+    #[test]
+    fn an_archive_link_on_the_users_own_domains_saves_without_asking() {
+        assert!(!needs("https://example.com/lists/news", None));
+        assert!(!needs("https://archive.example.com/news", None));
+        assert!(!needs("HTTPS://Second.Example./a", None));
+        assert!(!needs("https://user@example.com:8443/a?b#c", None));
+        assert!(!needs("mailto:archive@example.com?subject=x", None));
+        // No link publishes nothing.
+        assert!(!needs("", None));
+        assert!(!needs("   ", None));
+    }
+
+    #[test]
+    fn an_archive_link_off_the_users_server_asks_before_saving() {
+        assert!(needs("https://archive.example.net/news", None));
+        // A look-alike suffix is not a subdomain.
+        assert!(needs("https://notexample.com/news", None));
+        assert!(needs("https://example.com.evil.example/x", None));
+        assert!(needs("mailto:archive@elsewhere.example", None));
+        // An unreadable host is not "ours".
+        assert!(needs("https://[2001:db8::1]/x", None));
+        assert!(needs("https:///nohost", None));
+        // With no domains known at all, every link is off-server.
+        assert!(archive_url_needs_confirm(
+            "https://example.com/a".into(),
+            None,
+            vec![]
+        ));
+    }
+
+    #[test]
+    fn the_off_server_warning_asks_once_per_link() {
+        let off = "https://archive.example.net/news";
+        // Re-saving the link the list already stores never asks again…
+        assert!(!needs(off, Some(off)));
+        assert!(!needs(&format!(" {off} "), Some(off)));
+        // …but a different off-server link does.
+        assert!(needs("https://other.example.net/news", Some(off)));
     }
 
     // ── mail-lists ──────────────────────────────────────────────────────

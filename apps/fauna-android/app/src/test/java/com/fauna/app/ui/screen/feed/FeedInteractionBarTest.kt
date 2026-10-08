@@ -61,7 +61,9 @@ class FeedInteractionBarTest {
     fun countShownWhenPositive() {
         render(count = 5L)
         composeTestRule.onNodeWithTag("feed-like-button").assertExists("button missing")
-        composeTestRule.onNodeWithText("5").assertExists()
+        // The count rides the button's merged text beside the icon's label (the
+        // count Text's own semantics are cleared so the number is read once).
+        composeTestRule.onNodeWithTag("feed-like-button").assertTextEquals("Like 5")
     }
 
     @Test

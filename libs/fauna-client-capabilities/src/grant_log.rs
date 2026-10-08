@@ -26,6 +26,7 @@
 //! against the attested signer set.
 
 use ed25519_dalek::SigningKey;
+use fauna_client_config::PublishedLedger;
 use fauna_core::grant_event::{
     GRANT_SCOPE_TIER_BOUNDED, GrantEvent, GrantEventError, GrantEventKind, GrantEventScope,
 };
@@ -124,7 +125,12 @@ fn grant_id_hex(id: &[u8; 16]) -> String {
 /// yet built; it makes this ordering the primary defense rather than the only
 /// one, never a license to relax it.)
 ///
-/// Therefore the log must be durable **before** the blob ships. Inverted, the
+/// Therefore the log must be durable **before** the blob ships — and not only
+/// on this device: a sibling replica learns of the `Mint` only through the
+/// bound nest's state plane, and its reconcile sweep revokes a row whose event
+/// it cannot read, so the event must be **acknowledged by the nest** before the
+/// deposit (the published form, ruled 2026-10-06 — `ui/nests.md` § Trust facet
+/// — grants → *Record-then-deposit*). Inverted, the
 /// same interruption costs only a *phantom row* — a log entry with no nest
 /// blob, which is visible, and revoking it is idempotent nest-side
 /// (`bridge_blob_handlers.rs`: "revoking an absent grant still replies
@@ -136,13 +142,14 @@ fn grant_id_hex(id: &[u8; 16]) -> String {
 /// prior art* (`fauna-client-mail-settings`' `mint_baseline_grant`: "The nest
 /// deposit runs first, then the log records the mint (mirrors
 /// `LinkedNestsMachine::mint`)"). A comment propagated the bug; a type cannot.
-/// [`Self::release`] is the only way to reach the bytes, and it demands a
-/// [`RecordedGrants`] read back from the ledger the seam's merge actually stored.
+/// [`Self::release`] is the only way to reach the bytes, and it demands
+/// [`PublishedGrants`], built only from the ledger the seam's
+/// `merge_published` stored and the nest acknowledged.
 ///
 /// Invariant owner: `docs/goal/principles.md` § The user always controls their
 /// data (grants are "revocable, audited from the user's app") +
 /// `docs/goal/architecture/nest/common.md` § Client-state recoverability.
-#[must_use = "an UndepositedGrant must be released against RecordedGrants and deposited — \
+#[must_use = "an UndepositedGrant must be released against PublishedGrants and deposited — \
               dropping it silently skips the mint"]
 pub struct UndepositedGrant {
     grant_id: [u8; 16],
@@ -151,7 +158,7 @@ pub struct UndepositedGrant {
 
 impl UndepositedGrant {
     /// Hold `blob_bytes` (the canonical `GrantBlob` encoding) until its `Mint`
-    /// event is durable. `grant_id` must be the id inside that blob — it is what
+    /// event is durable and acknowledged by the bound nest. `grant_id` must be the id inside that blob — it is what
     /// [`Self::release`] looks for in the stored log.
     pub fn new(grant_id: [u8; 16], blob_bytes: Vec<u8>) -> Self {
         Self {
@@ -165,15 +172,17 @@ impl UndepositedGrant {
         self.grant_id
     }
 
-    /// Release the blob for deposit — **only** against a log that already
-    /// records its `Mint`.
+    /// Release the blob for deposit — **only** against a nest-acknowledged log
+    /// that already records its `Mint`.
     ///
-    /// This is a real check, not a ceremony: [`RecordedGrants`] is read from the
-    /// ledger a seam merge *returned*, so a write that dropped our event (a
-    /// READ fold that does not admit its signer) is caught here rather than
-    /// producing exactly the orphan this type exists to prevent.
-    pub fn release(self, recorded: &RecordedGrants) -> Result<Vec<u8>, UnrecordedGrantError> {
-        if recorded.minted.contains(&self.grant_id) {
+    /// This is a real check, not a ceremony: [`PublishedGrants`] is read from
+    /// the ledger `merge_published` *returned*, so a write that dropped our
+    /// event (a READ fold that does not admit its signer) is caught here, and a
+    /// publish the nest did not acknowledge never produced the proof at all —
+    /// either way, rather than producing exactly the orphan this type exists to
+    /// prevent.
+    pub fn release(self, published: &PublishedGrants) -> Result<Vec<u8>, UnrecordedGrantError> {
+        if published.minted.contains(&self.grant_id) {
             Ok(self.blob_bytes)
         } else {
             Err(UnrecordedGrantError {
@@ -183,26 +192,32 @@ impl UndepositedGrant {
     }
 }
 
-/// Proof that a set of `Mint` events reached durable storage.
+/// Proof that a set of `Mint` events reached durable storage **and the bound
+/// nest's state plane**.
 ///
-/// Built **only** by reading a stored [`SuccessionLedger`] — in practice the value
-/// `SuccessionLedgerStore::merge` returns, which is the ledger actually stored
-/// (post-merge), never the one the caller hoped to store.
-pub struct RecordedGrants {
+/// Built **only** from a [`PublishedLedger`] — the answer of
+/// `SuccessionLedgerStore::merge_published`, which is the ledger actually
+/// stored (post-merge, never the one the caller hoped to store) after every
+/// ledger row this device wrote was acknowledged by the nest. A local
+/// read-back alone (the pre-2026-10-06 `RecordedGrants`) proved the event
+/// durable on one device and on no nest, so a sibling's reconcile sweep could
+/// meet the deposited row before it could read the event.
+pub struct PublishedGrants {
     minted: Vec<[u8; 16]>,
 }
 
-impl RecordedGrants {
-    /// Collect every grant id the stored log records a `Mint` for.
+impl PublishedGrants {
+    /// Collect every grant id the acknowledged log records a `Mint` for.
     ///
     /// A later `Revoke` does not remove the id: this answers "is this grant in
     /// the user's log, so the page can show it and `revoke` can name it", which
     /// a revoked grant satisfies (its row is in History, and re-revoking is
     /// idempotent). The question `latest_live_events` answers — "is it live
     /// *now*" — is a different one.
-    pub fn from_stored(stored: &SuccessionLedger) -> Self {
+    pub fn from_published(published: &PublishedLedger) -> Self {
         Self {
-            minted: stored
+            minted: published
+                .ledger()
                 .grant_events
                 .iter()
                 .filter(|e| e.kind == GrantEventKind::Mint)
@@ -212,13 +227,13 @@ impl RecordedGrants {
     }
 }
 
-/// [`UndepositedGrant::release`] was handed a [`RecordedGrants`] with no `Mint`
+/// [`UndepositedGrant::release`] was handed a [`PublishedGrants`] with no `Mint`
 /// event for that grant — depositing anyway would strand a live capability the
 /// user's app can neither show nor revoke.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "refusing to deposit capability grant {grant_id}: the stored grant log records no Mint event \
-     for it, so the user's app could neither show nor revoke it"
+    "refusing to deposit capability grant {grant_id}: the published grant log records no Mint \
+     event for it, so the user's app could neither show nor revoke it"
 )]
 pub struct UnrecordedGrantError {
     /// The grant id, hex-encoded.
@@ -731,6 +746,18 @@ mod tests {
 
     fn empty_cfg() -> SuccessionLedger {
         SuccessionLedger::empty(ActorId([9u8; 32]))
+    }
+
+    /// `cfg` through the grant-mint door of a store that holds it — the only
+    /// way to build [`PublishedGrants`].
+    fn published(cfg: &SuccessionLedger) -> PublishedGrants {
+        use fauna_client_config::SuccessionLedgerStore;
+        let store = fauna_client_config::test_helpers::FakeSuccessionLedgerStore::with(cfg.clone());
+        let ledger = fauna_client_testkit::block_on(
+            store.merge_published(SuccessionLedger::empty(cfg.actor_id)),
+        )
+        .expect("the fake nest acknowledges the publish");
+        PublishedGrants::from_published(&ledger)
     }
 
     fn mail_scope() -> GrantEventScope {
@@ -1440,7 +1467,7 @@ mod tests {
         let pending = UndepositedGrant::new([3u8; 16], b"sealed-blob".to_vec());
         assert_eq!(pending.grant_id(), [3u8; 16]);
         let bytes = pending
-            .release(&RecordedGrants::from_stored(&cfg))
+            .release(&published(&cfg))
             .expect("the stored log records this mint");
         assert_eq!(bytes, b"sealed-blob".to_vec());
     }
@@ -1454,13 +1481,47 @@ mod tests {
         let cfg = empty_cfg();
 
         let err = UndepositedGrant::new([7u8; 16], b"sealed-blob".to_vec())
-            .release(&RecordedGrants::from_stored(&cfg))
+            .release(&published(&cfg))
             .expect_err("an empty log records no mint");
 
         assert_eq!(err.grant_id, "07070707070707070707070707070707");
         assert!(
             err.to_string().contains("neither show nor revoke"),
             "the error says what the user loses, not just that a lookup missed: {err}"
+        );
+    }
+
+    /// The published form's whole point: a `Mint` merged locally but whose
+    /// publish the bound nest did not acknowledge yields no proof at all, so
+    /// no blob can be released behind it — a sibling replica could not yet
+    /// read the event its reconcile sweep would judge the row by.
+    #[test]
+    fn a_publish_the_nest_refused_yields_no_proof() {
+        use fauna_client_config::SuccessionLedgerStore;
+        let kp = ActorKeypair::generate();
+        let mut replica = SuccessionLedger::empty(kp.actor_id());
+        record_mint(
+            &mut replica,
+            kp.signing_key(),
+            [5u8; 16],
+            [2u8; 32],
+            vec![mail_scope()],
+            1000,
+            2000,
+            1000,
+        )
+        .unwrap();
+        let store =
+            fauna_client_config::test_helpers::FakeSuccessionLedgerStore::empty(replica.actor_id);
+        store.publish_refuses(true);
+
+        let refused = fauna_client_testkit::block_on(store.merge_published(replica));
+
+        assert!(refused.is_err(), "an unacknowledged publish is a refusal");
+        assert_eq!(
+            store.current().grant_events.len(),
+            1,
+            "the event stays recorded locally — the recoverable phantom-row direction"
         );
     }
 
@@ -1481,7 +1542,7 @@ mod tests {
             1000,
         )
         .unwrap();
-        let recorded = RecordedGrants::from_stored(&cfg);
+        let recorded = published(&cfg);
 
         assert!(
             UndepositedGrant::new([1u8; 16], b"one".to_vec())
@@ -1520,7 +1581,7 @@ mod tests {
 
         assert!(
             UndepositedGrant::new([4u8; 16], b"blob".to_vec())
-                .release(&RecordedGrants::from_stored(&cfg))
+                .release(&published(&cfg))
                 .is_ok(),
             "a Mint event stays a Mint event in the log after a Revoke"
         );

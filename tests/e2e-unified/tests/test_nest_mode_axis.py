@@ -767,9 +767,6 @@ def test_no_conftest_fixture_spawns_a_nest_behind_both_entry_points():
 #: The same shape as `_PEER_FIELDS_REVIEWED_AS_CLIENT_DIALS` above and for the
 #: same reason.
 _COMPOSED_AUTHORITY_IS_NOT_A_NEST = {
-    "tests/api/test_activitypub_federation.py":
-        "a STUB remote fediverse actor this test serves itself "
-        "(`actor_uri`/`inbox_url` on its own HTTP server), not a fauna nest",
     "tests/test_box_recovery_two_nest.py":
         "`_FirstConnectionRefusingProxy` — a proxy the test owns and puts in "
         "front of the nest; its scheme is the proxy's fact, not the nest's",

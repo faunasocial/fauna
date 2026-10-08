@@ -84,17 +84,13 @@ pytestmark = [pytest.mark.tier_3, pytest.mark.real_conversations]
 # declares the row's automation text explicitly, as apple and tui always have
 # (`testid::set_test_text`; pinned by `automation::find`'s
 # `a_content_row_reads_its_declared_text_not_its_subtitle`).
-@pytest.mark.parametrize(
-    "folder_share_recipient_app",
-    [
-        "macos",
-        "ios",
-        "linux",
-        "web",
-        "tui",
-    ],
-    indirect=True,
-)
+#
+# windows and android wire the same source too (windows
+# `DevicesMachineHost` → `NestRpcClient.WireDevicesForeignSetsAsync`, android
+# `DevicesVM` → `ApiClient`), so the seat takes the fixture's own seven-app
+# default rather than a narrower override. Until 2026-10-08 a five-app override
+# left windows and android out, and no windows run could collect this witness
+# while the catalog still counted it for the windows column.
 @pytest.mark.feature("share-a-folder")
 def test_cross_nest_shared_folder_renders_as_a_foreign_row(
     folder_share_recipient_app, cross_nest_foreign

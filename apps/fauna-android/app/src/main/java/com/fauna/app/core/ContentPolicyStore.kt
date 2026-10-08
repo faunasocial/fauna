@@ -2,6 +2,7 @@ package com.fauna.app.core
 
 import com.fauna.ffi.FfiContentPolicy
 import com.fauna.ffi.FfiSupervisionSnapshot
+import com.fauna.ffi.contentRenderForItem
 import com.fauna.ffi.contentRenderVerdict
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -84,9 +85,28 @@ class ContentPolicyStore @Inject constructor(
      */
     private var seededActorHex: String? = null
 
+    /**
+     * The shared report sheet's state — held here because the reporter-side hide
+     * list ([ContentPolicyInputs.hiddenContent]) is this store's input, and a
+     * report filed from a card the hide then replaces still has to paint its
+     * acknowledgement ([ReportSheetStore]).
+     */
+    val report = ReportSheetStore(api) { setHiddenContent(it) }
+
+    /** Replace the reporter-side hide list (a `hideReported` reply, or the `loadHiddenContent` read). */
+    fun setHiddenContent(ids: List<String>) {
+        _inputs.update { it.copy(hiddenContent = ids) }
+    }
+
     init {
         accountStores.registerCloser("content-policy") {
             _inputs.value = ContentPolicyInputs()
+            // The reporter-side hide list and the open report sheet are one
+            // account's (`account-scoping.md`): a departing account's reports
+            // must never hide, or be acknowledged on, the next one. The reset
+            // above already empties the list; the incoming account's arrives
+            // with its `refresh`.
+            report.reset()
             // Re-seed for whoever is active NOW (family-safety.md § Content
             // policy, clause 2): the switch closer runs AFTER
             // `AccountStores`'s active pointer already names the incoming
@@ -154,8 +174,18 @@ class ContentPolicyStore @Inject constructor(
             } catch (_: Exception) {
                 null
             }
+            // The reporter-side hide list, keep-on-failure like the halves above: a
+            // failed read leaves the last-known list in force. Read HERE, on the
+            // refresh trigger — never on a surface's mount path (web's first run
+            // hung the feed behind it).
+            val hidden = try {
+                api.loadHiddenContent()
+            } catch (_: Exception) {
+                null
+            }
             _inputs.update { prev ->
                 ContentPolicyInputs(
+                    hiddenContent = hidden ?: prev.hiddenContent,
                     // The reply's gated fold, never the raw `policy` (class doc).
                     contentPolicy =
                         if (status != null) status.supervision?.contentPolicy else prev.contentPolicy,
@@ -183,7 +213,39 @@ data class ContentPolicyInputs(
     val contentNotify: Boolean = false,
     val ownSpamPermille: UShort? = null,
     val ownPhishingPermille: UShort? = null,
+    /**
+     * The ids the viewer hid by reporting them — posts, messages (record digest)
+     * and accounts (actor id) — the `fauna.state.moderation` record's hidden-content
+     * list (`moderation.md` § Corollary — block also hides). A personal filter:
+     * the shared `contentRenderForItem` answers `reported` for an item in it, or
+     * whose author is in it.
+     */
+    val hiddenContent: List<String> = emptyList(),
 ) {
+    /**
+     * Whether the viewer's OWN report hides this item — the shared
+     * `contentRenderForItem` face, asked with the reported list alone so the
+     * guardian/region/threshold composition stays where it already is
+     * ([verdictFor]). The keys are the report subject's, NOT the render id — a
+     * post's cid and author, a message's plane record DIGEST and sender actor
+     * (`moderation.md` § Corollary); `null` for an item with no report identity.
+     * Short-circuits for an empty list (nothing reported, no FFI call), which
+     * also keeps a default-constructed [ContentPolicyInputs] FFI-free.
+     */
+    fun isReported(itemId: String?, authorId: String?): Boolean {
+        if (hiddenContent.isEmpty() || (itemId == null && authorId == null)) return false
+        return contentRenderForItem(
+            hiddenContent = hiddenContent,
+            itemId = itemId.orEmpty(),
+            authorId = authorId,
+            labels = emptyList(),
+            contentPolicy = null,
+            ownSpamPermille = null,
+            ownPhishingPermille = null,
+            regionPolicies = emptyList(),
+        ).reported
+    }
+
     /**
      * The client render verdict for one item's `labels` — one of
      * `"show" | "badge" | "collapse" | "block"`, resolved by the shared

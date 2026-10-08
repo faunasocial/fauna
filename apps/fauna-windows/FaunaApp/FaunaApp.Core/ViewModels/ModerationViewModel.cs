@@ -34,6 +34,28 @@ public partial class ModerationViewModel : ViewModelBase
     // (moderation.md § Layout & flow); each row carries a train-correction.
     public ObservableCollection<ModerationRow> Actions { get; } = new();
 
+    // The reporter's own ledger (`moderation-reports-section`; moderation.md §
+    // User-initiated reporting → What the reporter is told), read beside the queue on
+    // every Moderation entry. Every word is shared Rust's: the row's reason / status /
+    // outcome / destinations arrive worded, the title and the empty line are
+    // report_ledger_title / report_ledger_empty, a withdraw's line is
+    // report_withdraw_verdict.
+    public ObservableCollection<ReportLedgerRowView> Reports { get; } = new();
+
+    /// <summary>Whether a ledger read has landed. The empty line paints only off this
+    /// bit, so a read in flight never reads as "you have not reported anything"
+    /// (ui/README.md § List pages: loading is not empty).</summary>
+    [ObservableProperty] private bool _reportsLoaded;
+
+    /// <summary>The line the last withdraw painted (its verdict), or <c>null</c>.</summary>
+    [ObservableProperty] private string? _reportWithdrawStatus;
+
+    /// <summary>The ledger's header (<c>report_ledger_title</c>).</summary>
+    public string ReportsTitle => Strings.Resolve(FaunaFfiMethods.ReportLedgerTitle());
+
+    /// <summary>The ledger's empty line (<c>report_ledger_empty</c>).</summary>
+    public string ReportsEmptyText => Strings.Resolve(FaunaFfiMethods.ReportLedgerEmpty());
+
     private readonly INestRpcClient _rpc;
     // The client half of the queue: the conversations session's post-decrypt local
     // detections. Null when there is no MLS session (→ the server rows alone).
@@ -73,6 +95,66 @@ public partial class ModerationViewModel : ViewModelBase
         {
             IsLoading = false;
         }
+        // The ledger rides the same entry, but its own read: an unavailable ledger
+        // must never cost the queue, nor paint an empty line it cannot vouch for.
+        await RefreshReportsAsync();
+    }
+
+    /// <summary>Re-read the reporter's ledger (<c>fauna.moderation.abuse_report.mine</c>).
+    /// A failed read leaves <see cref="ReportsLoaded"/> as it was — never an empty
+    /// line off a read that did not land.</summary>
+    private async Task RefreshReportsAsync()
+    {
+        try
+        {
+            var rows = await _rpc.AbuseReportMineAsync();
+            Reports.Clear();
+            foreach (var r in rows)
+                Reports.Add(MapLedgerRow(r));
+            ReportsLoaded = true;
+        }
+        catch (Exception ex)
+        {
+            Logs.ShellLog.Warn("ModerationViewModel", $"report ledger read skipped: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>Withdraw one of the caller's open reports
+    /// (<c>fauna.moderation.abuse_report.withdraw</c>), say how it went in the shared
+    /// verdict's words, and re-read the ledger — the row then reads withdrawn and
+    /// offers no second withdraw.</summary>
+    [RelayCommand]
+    private async Task WithdrawReportAsync(ReportLedgerRowView row)
+    {
+        string? failure = null;
+        try
+        {
+            await _rpc.AbuseReportWithdrawAsync(row.ReportId);
+        }
+        catch (Exception ex)
+        {
+            failure = Strings.Error(ex);
+        }
+        ReportWithdrawStatus = Strings.Resolve(FaunaFfiMethods.ReportWithdrawVerdict(failure));
+        await RefreshReportsAsync();
+    }
+
+    /// <summary>One ledger row's line — <c>reason · status · subject · outcome — destination(s)</c>,
+    /// every part already worded by shared Rust; only the join is here, the same one
+    /// web's <c>ledgerLine</c> and tui's <c>ledger_elements</c> make (the e2e reads it).</summary>
+    internal static ReportLedgerRowView MapLedgerRow(FfiReportLedgerRow r)
+    {
+        var parts = new List<string>
+        {
+            Strings.Resolve(r.reason),
+            Strings.Resolve(r.status),
+            FaunaFfiMethods.ShortId(ReportSheetViewModel.SubjectIdOf(r.subject)),
+        };
+        if (r.outcome is { } outcome) parts.Add(Strings.Resolve(outcome));
+        return new ReportLedgerRowView(
+            r.reportId,
+            $"{string.Join(" · ", parts)} — {Strings.Resolve(r.routedTo)}",
+            r.canWithdraw);
     }
 
     [RelayCommand]
@@ -172,6 +254,13 @@ public partial class ModerationViewModel : ViewModelBase
             IsLocal: r.source == QueueRowSource.Local);
     }
 }
+
+/// <summary>
+/// One row of the reporter's own ledger (<c>moderation-report-item</c>): the id the
+/// withdraw acts on, the shared-worded line the e2e reads, and whether the row is
+/// still open (<c>moderation-report-withdraw-button</c> paints only then).
+/// </summary>
+public record ReportLedgerRowView(string ReportId, string Line, bool CanWithdraw);
 
 /// <summary>
 /// One moderation-queue row, mapped from a shared <c>QueueRow</c> — the union of a

@@ -12,12 +12,7 @@
     type AccountEntry,
   } from '$lib/accounts';
   import { base } from '$app/paths';
-  import {
-    isSubscribed,
-    requestAndSubscribe,
-    unsubscribe as pushUnsubscribe,
-    dropActorPushRow,
-  } from '$lib/push';
+  import { pushOptedIn, enablePush, disablePush, dropActorPushRow } from '$lib/push';
   import {
     ensureWasm,
     encodeEmailFilterRule,
@@ -94,9 +89,11 @@
   // The owed-kit slot's three faces. From `$lib/wasm`, not `$lib/rpc`, because
   // they are pure sessionStorage reads that need no connected client — see
   // their doc comments for why the sibling succession reads beside them do.
-  import { claimOwedSuccessionKit, rearmOwedSuccessionKit } from '$lib/wasm';
+  import { claimOwedSuccessionKit, rearmOwedSuccessionKit, dischargeOwedSuccessionSweep } from '$lib/wasm';
   import { dischargeOwedKit } from '$lib/succession-kit';
   import { RecoveryErrorGuard } from '$lib/recovery-error-guard';
+  import { ownSupersessionHold } from '$lib/own-supersession-hold';
+  import { performHeldBackSupersession } from '$lib/post-auth-escalation';
   import type { SweepCopy } from '$lib/rpc';
   import {
     keypackageCount as wsKeypackageCount,
@@ -130,7 +127,7 @@
   import { resolveLocalized, resolveLocalizedNested, cellValueText } from '$lib/i18n/localized';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { onStoreChange } from '$lib/store-change';
   // The already-built conversations manager, for the succession ceremony's
   // post-succession group sweep. Never builds one — see `doSucceedIdentity`.
@@ -295,7 +292,7 @@
       // awaited (not fire-and-forget) because the hard reload below would
       // kill an in-flight call; best-effort inside the helper, so an offline
       // switch still switches. The incoming actor re-arms via the reload's
-      // `reconcileSubscriptionActor`. AFTER the activation, never before: a
+      // `rearmPush`. AFTER the activation, never before: a
       // refused switch leaves the user where they were, and that includes
       // their notifications (`multiple-accounts` outcome 11).
       if (outgoing) await dropActorPushRow(outgoing.secretHex);
@@ -574,11 +571,26 @@
   // the user is still on the page. This effect reads `current` only —
   // `$identity` stays untracked — so it fires exactly on the nav edge away
   // from `account`, never on an unrelated identity-store write.
+  //
+  // The same edge performs a supersession escalation held back for this
+  // device's own stolen-identity ceremony (`$lib/own-supersession-hold`, the
+  // same section's closing rule): the user has read the key, so the dead
+  // session it was parked over may now go the ordinary way.
   let wasOnAccountSubpage = current === 'account';
+  function leaveAccount() {
+    recoveryErrorGuard.discharge();
+    if (ownSupersessionHold.leftAccount()) performHeldBackSupersession();
+  }
   $effect(() => {
     const onAccount = current === 'account';
-    if (wasOnAccountSubpage && !onAccount) recoveryErrorGuard.discharge();
+    if (wasOnAccountSubpage && !onAccount) leaveAccount();
     wasOnAccountSubpage = onAccount;
+  });
+  // Leaving Settings altogether is the same edge, but no `current` change
+  // reaches the effect above — the component simply unmounts. The guard dies
+  // with the component; the hold is module state and must hear it.
+  onDestroy(() => {
+    if (wasOnAccountSubpage) leaveAccount();
   });
   // Discharge (and this time also CLEAR) a still-pending persist-failure
   // message when the SIGNED-IN IDENTITY changes — a multi-account switch that
@@ -669,6 +681,22 @@
     // identity change that flips it — so the obligation is discharged the
     // moment the session is real, and never before.
     if (!id.registered) return;
+    // A relaunch adoption also owes the group sweep its lost ceremony never ran
+    // (`succession-propagation.md` § Propagation → *Own device fleet*, the
+    // relaunch-adoption clause): an unbidden press of the sweep retry, ahead of
+    // the kit. It parks the report its answer chooses — re-read here so the
+    // sweep's lines and the retry button render — and says its answer as a
+    // press would. `null` on every session that adopted nothing.
+    try {
+      const sweepAnswer = await dischargeOwedSuccessionSweep(id.actorId);
+      if (sweepAnswer) {
+        console.info('[succession] discharged the owed group sweep for', id.actorId);
+        sweepCopy = await successionSweepCopy(id.secretHex);
+        recoveryError = recoveryErrorGuard.write(recoveryError, resolveLocalized(sweepAnswer));
+      }
+    } catch (e) {
+      console.warn('[succession] could not discharge the owed sweep:', e);
+    }
     // The order and the failure arm live in `$lib/succession-kit`, where they
     // are unit-tested; this supplies the effects. `recoveryBusy` is raised only
     // once the claim is won, so an ordinary sign-in never paints a spinner over
@@ -832,6 +860,9 @@
     }
     recoveryError = recoveryErrorGuard.write(recoveryError, '');
     recoveryBusy = true;
+    // From here the ceremony owns any supersession this session meets: it is
+    // what supersedes the identity (`$lib/own-supersession-hold`).
+    ownSupersessionHold.ceremonyStarted();
     try {
       // The LIVE manager only — `conversationsManagerIfReady()` never builds
       // one. A freshly built engine has no restored state, so sweeping it would
@@ -854,6 +885,7 @@
         recoveryError = outcome.carriesTheOnlySeed
           ? recoveryErrorGuard.park(message)
           : recoveryErrorGuard.write(recoveryError, message);
+        endStolenCeremony(outcome.carriesTheOnlySeed);
         return;
       }
       // Both secrets die here: the pasted kit outranks the seed, and the
@@ -876,6 +908,7 @@
         recoveryError = recoveryErrorGuard.park(
           t.settings.recovery_kit.stolen_persist_failed({ secret: landed.secretHex }),
         );
+        endStolenCeremony(true);
         return;
       }
       // The account is the successor's: re-launch as it. `false` because the
@@ -883,9 +916,25 @@
       // `add_account` entry never is), so the plain switch is the correct one —
       // the re-auth gate has exactly one call site and it is not this.
       await performSwitch(landed.newActorId, false);
+      // The switch is itself the full relaunch, so a held-back supersession
+      // escalation is spent, not performed. (A refused switch leaves the dead
+      // session in place; with nothing held, its next refusal escalates.)
+      ownSupersessionHold.adopted();
     } catch (e) {
       recoveryBusy = false;
       recoveryError = recoveryErrorGuard.write(recoveryError, e instanceof Error ? e.message : String(e));
+      endStolenCeremony(false);
+    }
+  }
+
+  /** The stolen-identity ceremony ended without adopting a successor. A
+   *  supersession it caused and that was held back is performed now only when
+   *  the user is off Account with nothing parked; otherwise the nav edge away
+   *  from Account performs it (`leaveAccount`). `parked`: this ending parked
+   *  the message carrying the seed's only copy. */
+  function endStolenCeremony(parked: boolean) {
+    if (ownSupersessionHold.ceremonyEnded({ onAccount: current === 'account', parked })) {
+      performHeldBackSupersession();
     }
   }
 
@@ -983,8 +1032,9 @@
   // save-filter, submits in that mode).
   let editingFilterId = $state<number | null>(null);
 
-  // Push notification state
-  let pushSubscribed = $state(isSubscribed());
+  // Push notification state — the install's stored opt-in bit (written only
+  // from the store, never from the click, so the toggle is evidence of it).
+  let pushSubscribed = $state(pushOptedIn());
   let pushLoading = $state(false);
   let pushError = $state('');
 
@@ -1670,35 +1720,22 @@
     }
   }
 
-  async function handleSubscribe() {
+  // The opt-in toggle (`settings.md` § Push notifications): on → enable, off →
+  // disable, then re-read the stored bit — a failed enable leaves it off, a
+  // disable clears it even when the nest is unreachable — and paint the
+  // failure on the inline line.
+  async function togglePushOptIn(on: boolean) {
     const id = $identity;
     if (!id) return;
     pushLoading = true;
     pushError = '';
     try {
-      const ok = await requestAndSubscribe(id.secretHex);
-      if (!ok) {
-        pushError = t.status.notifications.permission_denied;
-      }
-      pushSubscribed = isSubscribed();
+      if (on) await enablePush(id.secretHex);
+      else await disablePush(id.secretHex);
     } catch (e: any) {
-      pushError = e.message || t.settings.errors.enable_notifications;
+      pushError = `${t.settings.push_notifications.update_failed}: ${e?.message ?? e}`;
     } finally {
-      pushLoading = false;
-    }
-  }
-
-  async function handleUnsubscribe() {
-    const id = $identity;
-    if (!id) return;
-    pushLoading = true;
-    pushError = '';
-    try {
-      await pushUnsubscribe(id.secretHex);
-      pushSubscribed = isSubscribed();
-    } catch (e: any) {
-      pushError = e.message || t.settings.errors.disable_notifications;
-    } finally {
+      pushSubscribed = pushOptedIn();
       pushLoading = false;
     }
   }
@@ -2654,20 +2691,25 @@
 
 {:else if current === 'general'}
   <!-- ── General — push notifications (the web-applicable general preference). ── -->
-  <section class="section">
-    <h2>{t.common.notifications}</h2>
-    {#if pushSubscribed}
-      <p>{t.status.notifications.enabled}</p>
-      <button class="btn" onclick={handleUnsubscribe} disabled={pushLoading}>
-        {pushLoading ? t.status.notifications.disabling : t.status.notifications.disable}
-      </button>
-    {:else}
-      <p class="muted">{t.status.notifications.description}</p>
-      <button class="btn primary" onclick={handleSubscribe} disabled={pushLoading}>
-        {pushLoading ? t.status.notifications.enabling : t.status.notifications.enable}
-      </button>
-    {/if}
-    {#if pushError}<p class="error">{pushError}</p>{/if}
+  <!-- One opt-in toggle (settings.md § Push notifications): its state is the
+       install's stored opt-in, never the browser permission, and its label
+       carries the status. `data-state` is the uniform on/off reading every
+       app's witness uses (`get_attr(id, "state")`). -->
+  <section class="section" data-testid={IDS.PUSH_NOTIFICATIONS_SECTION}>
+    <h2>{t.settings.push_notifications.title}</h2>
+    <p class="muted">{t.settings.push_notifications.device_description}</p>
+    <label class="confirm-toggle">
+      <input
+        type="checkbox"
+        data-testid={IDS.PUSH_NOTIFICATIONS_OPT_IN_TOGGLE}
+        data-state={pushSubscribed ? 'on' : 'off'}
+        checked={pushSubscribed}
+        disabled={pushLoading}
+        onchange={(e) => togglePushOptIn(e.currentTarget.checked)}
+      />
+      <span class="confirm-toggle-label">{t.settings.push_notifications.opt_in_label}</span>
+    </label>
+    {#if pushError}<p class="error" data-testid={IDS.PUSH_NOTIFICATIONS_ERROR}>{pushError}</p>{/if}
   </section>
 
 {:else if current === 'encryption'}

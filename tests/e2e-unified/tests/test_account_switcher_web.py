@@ -891,3 +891,128 @@ def test_web_abandoned_created_identity_never_shows_among_your_identities(
         )
     finally:
         driver.teardown()
+
+
+# ── Device settings stay; identity-tied choices follow the identity ──────────
+# (multiple-accounts outcome 10 — `account-scoping.md` § Serialized switching
+# and § The scoping taxonomy, class 2 vs class 1)
+
+GENERAL_PAGE_NAV = {
+    "nav": {"stack": [{"view": "settings"}, {"view": "settings", "id": "general"}]}
+}
+PUSH_TOGGLE = "push-notifications-opt-in-toggle"
+PUSH_SECTION = "push-notifications-section"
+COMPOSE_FIELD = "compose-text-field"
+
+
+@pytest.mark.feature("multiple-accounts")
+def test_web_switching_identity_keeps_device_settings_and_moves_drafts(nest_instance, spa_url):
+    """Settings that describe this device stay as they are across a switch,
+    while a draft — a choice tied to an identity — follows its identity. The
+    web twin of `test_tui_switching_identity_keeps_device_settings_and_moves_drafts`.
+
+    Web's device setting is the push opt-in toggle (General): the install's
+    own bit, kept in this browser's `localStorage` under no actor scope
+    (`account-scoping.md` class 2), so no switch or erase touches it. The
+    browser's push service is stood in for (headless Chromium has none —
+    `test_push_settings.py`'s web section says why); the bit the toggle
+    renders is the real one. The identity-tied half is the feed composer's
+    draft, which rests in that identity's own sealed `__drafts` plane.
+
+    The arc: as the user, switch push on and leave a draft (confirmed on the
+    nest before switching — a switch mid-debounce would test the debounce,
+    not the scoping); switch to the admin → push still on, and the composer
+    holds NOT the user's draft; switch back → the user's draft is there again
+    and push still on. Every wait is on state (point 14); the drafts read is
+    the sanctioned side-channel verification (convention 8's carve-out), the
+    mutations are all UI."""
+    import os
+
+    from actions.feed import FeedActions
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from helpers.budgets import RPC_ROUNDTRIP_S, UI_SETTLE_S
+    from tests.test_push_settings import WEB_PUSH_STAND_IN
+
+    seed, user_actor, user_secret, admin_actor, _admin_secret = _seed_two_accounts(
+        nest_instance, spa_url
+    )
+    draft = f"half-written as the user {os.getpid()}"
+
+    def user_drafts_blob():
+        with WsRpcAdminClient(
+            nest_instance["url"], actor_id=bytes.fromhex(user_actor),
+            signing_key=bytes.fromhex(user_secret),
+        ) as dev:
+            return dev.call("fauna.drafts.get", {"path": "posts"}).get("blob")
+
+    driver = create_driver("web")
+    driver.launch({"url": spa_url + "/app/", "push_service_stand_in": WEB_PUSH_STAND_IN})
+    feed = FeedActions(driver)
+
+    def push_state():
+        driver.set_state(GENERAL_PAGE_NAV)
+        driver.wait_for(PUSH_SECTION, timeout=15)
+        seen = []
+
+        def painted():
+            seen.append(driver.get_attr(PUSH_TOGGLE, "state"))
+            return seen[-1] in ("on", "off")
+
+        wait_until(painted, UI_SETTLE_S, diagnose=lambda: f"toggle state {seen[-1:]!r}")
+        return seen[-1]
+
+    def switch_to(index, actor):
+        driver.set_state(ACCOUNT_PAGE_NAV)
+        driver.wait_for(SWITCHER_ITEM, timeout=30)
+        driver.click(SWITCHER_ITEM, index=index)
+        _wait_session_actor(driver, actor, timeout=60)
+
+    def composer_body():
+        feed.navigate()
+        feed.open_composer()
+        return feed.compose_body_text()
+
+    try:
+        _auth_on_account_page(driver, seed, user_secret, "user", user_actor, spa_url)
+
+        # (1) As the user: a device choice and a draft.
+        assert push_state() == "off", "precondition: a fresh install is never opted in"
+        driver.click(PUSH_TOGGLE)
+        wait_until(
+            lambda: driver.get_attr(PUSH_TOGGLE, "state") == "on", UI_SETTLE_S,
+            diagnose=lambda: f"push toggle reads {driver.get_attr(PUSH_TOGGLE, 'state')!r}",
+        )
+        baseline = user_drafts_blob()
+        feed.navigate()
+        feed.open_composer()
+        driver.type_text(COMPOSE_FIELD, draft)
+        wait_until(
+            lambda: feed.compose_body_text() == draft, UI_SETTLE_S,
+            diagnose=lambda: f"composer reads {feed.compose_body_text()!r}",
+        )
+        wait_until(
+            lambda: user_drafts_blob() not in (None, baseline), RPC_ROUNDTRIP_S,
+            diagnose=lambda: "the user's draft never reached its __drafts plane",
+        )
+
+        # (2) Switch to the admin.
+        switch_to(1, admin_actor)
+        assert push_state() == "on", (
+            "a setting that describes this device must survive the switch"
+        )
+        assert composer_body() != draft, (
+            "the user's draft must not follow the device to another identity"
+        )
+
+        # (3) Switch back: the user's draft is theirs again, the device choice
+        # is still the one made.
+        switch_to(0, user_actor)
+        feed.navigate()
+        feed.open_composer()
+        wait_until(
+            lambda: feed.compose_body_text() == draft, RPC_ROUNDTRIP_S,
+            diagnose=lambda: f"the user's composer reads {feed.compose_body_text()!r}",
+        )
+        assert push_state() == "on", "the device setting must still hold after switching back"
+    finally:
+        driver.teardown()

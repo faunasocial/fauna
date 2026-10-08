@@ -76,7 +76,10 @@ class AccountSettingsVMTest {
         // Stubbed BEFORE construction: `AccountSettingsVM.init` collects this
         // the moment the VM is built (mirrors DevicesVMTest).
         whenever(api.reconnectTick).thenReturn(MutableSharedFlow(replay = 0, extraBufferCapacity = 1))
-        val vm = AccountSettingsVM(api, secureStorage, registry, onboardingHost, actorScope, accountStores, context)
+        val vm = AccountSettingsVM(
+            api, secureStorage, registry, onboardingHost, actorScope, accountStores, context,
+            com.fauna.app.core.StolenCeremonyHold(),
+        )
         return Fixture(vm, api, registry, secureStorage, actorScope, accountStores, onboardingHost)
     }
 

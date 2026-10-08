@@ -155,11 +155,14 @@ class AdminBridgesPendingContentTest {
 
     @Test
     fun rotateConfirmShowsNoDkimWarningForAnyRole() {
-        for (role in listOf("mta", "mda")) {
-            render(approved = listOf(approvedBridge(pubkey = "aa", role = role)))
-            composeTestRule.onNodeWithTag("admin-bridges-approved-rotate-button").performScrollTo().performClick()
+        // One composition per test (`setContent` refuses a second call): both
+        // roles on the page, each card's rotate dialog opened and cancelled in turn.
+        render(approved = listOf(approvedBridge(pubkey = "aa", role = "mta"), approvedBridge(pubkey = "bb", role = "mda")))
+        for (card in 0..1) {
+            composeTestRule.onAllNodesWithTag("admin-bridges-approved-rotate-button")[card].performScrollTo().performClick()
             composeTestRule.onNodeWithTag("admin-bridges-rotate-warning-text").assertExists()
             composeTestRule.onAllNodesWithTag("admin-bridges-rotate-dkim-warning-text").assertCountEquals(0)
+            composeTestRule.onNodeWithTag("admin-bridges-rotate-cancel-button").performScrollTo().performClick()
         }
     }
 

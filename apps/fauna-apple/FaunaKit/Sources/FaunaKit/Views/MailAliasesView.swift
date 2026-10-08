@@ -9,9 +9,9 @@ import SwiftUI
 /// Reference implementation: linux `apps/fauna-linux/src/settings/mail_aliases.rs`.
 ///
 /// On macOS this is the `mail-aliases` sub-page of the Settings sidebar-swap shell
-/// (`SettingsShellView`); on iOS it is a Settings sub-page (NavigationLink). The kind picker
-/// is a single Exact↔Wildcard toggle (linux idiom); disposable aliases mint via
-/// the dedicated generate button (defaults), not the add-sheet.
+/// (`SettingsShellView`); on iOS it is a Settings sub-page (NavigationLink). The add sheet's
+/// kind picker steps Exact → Wildcard → Disposable (Disposable takes a lifetime and
+/// use count); the page's generate button mints one with the defaults.
 public struct MailAliasesView: View {
     @Environment(FaunaClient.self) private var client: FaunaClient?
     @State private var vm = MailAliasesVM()
@@ -370,16 +370,38 @@ public struct MailAliasesView: View {
 
 // MARK: - Add / edit sheet (`mail-aliases-add-sheet-*`)
 
-/// Add a new exact/wildcard alias (`Create`) or edit an existing one (`Update`,
-/// full-overwrite — kind is fixed). Disposable aliases mint via the page's
-/// generate button, so the ttl/uses inputs are disabled here (they apply only to
-/// the disposable path) — present for ui.yaml id conformance.
+/// The add sheet's three-way kind choice (`mail-aliases.md` § Layout): the picker
+/// steps Exact → Wildcard → Disposable, carried as its `kind` attr.
+private enum AliasKindChoice: String, CaseIterable {
+    case exact, wildcard, disposable
+
+    var label: String {
+        switch self {
+        case .exact: return L.mailAliases.kindExact
+        case .wildcard: return L.mailAliases.kindWildcard
+        case .disposable: return L.mailAliases.kindDisposable
+        }
+    }
+
+    var next: AliasKindChoice {
+        switch self {
+        case .exact: return .wildcard
+        case .wildcard: return .disposable
+        case .disposable: return .exact
+        }
+    }
+}
+
+/// Add a new exact/wildcard alias (`Create`), mint a disposable one
+/// (`GenerateDisposable` with the chosen lifetime and use count — the pattern is
+/// minted, not typed), or edit an existing one (`Update`, full-overwrite — kind
+/// is fixed).
 struct MailAliasAddSheet: View {
     let vm: MailAliasesVM
     let editing: AliasView?
 
     @Environment(\.dismiss) private var dismiss
-    @State private var isWildcard = false
+    @State private var kind: AliasKindChoice = .exact
     @State private var pattern = ""
     @State private var label = ""
     @State private var spamThreshold = ""
@@ -394,39 +416,54 @@ struct MailAliasAddSheet: View {
     var body: some View {
         Form {
             Section {
-                Toggle(L.mailAliases.kindWildcardLabel, isOn: $isWildcard)
-                    .disabled(isEditing)
-                    .accessibilityIdentifier(Ids.mailAliasesAddSheetKindPicker)
-                    // Single Exact↔Wildcard toggle (linux idiom): one click selects
-                    // Wildcard. Disabled while editing (kind is fixed on update).
-                    .automationActivate(
-                        Ids.mailAliasesAddSheetKindPicker,
-                        isEnabled: { !isEditing },
-                        value: { isWildcard ? "wildcard" : "exact" }
-                    ) { isWildcard.toggle() }
-                TextField(L.mailAliases.patternPlaceholder, text: $pattern)
-                    .accessibilityIdentifier(Ids.mailAliasesAddSheetPatternInput)
-                    .automationField(Ids.mailAliasesAddSheetPatternInput, text: $pattern)
+                Picker(selection: $kind) {
+                    ForEach(AliasKindChoice.allCases, id: \.self) { Text($0.label).tag($0) }
+                } label: {
+                    Text(L.mailAliases.kindWildcardLabel)
+                }
+                .pickerStyle(.segmented)
+                .disabled(isEditing)
+                .accessibilityIdentifier(Ids.mailAliasesAddSheetKindPicker)
+                // One click steps Exact → Wildcard → Disposable (tui and android's
+                // shape); the selection reads back as the `kind` attr. Disabled
+                // while editing (kind is fixed on update).
+                .automationActivate(
+                    Ids.mailAliasesAddSheetKindPicker,
+                    isEnabled: { !isEditing },
+                    value: { kind.rawValue },
+                    attributes: { ["kind": kind.rawValue] }
+                ) { kind = kind.next }
+                if kind != .disposable {
+                    TextField(L.mailAliases.patternPlaceholder, text: $pattern)
+                        .accessibilityIdentifier(Ids.mailAliasesAddSheetPatternInput)
+                        .automationField(Ids.mailAliasesAddSheetPatternInput, text: $pattern)
+                }
                 TextField(L.mailAliases.labelPlaceholder, text: $label)
                     .accessibilityIdentifier(Ids.mailAliasesAddSheetLabelInput)
                     .automationField(Ids.mailAliasesAddSheetLabelInput, text: $label)
-                TextField(L.mailAliases.spamThresholdPlaceholder, text: $spamThreshold)
-                    .accessibilityIdentifier(Ids.mailAliasesAddSheetSpamThresholdInput)
-                    .automationField(Ids.mailAliasesAddSheetSpamThresholdInput, text: $spamThreshold)
-                TextField(L.mailAliases.ratePerHourPlaceholder, text: $ratePerHour)
-                    .accessibilityIdentifier(Ids.mailAliasesAddSheetRatePerHourInput)
-                    .automationField(Ids.mailAliasesAddSheetRatePerHourInput, text: $ratePerHour)
+                // The mint takes neither a spam threshold nor an hourly limit, so
+                // the Disposable choice hides both (as tui does).
+                if kind != .disposable {
+                    TextField(L.mailAliases.spamThresholdPlaceholder, text: $spamThreshold)
+                        .accessibilityIdentifier(Ids.mailAliasesAddSheetSpamThresholdInput)
+                        .automationField(Ids.mailAliasesAddSheetSpamThresholdInput, text: $spamThreshold)
+                    TextField(L.mailAliases.ratePerHourPlaceholder, text: $ratePerHour)
+                        .accessibilityIdentifier(Ids.mailAliasesAddSheetRatePerHourInput)
+                        .automationField(Ids.mailAliasesAddSheetRatePerHourInput, text: $ratePerHour)
+                }
             }
 
-            // Disposable lifetime/uses apply only to the Generate path — disabled
-            // here, present for id conformance (mail-aliases.md § Disposable).
-            Section {
-                TextField(L.mailAliases.ttlPlaceholder, text: $ttl)
-                    .disabled(true)
-                    .accessibilityIdentifier(Ids.mailAliasesAddSheetTtlInput)
-                TextField(L.mailAliases.usesPlaceholder, text: $uses)
-                    .disabled(true)
-                    .accessibilityIdentifier(Ids.mailAliasesAddSheetUsesInput)
+            // Disposable lifetime and use count (`mail-aliases.md` § Disposable);
+            // an empty field means the per-user default.
+            if kind == .disposable {
+                Section {
+                    TextField(L.mailAliases.ttlPlaceholder, text: $ttl)
+                        .accessibilityIdentifier(Ids.mailAliasesAddSheetTtlInput)
+                        .automationField(Ids.mailAliasesAddSheetTtlInput, text: $ttl)
+                    TextField(L.mailAliases.usesPlaceholder, text: $uses)
+                        .accessibilityIdentifier(Ids.mailAliasesAddSheetUsesInput)
+                        .automationField(Ids.mailAliasesAddSheetUsesInput, text: $uses)
+                }
             }
 
             if let error {
@@ -437,11 +474,11 @@ struct MailAliasAddSheet: View {
                 Button(submitting ? "…" : (isEditing ? L.common.save : L.mailAliases.submit)) {
                     Task { await submit() }
                 }
-                .disabled(submitting || pattern.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(!canSubmit)
                 .accessibilityIdentifier(Ids.mailAliasesAddSheetSubmitButton)
                 .automationActivate(
                     Ids.mailAliasesAddSheetSubmitButton,
-                    isEnabled: { !submitting && !pattern.trimmingCharacters(in: .whitespaces).isEmpty }
+                    isEnabled: { canSubmit }
                 ) { Task { await submit() } }
                 // The sheet's one commit, and the page's second state-dependent
                 // gesture: `submit()` branches on exactly this `editing != nil`,
@@ -452,7 +489,9 @@ struct MailAliasAddSheet: View {
                 // beside it are the buffer and stay live.
                 .faunaGate(isEditing
                            ? "fauna.bridges.update_account_alias"
-                           : "fauna.bridges.create_account_alias")
+                           : (kind == .disposable
+                              ? "fauna.bridges.generate_disposable_alias"
+                              : "fauna.bridges.create_account_alias"))
                 Button(L.mailAliases.cancel, role: .cancel) { dismiss() }
                     .accessibilityIdentifier(Ids.mailAliasesAddSheetCancelButton)
                     .automationActivate(Ids.mailAliasesAddSheetCancelButton) { dismiss() }
@@ -461,7 +500,7 @@ struct MailAliasAddSheet: View {
         .formStyle(.grouped)
         .onAppear {
             if let editing {
-                isWildcard = editing.kind == .wildcard
+                kind = editing.kind == .wildcard ? .wildcard : .exact
                 pattern = editing.pattern
                 label = editing.label
                 spamThreshold = editing.spamThresholdOverride.map(String.init) ?? ""
@@ -470,9 +509,21 @@ struct MailAliasAddSheet: View {
         }
     }
 
+    /// A disposable address is minted, so its pattern is not required.
+    private var canSubmit: Bool {
+        guard !submitting else { return false }
+        return kind == .disposable || !pattern.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
     private func submit() async {
         submitting = true
         defer { submitting = false }
+        if kind == .disposable && !isEditing {
+            await vm.dispatch(.generateDisposable(
+                ttlDays: parseCount(input: ttl), uses: parseCount(input: uses), label: label))
+            if let e = vm.errorMessage { error = e } else { dismiss() }
+            return
+        }
         let spam = parseCount(input: spamThreshold)
         let rate = parseCountI64(input: ratePerHour)
         let action: MailAliasesAction
@@ -483,7 +534,7 @@ struct MailAliasAddSheet: View {
             )
         } else {
             action = .create(
-                kind: isWildcard ? .wildcard : .exact, pattern: pattern, label: label,
+                kind: kind == .wildcard ? .wildcard : .exact, pattern: pattern, label: label,
                 spamThresholdOverride: spam, rateLimitPerHour: rate
             )
         }

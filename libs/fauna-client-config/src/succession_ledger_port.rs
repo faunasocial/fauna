@@ -13,8 +13,11 @@
 //! [`serve`] over the handle's own implementation of the seam. Both chunks
 //! compile this module, so the two ends of every crossing are one definition.
 //!
-//! **The crossing set is a positive list (decision (h)).** Only the read and
-//! the join cross (`succession_ledger.load`, `succession_ledger.merge`). The
+//! **The crossing set is a positive list (decision (h)).** Only the read, the
+//! join and the publish to the nest's acknowledgement cross
+//! (`succession_ledger.load`, `succession_ledger.merge`,
+//! `succession_ledger.publish` — the last is what a chunk's grant mint
+//! releases its blob behind, through the trait's provided `merge_published`). The
 //! succession writes — the chain re-point and the grant-mark raise — are the
 //! core chunk's post-store-ready pass's alone; on the forwarder they refuse
 //! with `StoreError::Save` naming the door that does not cross. `self_actor`
@@ -38,9 +41,10 @@ use crate::store_seam::{StoreError, SuccessionLedgerStore};
 pub mod doors {
     pub const LOAD: &str = "succession_ledger.load";
     pub const MERGE: &str = "succession_ledger.merge";
+    pub const PUBLISH: &str = "succession_ledger.publish";
 
     /// Every door of the seam that crosses.
-    pub const ALL: [&str; 2] = [LOAD, MERGE];
+    pub const ALL: [&str; 3] = [LOAD, MERGE, PUBLISH];
 }
 
 /// What every door answers: the ledger as it now reads, or the refusal's
@@ -100,6 +104,13 @@ impl<T: PortTransport> SuccessionLedgerStore for PortLedgerStore<T> {
         answered.map_err(StoreError::Save)
     }
 
+    async fn publish_ledger(&self) -> Result<(), StoreError> {
+        let answered: Result<(), String> = forward(&self.transport, doors::PUBLISH, &())
+            .await
+            .map_err(|f| StoreError::Save(f.to_string()))?;
+        answered.map_err(StoreError::Save)
+    }
+
     async fn repoint(&self, _retired: ActorId) -> Result<bool, StoreError> {
         Err(StoreError::Save(not_crossing("repoint")))
     }
@@ -143,6 +154,13 @@ pub async fn serve(
         doors::MERGE => {
             answer(payload, |replica: SuccessionLedger| async move {
                 let reply: Reply = seam.merge(replica).await.map_err(message);
+                reply
+            })
+            .await
+        }
+        doors::PUBLISH => {
+            answer(payload, |(): ()| async move {
+                let reply: Result<(), String> = seam.publish_ledger().await.map_err(message);
                 reply
             })
             .await
@@ -227,6 +245,29 @@ mod tests {
         assert_eq!(seam.merges(), 1, "a refused join writes nothing");
     }
 
+    /// The publish crosses and reaches the far side's seam, its
+    /// acknowledgement crossing back as `Ok`; the seam's refusal crosses as
+    /// `StoreError::Save` with its message intact, so `merge_published`
+    /// releases no blob behind a publish the nest never acknowledged.
+    #[tokio::test]
+    async fn publish_round_trips_both_arms() {
+        let seam = FakeSuccessionLedgerStore::serving(ME, moved());
+        let port = over(Arc::new(seam.clone()));
+        port.publish_ledger().await.expect("the publish crosses");
+        assert_eq!(seam.publishes(), 1, "the far side's seam published");
+
+        seam.publish_refuses(true);
+        let err = port
+            .publish_ledger()
+            .await
+            .expect_err("the refusal crosses");
+        assert!(
+            matches!(&err, StoreError::Save(m) if m.contains("did not acknowledge the ledger rows")),
+            "{err:?}"
+        );
+        assert_eq!(seam.publishes(), 1, "a refused publish is not counted");
+    }
+
     /// `self_actor` never crosses: it answers the account the port was minted
     /// for, even over a transport that reaches nothing.
     #[test]
@@ -252,6 +293,10 @@ mod tests {
             );
             assert!(
                 matches!(port.merge(moved()).await, Err(StoreError::Save(m)) if m == fault.to_string()),
+                "{fault:?}"
+            );
+            assert!(
+                matches!(port.publish_ledger().await, Err(StoreError::Save(m)) if m == fault.to_string()),
                 "{fault:?}"
             );
             assert!(matches!(
@@ -299,5 +344,6 @@ mod tests {
         let replica = fauna_account_port::encode(&moved()).unwrap();
         assert!(serve(&seam, doors::LOAD, &unit).await.is_some());
         assert!(serve(&seam, doors::MERGE, &replica).await.is_some());
+        assert!(serve(&seam, doors::PUBLISH, &unit).await.is_some());
     }
 }

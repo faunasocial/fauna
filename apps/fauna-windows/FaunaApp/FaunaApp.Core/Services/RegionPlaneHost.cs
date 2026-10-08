@@ -139,14 +139,26 @@ public static class RegionPlaneHost
     internal static RegionRenderDecision Render(
         ContentLabelEntry[] labels, ContentPolicyInputs inputs, RegionSubject subject)
     {
+        // The viewer's own reports are a third input beside the family floor and the
+        // region (moderation.md § Corollary): ask the ITEM verdict, which carries the
+        // hidden list, and fold it under the region's answer below.
+        var item = inputs.ItemVerdictFor(labels, subject.ReportKey, subject.ReportAuthor);
         var plane = Plane;
         if (plane is null)
-            return new RegionRenderDecision(inputs.VerdictFor(labels), null);
+            return new RegionRenderDecision(item.Verdict, null, item.Reported);
         var r = plane.Render(
             labels, inputs.ContentPolicy, inputs.OwnSpamPermille, inputs.OwnPhishingPermille,
             subject.ContentIdHex, subject.AuthorHex, subject.Text, subject.Hashtags,
             subject.HasMedia, UiLang);
-        return new RegionRenderDecision(r.@verdict, RegionPlaceholderModel.From(r.@placeholder));
+        var placeholder = RegionPlaceholderModel.From(r.@placeholder);
+        if (!item.Reported)
+            return new RegionRenderDecision(r.@verdict, placeholder, false);
+        // Reported: the item is blocked whatever the region said. A region BLOCK keeps
+        // its placeholder (convention 17: a region block never renders silent); a
+        // region COLLAPSE is dropped — the viewer's own act is the more specific
+        // explanation, and a reveal must not lift it.
+        return new RegionRenderDecision(
+            "block", placeholder is { IsBlock: true } ? placeholder : null, true);
     }
 
     /// <summary>What the settings region section paints; <c>null</c> before the plane
@@ -198,16 +210,22 @@ public static class RegionPlaneHost
 /// (<c>FfiRegionPlane.render</c>). apple's <c>RegionSubject</c>, linux's
 /// <c>region::post_input</c> / <c>message_input</c>.</summary>
 internal sealed record RegionSubject(
-    string? ContentIdHex, string? AuthorHex, string Text, string[] Hashtags, bool HasMedia)
+    string? ContentIdHex, string? AuthorHex, string Text, string[] Hashtags, bool HasMedia,
+    string? ReportKey = null, string? ReportAuthor = null)
 {
-    /// A feed post (card or detail).
+    /// A feed post (card or detail). Its report key is the post's cid + author.
     public static RegionSubject Post(uniffi.fauna_feed.PostSummary p) =>
-        new(p.postId, p.author, p.body, p.tags, p.hasMedia);
+        new(p.postId, p.author, p.body, p.tags, p.hasMedia, p.postId, p.author);
 
     /// A conversation bubble, post-decrypt — the zero id stands in for the author,
-    /// as on tui, linux and apple.
-    public static RegionSubject Message(string id, string text) =>
-        new(id, null, text, Array.Empty<string>(), false);
+    /// as on tui, linux and apple. <paramref name="reportKey"/> is the message's
+    /// plane record DIGEST (never its message id — the id a report names is the
+    /// digest, <c>report_message_subject</c>) and <paramref name="reportAuthor"/>
+    /// the sender's actor id; both null for a message with no plane ref (mail,
+    /// bridged), which cannot be reported or hidden.
+    public static RegionSubject Message(
+        string id, string text, string? reportKey = null, string? reportAuthor = null) =>
+        new(id, null, text, Array.Empty<string>(), false, reportKey, reportAuthor);
 }
 
 /// <summary>A region placeholder, ready to paint: the verb, the region, the
@@ -234,7 +252,8 @@ public sealed record RegionPlaceholderModel(
 /// <summary>One item's render decision: the composed verdict, and the region
 /// placeholder to paint AHEAD of the family arm when the region drove a
 /// <c>block</c> or <c>collapse</c> (<c>null</c> → the app's existing arms).</summary>
-internal sealed record RegionRenderDecision(string Verdict, RegionPlaceholderModel? Placeholder)
+internal sealed record RegionRenderDecision(
+    string Verdict, RegionPlaceholderModel? Placeholder, bool Reported = false)
 {
     /// Whether the region blocks this item — convention 17's verdict side.
     public bool IsRegionBlocked => Placeholder?.IsBlock == true;

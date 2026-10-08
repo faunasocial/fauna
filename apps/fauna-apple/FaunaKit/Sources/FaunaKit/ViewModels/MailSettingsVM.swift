@@ -112,8 +112,21 @@ public final class MailSettingsVM: MachineBackedVM {
         // discarding it (`try?`) rendered a failed enable/add as a no-op with an empty
         // error banner — the mint just never happened and nothing said why.
         var thrown: Error?
+        // The status line paints the machine's LIVE status (`mail-settings.md`
+        // § Status indicator), so "Syncing mail credentials…" and the rotate
+        // button's disabled state show while the change is still running. A
+        // snapshot folded only when the dispatch returns would never show them,
+        // so re-read it on a short tick for the dispatch's whole life.
+        let livePoll = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                if Task.isCancelled { break }
+                self?.snapshot = machine.snapshot()
+            }
+        }
         do { try await machine.dispatch(action: action) }
         catch { thrown = error }
+        livePoll.cancel()
         let snap = machine.snapshot()
         snapshot = snap
         errorMessage = snap.error ?? thrown.map { "\($0)" }

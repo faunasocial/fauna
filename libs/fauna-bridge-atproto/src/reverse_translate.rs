@@ -639,7 +639,7 @@ mod tests {
     /// picture this parse reads — the profile twin of
     /// `record_refs::the_blob_walk_covers_every_image_reverse_translate_parses`.
     /// A miss here is not cosmetic: an unstamped `atproto_blobs` row reads as
-    /// unreferenced to the F2.4 GC, which is deleted user media (finding 42).
+    /// unreferenced to the F2.4 GC, which is deleted user media.
     #[test]
     fn the_blob_walk_covers_every_picture_the_profile_parse_reads() {
         let avatar_cid = test_cid(14);
