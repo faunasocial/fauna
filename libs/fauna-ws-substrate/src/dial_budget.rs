@@ -46,14 +46,14 @@ pub const REDEPLOY_RECONNECT_DIALS: u32 = 64;
 
 /// Dials one session start costs at its widest today (windows and tui,
 /// measured 2026-09-28): the launch's silent challenge, the session client's
-/// bearer mint and authenticated dial, the store principal's device-handshake
-/// mint and authenticated dial, and the post-auth silent challenge tui, linux
-/// and apple still run beside the session's own mint. Rounded up, and kept at
-/// the 2026-09-28 measurement: the device principal's one to five mints
-/// refused `not_registered` it also counted are gone (its first connect now
-/// waits for the grant), and the post-auth challenge — a dial the process owes
-/// to nothing — is being removed; a ceiling that outlives what it covered only
-/// widens the margin.
+/// bearer mint and authenticated dial, and the store principal's
+/// device-handshake mint and authenticated dial. Rounded up, and kept at the
+/// 2026-09-28 measurement: the device principal's one to five mints refused
+/// `not_registered` it also counted are gone (its first connect now waits for
+/// the grant), and so is the post-auth silent challenge tui and linux ran
+/// beside the session's own mint (they read the mint's identity now; apple's
+/// Swift leg is still to follow, and fits inside the rounding); a
+/// ceiling that outlives what it covered only widens the margin.
 pub const DIALS_PER_SESSION_START: u32 = 12;
 
 /// Session starts back to back — within one refill interval, so the refill
@@ -185,7 +185,7 @@ impl DialBudget {
 
     /// Forget every nest's spent burst and standing hold, as a fresh process
     /// would. Test builds only — see [`clear_for_test`].
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
     fn clear(&self) {
         self.slots.lock().unwrap_or_else(|p| p.into_inner()).clear();
     }
@@ -206,9 +206,10 @@ pub async fn acquire(nest: &str) {
 /// "a reset app is a new device". A native e2e driver keeps one app process
 /// across tests and factory-resets it in place, so without this a journey's
 /// dials spend the NEXT test's burst too, a coupling no real device has: a
-/// device lost and restored is a new process. `test-helpers` only; a shipped
-/// build has no way to clear the backstop.
-#[cfg(any(test, feature = "test-helpers"))]
+/// device lost and restored is a new process. `test-helpers` or a debug build
+/// only (the sync agent's e2e seams ride `debug_assertions`, the profile the
+/// harness builds it in); a shipped build has no way to clear the backstop.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
 pub fn clear_for_test() {
     process_budget().clear();
 }

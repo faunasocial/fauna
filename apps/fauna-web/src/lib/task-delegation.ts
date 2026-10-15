@@ -15,7 +15,7 @@
 // (participants.md § The assignment picker) — web is `HeavyTaskCapability::ViewerOnly`
 // (a browser tab runs no lease driver), which is why "This device" never appears here.
 import { type LocalizedText, resolveLocalized } from '$lib/i18n/localized';
-import { hexFull, taskDelegationRunnerLabelRaw, taskDelegationOptionLabelRaw } from '$lib/wasm';
+import { taskDelegationRunnerLabelRaw, taskDelegationOptionLabelRaw, taskDelegationOptionKeyRaw } from '$lib/wasm';
 
 /** `fauna_core::data::ParticipantRef` — a device (hex id) or a nest (pubkey bytes).
  *  The pubkey is a byte-string field in Rust, so the WASM bridge may hand it over
@@ -39,24 +39,17 @@ export interface TaskDelegationRow {
   pin_options: PinOption[];
 }
 
-/** The hex key of a participant: a device's id verbatim, a nest's pubkey bytes hex-encoded. */
-export function participantKeyHex(who: ParticipantRef): string {
-  if ('Device' in who) return who.Device.device_id;
-  return hexFull(Uint8Array.from(who.Nest.actor_pubkey));
-}
-
 /**
  * The stable cross-app option key — `"automatic"` / `"this-device"` / a
- * participant-ref hex. It backs the `<option value>`, which is BOTH what the e2e
- * driver selects by (Playwright `select_option(value=…)`) and what it reads back
- * (`el.value`); `actions/task_delegation.py::_norm` normalizes it against GTK's
- * selected-label so one key asserts on every app. The native legs derive the
- * same three keys (windows `TaskDelegationViewModel.OptionKey`).
+ * participant-ref hex, the one shared decision
+ * `fauna_core::delegation::option_key` over wasm (priority #2). It backs the
+ * `<option value>`, which is BOTH what the e2e driver selects by (Playwright
+ * `select_option(value=…)`) and what it reads back (`el.value`);
+ * `actions/task_delegation.py::_norm` normalizes it against GTK's
+ * selected-label so one key asserts on every app.
  */
 export function pinOptionKey(option: PinOption): string {
-  if (option === 'Automatic') return 'automatic';
-  if (option === 'ThisDevice') return 'this-device';
-  return participantKeyHex(option.Other.who);
+  return taskDelegationOptionKeyRaw(option);
 }
 
 /**

@@ -44,7 +44,7 @@ pub mod atomic_write;
 pub mod bootstrap_source;
 pub mod causal;
 /// The folder-key custody reader over a capability host's throwaway fleet
-/// replica (`on-demand-files.md` § Shared sets on a capability host,
+/// replica (`on-demand-files-shared-sets.md` § Shared sets on a capability host,
 /// decision 1′).
 pub mod cold_folder_keys;
 pub use fauna_account_plane::cold_replica;
@@ -56,6 +56,7 @@ pub mod custodian_host;
 pub mod custodian_pull;
 pub mod custodian_store;
 pub mod custody_leg;
+pub mod custody_recovery;
 pub use fauna_account_plane::atproto_identity_rows;
 pub use fauna_account_plane::atproto_rows;
 pub use fauna_account_plane::blessed_nest_rows;
@@ -92,7 +93,7 @@ pub use fauna_account_store::db;
 // sync agent reach the one path derivation without a new direct dep.
 pub use fauna_account_store::root;
 /// Decision 2's re-resolve edges: the row basis, the floor comparison, and the
-/// engine's pre-seal hold (`on-demand-files.md` § Shared sets on a capability host).
+/// engine's pre-seal hold (`on-demand-files-shared-sets.md` § Shared sets on a capability host).
 pub mod binding_edge;
 /// The ceremony's admission clock and its compile-gated e2e offset — the
 /// `now` a receive-act expectation is minted and judged against. Same gate as
@@ -173,13 +174,15 @@ use fauna_account_plane::page_walk;
 /// from it — the relationship the ceiling's own sizing comment assumes
 /// (`account-sync-plane.md` § Feeds and cursors).
 pub use page_walk::MAX_FRONTIER_WRITERS;
+/// The owner-fleet restore leg: the custodian dial pass's NEST arm.
+#[cfg(feature = "account-runtime")]
+pub mod custodian_nest_restore;
 #[cfg(feature = "account-runtime")]
 pub mod peer_leg;
 #[cfg(all(test, feature = "p2p-share"))]
 mod peer_share_ingest_test;
 #[cfg(all(test, feature = "p2p-share"))]
 mod peer_share_serve_test;
-#[cfg(feature = "p2p-share")]
 pub mod peer_share_store;
 /// The relay-serving seat: a host of resident engines announces their folders
 /// on its WS-RPC connection and answers the nest's asks (`file-sync.md`
@@ -199,7 +202,6 @@ pub mod share_body;
 pub mod share_glue;
 /// Which pulled bodies a replica lands, and where — the share plane's landing
 /// policy as pure functions.
-#[cfg(feature = "p2p-share")]
 pub mod share_landing;
 /// A raw read of one shared set from one peer — the compile-gated e2e probe
 /// behind "a non-member gets nothing readable from your device" (the same
@@ -239,6 +241,7 @@ pub use fauna_account_plane::preference_put;
 pub mod presence;
 pub mod progress;
 pub mod provider_face;
+pub mod recovery;
 pub mod reseed;
 pub mod reseed_pull;
 pub use fauna_account_plane::scope_set;
@@ -299,6 +302,8 @@ mod offline_placeholder_delete_test;
 #[cfg(test)]
 mod offline_publication_hold_test;
 #[cfg(test)]
+mod own_folder_pending_mint_test;
+#[cfg(test)]
 mod populate_placeholders_test;
 #[cfg(test)]
 mod predecessor_signed_rows_test;
@@ -309,11 +314,21 @@ mod readopt_row_identity_test;
 #[cfg(test)]
 mod record_head_commit_wiring_test;
 #[cfg(test)]
+mod relay_serve_on_demand_test;
+#[cfg(test)]
 mod relay_serve_test;
 #[cfg(test)]
 mod resident_placeholder_test;
 #[cfg(test)]
+mod resident_restore_test;
+#[cfg(test)]
 mod seal_recorded_path_test;
+#[cfg(test)]
+mod self_echo_local_body_test;
+#[cfg(test)]
+mod set_row_stamp_test;
+#[cfg(test)]
+mod stale_cache_placeholder_test;
 #[cfg(test)]
 mod superseded_own_record_test;
 // The mock nest (`MockNest`/`BlobStore`) other crates' tests reach through
@@ -322,5 +337,7 @@ mod superseded_own_record_test;
 // gate in this same crate (e2e-automation-surface-gating.md § convention 15).
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod test_support;
+#[cfg(test)]
+mod unpublished_conflict_row_test;
 #[cfg(test)]
 mod upload_thumbnail_test;

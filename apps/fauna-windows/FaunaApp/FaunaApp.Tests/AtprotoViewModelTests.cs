@@ -136,6 +136,7 @@ public class AtprotoViewModelTests
             if (OnRequestContest is not null) Snap = OnRequestContest();
             return Task.CompletedTask;
         }
+        public override void SetDeleteRetireIdentity(bool enabled) => Calls.Add($"SetDeleteRetireIdentity:{enabled}");
         public override void SetDidMethod(string method) => Calls.Add($"SetDidMethod:{method}");
         public override void SetHistoryBackfill(bool enabled) => Calls.Add($"SetHistoryBackfill:{enabled}");
         public override Task SetExternalAppsEnabled(bool enabled) { Calls.Add($"SetExternalAppsEnabled:{enabled}"); return Task.CompletedTask; }
@@ -534,7 +535,7 @@ public class AtprotoViewModelTests
     {
         var lines = new[] { Text("atproto_settings/card_unlink"), Text("atproto_settings/card_mint"), Text("atproto_settings/card_publish") };
         var (vm, _) = await LoadedAsync(Snapshot(
-            pending: new TransitionCardModel("hosted_visible", lines, false, false)));
+            pending: new TransitionCardModel("hosted_visible", lines, false, Text("k"), false)));
 
         Assert.True(vm.ShowCard);
         Assert.Equal(3, vm.CardLines.Count);
@@ -557,13 +558,13 @@ public class AtprotoViewModelTests
     public async Task The_backfill_optin_rides_the_card_that_declares_it()
     {
         var withBackfill = await LoadedAsync(Snapshot(
-            pending: new TransitionCardModel("hosted_visible", new[] { Text("k") }, true, false),
+            pending: new TransitionCardModel("hosted_visible", new[] { Text("k") }, true, Text("k"), false),
             historyBackfill: true));
         Assert.True(withBackfill.Vm.ShowHistoryBackfill);
         Assert.True(withBackfill.Vm.HistoryBackfill);
 
         var without = await LoadedAsync(Snapshot(
-            pending: new TransitionCardModel("linked", new[] { Text("k") }, false, false)));
+            pending: new TransitionCardModel("linked", new[] { Text("k") }, false, Text("k"), false)));
         Assert.False(without.Vm.ShowHistoryBackfill);
     }
 
@@ -573,7 +574,7 @@ public class AtprotoViewModelTests
     public async Task Card_actions_are_disabled_while_the_confirm_is_in_flight()
     {
         var (vm, _) = await LoadedAsync(Snapshot(
-            pending: new TransitionCardModel("hosted_visible", new[] { Text("k") }, false, true)));
+            pending: new TransitionCardModel("hosted_visible", new[] { Text("k") }, false, Text("k"), true)));
 
         Assert.False(vm.CardActionsEnabled);
     }
@@ -600,7 +601,7 @@ public class AtprotoViewModelTests
         var (vm, m) = await LoadedAsync(Snapshot(level: "off"));
         m.OnSelect = target => Snapshot(
             level: "off",
-            pending: new TransitionCardModel(target, new[] { Text("atproto_settings/card_mint") }, true, false));
+            pending: new TransitionCardModel(target, new[] { Text("atproto_settings/card_mint") }, true, Text("k"), false));
 
         await vm.SelectLevelAsync("hosted_visible");
 
@@ -638,7 +639,7 @@ public class AtprotoViewModelTests
             level: "off",
             showDidMethodRadio: true,
             handlePreview: "alice.example.com",
-            pending: new TransitionCardModel("hosted_visible", new[] { Text("k") }, true, false)));
+            pending: new TransitionCardModel("hosted_visible", new[] { Text("k") }, true, Text("k"), false)));
 
         Assert.True(vm.ShowHostedPanel);
         Assert.True(vm.ShowDidMethodRadio);
@@ -779,6 +780,48 @@ public class AtprotoViewModelTests
             deleteConfirm: new DeleteConfirmCardModel(new[] { Text("k") }, true, NoRetire())));
 
         Assert.False(vm.DeleteConfirmActionsEnabled);
+    }
+
+    /// <summary>The retire-identity opt-in renders the machine's three states —
+    /// off, on, unavailable (greyed, with the machine's reason) — and an in-flight
+    /// sweep greys even a live toggle. The <c>state</c> attr is what the e2e reads.</summary>
+    [Fact]
+    public async Task Delete_retire_identity_toggle_renders_the_machines_three_states()
+    {
+        DeleteConfirmCardModel Card(RetireIdentityOptIn o, bool inProgress = false) =>
+            new(new[] { Text("k") }, inProgress, o);
+
+        var (off, _) = await LoadedAsync(Snapshot(deleteConfirm: Card(new(true, false, null))));
+        Assert.Equal("off", off.DeleteRetireIdentityState);
+        Assert.False(off.DeleteRetireIdentitySelected);
+        Assert.True(off.DeleteRetireIdentityEnabled);
+        Assert.Null(off.DeleteRetireIdentityReason);
+
+        var (on, _) = await LoadedAsync(Snapshot(deleteConfirm: Card(new(true, true, null))));
+        Assert.Equal("on", on.DeleteRetireIdentityState);
+        Assert.True(on.DeleteRetireIdentitySelected);
+
+        var (grey, _) = await LoadedAsync(Snapshot(
+            deleteConfirm: Card(new(false, false, Text("atproto_settings/delete_retire_identity_unavailable_web")))));
+        Assert.Equal("unavailable", grey.DeleteRetireIdentityState);
+        Assert.False(grey.DeleteRetireIdentityEnabled);
+        Assert.Equal("atproto_settings/delete_retire_identity_unavailable_web", grey.DeleteRetireIdentityReason);
+
+        var (busy, _) = await LoadedAsync(Snapshot(deleteConfirm: Card(new(true, true, null), inProgress: true)));
+        Assert.False(busy.DeleteRetireIdentityEnabled);
+        Assert.Equal("on", busy.DeleteRetireIdentityState);
+    }
+
+    /// <summary>The tick is a sync machine mutation — nothing is sent until confirm.</summary>
+    [Fact]
+    public async Task SetDeleteRetireIdentity_forwards_to_the_machine()
+    {
+        var (vm, m) = await LoadedAsync(Snapshot(
+            deleteConfirm: new DeleteConfirmCardModel(new[] { Text("k") }, false, NoRetire())));
+
+        vm.SetDeleteRetireIdentity(true);
+
+        Assert.Contains("SetDeleteRetireIdentity:True", m.Calls);
     }
 
     /// <summary>Open/cancel are SYNC pure-local machine mutations — no wire kind.</summary>

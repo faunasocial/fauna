@@ -98,11 +98,12 @@ pub fn not_registered_voids_latch(actor_id_hex: &str) -> Arc<dyn Fn() + Send + S
 /// hook for a machine whose slot is not the production one (a conformance
 /// suite's file-backed machine).
 pub fn not_registered_voids_latch_in(
-    credentials: CredentialStore,
+    credentials: impl Into<Arc<CredentialStore>>,
     actor_id_hex: &str,
 ) -> Arc<dyn Fn() + Send + Sync> {
+    let credentials = credentials.into();
     let actor_id_hex = actor_id_hex.to_string();
-    Arc::new(move || bundle::void_grant_registration(&credentials, &actor_id_hex))
+    Arc::new(move || bundle::void_grant_registration(&*credentials, &actor_id_hex))
 }
 
 /// A store is stamped with the slot's writer: the mint marker is spent.

@@ -1455,6 +1455,168 @@ async fn cancel_disarms_the_run() {
     assert_eq!(m.snapshot().phase, RetirePhase::List);
 }
 
+// --- Witnesses for each layer of the run guards  ------------------
+//
+// The guards mask each other through the public API (a re-list or a cancel
+// moves the phase off `Running`, so the phase check refuses whether or not the
+// disarm ran). Each test below reaches the state its arm alone must refuse by
+// writing the machine's private state directly, so mutating that one arm
+// reddens that one test.
+
+/// Mounts `box-a`'s server `DELETE` expecting exactly `expected` calls.
+async fn mount_a_delete(mock: &MockServer, expected: u64) {
+    Mock::given(method("DELETE"))
+        .and(path("/v1/servers/s-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(expected)
+        .mount(mock)
+        .await;
+}
+
+fn set_state(
+    m: &NestRetireMachine,
+    armed: Option<&str>,
+    phase: RetirePhase,
+    offered: bool,
+    selected: Option<&str>,
+) {
+    let mut inner = m.inner.lock().expect("retire mutex");
+    inner.armed = armed.map(str::to_string);
+    inner.snap.phase = phase;
+    inner.snap.force_server_offered = offered;
+    inner.snap.selected = selected.map(str::to_string);
+}
+
+fn is_armed(m: &NestRetireMachine) -> bool {
+    m.inner.lock().expect("retire mutex").armed.is_some()
+}
+
+#[tokio::test]
+async fn a_relist_after_a_failed_dns_step_does_not_reach_the_server() {
+    let mock = MockServer::start().await;
+    mount_two_boxes(&mock).await;
+    Mock::given(method("GET"))
+        .and(path("/v1/zones/z-1/records"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+        .mount(&mock)
+        .await;
+    mount_a_delete(&mock, 0).await;
+
+    let m = machine(&mock, RetireInputs::default());
+    m.verify().await;
+    m.select("s-1".into());
+    m.begin_confirm();
+    m.set_confirm_name("box-a".into());
+    m.confirm().await;
+    assert!(m.snapshot().force_server_offered);
+
+    m.verify().await;
+    assert_eq!(m.snapshot().phase, RetirePhase::List);
+    m.force_server().await;
+    m.retry().await;
+
+    let snap = m.snapshot();
+    assert_eq!(snap.phase, RetirePhase::List);
+    assert!(snap.servers.iter().any(|r| r.name == "box-a"));
+}
+
+#[tokio::test]
+async fn verify_leaves_the_run_disarmed_and_clears_the_offer() {
+    let mock = MockServer::start().await;
+    mount_two_boxes(&mock).await;
+    let m = machine(&mock, RetireInputs::default());
+    m.verify().await;
+    set_state(&m, Some("s-1"), RetirePhase::Running, true, Some("s-1"));
+
+    m.verify().await;
+
+    assert!(!is_armed(&m));
+    assert!(!m.snapshot().force_server_offered);
+}
+
+#[tokio::test]
+async fn follow_ups_are_refused_off_the_running_phase_even_when_armed() {
+    let mock = MockServer::start().await;
+    mount_two_boxes(&mock).await;
+    mount_a_delete(&mock, 0).await;
+    let m = machine(&mock, RetireInputs::default());
+    m.verify().await;
+    // Armed and offered, but the run is not on screen: the phase check is the
+    // only thing left to refuse.
+    set_state(&m, Some("s-1"), RetirePhase::List, true, Some("s-1"));
+
+    m.force_server().await;
+    m.retry().await;
+
+    assert_eq!(m.snapshot().phase, RetirePhase::List);
+}
+
+#[tokio::test]
+async fn a_run_acts_on_the_armed_row_never_the_selected_one() {
+    let mock = MockServer::start().await;
+    mount_two_boxes(&mock).await;
+    mount_a_delete(&mock, 1).await;
+    let m = machine(&mock, RetireInputs::default());
+    m.verify().await;
+    // `selected` has drifted to box-b while box-a is the armed run.
+    set_state(&m, Some("s-1"), RetirePhase::Running, true, Some("s-2"));
+
+    m.force_server().await;
+
+    let names: Vec<_> = m
+        .snapshot()
+        .servers
+        .iter()
+        .map(|r| r.name.clone())
+        .collect();
+    assert_eq!(names, ["box-b"], "box-a retired, box-b untouched");
+}
+
+#[tokio::test]
+async fn cancel_clears_the_armed_id() {
+    let mock = MockServer::start().await;
+    mount_two_boxes(&mock).await;
+    let m = machine(&mock, RetireInputs::default());
+    m.verify().await;
+    set_state(&m, Some("s-1"), RetirePhase::Running, true, Some("s-1"));
+
+    m.cancel();
+
+    assert!(!is_armed(&m));
+}
+
+#[tokio::test]
+async fn back_from_confirm_and_from_the_list_clear_the_armed_id() {
+    let mock = MockServer::start().await;
+    mount_two_boxes(&mock).await;
+    let m = machine(&mock, RetireInputs::default());
+    m.verify().await;
+
+    set_state(&m, Some("s-1"), RetirePhase::Confirm, false, Some("s-1"));
+    m.back();
+    assert!(!is_armed(&m));
+
+    set_state(&m, Some("s-1"), RetirePhase::List, false, Some("s-1"));
+    m.back();
+    assert!(!is_armed(&m));
+}
+
+#[tokio::test]
+async fn confirm_refuses_off_the_confirm_phase_even_with_an_enabled_name() {
+    let mock = MockServer::start().await;
+    mount_two_boxes(&mock).await;
+    mount_a_delete(&mock, 0).await;
+    let m = machine(&mock, RetireInputs::default());
+    m.verify().await;
+    set_state(&m, None, RetirePhase::List, false, Some("s-1"));
+    m.inner.lock().expect("retire mutex").snap.confirm_enabled = true;
+
+    m.confirm().await;
+
+    assert_eq!(m.snapshot().phase, RetirePhase::List);
+    assert!(!is_armed(&m));
+}
+
 // ---------------------------------------------------------------------------
 // A partly-failed DNS step says what is left (§ DNS cleanup — scope and order)
 // ---------------------------------------------------------------------------
@@ -1964,5 +2126,189 @@ fn a_skipped_step_says_why_and_the_status_maps_onto_provisioning_progress() {
     assert_eq!(
         StepState::Failed { cause: "x".into() }.progress_status(),
         fauna_provisioning::progress::StepStatus::Failed
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Remembered-slot names (§ DNS cleanup — scope and order, the second arm)
+// ---------------------------------------------------------------------------
+
+async fn mount_txt_at(mock: &MockServer, name: &str, records: serde_json::Value) {
+    Mock::given(method("GET"))
+        .and(path("/v1/zones/z-1/records"))
+        .and(query_param("name", name))
+        .and(query_param("type", "TXT"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "records": records })),
+        )
+        .mount(mock)
+        .await;
+}
+
+async fn expect_delete(mock: &MockServer, id: &str, times: u64) {
+    Mock::given(method("DELETE"))
+        .and(path(format!("/v1/zones/z-1/records/{id}")))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(times)
+        .mount(mock)
+        .await;
+}
+
+#[tokio::test]
+async fn the_dns_step_withdraws_the_remembered_slot_values_and_nothing_else() {
+    let mock = MockServer::start().await;
+    mount_account(&mock, one_zone(), "example-test").await;
+    mount_ptr(&mock, Some("mail.example.test")).await;
+    mount_apex_a(&mock, BOX_IPV4).await;
+    // The remembered names, each holding Fauna's value; the `_fauna` name also
+    // carries a sibling value (`subhandles=`) that is not Fauna's slot value.
+    mount_txt_at(
+        &mock,
+        "s1._domainkey",
+        serde_json::json!([
+            { "id": "r-dkim", "type": "TXT", "name": "s1._domainkey", "value": "v=DKIM1; k=rsa; p=AAAA", "ttl": 300 }
+        ]),
+    )
+    .await;
+    mount_txt_at(
+        &mock,
+        "_atproto.alice",
+        serde_json::json!([
+            { "id": "r-atp", "type": "TXT", "name": "_atproto.alice", "value": "did=did:plc:abc", "ttl": 300 }
+        ]),
+    )
+    .await;
+    mount_txt_at(
+        &mock,
+        "_fauna",
+        serde_json::json!([
+            { "id": "r-self", "type": "TXT", "name": "_fauna", "value": "self=xyz", "ttl": 300 },
+            { "id": "r-sub", "type": "TXT", "name": "_fauna", "value": "subhandles=bob", "ttl": 300 }
+        ]),
+    )
+    .await;
+    // A third party's DKIM at a name Fauna never remembered: never even read.
+    mount_txt_at(
+        &mock,
+        "other._domainkey",
+        serde_json::json!([
+            { "id": "r-foreign", "type": "TXT", "name": "other._domainkey", "value": "v=DKIM1; p=FOREIGN", "ttl": 300 }
+        ]),
+    )
+    .await;
+    mount_empty_records(&mock).await;
+    expect_delete(&mock, "r-apex", 1).await;
+    expect_delete(&mock, "r-dkim", 1).await;
+    expect_delete(&mock, "r-atp", 1).await;
+    expect_delete(&mock, "r-self", 1).await;
+    expect_delete(&mock, "r-sub", 0).await;
+    expect_delete(&mock, "r-foreign", 0).await;
+    Mock::given(method("DELETE"))
+        .and(path("/v1/servers/s-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&mock)
+        .await;
+
+    let set = |name: &str| {
+        BTreeMap::from([(
+            "example.test".to_string(),
+            BTreeSet::from([name.to_string()]),
+        )])
+    };
+    let m = machine(
+        &mock,
+        RetireInputs {
+            remembered_slots: RememberedDnsSlots {
+                dkim: set("s1._domainkey.example.test"),
+                atproto: set("_atproto.alice.example.test"),
+                fauna_self: set("_fauna.example.test"),
+            },
+            ..RetireInputs::default()
+        },
+    );
+    m.verify().await;
+    m.select("s-1".into());
+    m.begin_confirm();
+    m.set_confirm_name("example-test".into());
+    m.confirm().await;
+
+    let snap = m.snapshot();
+    assert_eq!(snap.steps[0].state, StepState::Done, "DNS ran");
+    assert_eq!(snap.phase, RetirePhase::Done);
+}
+
+#[tokio::test]
+async fn no_remembered_names_means_no_slot_reads_at_all() {
+    let mock = MockServer::start().await;
+    mount_account(&mock, one_zone(), "example-test").await;
+    mount_ptr(&mock, Some("mail.example.test")).await;
+    mount_apex_a(&mock, BOX_IPV4).await;
+    // A TXT read at any `_domainkey` name would hit this and fail the run.
+    Mock::given(method("GET"))
+        .and(path("/v1/zones/z-1/records"))
+        .and(query_param("type", "TXT"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&mock)
+        .await;
+    mount_empty_records(&mock).await;
+    expect_delete(&mock, "r-apex", 1).await;
+    Mock::given(method("DELETE"))
+        .and(path("/v1/servers/s-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&mock)
+        .await;
+
+    let m = machine(&mock, RetireInputs::default());
+    m.verify().await;
+    m.select("s-1".into());
+    m.begin_confirm();
+    m.set_confirm_name("example-test".into());
+    m.confirm().await;
+    assert_eq!(m.snapshot().steps[0].state, StepState::Done);
+}
+
+// ---------------------------------------------------------------------------
+// The *current* badge for an app with no OS resolver (`resolve_current_host`)
+// ---------------------------------------------------------------------------
+
+/// A browser cannot resolve its nest's host itself, so the machine does it
+/// through the same public resolver attribution uses: a name's apex `A`
+/// badges the matching row; an IPv4 literal needs no lookup; an unresolvable
+/// name (or an IPv6 literal) badges nothing.
+#[tokio::test]
+async fn resolve_current_host_badges_the_row_the_nest_host_points_at() {
+    let mock = MockServer::start().await;
+    mount_account(&mock, serde_json::json!([]), "example-test").await;
+    mount_ptr(&mock, None).await;
+    mount_public_a(&mock, "nest.example.test", BOX_IPV4, 1).await;
+
+    let m = machine(&mock, with_public_dns(&mock));
+    m.verify().await;
+    assert!(!m.snapshot().servers[0].current, "nothing resolved yet");
+
+    assert!(m.resolve_current_host("nest.example.test.").await);
+    assert!(
+        m.snapshot().servers[0].current,
+        "the host's A is the box's IPv4"
+    );
+
+    assert!(
+        m.resolve_current_host("198.51.100.9").await,
+        "a literal is taken as is"
+    );
+    assert!(
+        !m.snapshot().servers[0].current,
+        "a literal elsewhere moves the badge off"
+    );
+
+    assert!(
+        !m.resolve_current_host("::1").await,
+        "no IPv4 to badge with"
+    );
+    assert!(
+        !m.resolve_current_host("gone.example.test").await,
+        "unresolvable"
     );
 }

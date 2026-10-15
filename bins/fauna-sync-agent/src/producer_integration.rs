@@ -81,7 +81,7 @@ fn seed_db_row(paths: &SyncPaths, set: FolderRef, rel: &str, state: SyncState, s
 #[tokio::test]
 async fn get_file_status_reports_overlay_state_from_real_per_folder_db() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let paths = SyncPaths::new(Some(tmp.path().to_path_buf()));
+    let paths = SyncPaths::at(tmp.path().to_path_buf());
 
     // No capability → reconcile_engines provably no-ops
     // (no engine, no cfapi sync-root registration).
@@ -243,7 +243,7 @@ async fn folder_status_is(state: &Arc<SyncServiceState>, path: &str, want: FileS
 #[tokio::test]
 async fn get_file_status_aggregates_a_folder_from_its_tracked_descendants() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let paths = SyncPaths::new(Some(tmp.path().to_path_buf()));
+    let paths = SyncPaths::at(tmp.path().to_path_buf());
     let state = state(paths.clone());
 
     let folder = r"C:\od-docs";
@@ -305,7 +305,7 @@ async fn get_file_status_aggregates_a_folder_from_its_tracked_descendants() {
 #[tokio::test]
 async fn provisioned_capability_does_not_serve_unbound_on_demand_folder() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let paths = SyncPaths::new(Some(tmp.path().to_path_buf()));
+    let paths = SyncPaths::at(tmp.path().to_path_buf());
 
     let state = state(paths);
 

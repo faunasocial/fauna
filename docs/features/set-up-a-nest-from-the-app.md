@@ -63,7 +63,7 @@ Stamped 2026-09-26 at d33b1481dd.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | |
-| linux | ⚠ partial | |
+| linux | ✅ full | |
 | windows | ⚠ partial | |
 | macos | ⚠ partial | |
 | ios | ⚠ partial | |
@@ -89,14 +89,14 @@ Stamped 2026-09-26 at d33b1481dd.
 | 4 | app | `tests/e2e-unified/tests/web/test_provisioning_continue_to_nat_mode.py::test_provisioning_continue_lands_on_nat_mode_choice` | web (linux): passed, linux (linux): failed |
 | 5 | app | (maintainer-only) | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_dns_post_instructions.py::test_dns_post_instructions_shows_seeded_records` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_awaiting_manual_dns.py::test_awaiting_manual_dns_surface_renders` | web (linux): passed, linux (linux): skipped, windows (windows): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_awaiting_manual_dns.py::test_awaiting_manual_dns_surface_renders` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_awaiting_manual_dns.py::test_awaiting_manual_dns_recheck_and_copy_actionable` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_i_deferred_dns_relaunches_to_the_almost_ready_surface` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 6 | app | `tests/e2e-unified/tests/web/test_awaiting_dns_poll_error_guard.py::test_recheck_against_unreachable_nest_logs_no_pageerror` | web (linux): passed, linux (linux): failed |
 | 7 | app | `tests/e2e-unified/tests/test_provisioning_slot_recovery.py::test_a_crash_during_online_resumes_on_the_records_less_surface` | web (linux): passed, linux (linux): passed, windows (windows): skipped, tui (linux): passed, tui (windows): passed |
 | 7 | app | `tests/e2e-unified/tests/test_provisioning_slot_recovery.py::test_create_server_failing_after_the_slot_write_still_resumes` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
 | 8 | app | `tests/e2e-unified/tests/test_onboarding_dns_glue_app.py::test_the_verified_dns_credential_is_sealed_by_the_launched_app` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_awaiting_manual_dns.py::test_awaiting_manual_dns_fallthrough_lands_on_handle_entry` | linux (linux): skipped, windows (windows): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_provisioning_slot_recovery.py::test_the_exit_retires_the_slot_so_a_relaunch_no_longer_resumes_the_box` | linux (linux): skipped, windows (windows): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_vps_config.py::test_vps_config_update_channel_rows_select_one_of_three` | linux (linux): skipped, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_awaiting_manual_dns.py::test_awaiting_manual_dns_fallthrough_lands_on_handle_entry` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_provisioning_slot_recovery.py::test_the_exit_retires_the_slot_so_a_relaunch_no_longer_resumes_the_box` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_vps_config.py::test_vps_config_update_channel_rows_select_one_of_three` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 <!-- features-render:end -->

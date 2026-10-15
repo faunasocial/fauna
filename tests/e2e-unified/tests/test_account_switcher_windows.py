@@ -53,7 +53,7 @@ from conftest import _seeded_environment
 from drivers import create_driver
 from drivers.machine_test_setter import set_handle_check_snapshot
 from helpers.budgets import APP_RELAUNCH_S, RPC_ROUNDTRIP_S, UI_SETTLE_S
-from helpers.registry_store import read_registry_index, read_store_map
+from helpers.registry_store import describe_registry, read_registry_index, read_store_map
 from helpers.waiting import (
     activation_gesture_completed,
     assert_no_relaunch,
@@ -209,10 +209,17 @@ def _wait_switcher_count(driver, n, timeout=30):
         tree = driver.tree()
     except Exception as e:  # pragma: no cover - diagnostic only
         tree = f"(tree dump failed: {e})"
+    # The registry at rest beside the UI: a wrong row COUNT is a registry outcome
+    # far more often than a paint one, and the slot names say why a row survived.
+    try:
+        registry = describe_registry(driver)
+    except Exception as e:  # pragma: no cover - diagnostic only
+        registry = f"(registry unreadable: {type(e).__name__}: {e})"
     raise AssertionError(
         f"switcher never reached {n} accounts (one active) within {timeout}s.\n"
         f"  last step failure: {last_error}\n"
         f"  app error-message: {app_error!r}\n"
+        f"--- registry at rest ---\n{registry}\n"
         f"--- accessibility tree ---\n{tree}"
     )
 
@@ -1036,8 +1043,9 @@ def test_windows_abandoned_create_identity_does_not_ghost_the_switcher(
     legacy slot at Continue, before it was ever registered, and the old
     ``FfiAccountRegistry.EnsureMigrated()`` boot call minted a real index entry for
     it on the VERY NEXT LAUNCH. Dropping that call made this test belt-and-braces
-    — until moment 1 (2026-08-15) made ``CommitConfirmedIdentity`` ->
-    ``persist_confirmed_identity_mirrored`` register AND activate the identity at
+    — until moment 1 (2026-08-15) made ``CommitConfirmedIdentity`` -> the FFI's
+    ``ConfirmIdentity`` (``FfiAccountRegistry::confirm_identity``, a pass-through to
+    the shared ``persist_confirmed_identity``) register AND activate the identity at
     Continue on all seven apps, reintroducing the ghost through the front door
     while the whole test was still timing out at step (2) on an unrelated driver
     bug and so had never once reached step (5). It is NOT belt-and-braces:

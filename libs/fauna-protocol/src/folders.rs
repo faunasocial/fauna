@@ -68,14 +68,26 @@ pub const KIND_FOLDERS_WRITE_TOKEN_GET: &str = "fauna.folders.write_token.get";
 pub const KIND_FOLDERS_READ_TOKEN_GET: &str = "fauna.folders.read_token.get";
 pub const KIND_FOLDERS_SERVED_ROWS_ADOPT: &str = "fauna.folders.served_rows.adopt";
 /// A third-party principal's write-only ingress into one folder — served on a
-/// principal session only (`file-sync.md` § Third-party deposit ingress).
+/// principal session only (`folder-deposit.md`).
 pub const KIND_FOLDERS_DEPOSIT: &str = "fauna.folders.deposit";
 /// The owner's read of one folder's parked deposits — adoption's input
-/// (`file-sync.md` § Third-party deposit ingress).
+/// (`folder-deposit.md`).
 pub const KIND_FOLDERS_DEPOSITS_LIST: &str = "fauna.folders.deposits.list";
 /// The owner's retire of one parked deposit once its adopted change row is
-/// durable (`file-sync.md` § Third-party deposit ingress).
+/// durable (`folder-deposit.md`).
 pub const KIND_FOLDERS_DEPOSITS_RETIRE: &str = "fauna.folders.deposits.retire";
+/// The owner's read of one sealed part of a parked deposit larger than one
+/// message (`folder-deposit.md` § Deposits larger
+/// than one message).
+pub const KIND_FOLDERS_DEPOSITS_PART: &str = "fauna.folders.deposits.part";
+/// A principal opens a deposit larger than one message — the staged upload its
+/// parts land in (principal session only).
+pub const KIND_FOLDERS_DEPOSIT_BEGIN: &str = "fauna.folders.deposit.begin";
+/// One part of a staged deposit, sealed on arrival (principal session only).
+pub const KIND_FOLDERS_DEPOSIT_PART: &str = "fauna.folders.deposit.part";
+/// The atomic commit that makes a staged deposit adoptable (principal session
+/// only).
+pub const KIND_FOLDERS_DEPOSIT_COMMIT: &str = "fauna.folders.deposit.commit";
 
 // ── shared sub-structs ───────────────────────────────────────────────────────
 
@@ -329,7 +341,7 @@ pub struct FolderSummary {
     /// discloses nothing new — because every holder that seals must hold
     /// itself to it, and the capability host, whom the nest's owner exemption
     /// does not cover, reads it here at its re-resolve edges
-    /// (`on-demand-files.md` § Shared sets on a capability host, decision 2).
+    /// (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 2).
     /// `None` = unbound or no floor established. Wire-additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_key_floor: Option<u64>,
@@ -487,6 +499,19 @@ pub struct FolderSummary {
     /// echo. `None` on a row created without one. Wire-additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub set_nonce: Option<ByteBuf>,
+    /// The nest's **digest of the set's stored content-key envelope**
+    /// (`writer-signed-change-records.md` ruling (7)(b)(ii) rule (6)(a)) —
+    /// [`crate::folder_envelope_sig::digest`] over the blob as `content_key.put`
+    /// stored it. Like [`Self::set_nonce`] it is only ever a reason to fetch: a
+    /// member whose last fetched envelope digests otherwise re-fetches it, and
+    /// takes nothing from this echo — the envelope it fetches verifies under
+    /// the owner's signature. This is what carries a re-publish that advances
+    /// no epoch (a serve flip, a rotation's re-publish) to a member. Rides both
+    /// arms, as [`Self::content_key_floor`] does. `None` = unbound, no envelope
+    /// yet, or one put before the nest kept digests — asserts nothing.
+    /// Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_digest: Option<ByteBuf>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -849,6 +874,13 @@ pub struct FolderSetWebPaywallRequest {
     /// (non-32-byte) hash is refused, never silently ignored. Wire-additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -877,6 +909,13 @@ pub struct ServedRowsAdoptRequest {
     /// Hash-first addressing, as on [`FolderUpdateRequest::name_hash`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     /// The key every carried signature verifies under — the owner's identity
     /// key (direct) or a `SyncWrite` principal key the owner registered here.
     pub signer_key: ByteBuf,
@@ -1367,6 +1406,13 @@ pub struct FolderUpdateRequest {
     /// (non-32-byte) hash is refused, never silently ignored. Wire-additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     /// [`Self::include_paths`], sealed under the owner's root
     /// (`fauna_core::label_custody::seal_include_paths`) — the write half of
     /// `FolderSummary::include_paths_sealed`.
@@ -1512,6 +1558,13 @@ pub struct FolderDeleteRequest {
     /// Hash-first addressing (S5b) — see `FolderUpdateRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -1532,6 +1585,13 @@ pub struct FolderDevicesRequest {
     /// Hash-first addressing (S5b) — see `FolderUpdateRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -1558,6 +1618,13 @@ pub struct PlacesSetRequest {
     /// Hash-first addressing (S5b) — see `FolderUpdateRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     /// Hex-encoded 32-byte device id of the place to set. The device must
     /// already be one of the actor's registered sync devices.
     pub device_id: String,
@@ -1586,6 +1653,13 @@ pub struct MembersListRequest {
     /// Hash-first addressing (S5b) — see `FolderUpdateRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -1673,6 +1747,13 @@ pub struct ActorMembersListRequest {
     /// Hash-first addressing (S5b) — see `FolderUpdateRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -1751,6 +1832,13 @@ pub struct MemberSetAccessRequest {
     /// Hash-first addressing (S5b) — see `FolderUpdateRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -1774,6 +1862,13 @@ pub struct MemberRemoveRequest {
     /// Hash-first addressing (S5b) — see `FolderUpdateRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -1812,6 +1907,13 @@ pub struct MemberEvictRequest {
     /// Hash-first addressing (S5b) — see `FolderUpdateRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -1946,6 +2048,13 @@ pub struct LeaseAcquireRequest {
     /// Hash-first addressing (S5b) — see `FolderUpdateRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -1977,6 +2086,13 @@ pub struct LeaseReleaseRequest {
     /// Hash-first addressing (S5b) — see `FolderUpdateRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -2121,6 +2237,13 @@ pub struct ConflictReportRequest {
     /// `FolderUpdateRequest::name_hash` for the full rationale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     /// BLAKE3 of the normalized [`Self::path`] — the routing/PK-class key the
     /// stored row is addressed by (path-sealing S6-a). The nest derives it from
     /// [`Self::path`] when absent;
@@ -2295,6 +2418,13 @@ pub struct FolderShareRequest {
     /// Hash-first addressing (S5b) — see `FolderUpdateRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -2361,6 +2491,13 @@ pub struct ContentKeyPutRequest {
     /// Hash-first addressing (S5b) — see `FolderUpdateRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -2397,6 +2534,13 @@ pub struct ContentKeyGetRequest {
     /// `channel_id`, not `name`/`name_hash`, so this is ignored alongside it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -2435,7 +2579,7 @@ pub struct ContentKeyGetReply {
     /// has no row on its own nest, so this reply is the carrier that lets its
     /// engine hold a write behind the floor locally instead of learning of a
     /// rotation only from the home nest's `stale_content_key` refusal
-    /// (`docs/goal/behavior/on-demand-files.md` § Shared sets on a capability
+    /// (`docs/goal/behavior/on-demand-files-shared-sets.md` § Shared sets on a capability
     /// host → *One mechanism*, question 2). The member refreshes its stored
     /// `ForeignFolder.content_key_floor` from it. `None` same-nest, or from a
     /// home nest that holds no floor ⇒ keep what is held
@@ -2472,11 +2616,31 @@ pub struct ContentKeyGetReply {
     pub extra: BTreeMap<String, Value>,
 }
 
+/// The address a per-set request names its set by, as the nest reads it
+/// (`set-addressing.md` § The forms): the set's **row** when the request
+/// carries one — it wins, and the name forms are not consulted beside it —
+/// else its **name** with the hash address the client funnel stamped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetAddress<'a> {
+    /// `folders.id` on the nest the request is sent to — names exactly one
+    /// row, resolved under the kind's own gate (`set-addressing.md` § The row
+    /// form).
+    Row(i64),
+    /// The plaintext name (empty once the funnel took it off) and the
+    /// `name_hash` beside it, resolved owner-first.
+    Name {
+        name: &'a str,
+        name_hash: Option<&'a ByteBuf>,
+    },
+}
+
 /// A request addressed to one folder set by its user-chosen name that also
 /// carries the set's hash address (`name_hash`, S5b) — the address that
-/// survives once the nest stops resting the plaintext name. The client stamps
-/// the hash through one funnel ([`addressed`]), which also takes the plaintext
-/// name off the request, so no such request leaves an app by name.
+/// survives once the nest stops resting the plaintext name — and the set's
+/// row (`folder_id`), the one same-nest form naming a row and not a label
+/// (`set-addressing.md` § The row form). The client stamps the hash through
+/// one funnel ([`addressed`]), which also takes the plaintext name off the
+/// request, so no such request leaves an app by name.
 pub trait SetAddressed {
     /// The set's name as this request carries it.
     fn set_name(&self) -> &str;
@@ -2484,6 +2648,22 @@ pub trait SetAddressed {
     fn name_hash(&self) -> Option<&ByteBuf>;
     /// The request's `name_hash` slot.
     fn name_hash_mut(&mut self) -> &mut Option<ByteBuf>;
+    /// The set's row (`folders.id`), if the request carries one.
+    fn folder_id(&self) -> Option<i64>;
+    /// Fill (or clear) the request's row slot. A no-op on the one request
+    /// that names a set with no row yet, `folders.create`.
+    fn set_folder_id(&mut self, folder_id: Option<i64>);
+    /// The address the nest resolves this request by: [`SetAddress::Row`]
+    /// when a row is carried — the row wins — else [`SetAddress::Name`].
+    fn address(&self) -> SetAddress<'_> {
+        match self.folder_id() {
+            Some(id) => SetAddress::Row(id),
+            None => SetAddress::Name {
+                name: self.set_name(),
+                name_hash: self.name_hash(),
+            },
+        }
+    }
     /// Take the plaintext name off the request (an empty name is omitted on
     /// the wire).
     fn clear_set_name(&mut self);
@@ -2518,6 +2698,12 @@ macro_rules! set_addressed {
             fn name_hash_mut(&mut self) -> &mut Option<ByteBuf> {
                 &mut self.name_hash
             }
+            fn folder_id(&self) -> Option<i64> {
+                self.folder_id
+            }
+            fn set_folder_id(&mut self, folder_id: Option<i64>) {
+                self.folder_id = folder_id;
+            }
             fn clear_set_name(&mut self) {
                 self.$field.clear();
             }
@@ -2525,6 +2711,9 @@ macro_rules! set_addressed {
     };
 }
 
+/// The one set-addressed request without a row slot: a create names a set
+/// that has no row yet, so it is always name-addressed
+/// (`set-addressing.md` § The row form).
 impl SetAddressed for FolderCreateRequest {
     fn set_name(&self) -> &str {
         &self.name
@@ -2535,6 +2724,10 @@ impl SetAddressed for FolderCreateRequest {
     fn name_hash_mut(&mut self) -> &mut Option<ByteBuf> {
         &mut self.name_hash
     }
+    fn folder_id(&self) -> Option<i64> {
+        None
+    }
+    fn set_folder_id(&mut self, _folder_id: Option<i64>) {}
     fn clear_set_name(&mut self) {
         self.name.clear();
     }
@@ -2552,6 +2745,12 @@ impl SetAddressed for FolderUpdateRequest {
     }
     fn name_hash_mut(&mut self) -> &mut Option<ByteBuf> {
         &mut self.name_hash
+    }
+    fn folder_id(&self) -> Option<i64> {
+        self.folder_id
+    }
+    fn set_folder_id(&mut self, folder_id: Option<i64>) {
+        self.folder_id = folder_id;
     }
     fn clear_set_name(&mut self) {
         self.name.clear();
@@ -2605,6 +2804,12 @@ macro_rules! optional_set_addressed {
             fn name_hash_mut(&mut self) -> &mut Option<ByteBuf> {
                 &mut self.name_hash
             }
+            fn folder_id(&self) -> Option<i64> {
+                self.folder_id
+            }
+            fn set_folder_id(&mut self, folder_id: Option<i64>) {
+                self.folder_id = folder_id;
+            }
             fn clear_set_name(&mut self) {
                 self.folder = None;
             }
@@ -2641,10 +2846,79 @@ pub fn addressed<T: SetAddressed>(mut req: T) -> T {
     req
 }
 
+/// [`addressed`], row-aware: the one funnel a sender holding its set's
+/// [`FolderRef`](fauna_core::folder_keys::FolderRef) leaves through
+/// (`set-addressing.md` § The row form → *Whoever holds the row sends it*). A
+/// `Local(id)` fills `folder_id`, which the nest resolves by that row alone; a
+/// `Foreign` ref fills nothing, since a cross-nest set has no row here and the
+/// channel form already on the request is its address; `None` is [`addressed`].
+/// The name forms are stamped either way — they keep travelling beside the row.
+pub fn addressed_at<T: SetAddressed>(
+    mut req: T,
+    row: Option<fauna_core::folder_keys::FolderRef>,
+) -> T {
+    stamp_row(&mut req, row);
+    addressed(req)
+}
+
+/// The row half of [`addressed_at`], for the one sender that must see the row
+/// before the name comes off: a signed record resolves its nonce by the row it
+/// names and by the name beside it, so it stamps here, signs, then runs
+/// [`addressed`] (`set-addressing.md` § The row form, *a sender that signs
+/// what it sends binds that row's nonce*).
+pub fn stamp_row<T: SetAddressed>(req: &mut T, row: Option<fauna_core::folder_keys::FolderRef>) {
+    if let Some(fauna_core::folder_keys::FolderRef::Local(id)) = row {
+        req.set_folder_id(Some(id));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::codec::{decode_strict as decode, encode_canonical};
+
+    /// The row wins: a request carrying `folder_id` addresses that row and its
+    /// name forms are not part of the address; without it the address is the
+    /// name with its hash; a create has no row slot at all
+    /// (`set-addressing.md` § The row form). The slot is wire-additive —
+    /// omitted when `None`, so a rowless request encodes exactly as before.
+    #[test]
+    fn address_prefers_the_row_and_the_slot_is_additive() {
+        let hash = ByteBuf::from(vec![7u8; 32]);
+        let mut lease = LeaseAcquireRequest {
+            name: "photos".into(),
+            name_hash: Some(hash.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            lease.address(),
+            SetAddress::Name {
+                name: "photos",
+                name_hash: Some(&hash)
+            }
+        );
+        let rowless = encode_canonical(&lease).unwrap();
+        lease.set_folder_id(Some(9));
+        assert_eq!(lease.address(), SetAddress::Row(9));
+        let back: LeaseAcquireRequest = decode(&encode_canonical(&lease).unwrap()).unwrap();
+        assert_eq!(back.folder_id, Some(9));
+        lease.set_folder_id(None);
+        assert_eq!(encode_canonical(&lease).unwrap(), rowless);
+
+        let list = crate::sync::SyncChangesListRequest {
+            folder_id: Some(9),
+            ..Default::default()
+        };
+        assert_eq!(list.address(), SetAddress::Row(9));
+
+        let mut create = FolderCreateRequest {
+            name: "photos".into(),
+            ..Default::default()
+        };
+        create.set_folder_id(Some(9));
+        assert_eq!(create.folder_id(), None);
+        assert!(matches!(create.address(), SetAddress::Name { .. }));
+    }
 
     /// The funnel stamps every by-name set request — the folders plane, the
     /// sync plane and the snapshot plane alike — and leaves the three shapes
@@ -2705,6 +2979,49 @@ mod tests {
         });
         assert_eq!(kept.name_hash, Some(ByteBuf::from(vec![7u8; 32])));
         assert_eq!(reserved.folder, "__inbox");
+    }
+
+    /// The row-aware funnel: a `Local` ref stamps its row, a `Foreign` ref
+    /// stamps none, and both still hash the name and take it off the wire
+    /// (`set-addressing.md` § The row form → *Whoever holds the row sends it*).
+    #[test]
+    fn addressed_at_stamps_a_local_row_and_never_a_foreign_one() {
+        use fauna_core::folder_keys::FolderRef;
+        let want = Some(ByteBuf::from(
+            fauna_core::path_crypto::set_name_hash("photos").to_vec(),
+        ));
+        let local = addressed_at(
+            LeaseAcquireRequest {
+                name: "photos".into(),
+                ..Default::default()
+            },
+            Some(FolderRef::Local(9)),
+        );
+        assert_eq!(local.folder_id, Some(9));
+        assert_eq!(local.address(), SetAddress::Row(9));
+        assert_eq!(local.name_hash, want);
+        assert!(local.name.is_empty());
+
+        let foreign = addressed_at(
+            crate::sync::SyncChangesListRequest {
+                folder: Some("photos".into()),
+                ..Default::default()
+            },
+            Some(FolderRef::Foreign([3u8; 32])),
+        );
+        assert_eq!(foreign.folder_id, None);
+        assert_eq!(foreign.name_hash, want);
+        assert_eq!(foreign.folder, None);
+
+        let rowless = addressed_at(
+            crate::sync::SyncFilesRequest {
+                folder: "photos".into(),
+                ..Default::default()
+            },
+            None,
+        );
+        assert_eq!(rowless.folder_id, None);
+        assert_eq!(rowless.name_hash, want);
     }
 
     /// The funnel takes the plaintext name off every addressed request, so it
@@ -3893,7 +4210,7 @@ impl SeatRead {
     }
 
     /// Whether this seat makes the device a **delivery seat for an on-demand
-    /// presence** (`on-demand-files.md` § Apple File Provider binding: desired =
+    /// presence** (`on-demand-files-apple.md` § Apple File Provider binding: desired =
     /// the own folders where this device's place has `accepts: true`). Only a
     /// read place with `accepts` set answers yes: an **Absent** seat gets no
     /// presence — the toggle there is the enrol gesture, which writes the place
@@ -4070,7 +4387,7 @@ pub fn toggled(row: &PlaceRow, flag: &str) -> Option<PlaceRow> {
 
 // ── fauna.folders.deposit (≡ POST /api/v1/folders/{id}/deposit) ─────────────
 //
-// `file-sync.md` § Third-party deposit ingress: a principal holding
+// `folder-deposit.md`: a principal holding
 // `fauna:folder:deposit:<id>` posts one file; the nest seals a
 // [`DepositEnvelope`] of it to the folder owner's recipient key and parks it
 // in the folder's inbox segment. The reply says "accepted" and nothing else.
@@ -4125,13 +4442,109 @@ pub struct FolderDepositReply {
 
 /// What rests sealed in a folder's inbox segment: the deposited file, as the
 /// owner's next client sync opens it with the recipient key (adoption,
-/// `file-sync.md` § Third-party deposit ingress). Canonical CBOR; the name and
+/// `folder-deposit.md`). Canonical CBOR; the name and
 /// media type are content and ride inside the seal, never beside it.
+///
+/// A deposit of one message carries its bytes in `body` and `parts == 0`. A
+/// deposit larger than one message carries an empty `body` and the count of
+/// its [`DepositPart`]s, each sealed on its own, which adoption opens in index
+/// order and concatenates.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct DepositEnvelope {
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub content_type: String,
+    pub body: ByteBuf,
+    /// How many sealed [`DepositPart`]s carry the body; `0` = `body` holds it.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub parts: u32,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
+}
+
+// ── deposits larger than one message: begin → part… → commit ───────────────
+//
+// `folder-deposit.md` § Deposits larger than one
+// message: the principal opens a staged upload, sends the body in parts of at
+// most [`MAX_DEPOSIT_PART_BYTES`] — each sealed to the owner's recipient key on
+// arrival, so no plaintext ever rests — and commits with the file's name and
+// media type. Only the commit makes the item adoptable, in one write: a crash
+// or a dropped principal mid-upload leaves a staged upload that no list shows
+// and that expires on its own.
+
+/// The most body bytes one [`FolderDepositPartRequest`] carries — one
+/// message's worth, as for a single-message deposit.
+pub const MAX_DEPOSIT_PART_BYTES: usize = MAX_DEPOSIT_BYTES;
+
+/// The most parts one deposit may have: a deposit carries at most
+/// `MAX_DEPOSIT_PARTS × MAX_DEPOSIT_PART_BYTES` (1 GiB) — the nest's per-account
+/// inbox ceiling, which no single deposit could rest past anyway. Adoption
+/// streams an item's parts to disk one at a time, so no smaller bound is
+/// needed to keep a seat's memory finite.
+pub const MAX_DEPOSIT_PARTS: u32 = 1024;
+
+/// The largest deposit either door accepts, in bytes.
+pub const MAX_DEPOSIT_TOTAL_BYTES: u64 = MAX_DEPOSIT_PARTS as u64 * MAX_DEPOSIT_PART_BYTES as u64;
+
+/// The length of a staged upload's token, in bytes.
+pub const DEPOSIT_UPLOAD_TOKEN_BYTES: usize = 16;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct FolderDepositBeginRequest {
+    /// The folder's row id, as for [`FolderDepositRequest`].
+    pub folder_id: i64,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct FolderDepositBeginReply {
+    /// The staged upload's random token ([`DEPOSIT_UPLOAD_TOKEN_BYTES`]) —
+    /// what every part and the commit name.
+    pub upload: ByteBuf,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct FolderDepositPartRequest {
+    pub folder_id: i64,
+    /// The token [`FolderDepositBeginReply`] answered.
+    pub upload: ByteBuf,
+    /// The part's place in the body, from `0`. Re-sending an index replaces
+    /// that part, so a part whose reply was lost is retried as it was.
+    pub index: u32,
+    /// At most [`MAX_DEPOSIT_PART_BYTES`].
+    pub body: ByteBuf,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct FolderDepositCommitRequest {
+    pub folder_id: i64,
+    pub upload: ByteBuf,
+    /// The file's name ([`is_deposit_name`]).
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub content_type: String,
+    /// How many parts the body has: exactly the indices `0..parts` must be
+    /// staged.
+    pub parts: u32,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// One sealed part of a deposit larger than one message, as adoption opens
+/// it. `index` rides inside the seal so adoption checks the order it
+/// reassembles in.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct DepositPart {
+    pub index: u32,
     pub body: ByteBuf,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
@@ -4139,7 +4552,7 @@ pub struct DepositEnvelope {
 
 // ── fauna.folders.deposits.{list,retire} — the owner's half of the inbox ────
 //
-// Adoption (`file-sync.md` § Third-party deposit ingress) reads a folder's
+// Adoption (`folder-deposit.md`) reads a folder's
 // parked items, opens each with the owner's recipient key, records it as an
 // ordinary change row, then retires it. Both kinds are the owner's own: the
 // nest resolves the folder from the connection actor's own sets.
@@ -4180,6 +4593,23 @@ pub struct FolderDepositsListReply {
     /// More items are parked past the last one here.
     #[serde(default)]
     pub more: bool,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct FolderDepositsPartRequest {
+    pub folder_id: i64,
+    pub deposit_id: i64,
+    pub index: u32,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct FolderDepositsPartReply {
+    /// The recipient-sealed [`DepositPart`].
+    pub sealed: ByteBuf,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -4231,6 +4661,7 @@ mod deposit_tests {
             name: "report.pdf".into(),
             content_type: "application/pdf".into(),
             body: ByteBuf::from(b"%PDF".to_vec()),
+            parts: 0,
             extra: BTreeMap::new(),
         };
         let bytes = crate::encode_canonical(&env).expect("encodes");

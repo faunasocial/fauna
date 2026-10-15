@@ -10,19 +10,22 @@ main view), the same landing as `settings-nav-back` — corrected 2026-06-07
 no longer chains through the Settings shell. Reference implementation: linux
 (-> primary view); web lifted it 2026-06-08; windows lifted it 2026-06-08
 (MainPage.LeaveAdmin → the shared NavigateToPrimaryView, same landing as
-LeaveSettings); macos lifted it 2026-06-08 (AdminNavRail → Conversations). ios
-still owes its shell (admin.md § Implementation status — navigation).
+LeaveSettings); macos lifted it 2026-06-08 (AdminNavRail → Conversations); ios
+built its shell (AdminShellView, verified 2026-07-10) and tui its admin shell
+(2026-07-18), android tags it on every admin screen (admin.md § Implementation
+status — navigation).
 
 Client scoping is **per test** (not a single module-level marker): the
-shell-exit tests below are shared by every app that renders the shell
-(web/linux/windows/macos); the primary-view-landing test is marked for the
-apps that have the corrected landing (linux + web + windows + macos today).
-As the remaining clients lift, add their `pytest.mark.<client>` to that test.
+shell-exit tests below are shared by every app that renders the shell; the
+primary-view-landing test is marked for the apps that have the corrected
+landing (see the markers on each test).
 """
 
 import time
 
 import pytest
+
+from helpers.app_surface import skip_unbuilt
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
 # macos built the shell + admin-nav-back 2026-06-08 (a macos admin-users follow-up) and
@@ -34,8 +37,8 @@ pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
 # android: the shell itself (state-protocol entry via NavRouteResolver, the
 # admin-dashboard-heading, and now admin-nav-back — added to
 # AdminDashboardScreen.kt, the sole admin screen missing the tag every other
-# admin screen already carries) all check out, so the three shell-exit tests
-# carry android too. The admin-tab visibility tests below do NOT: android
+# admin screen already carries) all check out, so the two shell-exit tests
+# carry android too; the lands-on-primary test does not (see its marker note). The admin-tab visibility tests below do NOT: android
 # nests admin under Settings like web/ios, not as a primary-nav tab, so they
 # need the same navigate-to-settings variant web/ios are still owed.
 
@@ -237,4 +240,85 @@ def test_admin_tab_hidden_for_non_admin(logged_in_app):
     # exactly as required — and without the below-fold scroll that hangs the bridge.
     assert not logged_in_app.driver.is_nav_tab_revealed("admin-tab"), (
         "admin-tab visible to a non-admin user — the am_i_admin gate should hide it."
+    )
+
+
+# ── Inside the shell: its own navigation, and where entering it lands ────────
+
+
+@pytest.mark.feature("admin-dashboard")
+def test_admin_area_navigation_switches_between_admin_pages(admin_main_app):
+    """admin.md § Navigation model, point 2: inside the admin area its own
+    navigation takes the place of the app's and switches between the admin
+    pages. Entered by the real gated entry, the dashboard shows the admin rail;
+    one rail row opens Users, another opens Logs — each a single click, with
+    no way back out between them.
+
+    On a desktop app the rail replaces the app sidebar in place, so the app's
+    own `feed-tab` is gone while the admin area shows; tui paints its rail
+    atop the shell (the terminal-idiomatic equivalent, same point) and mobile
+    keeps its platform nav, so that half is desktop-only."""
+    app = admin_main_app
+    if not (
+        app.driver.is_tui()
+        or app.driver.is_web()
+        or app.driver.is_linux()
+        or app.driver.is_android()
+    ):
+        skip_unbuilt(
+            app.driver,
+            surface="admin-nav-row[<page id>]",
+            detail="the admin rail rows carry their ids on tui, web, linux and android; the other three "
+            "gain them in their trickle-down rows",
+            tracked="ui.yaml navigation.sub_page_nav_rows",
+        )
+    app.admin.enter_by_click()
+    app.driver.wait_for("admin-dashboard-heading", timeout=15.0)
+    if not (app.driver.is_tui() or app.driver.is_mobile()):
+        assert app.driver.is_absent("feed-tab"), (
+            "inside the admin area the admin rail replaces the app's own "
+            f"navigation, but feed-tab still shows: {app.driver.diagnose('feed-tab')}"
+        )
+
+    for page_id, heading in (
+        ("admin-users", "admin-users-heading"),
+        ("admin-logs", "admin-logs-heading"),
+    ):
+        app.driver.click(f"admin-nav-row[{page_id}]")
+        app.driver.wait_for(heading, timeout=15.0)
+        assert app.driver.is_absent("admin-dashboard-heading"), (
+            f"the {page_id} rail row should replace the dashboard, not stack on "
+            f"it: {app.driver.diagnose('admin-dashboard-heading')}"
+        )
+        assert app.admin.nav_back_present(), (
+            f"{page_id} reached by the rail must still be inside the admin area "
+            "(admin-nav-back present)"
+        )
+
+
+@pytest.mark.feature("admin-dashboard")
+def test_admin_entry_after_leaving_a_deep_page_lands_on_the_dashboard(admin_app):
+    """docs/goal/ui/README.md § Navigation model → *Entering a shell lands on
+    its canonical entry*: leave the admin area while Users is open, enter it
+    again by the real gated entry, and it opens on the dashboard — never on the
+    page left open last time. The all-app twin of the macos-only
+    `test_macos_shell_canonical_entry.py` witness.
+
+    Users is reached by the nav patch (setup only); both the exit
+    (`admin-nav-back`) and the re-entry (`admin-tab`, in Settings on mobile)
+    are the real affordances — a nav patch naming the bare admin view would
+    resolve to the dashboard on some apps whatever the rule (the macos
+    witness's docstring)."""
+    d = admin_app.driver
+    d.set_state({"nav": {"stack": [{"view": "admin"}, {"view": "admin", "id": "users"}]}})
+    d.wait_for("admin-users-heading", timeout=15.0)
+
+    admin_app.admin.leave_admin()
+    d.wait_for("new-conversation-button", timeout=15.0)
+
+    admin_app.admin.enter_by_click()
+    d.wait_for("admin-dashboard-heading", timeout=15.0)
+    assert d.is_absent("admin-users-heading"), (
+        "re-entering the admin area should land on the dashboard, not the Users "
+        f"page the last visit left open: {d.diagnose('admin-users-heading')}"
     )

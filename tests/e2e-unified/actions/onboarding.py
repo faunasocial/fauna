@@ -142,6 +142,37 @@ class OnboardingActions:
             self.driver.fill("recovery-entry-account-field", account)
         self.driver.click("recovery-entry-submit-button")
 
+    # ── The signed-out lock door (`ui/sessions.md` § The signed-out door) ─
+    #
+    # `identity_choice` → `emergency_lockout_entry`: the seed-signed 24-hour
+    # lock from a device the owner will not sign in on. Persists nothing.
+
+    def open_emergency_lockout_entry(self) -> None:
+        """identity_choice → `emergency_lockout_entry` via its entry button.
+
+        Clicks `emergency-lockout-entry-button` and not the two recovery entries
+        beside it: this one locks, the others restore.
+        """
+        self.driver.wait_for("emergency-lockout-entry-button", timeout=15)
+        self.driver.click("emergency-lockout-entry-button")
+        self.driver.wait_for("sessions-lockout-button", timeout=10)
+
+    def lock_from_the_door(
+        self, secret_hex: str, account: str | None = None, confirm: str = "LOCK"
+    ) -> None:
+        """Fill `emergency_lockout_entry` and press the lock.
+
+        `account` is the handle including its domain — the only thing that
+        locates the nest for a secret that names no handle. Does not wait for an
+        outcome: a landed lock returns to `identity_choice`, every refusal
+        stays and speaks on `error-message`.
+        """
+        self.driver.fill("paste-secret-field", secret_hex)
+        if account is not None:
+            self.driver.fill("recovery-entry-account-field", account)
+        self.driver.fill("sessions-lockout-confirm-field", confirm)
+        self.driver.click("sessions-lockout-button")
+
     # ── The recovery-kit offer (`onboarding.md` § 1 Identity) ─────────────
     #
     # The screen after `identity_created` on the CREATE path: strongly
@@ -483,13 +514,14 @@ class OnboardingActions:
         ``handle-message-area`` text indicates an outcome has been reached.
 
         The machine sets ``snapshot.message.key`` to:
-          - ``handle_check.phase.*`` during the probe  (in-progress)
-          - ``handle_check.outcome.*`` when done        (complete)
-          - ``handle_check.error.*`` on errors          (complete)
+          - ``onboarding.handle_check.phase.*`` during the probe  (in-progress)
+          - ``onboarding.handle_check.outcome.*`` when done        (complete)
+          - ``onboarding.handle_check.error.*`` on errors          (complete)
 
-        The i18n keys may be returned as raw strings if the lookup table
-        doesn't have them, OR as resolved English strings (ending in ``…``
-        for phase messages). Both forms are handled.
+        Every app shows the resolved sentence (the machine's keys are pinned
+        to resolve by ``fauna-onboarding-machine``'s ``i18n_keys_resolve``
+        test); the phase sentences end in ``…``, the outcome and error ones
+        do not.
         """
         self.driver.wait_for("handle-check-button", timeout=10)
         self.driver.click("handle-check-button")
@@ -497,22 +529,21 @@ class OnboardingActions:
         while time.monotonic() < deadline:  # deadline-ok: documented below — a timeout leaves Continue disabled, the caller's own next step
             try:
                 msg = self.driver.get_text("handle-message-area").strip()
-                if msg:
-                    # Raw i18n key form: check if it's an outcome or error key.
-                    if (msg.startswith("handle_check.outcome.")
-                            or msg.startswith("handle_check.error.")):
-                        return  # Outcome/error key — check complete.
-                    # Resolved English form: phase messages end in "…" or
-                    # "..."; outcome messages don't.
-                    if not (msg.endswith("…") or msg.endswith("...")):
-                        # Non-phase message: either an outcome or an error.
-                        # Also check it doesn't look like a phase key.
-                        if not msg.startswith("handle_check.phase."):
-                            return
+                # Phase messages end in "…" or "..."; an outcome or error
+                # message does not — the check is complete.
+                if msg and not (msg.endswith("…") or msg.endswith("...")):
+                    break
             except Exception:
                 pass
             time.sleep(0.5)
-        # Timed out — caller will continue but Continue button may be disabled.
+        else:
+            # Timed out — caller will continue but Continue button may be disabled.
+            return
+        # A raw key here means the app's i18n lookup missed what the machine
+        # emitted — an app bug, never an environment skip downstream.
+        assert "handle_check." not in msg, (
+            f"handle-message-area shows a raw i18n key, not its sentence: {msg!r}"
+        )
 
     # Removed 2026-05-31 (S5 nest_connect deprecation): go_to_nest_select_with_handle
     # + go_to_nest_select_with_status. nest_select is eliminated (onboarding.md
@@ -556,28 +587,18 @@ class OnboardingActions:
             msg = self.driver.get_text("handle-message-area").strip()
         except Exception:
             pass
-        # Determine if Continue should be enabled. DomainAvailable outcomes
-        # surface in one of two client-dependent forms:
-        #   raw key (linux/web/windows): handle_check.outcome.domain_available_*
-        #     — their i18n lookup misses the `onboarding.`-prefixed key the
-        #     machine omits, so `LocalizedText::resolve` falls back to the raw
-        #     key (libs/fauna-core/src/localized.rs).
-        #   resolved English (macos/ios): `renderLocalizedText` finds the
-        #     prefixed template, so the message reads "… appears to be
-        #     available …" / "… is available …". Match both. The three
-        #     domain_available_* templates are the only outcome/error strings
-        #     containing those phrases; the in-progress "Checking domain
-        #     availability…" is excluded by `is_in_progress` below.
+        # Determine if Continue should be enabled. A DomainAvailable outcome
+        # reads "… appears to be available …" / "… is available …" / "… It
+        # sits inside …" — the domain_available_* templates are the only
+        # outcome/error strings containing those phrases; the in-progress
+        # "Checking domain availability…" is excluded by `is_in_progress`.
         # AlreadyOnNest and NestRunningUserUnregistered also enable Continue;
         # we skip on those since we need DomainAvailable for the dns_config path.
-        is_domain_available_key = msg.startswith("handle_check.outcome.domain_available")
-        is_domain_available_resolved = (
+        is_domain_available = (
             "appears to be available" in msg or "is available" in msg
             or "It sits inside" in msg  # domain_available_inside_zone
         )
-        is_domain_available = is_domain_available_key or is_domain_available_resolved
-        is_in_progress = (msg.startswith("handle_check.phase.")
-                          or msg.endswith("…") or msg.endswith("...") or not msg)
+        is_in_progress = msg.endswith("…") or msg.endswith("...") or not msg
         if is_in_progress or not is_domain_available:
             from helpers.app_surface import skip_environment
 

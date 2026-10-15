@@ -47,13 +47,24 @@ fn build_copy_actor_id_button(actor_id: &str) -> gtk::Button {
 pub fn build_find_result_row(
     display: &str,
     actor_id: &str,
+    recipient_nest_url: Option<String>,
     client: &Rc<FaunaClient>,
 ) -> gtk::ListBoxRow {
-    let label = gtk::Label::new(Some(display));
+    // `contact-actor-id-result` is the leaf holding the FULL actor-id value —
+    // the cross-app contract (`contacts.md` § Add-contact panel; tui's
+    // `get_text("contact-actor-id-result")`) every Find User assertion reads, so
+    // a handle lookup puts the id here and its `handle@domain` in a label of its
+    // own beside it, never folded into this one.
+    let label = gtk::Label::new(Some(actor_id));
     label.set_halign(gtk::Align::Start);
     label.set_hexpand(true);
     label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     crate::testid::set_test_id(&label, ids::CONTACT_ACTOR_ID_RESULT);
+    let handle_label = (display != actor_id).then(|| {
+        let handle_label = gtk::Label::new(Some(display));
+        handle_label.set_halign(gtk::Align::Start);
+        handle_label
+    });
 
     let copy_btn = build_copy_actor_id_button(actor_id);
 
@@ -72,9 +83,12 @@ pub fn build_find_result_row(
             let btn = btn.clone();
             let ask = Rc::clone(&ask);
             let tx = c.tx();
-            // A bare id / same-nest lookup names no foreign nest, so this knock
-            // goes to the home nest (`recipient_nest_url = None`), as before.
-            c.send_knock_classified(&aid, None, move |outcome| {
+            // The lookup's own nest: `Some` for an actor found on a peer, so the
+            // home nest originates the federation delivery to it; `None` (a bare
+            // id / same-nest lookup) delivers on the home nest. Carried from the
+            // lookup, never re-derived — a second derivation can name a different
+            // nest than the one that found the actor.
+            c.send_knock_classified(&aid, recipient_nest_url.clone(), move |outcome| {
                 if let Some(error) = apply_knock_outcome(&btn, &ask, outcome) {
                     tx.send(UiMessage::Action(ActionResult::FailedLocalized {
                         message: error,
@@ -118,6 +132,9 @@ pub fn build_find_result_row(
     hbox.set_margin_bottom(8);
     hbox.set_margin_start(12);
     hbox.set_margin_end(12);
+    if let Some(handle_label) = &handle_label {
+        hbox.append(handle_label);
+    }
     hbox.append(&label);
     hbox.append(&copy_btn);
     hbox.append(&knock_btn);
@@ -159,8 +176,8 @@ fn apply_knock_outcome(
 // `build_node_resolved_row` was removed: a resolved remote domain no longer
 // renders a SECOND "Look up" button (which duplicated the
 // `contact-actor-id-lookup` id and produced the reported confusing double
-// lookup). `app.rs`'s `NestResolved` handler now auto-chains
-// `resolve_handle_on_remote` and shows a transient "Looking up…" row instead.
+// lookup). The typed-`user@domain` lookup is now `FaunaClient::find_user`, one
+// shared cross-nest hop whose `HandleResolved` reply lands on the normal channel.
 
 #[cfg(test)]
 mod tests {

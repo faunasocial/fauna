@@ -413,6 +413,7 @@ mod tests {
             PassOutcome {
                 attempted: 2,
                 failed: 2,
+                paused: 0,
             }
         }
 
@@ -420,6 +421,7 @@ mod tests {
             PassOutcome {
                 attempted: 2,
                 failed: 1,
+                paused: 0,
             }
         }
 
@@ -703,6 +705,7 @@ mod tests {
                 PassOutcome {
                     attempted: 1,
                     failed: 0,
+                    paused: 0,
                 },
             );
             run_pass(&state, &mut held).await;

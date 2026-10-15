@@ -1,5 +1,6 @@
 package com.fauna.app
 
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.compose.setContent
@@ -70,8 +71,45 @@ class MainActivity : FragmentActivity() {
                     android.util.Log.w("MainActivity", "launch clock offset setenv failed: ${e.message}")
                 }
             }
+            // The region content plane's two test-capable seams
+            // (`fauna_client_region`'s registry seed and declared-region
+            // override, convention 15), through the same door: both are read
+            // via std::env::var inside `FfiRegionPlane.open` below, so they must
+            // be process env first. A relaunch that re-delivers them into a
+            // surviving process reopens the plane so they take effect.
+            var regionSeeded = false
+            for (key in REGION_E2E_ENV_KEYS) {
+                intent.getStringExtra(key)?.let {
+                    try {
+                        android.system.Os.setenv(key, it, true)
+                        regionSeeded = true
+                    } catch (e: android.system.ErrnoException) {
+                        android.util.Log.w("MainActivity", "$key setenv failed: ${e.message}")
+                    }
+                }
+            }
+            if (regionSeeded) com.fauna.app.core.RegionLeaf.openPlane(this, reopen = true)
+            // The admin DNS page's two seams, through the same door: the
+            // fake-provider gate and the compressed re-check clock are read via
+            // std::env inside `fauna-client-dns` each time the page builds its
+            // machine or ticks a clock, so process env before the page opens is
+            // enough — no reopen.
+            for (key in DNS_E2E_ENV_KEYS) {
+                intent.getStringExtra(key)?.let {
+                    try {
+                        android.system.Os.setenv(key, it, true)
+                    } catch (e: android.system.ErrnoException) {
+                        android.util.Log.w("MainActivity", "$key setenv failed: ${e.message}")
+                    }
+                }
+            }
         }
+        // The device's region plane, opened at launch AHEAD of the first fetch
+        // (region-blocking.md § Fail posture) — idempotent, the leaf reads one
+        // OS setting per launch.
+        com.fauna.app.core.RegionLeaf.openPlane(this)
         val appState = AppState()
+        this.appState = appState
 
         setContent {
             FaunaTheme {
@@ -106,6 +144,54 @@ class MainActivity : FragmentActivity() {
                 com.fauna.app.testing.TestAgent.start(this, bridgeUrl, appState)
             }
         }
+
+        // A `fauna://` route that launched the app. Only on a fresh create: a
+        // recreation (rotation, process restore) re-delivers the same launch
+        // intent, and re-offering a spent consent handle would paint the
+        // expired-link message over a card the user already answered.
+        if (savedInstanceState == null) receiveRoute(intent)
+    }
+
+    // `singleTask`: a route opened while the app runs arrives here.
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        receiveRoute(intent)
+    }
+
+    /**
+     * Hand a `fauna://` route to the one door (`android.md` § Navigation →
+     * *In-app routes*): it parses through the shared `parseAppRoute`, drops what
+     * it does not take, holds a route that arrives signed out, and otherwise
+     * navigates to the route's page. A relaunch from Recents re-delivers the old
+     * intent, so that one is not a route.
+     */
+    private fun receiveRoute(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_VIEW) return
+        if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
+        val uri = intent.dataString ?: return
+        com.fauna.app.core.ConsentHandoff.shared.offer(uri, appState)
+    }
+
+    private lateinit var appState: AppState
+
+    private companion object {
+        /** `fauna_client_region::registry::E2E_REGISTRY_ENV` and
+         *  `fauna_client_region::source::E2E_DECLARED_ENV` — the keys the driver's
+         *  `declare_region_for_relaunch` writes (`drivers/http_bridge.py`). */
+        val REGION_E2E_ENV_KEYS = listOf("FAUNA_E2E_REGION_REGISTRY", "FAUNA_E2E_REGION_DECLARED")
+
+        /** `fauna_client_dns`'s fake-provider gate, DNS-page clock override and
+         *  ACME directory seed (`e2e_acme_seam`, read when an order starts) —
+         *  the keys conftest's android block sets for the admin DNS journeys;
+         *  the whole seed, its name server a reversed loopback port. */
+        val DNS_E2E_ENV_KEYS = listOf(
+            "FAUNA_DNS_PROVIDER_FAKE",
+            "FAUNA_DNS_RECHECK_SECS",
+            "FAUNA_E2E_ACME_DIRECTORY_URL",
+            "FAUNA_E2E_ACME_CA_PEM",
+            "FAUNA_E2E_ACME_NAMESERVER",
+        )
     }
 }
 

@@ -61,6 +61,13 @@
 //! (7)(b)(ii) rule (3)): the pass reconciles the `WebdavKeysBlob` once, and
 //! the follower re-runs that reconcile whenever the custody nudge's walk lands
 //! a sibling's serve flip, for the rest of the session.
+//!
+//! **And it registers the owner's envelope re-seal on the backend**
+//! ([`fauna_conversations::backend::FolderEnvelopeOwner`],
+//! `mls-group-key-material.md` § Admitting a member, *Envelope ordering*):
+//! the pass converges every owned envelope once, and from then on the folder
+//! commit walk re-seals one whenever a takeover moves the group's epoch past
+//! it, for the rest of the session.
 
 use std::sync::{Arc, Weak};
 
@@ -224,6 +231,7 @@ impl FolderRemovalResume {
         }
         let keypair = ActorKeypair::from_secret(*self.seed);
         let engine = backend.engine();
+        let walk_backend = Arc::clone(&backend);
         let mut author = FoldersAuthor::new(
             FoldersClient::new(Arc::clone(&self.nest)),
             keypair,
@@ -268,6 +276,18 @@ impl FolderRemovalResume {
                 tracing::warn!("folders: resume_pending_removals failed at launch: {e}")
             }
         }
+
+        // The launch pass converged every owned envelope; from here the
+        // folder commit walk re-seals one whenever the group's epoch moves
+        // past it (`FolderEnvelopeOwner`) — over an author without the
+        // commit gate, which is this backend.
+        walk_backend.set_folder_envelope_owner(Arc::new(FoldersAuthor::new(
+            FoldersClient::new(Arc::clone(&self.nest)),
+            ActorKeypair::from_secret(*self.seed),
+            Arc::clone(&self.custody),
+            Arc::clone(&self.mail),
+            walk_backend.engine(),
+        )));
 
         self.follow_served_custody(follower).await;
     }

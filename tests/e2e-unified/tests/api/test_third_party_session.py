@@ -21,21 +21,51 @@ with its DPoP-bound access token in ``Sec-WebSocket-Protocol``. Then:
 - ``fauna.principals.revoke`` closes the live socket ``4401``, and a fresh
   upgrade with the still-unexpired token is refused.
 
+A grant-family journey holds door (c) (§ *The principal session* →
+*Revocation — three doors*): two ceremonies of one client open two families of
+one principal, each dials a session, and the user's per-grant revoke from their
+own app (``fauna.bridges.atproto.revoke_session``) closes that family's socket
+``4401`` while the sibling family's session keeps answering — and the revoked
+family's still-unexpired token opens nothing more.
+
+A second journey holds the fifth arm, ``fauna:personalization:rw``
+(``docs/goal/behavior/authorization-server.md`` § Scope grammar → *The fifth
+arm*): a public client attesting a holder key consents the arm, the owner
+deposits its grant twin before resolving (the production
+``mint_personalization_grant`` through ``fauna_ffi``), and the principal finds
+both pairs on its grant, trains and reads a model, lists ``state`` and opens
+the owner's registry row with the wrapped pair, and — holding
+``fauna:events:subscribe`` beside the arm — hears the owner's next ``state``
+put on the events long-poll (``docs/goal/architecture/transport.md`` § Push
+events → *Third-party event doors*) — while the ``state`` put, the model delete
+and an ``ext:`` list refuse. The confidential client's PAR
+refusal of the same string sits beside its TP4 sibling in
+``test_ext_kinds.py``, whose fixture serves the ``https`` document a
+confidential client needs.
+
+A third journey covers the fourth arm, ``fauna:feed:read:account``
+(``docs/goal/behavior/authorization-server.md`` § Scope grammar → *The fourth
+arm*): the bare arm alone reaches no custom-feed read and no viewer state; a
+ceremony adding the account arm reads the account's own feed and its like
+state, and never a gated post.
+
 No wall-clock assertion anywhere (convention 14): the ``exp`` close is pinned
 at tier_1 (``principal_session::tests::the_session_closes_at_its_tokens_exp``)
 against tokio's paused clock.
 """
 
+import base64
+import json
 import secrets
-import struct
+import threading
 import time
-import urllib.parse
 
 import cbor2
 import pytest
-import websocket  # type: ignore[import-untyped]  # from `websocket-client`
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 
-from clients.ws_rpc_admin_client import WsRpcAdminClient
+import fauna_ffi
 from helpers.atproto_consent import (  # noqa: F401 — consent_nest/consent_nest_env/consent_bridge are pytest fixtures adopted by import
     HANDLE_DOMAIN,
     consent_bridge,
@@ -43,158 +73,52 @@ from helpers.atproto_consent import (  # noqa: F401 — consent_nest/consent_nes
     consent_nest_env,
 )
 from helpers.budgets import RPC_ROUNDTRIP_S
+from helpers.blob_upload import SEALED_MIME, upload_blob
 from helpers.oauth_client import NONCE_HEADER, OAuthClient
+from helpers.principal_session import (
+    CLOSE_AUTH_EXPIRED,
+    DECLARED,
+    REDIRECT_URI,
+    PrincipalSession,
+    alice_client,
+    ceremony,
+    events_poll,
+    refusal_code,
+    refused_status,
+    upgrade,
+)
 
 pytestmark = pytest.mark.tier_3
 
-REDIRECT_URI = "http://127.0.0.1:17774/callback"
-#: What the client's metadata document declares: the one built Fauna arm, and
-#: sign-in. A ceremony may request any subset (``OAuthClient.request_scope``).
-DECLARED = "fauna:feed:read openid"
-PATH = "/api/v1/principal/ws"
-HTU = f"https://{HANDLE_DOMAIN}{PATH}"
-CLOSE_AUTH_EXPIRED = 4401
+PERSONALIZATION = "fauna:personalization:rw"
+EVENTS = "fauna:events:subscribe"
+#: How long the events long-poll is asked to hold — the door's own ceiling.
+#: The assertion is on what it answers, never on how long it took.
+LONG_POLL_WAIT_S = 25
+REGISTRY_KIND = "fauna.state.personalization"
+MODEL_KIND = "fauna.personalization.model"
+TOPIC = "topic:" + "c4" * 16
+STATE_FEED = "state-entry"
 
 
-def _alice(nest):
-    alice = nest["user"]
-    return WsRpcAdminClient(
-        nest["url"],
-        actor_id=alice["actor_id_bytes"],
-        signing_key=bytes(alice["signing_key"]),
+def _raw(public_key) -> bytes:
+    return public_key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+
+
+def _secret(private_key) -> bytes:
+    return private_key.private_bytes(
+        serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()
     )
-
-
-def _ceremony(nest, request_scope):
-    """One browser-start ceremony for the shared client, approved over the
-    account's own connection. Returns the client and its token reply."""
-    client = OAuthClient(
-        base=nest["url"],
-        htu_origin=f"https://{HANDLE_DOMAIN}",
-        redirect_uri=REDIRECT_URI,
-        scope=DECLARED,
-        request_scope=request_scope,
-    )
-    request_uri = client.push_authorization_request()
-    browser_code, flow_token = client.open_consent_page(request_uri)
-    with _alice(nest) as ws:
-        pending = ws.call("fauna.bridges.atproto.list_pending_consents", {})["consents"]
-        matches = [c for c in pending if c["code"] == browser_code]
-        assert matches, f"no pending consent carries {browser_code!r}: {pending!r}"
-        resolved = ws.call(
-            "fauna.bridges.atproto.resolve_consent",
-            {"consent_id": matches[0]["consent_id"], "approved": True},
-        )
-        assert resolved["resolved"], resolved
-    redirect = ""
-    deadline = time.monotonic() + RPC_ROUNDTRIP_S
-    while time.monotonic() < deadline:
-        status, redirect = client.poll(flow_token)
-        if status == "resolved":
-            break
-    assert redirect and "code=" in redirect, f"approval must release a code: {redirect!r}"
-    tokens = client.exchange_code(redirect)
-    assert tokens.get("access_token"), tokens
-    return client, tokens
-
-
-def _ws_url(nest) -> str:
-    parsed = urllib.parse.urlparse(nest["url"])
-    scheme = "wss" if parsed.scheme == "https" else "ws"
-    return f"{scheme}://{parsed.netloc}{PATH}"
-
-
-def _upgrade(nest, client, token, proof_signer=None, with_proof=True):
-    """Dial the principal session. ``proof_signer`` signs the proof (default:
-    the client whose key the token is bound to). One ``use_dpop_nonce`` retry,
-    the protocol's own, never any other.
-
-    Returns the open socket, or raises ``WebSocketBadStatusException``."""
-    signer = proof_signer or client
-
-    def dial():
-        protocols = ["fauna.v1", f"dpop.{token}"]
-        if with_proof:
-            protocols.append(f"dpop-proof.{signer.dpop_proof('GET', HTU, access_token=token)}")
-        return websocket.create_connection(
-            _ws_url(nest), subprotocols=protocols, timeout=RPC_ROUNDTRIP_S
-        )
-
-    try:
-        return dial()
-    except websocket.WebSocketBadStatusException as refused:
-        headers = {k.lower(): v for k, v in (refused.resp_headers or {}).items()}
-        if refused.status_code == 401 and "use_dpop_nonce" in headers.get(
-            "www-authenticate", ""
-        ):
-            signer.nonce = headers.get(NONCE_HEADER.lower())
-            return dial()
-        raise
-
-
-def _refused_status(nest, client, token, **kw) -> tuple[int, dict]:
-    with pytest.raises(websocket.WebSocketBadStatusException) as refused:
-        _upgrade(nest, client, token, **kw).close()
-    headers = {k.lower(): v for k, v in (refused.value.resp_headers or {}).items()}
-    return refused.value.status_code, headers
-
-
-class _Session:
-    """A minimal WS-RPC caller over one principal socket: one request at a
-    time, and the close code surfaced rather than reconnected around."""
-
-    def __init__(self, ws):
-        self.ws = ws
-        self.corr = 0
-        #: Push frames read while waiting for a reply, as ``(kind, payload)``,
-        #: in arrival order — kept for :meth:`next_push`, never dropped.
-        self.pushes: list[tuple[str, dict]] = []
-
-    def call(self, kind: str, payload: dict):
-        """``(ok, payload)`` of the Reply to one request."""
-        self.corr += 1
-        self.ws.send_binary(
-            cbor2.dumps(
-                {0: 0, 1: self.corr, 2: kind, 3: secrets.token_bytes(16), 4: payload},
-                canonical=True,
-            )
-        )
-        while True:
-            frame = cbor2.loads(self.ws.recv())
-            if frame.get(0) == 1 and frame.get(1) == self.corr:
-                return bool(frame.get(7)), frame.get(4)
-            if frame.get(0) == 2:
-                self.pushes.append((frame.get(2), frame.get(4)))
-
-    def next_push(self) -> tuple[str, dict]:
-        """The oldest push not yet taken — buffered by :meth:`call`, else the
-        next one off the socket (bounded by the socket's own timeout)."""
-        while not self.pushes:
-            frame = cbor2.loads(self.ws.recv())
-            if frame.get(0) == 2:
-                self.pushes.append((frame.get(2), frame.get(4)))
-        return self.pushes.pop(0)
-
-    def close_code(self) -> int:
-        """Read until the nest closes the socket; its close code."""
-        while True:
-            opcode, data = self.ws.recv_data(control_frame=True)
-            if opcode == websocket.ABNF.OPCODE_CLOSE:
-                return struct.unpack("!H", data[:2])[0] if len(data) >= 2 else 1005
-
-
-def _refusal_code(reply) -> str:
-    return str(reply.get("code", "")) if isinstance(reply, dict) else ""
 
 
 @pytest.mark.feature("connected-apps")
 def test_a_principal_session_is_gated_by_ceiling_scope_and_revoke(consent_nest, consent_bridge):
     nest = consent_nest
-    client, tokens = _ceremony(nest, DECLARED)
+    client, tokens = ceremony(nest, DECLARED)
     token = tokens["access_token"]
 
     # ── The upgrade gate. ──
-    status, headers = _refused_status(nest, client, token, with_proof=False)
+    status, headers = refused_status(nest, client, token, with_proof=False)
     assert status == 401 and "invalid_token" in headers.get("www-authenticate", ""), (
         status,
         headers,
@@ -205,11 +129,11 @@ def test_a_principal_session_is_gated_by_ceiling_scope_and_revoke(consent_nest, 
         base=nest["url"], htu_origin=f"https://{HANDLE_DOMAIN}", redirect_uri=REDIRECT_URI
     )
     stranger.nonce = client.nonce
-    status, _ = _refused_status(nest, client, token, proof_signer=stranger)
+    status, _ = refused_status(nest, client, token, proof_signer=stranger)
     assert status == 401, "a proof under a key the token is not bound to opens nothing"
 
     # ── The session. ──
-    session = _Session(_upgrade(nest, client, token))
+    session = PrincipalSession(upgrade(nest, client, token))
     ok, reply = session.call("fauna.feed.trending.posts", {})
     assert ok, f"a kind inside the principal's scopes answers: {reply!r}"
     ok, reply = session.call("fauna.capabilities.fetch", {})
@@ -217,27 +141,27 @@ def test_a_principal_session_is_gated_by_ceiling_scope_and_revoke(consent_nest, 
         f"the session kind answers — empty, since the client attested no key: {reply!r}"
     )
     ok, reply = session.call("fauna.principals.list", {})
-    assert not ok and _refusal_code(reply).endswith("permission_denied"), (
+    assert not ok and refusal_code(reply).endswith("permission_denied"), (
         f"a User-only kind is above the ThirdParty ceiling: {reply!r}"
     )
 
     # ── The scope check, with one arm: narrow the row under the live session. ──
-    narrow_client, narrow_tokens = _ceremony(nest, "openid")
+    narrow_client, narrow_tokens = ceremony(nest, "openid")
     assert narrow_client.client_id == client.client_id, "the same client, re-consenting"
-    status, headers = _refused_status(nest, narrow_client, narrow_tokens["access_token"])
+    status, headers = refused_status(nest, narrow_client, narrow_tokens["access_token"])
     assert status == 403 and "insufficient_scope" in headers.get("www-authenticate", ""), (
         f"a token holding no Fauna scope opens no session: {status} {headers!r}"
     )
 
     ok, reply = session.call("fauna.feed.trending.posts", {})
-    assert not ok and _refusal_code(reply).endswith("permission_denied"), (
+    assert not ok and refusal_code(reply).endswith("permission_denied"), (
         f"the row now grants only openid, so the live session's feed read is refused: {reply!r}"
     )
     ok, reply = session.call("fauna.capabilities.fetch", {})
     assert ok, f"a session kind needs no scope and still answers: {reply!r}"
 
     # ── Revoke: the live socket closes 4401, and the token opens nothing more. ──
-    with _alice(nest) as ws:
+    with alice_client(nest) as ws:
         rows = [
             p
             for p in ws.call("fauna.principals.list", {})["principals"]
@@ -250,5 +174,336 @@ def test_a_principal_session_is_gated_by_ceiling_scope_and_revoke(consent_nest, 
     assert revoked["revoked"] is True, revoked
     assert session.close_code() == CLOSE_AUTH_EXPIRED, "the revoke closes the live socket 4401"
 
-    status, _ = _refused_status(nest, client, token)
+    status, _ = refused_status(nest, client, token)
     assert status == 401, "an unexpired token of a revoked principal opens no session"
+
+
+def _family(access_token: str) -> bytes:
+    """The grant family an access token was minted under — its ``sid``,
+    decoded: the grant id the user's app revokes by."""
+
+    def unpad(s: str) -> bytes:
+        return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+    return unpad(json.loads(unpad(access_token.split(".")[1]))["sid"])
+
+
+@pytest.mark.feature("connected-apps")
+def test_revoking_one_grant_closes_only_that_familys_session(consent_nest, consent_bridge):
+    nest = consent_nest
+    first_client, first = ceremony(nest, DECLARED)
+    second_client, second = ceremony(nest, DECLARED)
+    assert first_client.client_id == second_client.client_id, "one client, one principal"
+    first_family = _family(first["access_token"])
+    assert first_family != _family(second["access_token"]), "two ceremonies, two families"
+
+    revoked_session = PrincipalSession(upgrade(nest, first_client, first["access_token"]))
+    sibling_session = PrincipalSession(upgrade(nest, second_client, second["access_token"]))
+    for session in (revoked_session, sibling_session):
+        ok, reply = session.call("fauna.capabilities.fetch", {})
+        assert ok, f"both families' sessions serve: {reply!r}"
+
+    # ── The user revokes ONE grant from their own app. ──
+    with alice_client(nest) as ws:
+        grants = [
+            g
+            for g in ws.call("fauna.bridges.atproto.list_grants", {})["grants"]
+            if g["client_id"] == first_client.client_id
+        ]
+        assert first_family in [bytes(g["grant_id"]) for g in grants], (
+            f"the token's family is a grant the user's app lists: {grants!r}"
+        )
+        revoked = ws.call("fauna.bridges.atproto.revoke_session", {"session_id": first_family})
+    assert revoked["revoked"] is True, revoked
+    assert revoked_session.close_code() == CLOSE_AUTH_EXPIRED, (
+        "the revoked family's live socket closes 4401, not at its token's exp"
+    )
+    ok, reply = sibling_session.call("fauna.capabilities.fetch", {})
+    assert ok, f"the sibling family's session keeps serving: {reply!r}"
+
+    status, headers = refused_status(nest, first_client, first["access_token"])
+    assert status == 401 and "invalid_token" in headers.get("www-authenticate", ""), (
+        f"an unexpired token of an ended family opens no session: {status} {headers!r}"
+    )
+
+
+def _approve_personalization(nest, client, holder_pub: bytes, grant_id: bytes) -> dict:
+    """PAR → the browser page → the owner deposits the arm's grant twin and
+    approves → the code is redeemed: the order the approving machines run.
+    Returns the token reply."""
+    request_uri = client.push_authorization_request()
+    browser_code, flow_token = client.open_consent_page(request_uri)
+    alice = nest["user"]
+    now = int(time.time())
+    with alice_client(nest) as ws:
+        pending = ws.call("fauna.bridges.atproto.list_pending_consents", {})["consents"]
+        consent = next((c for c in pending if c["code"] == browser_code), None)
+        assert consent, f"no pending consent carries {browser_code!r}: {pending!r}"
+        assert bytes(consent["holder_x25519"]) == holder_pub, consent
+        blob = fauna_ffi.build_personalization_grant(
+            bytes(alice["signing_key"]), grant_id, holder_pub, now, now + 3600
+        )
+        minted = ws.call("fauna.capabilities.mint", {"grant_blob": blob})
+        assert minted.get("ok") is True, minted
+        resolved = ws.call(
+            "fauna.bridges.atproto.resolve_consent",
+            {"consent_id": consent["consent_id"], "approved": True},
+        )
+        assert resolved["resolved"], resolved
+    redirect = ""
+    deadline = time.monotonic() + RPC_ROUNDTRIP_S
+    while time.monotonic() < deadline:
+        status, redirect = client.poll(flow_token)
+        if status == "resolved":
+            break
+    assert redirect and "code=" in redirect, f"approval must release a code: {redirect!r}"
+    tokens = client.exchange_code(redirect)
+    assert tokens.get("access_token"), tokens
+    return tokens
+
+
+@pytest.mark.feature("connected-apps")
+def test_the_personalization_arm_reads_and_trains_the_accounts_models(
+    consent_nest, consent_bridge
+):
+    nest = consent_nest
+    alice = nest["user"]
+    holder = x25519.X25519PrivateKey.generate()
+    holder_pub = _raw(holder.public_key())
+    client = OAuthClient(
+        base=nest["url"],
+        htu_origin=f"https://{HANDLE_DOMAIN}",
+        redirect_uri=REDIRECT_URI,
+        scope=f"{PERSONALIZATION} {EVENTS}",
+        holder_x25519=holder_pub,
+    )
+
+    # The owner's registry row on the delegable scope — what one of the
+    # account's own apps wrote when the factor was trained.
+    owner_device = ed25519.Ed25519PrivateKey.generate()
+    owner_writer = _raw(owner_device.public_key())
+    item_key, envelope = fauna_ffi.account_state_seal_delegable_row(
+        bytes(alice["signing_key"]), _secret(owner_device), REGISTRY_KIND, TOPIC,
+        b"learn_from_engagement", 1,
+    )
+    state_put = {
+        "scope": "state",
+        "writer_id": owner_writer.hex(),
+        "writer_seq": 1,
+        "item_key": item_key,
+        "op": "state-put",
+        "entry": envelope,
+    }
+    with alice_client(nest) as ws:
+        ws.call("fauna.account.state.put", state_put)
+
+    tokens = _approve_personalization(nest, client, holder_pub, secrets.token_bytes(16))
+    session = PrincipalSession(upgrade(nest, client, tokens["access_token"]))
+
+    # ── The grant twin: both pairs, over the principal's own session. ──
+    ok, reply = session.call("fauna.capabilities.fetch", {})
+    assert ok, reply
+    grants = [bytes(g) for g in reply.get("grants", [])]
+    assert len(grants) == 1, f"the principal holds exactly the consent-time twin: {reply!r}"
+    tuples = cbor2.loads(grants[0])["scope"]
+    assert sorted((t["class"], t["kind"]) for t in tuples) == [
+        ("content.read", MODEL_KIND),
+        ("content.read", REGISTRY_KIND),
+    ], tuples
+
+    # ── Train and read a model, as the account. ──
+    sealed_model = secrets.token_bytes(48)
+    ok, reply = session.call(
+        "fauna.personalization.model.put",
+        {"factor": TOPIC, "sealed_blob": sealed_model, "sample_count": 7},
+    )
+    assert ok, f"the arm trains the account's model: {reply!r}"
+    ok, reply = session.call("fauna.personalization.model.fetch", {"factor": TOPIC})
+    assert ok and bytes(reply["sealed_blob"]) == sealed_model, reply
+    with alice_client(nest) as ws:
+        owned = ws.call("fauna.personalization.model.fetch", {"factor": TOPIC})
+    assert bytes(owned["sealed_blob"]) == sealed_model, (
+        f"the principal's put is the account's own model row: {owned!r}"
+    )
+
+    # ── List `state`, read only, and open the registry row with the twin. ──
+    ok, reply = session.call(
+        "fauna.sync.changes.list", {"scope": "state", "item_class": STATE_FEED}
+    )
+    assert ok, f"the arm lists the delegable scope: {reply!r}"
+    rows = [c for c in reply["changes"] if c.get("path_hash") == item_key.hex()]
+    assert len(rows) == 1, f"the owner's registry row is listed: {reply!r}"
+    opened = fauna_ffi.personalization_open_state_row(
+        grants[0], _secret(holder), owner_writer, rows[0]["origin_seq"], item_key,
+        bytes(rows[0]["entry"]),
+    )
+    assert opened["kind"] == REGISTRY_KIND and opened["key"] == TOPIC, opened
+    assert bytes(opened["value"]) == b"learn_from_engagement", opened
+
+    # ── The events doors: the owner's next `state` put answers the long-poll. ──
+    status, first = events_poll(nest, client, tokens["access_token"], None, wait=0)
+    assert status == 200 and first["frames"] == [{"scope": "state"}], (
+        f"the arm lists `state`, so the poll names it: {first!r}"
+    )
+    held: dict = {}
+
+    def long_poll():
+        held["reply"] = events_poll(
+            nest, client, tokens["access_token"], first["cursor"], wait=LONG_POLL_WAIT_S
+        )
+
+    poller = threading.Thread(target=long_poll)
+    poller.start()
+    next_key, next_envelope = fauna_ffi.account_state_seal_delegable_row(
+        bytes(alice["signing_key"]), _secret(owner_device), REGISTRY_KIND, TOPIC,
+        b"learn_from_dwell", 2,
+    )
+    with alice_client(nest) as ws:
+        ws.call(
+            "fauna.account.state.put",
+            {**state_put, "writer_seq": 2, "item_key": next_key, "entry": next_envelope},
+        )
+    poller.join(timeout=LONG_POLL_WAIT_S + 2 * RPC_ROUNDTRIP_S)
+    assert not poller.is_alive(), "the long-poll answered"
+    status, after = held["reply"]
+    assert status == 200 and after["frames"] == [{"scope": "state"}], (
+        f"the long-poll from the cursor names the owner's `state` put: {after!r}"
+    )
+    assert after["cursor"] > first["cursor"], after
+
+    # ── What the arm never reaches. ──
+    ok, reply = session.call("fauna.account.state.put", {**state_put, "writer_seq": 3})
+    assert not ok and refusal_code(reply).endswith("permission_denied"), (
+        f"a principal never writes the registry: {reply!r}"
+    )
+    ok, reply = session.call("fauna.personalization.model.delete", {"factor": TOPIC})
+    assert not ok and refusal_code(reply).endswith("permission_denied"), (
+        f"destruction is the owner's: {reply!r}"
+    )
+    ok, reply = session.call(
+        "fauna.sync.changes.list",
+        {"scope": "ext:ext.example.com.notes", "item_class": STATE_FEED},
+    )
+    assert not ok and refusal_code(reply).endswith("permission_denied"), (
+        f"the list dispatches on the scope — an ext: scope is the records arm's: {reply!r}"
+    )
+#: The fourth arm's client: its document declares both feed arms, so one
+#: ceremony may consent the bare arm alone and a later one add the account arm.
+ACCOUNT_DECLARED = "fauna:feed:read fauna:feed:read:account openid"
+
+#: The five feed kinds a principal session may reach.
+FIVE_KINDS = (
+    "fauna.feed.list",
+    "fauna.feed.get",
+    "fauna.feed.posts",
+    "fauna.feed.local.posts",
+    "fauna.feed.trending.posts",
+)
+
+
+@pytest.mark.feature("connected-apps")
+def test_the_account_arm_reads_the_accounts_feeds_over_public_posts(
+    consent_nest, consent_bridge
+):
+    """``fauna:feed:read:account`` (``docs/goal/behavior/authorization-server.md``
+    § Scope grammar → *The fourth arm*; the refinement of the two timelines,
+    ``apps/bridges.md`` rule (c)): with the bare arm alone the custom-feed
+    reads are refused and the local timeline carries no viewer state; after a
+    ceremony adding the account arm the session reads the account's own feed,
+    the public post the owner liked over its first-party connection shows
+    ``viewer_liked``, and the gated post the owner can read never appears on
+    any of the five kinds."""
+    nest = consent_nest
+    alice = nest["user"]
+    secret = bytes(alice["signing_key"])
+
+    # ── Fixture setup over the account's own connection (convention 8 (b)). ──
+    gold_key = bytes(range(32))
+    with alice_client(nest) as ws:
+        ws.call(
+            "fauna.subscriptions.tiers.create",
+            {
+                "name": "gold",
+                "rank": 2,
+                "description": None,
+                "price_hint": "5 EUR / month",
+                "payment_url": "https://pay.example/gold",
+                "auto_approve": False,
+                "encrypted_upload": fauna_ffi.build_tier_birth_upload(secret, "gold", gold_key),
+            },
+        )
+    gated_body, sealed = fauna_ffi.build_gated_post(
+        secret,
+        "Restricted: accountarmbeacon",
+        "Restricted: accountarmbeacon\n\nThe part you pay for.",
+        "gold",
+        2,
+        b"\x11" * 32,
+        gold_key,
+    )
+    upload_blob(
+        nest["port"], alice["token"], sealed,
+        audience_class="PeriodRestrictedPost", mime=SEALED_MIME,
+    )
+    with alice_client(nest) as ws:
+        gated = ws.call("fauna.posts.create", {"body": gated_body})["post_id"]
+        public = ws.call(
+            "fauna.posts.create",
+            {"body": fauna_ffi.build_post(secret, "Public: accountarmbeacon")},
+        )["post_id"]
+        for post in (public, gated):
+            ws.call("fauna.posts.interact", {"post_id": post, "action": "like"})
+        feed_id = ws.call(
+            "fauna.feed.create",
+            {"name": "Account arm", "rules": [], "combination": "any"},
+        )["feed_id"]
+        own = ws.call("fauna.feed.posts", {"feed_id": feed_id})["posts"]
+    assert {gated, public} <= {p["post_id"] for p in own}, (
+        f"the control: the owner's own read of its feed holds both posts: {own!r}"
+    )
+
+    def payload(kind: str) -> dict:
+        return {"feed_id": feed_id} if kind in ("fauna.feed.get", "fauna.feed.posts") else {}
+
+    # ── The bare arm alone. ──
+    client, tokens = ceremony(nest, DECLARED, declared=ACCOUNT_DECLARED)
+    bare = PrincipalSession(upgrade(nest, client, tokens["access_token"]))
+    for kind in ("fauna.feed.list", "fauna.feed.get", "fauna.feed.posts"):
+        ok, reply = bare.call(kind, payload(kind))
+        assert not ok and refusal_code(reply).endswith("permission_denied"), (
+            f"the bare arm never covers {kind}: {reply!r}"
+        )
+    ok, reply = bare.call("fauna.feed.local.posts", {})
+    assert ok, reply
+    rows = {p["post_id"]: p for p in reply["posts"]}
+    assert public in rows and gated not in rows, (
+        f"the bare arm reads public posts only: {sorted(rows)!r}"
+    )
+    assert not rows[public]["viewer_liked"], (
+        f"the bare arm reads nothing of the account's own state: {rows[public]!r}"
+    )
+
+    # ── A ceremony adding the account arm. ──
+    wide_client, wide_tokens = ceremony(nest, ACCOUNT_DECLARED, declared=ACCOUNT_DECLARED)
+    assert wide_client.client_id == client.client_id, "the same client, re-consenting wider"
+    session = PrincipalSession(upgrade(nest, wide_client, wide_tokens["access_token"]))
+    replies = {}
+    for kind in FIVE_KINDS:
+        ok, reply = session.call(kind, payload(kind))
+        assert ok, f"{kind} answers under the account arm: {reply!r}"
+        replies[kind] = reply
+    feeds = [f["feed_id"] for f in replies["fauna.feed.list"]["feeds"]]
+    assert feed_id in feeds, f"the account's own feed is listed: {feeds!r}"
+    assert replies["fauna.feed.get"]["feed_id"] == feed_id
+    for kind in ("fauna.feed.posts", "fauna.feed.local.posts"):
+        rows = {p["post_id"]: p for p in replies[kind]["posts"]}
+        assert public in rows, f"{kind}: the public post: {sorted(rows)!r}"
+        assert rows[public]["viewer_liked"], (
+            f"{kind}: the owner's like, made over its first-party session: {rows[public]!r}"
+        )
+    for kind in ("fauna.feed.posts", "fauna.feed.local.posts", "fauna.feed.trending.posts"):
+        assert gated not in {p["post_id"] for p in replies[kind]["posts"]}, (
+            f"{kind}: a gated post the owner can read never leaves the box"
+        )
+    for kind in ("fauna.feed.list", "fauna.feed.get"):
+        assert gated not in repr(replies[kind]), f"{kind} names no gated post"

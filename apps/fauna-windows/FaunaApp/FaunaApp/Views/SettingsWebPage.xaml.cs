@@ -84,6 +84,7 @@ public sealed partial class SettingsWebPage : Page
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
             SubdomainToggle, _vm.SubdomainEnabled ? "on" : "off");
         SubdomainUrl.Text = _vm.SubdomainUrlText;
+        RenderStatus.Visibility = _vm.RenderedPagesDown ? Visibility.Visible : Visibility.Collapsed;
         RenderPublishedPosts();
         ShowError(_vm.Error);
     }

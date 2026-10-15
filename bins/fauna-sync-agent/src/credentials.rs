@@ -422,7 +422,7 @@ mod tests {
             crate::config::SyncConfig::default(),
             shutdown_tx,
             event_tx,
-            crate::config::SyncPaths::new(Some(dir.clone())),
+            crate::config::SyncPaths::at(dir.clone()),
             Some(store.clone()),
         );
 

@@ -98,6 +98,7 @@ from common import build_registry_seed, create_actor_and_register
 from conftest import _seeded_environment
 from drivers import create_driver
 from drivers.machine_test_setter import set_handle_check_snapshot
+from helpers.app_launch import app_launch_config
 from helpers.apple_admin_gate import admin_gate_log
 from common.scope_store import attach_scope_store
 from helpers.budgets import APP_RELAUNCH_S, RPC_ROUNDTRIP_S, UI_SETTLE_S
@@ -201,27 +202,6 @@ ACCOUNT_PAGE_NAV = {
 # to macOS too. macOS's pre-check stays exactly as it always was: checked
 # on the primary view, no navigation.
 SETTINGS_PAGE_NAV = {"nav": {"stack": [{"view": "settings"}]}}
-
-
-def _app_launch_config(app_name, request):
-    """App-specific keys `create_driver(app_name).launch()` needs — macOS wants
-    only `app_path` (the bare `FaunaMacOS` executable); iOS additionally needs `udid`
-    (the simctl target); android needs the APK plus the run's bridge APK and
-    device (`helpers/android_device.run_launch_facts`, the one home conftest's
-    own android launch reads too). Fetched via `request.getfixturevalue` (not a
-    plain fixture parameter) so a `--client macos` run never triggers the iOS
-    build, and vice versa."""
-    if app_name == "ios":
-        setup = request.getfixturevalue("ios_setup")
-        return {"app_path": setup["app_path"], "udid": setup["udid"]}
-    if app_name == "android":
-        from helpers import android_device
-
-        return {
-            "app_path": request.getfixturevalue("android_app_path"),
-            **android_device.run_launch_facts(Path(__file__).resolve().parents[3]),
-        }
-    return {"app_path": request.getfixturevalue("macos_app_path")}
 
 
 def _seed_two_accounts(nest_instance, active="user"):
@@ -383,7 +363,7 @@ def test_apple_account_switcher_lists_switches_and_reveals_admin(
         "url": nest_instance["url"],
         "seed_credentials": seed,
         "environment": _seeded_environment(request, nest_instance),
-        **_app_launch_config(app_name, request),
+        **app_launch_config(app_name, request),
     })
     try:
         # (2) Launched active on the regular user → authenticated, NO admin shell.
@@ -470,7 +450,7 @@ def test_apple_add_account_appends_second_identity_to_registry(
         "url": nest_instance["url"],
         "seed_credentials": seed,
         "environment": _seeded_environment(request, nest_instance),
-        **_app_launch_config(app_name, request),
+        **app_launch_config(app_name, request),
     })
     try:
         # (1) One seeded account, authenticated, no admin shell.
@@ -613,7 +593,7 @@ def test_apple_add_account_pending_invite_submit_switches_the_live_session(
         "url": nest_instance["url"],
         "seed_credentials": seed,
         "environment": _seeded_environment(request, nest_instance),
-        **_app_launch_config(app_name, request),
+        **app_launch_config(app_name, request),
     })
     try:
         # (1) One seeded account, authenticated. The generation read here is the
@@ -733,7 +713,7 @@ def test_apple_add_account_import_does_not_touch_registry_before_completion(
         "url": nest_instance["url"],
         "seed_credentials": seed,
         "environment": _seeded_environment(request, nest_instance),
-        **_app_launch_config(app_name, request),
+        **app_launch_config(app_name, request),
     })
     try:
         driver.wait_for_state(
@@ -841,7 +821,7 @@ def test_apple_mls_store_is_account_scoped_and_never_adopts_a_flat_store(
         "seed_credentials": seed,
         "seed_app_support": {"Fauna/conv-mls.db": str(flat_seed)},
         "environment": _seeded_environment(request, nest_instance),
-        **_app_launch_config(app_name, request),
+        **app_launch_config(app_name, request),
     }
     if not driver.is_mobile():
         # macOS resolves `.applicationSupportDirectory` through CFFIXED_USER_HOME,
@@ -993,7 +973,7 @@ def test_apple_require_confirm_gates_switch_decline_then_approve(
         "url": nest_instance["url"],
         "seed_credentials": seed,
         "environment": _seeded_environment(request, nest_instance),
-        **_app_launch_config(app_name, request),
+        **app_launch_config(app_name, request),
     })
     try:
         driver.wait_for_state(
@@ -1197,7 +1177,7 @@ def test_apple_admin_auto_default_flags_admin_and_explicit_off_sticks(
         "url": nest_instance["url"],
         "seed_credentials": seed,
         "environment": _seeded_environment(request, nest_instance),
-        **_app_launch_config(app_name, request),
+        **app_launch_config(app_name, request),
     })
     try:
         driver.wait_for_state(
@@ -1262,7 +1242,7 @@ def test_apple_remove_account_shrinks_switcher_live(nest_instance, app_name, req
         "url": nest_instance["url"],
         "seed_credentials": seed,
         "environment": _seeded_environment(request, nest_instance),
-        **_app_launch_config(app_name, request),
+        **app_launch_config(app_name, request),
     })
     try:
         driver.wait_for_state(
@@ -1304,7 +1284,7 @@ def _launch_seeded(app_name, request, nest_instance, seed):
         "url": nest_instance["url"],
         "seed_credentials": seed,
         "environment": _seeded_environment(request, nest_instance),
-        **_app_launch_config(app_name, request),
+        **app_launch_config(app_name, request),
     })
     return driver
 
@@ -1516,7 +1496,7 @@ def test_apple_switching_identity_keeps_device_settings_and_moves_drafts(
         "url": nest_instance["url"],
         "seed_credentials": seed,
         "environment": _seeded_environment(request, nest_instance),
-        **_app_launch_config(app_name, request),
+        **app_launch_config(app_name, request),
     })
     app = ActionLayer(driver)
     feed = app.feed
@@ -1645,7 +1625,7 @@ def test_apple_abandoned_created_identity_never_shows_among_your_identities(
     driver.launch({
         "url": nest_instance["url"],
         "environment": _seeded_environment(request, nest_instance),
-        **_app_launch_config(app_name, request),
+        **app_launch_config(app_name, request),
     })
     try:
         # (1) Fresh install → create A → Continue: moment 1 writes A's row.
@@ -1748,7 +1728,7 @@ def test_apple_bound_launch_authenticates_as_the_bound_account(
         "url": nest_instance["url"],
         "seed_credentials": seed,
         "environment": {**_seeded_environment(request, nest_instance), "FAUNA_BOUND_ACCOUNT": admin_actor},
-        **_app_launch_config(app_name, request),
+        **app_launch_config(app_name, request),
     })
     try:
         # The session comes up as the BOUND (admin) account, while `active`
@@ -1807,7 +1787,7 @@ def test_apple_bound_launch_refuses_an_unknown_account(
                 "url": nest_instance["url"],
                 "seed_credentials": seed,
                 "environment": {"FAUNA_BOUND_ACCOUNT": unknown_actor},
-                **_app_launch_config(app_name, request),
+                **app_launch_config(app_name, request),
             },
             "a bound launch for an unknown account must exit — refusal is "
             "terminal, never a fallback onto the active account",
@@ -1884,7 +1864,7 @@ def test_apple_second_instance_on_the_same_account_coexists(
     guard."""
     seed, user_actor, _admin_actor = _seed_two_accounts(nest_instance)
     world = _shared_instance_world()
-    launch_config = _app_launch_config(app_name, request)
+    launch_config = app_launch_config(app_name, request)
 
     first = create_driver(app_name)
     first.launch({
@@ -1959,7 +1939,7 @@ def test_apple_bound_launch_onto_the_served_account_coexists(
        process — works normally."""
     seed, user_actor, _admin_actor = _seed_two_accounts(nest_instance)
     world = _shared_instance_world()
-    launch_config = _app_launch_config(app_name, request)
+    launch_config = app_launch_config(app_name, request)
 
     first = create_driver(app_name)
     first.launch({
@@ -2136,7 +2116,7 @@ def test_apple_a_bound_instance_survives_its_own_succession(
     """
     seed, user_actor = _seed_one_account(nest_instance)
     world = _shared_instance_world()
-    launch_config = _app_launch_config(app_name, request)
+    launch_config = app_launch_config(app_name, request)
 
     first = create_driver(app_name)
     first.launch({
@@ -2267,7 +2247,7 @@ def test_apple_a_launch_bound_to_a_retired_id_comes_up_as_the_successor(
     """
     seed, user_actor = _seed_one_account(nest_instance)
     world = _shared_instance_world()
-    launch_config = _app_launch_config(app_name, request)
+    launch_config = app_launch_config(app_name, request)
 
     first = create_driver(app_name)
     first.launch({
@@ -2375,7 +2355,7 @@ def test_apple_open_as_new_instance_spawns_a_bound_sibling(
 
     seed, user_actor, admin_actor = _seed_two_accounts(nest_instance)
     world = _shared_instance_world()
-    launch_config = _app_launch_config(app_name, request)
+    launch_config = app_launch_config(app_name, request)
 
     driver = create_driver(app_name)
     driver.launch({
@@ -2473,7 +2453,7 @@ def test_apple_logout_promotes_the_next_account_and_survives_relaunch(
     seed, user_actor, admin_actor = _seed_two_accounts(nest_instance)
     admin_secret = seed[f"fauna/{admin_actor}/secret"]
     world = _shared_instance_world()
-    launch_config = _app_launch_config(app_name, request)
+    launch_config = app_launch_config(app_name, request)
 
     driver = create_driver(app_name)
     driver.launch({
@@ -2543,7 +2523,7 @@ def test_apple_logout_of_the_last_account_survives_relaunch_signed_out(
     per-actor slots, which a single-slot delete once left behind)."""
     seed, user_actor = _seed_one_account(nest_instance)
     world = _shared_instance_world()
-    launch_config = _app_launch_config(app_name, request)
+    launch_config = app_launch_config(app_name, request)
 
     driver = create_driver(app_name)
     driver.launch({
@@ -2603,7 +2583,7 @@ def test_apple_instances_on_different_accounts_run_concurrently(
     above come from the per-account lock, not some install-wide guard."""
     seed, user_actor, admin_actor = _seed_two_accounts(nest_instance)
     world = _shared_instance_world()
-    launch_config = _app_launch_config(app_name, request)
+    launch_config = app_launch_config(app_name, request)
 
     first = create_driver(app_name)
     first.launch({

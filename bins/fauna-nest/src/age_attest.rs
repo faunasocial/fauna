@@ -17,7 +17,7 @@
 //!   2026-08-24).** The app makes a Play Integrity **classic** request whose
 //!   nonce is the SHA-256 of our claim message, and the nest opens the verdict token
 //!   **locally** with the app's Play-Console response-encryption keys pinned
-//!   as constants ([`FAUNA_ANDROID_PLAY_INTEGRITY_KEYS`]) — the same shape as
+//!   as constants ([`FAUNA_ANDROID_PLAY_APPS`]) — the same shape as
 //!   the iOS arm: no Google service call, no Fauna-org relay, sovereign and
 //!   works out of the box. Google signs the verdict (`ES256`); the pinned keys
 //!   only open its envelope (JWE `A256KW` + `A256GCM`), so publishing them in
@@ -93,49 +93,70 @@ oyFraWVIyd/dganmrduC1bmTBGwD
 -----END CERTIFICATE-----
 ";
 
-/// The genuine Fauna iOS app's App ID — owned by
-/// [`fauna_protocol::age::FAUNA_IOS_APP_ID`], the one arming point both the
-/// nest verifier and the iOS app's signed message read. **`None` leaves iOS
-/// unarmed**: [`verify_age_attestation`] answers every iOS attestation
-/// [`AttestationOutcome::CannotCheck`] and the age-nonce reply does not list
-/// `ios`. Armed with the org's App ID
-/// (`fauna_core::platform_ids::APPLE_IOS_APP_ID`).
-pub use fauna_protocol::age::FAUNA_IOS_APP_ID;
+/// The genuine Fauna iOS apps' App IDs — the main app and Fauna Kids — owned
+/// by [`fauna_protocol::age::FAUNA_IOS_APP_IDS`], the one arming point of the
+/// nest verifier. **Empty leaves iOS unarmed**: [`verify_age_attestation`]
+/// answers every iOS attestation [`AttestationOutcome::CannotCheck`] and the
+/// age-nonce reply does not list `ios`. Armed with the org's two App IDs
+/// (`fauna_core::platform_ids::APPLE_IOS_APP_ID`, `APPLE_IOS_KIDS_APP_ID`);
+/// [`verify_ios_age_attestation`] picks the one the attestation's RP-ID hash
+/// names.
+pub use fauna_protocol::age::FAUNA_IOS_APP_IDS;
 
 /// The genuine Fauna android app's Play application id — the permanent store
-/// identity `installers/android.md` § Store identity pins (the Gradle
-/// namespace `com.fauna.app` is deliberately not it). Both the classic
-/// request's `requestPackageName` and the verdict's `appIntegrity.packageName`
-/// must name exactly this.
-pub const FAUNA_ANDROID_APPLICATION_ID: &str = "social.fauna.fauna";
+/// identity, owned by [`fauna_core::platform_ids::ANDROID_APPLICATION_ID`].
+pub const FAUNA_ANDROID_APPLICATION_ID: &str = fauna_core::platform_ids::ANDROID_APPLICATION_ID;
 
-/// The Play Integrity **response-encryption keys** for
-/// [`FAUNA_ANDROID_APPLICATION_ID`], exactly as Play Console hands them to the
-/// developer (App integrity → Play Integrity API → Response encryption →
-/// *Manage and download my response encryption keys*): the AES-256
-/// **decryption key** that unwraps the verdict token's envelope (JWE
-/// `A256KW` + `A256GCM`) and the EC P-256 **verification key** (DER
-/// `SubjectPublicKeyInfo`) that checks Google's `ES256` signature over the
-/// verdict inside. Both base64 as downloaded.
+/// The Fauna Kids android app's Play application id — its own Play record,
+/// owned by [`fauna_core::platform_ids::ANDROID_KIDS_APPLICATION_ID`].
+pub const FAUNA_ANDROID_KIDS_APPLICATION_ID: &str =
+    fauna_core::platform_ids::ANDROID_KIDS_APPLICATION_ID;
+
+/// One genuine Fauna android app the Play arm verifies: its Play application
+/// id and the Play Integrity **response-encryption keys** of ITS Play record,
+/// exactly as Play Console hands them to the developer (App integrity → Play
+/// Integrity API → Response encryption → *Manage and download my response
+/// encryption keys*). Play Console issues the pair **per app**, so the main
+/// app and Fauna Kids each carry their own.
 ///
-/// **Why they may live in a public tree (ruled 2026-08-24, `family-safety.md`
-/// § The account age band):** Google signs the verdict with a key only Google
-/// holds; these two only *open the envelope*. Publishing them lets anyone read
-/// a Fauna verdict token they already possess — verdict secrecy — and forges
-/// nothing. That is the price of a self-hosted nest verifying nest-locally,
-/// with no Fauna-org relay in the path. Rotation (Play Console can mint a
-/// new pair) is a deliberate nest release that swaps both constants together.
+/// **Why the keys may live in a public tree (ruled 2026-08-24,
+/// `family-safety.md` § The account age band):** Google signs the verdict with
+/// a key only Google holds; these two only *open the envelope*. Publishing
+/// them lets anyone read a Fauna verdict token they already possess — verdict
+/// secrecy — and forges nothing. That is the price of a self-hosted nest
+/// verifying nest-locally, with no Fauna-org relay in the path. Rotation (Play
+/// Console can mint a new pair) is a deliberate nest release that swaps the
+/// app's pair.
 ///
-/// **`None` leaves android unarmed** exactly like [`FAUNA_IOS_APP_ID`]: until
-/// the org downloads the pair and lands it here, every android attestation is
-/// [`AttestationOutcome::CannotCheck`] — ignored unread, the claim handled as
-/// declared-only, never recorded `attested-android` — and the age-nonce reply
-/// does not list `android`. A pinned pair that fails to decode counts as
-/// unarmed on both sides ([`android_key_material`]).
-pub const FAUNA_ANDROID_PLAY_INTEGRITY_KEYS: Option<PlayIntegrityKeys> = None;
+/// **`keys: None` leaves THAT app unarmed.** With every entry unarmed the
+/// android platform is unarmed exactly like an empty [`FAUNA_IOS_APP_IDS`]:
+/// every android attestation is [`AttestationOutcome::CannotCheck`] and the
+/// age-nonce reply does not list `android`. With some armed and some not, the
+/// platform is listed and a token no armed app's key opens is cannot-check
+/// ([`pinned_play_app_for`]; `family-safety.md` § *An attestation the nest
+/// cannot check*, the half-armed ruling). A pinned pair that fails to decode
+/// counts as unarmed ([`android_arming`]).
+#[derive(Debug, Clone, Copy)]
+pub struct PlayIntegrityApp {
+    pub package: &'static str,
+    pub keys: Option<PlayIntegrityKeys>,
+}
+
+/// The pinned android apps — the main app and Fauna Kids — and the one arming
+/// point of the Play arm: land an app's Play Console pair in its `keys`.
+pub const FAUNA_ANDROID_PLAY_APPS: &[PlayIntegrityApp] = &[
+    PlayIntegrityApp {
+        package: FAUNA_ANDROID_APPLICATION_ID,
+        keys: None,
+    },
+    PlayIntegrityApp {
+        package: FAUNA_ANDROID_KIDS_APPLICATION_ID,
+        keys: None,
+    },
+];
 
 /// One Play Integrity response-encryption key pair as Play Console exports
-/// it (see [`FAUNA_ANDROID_PLAY_INTEGRITY_KEYS`]).
+/// it (see [`PlayIntegrityApp`]).
 #[derive(Debug, Clone, Copy)]
 pub struct PlayIntegrityKeys {
     /// Base64 (standard alphabet) of the 32-byte AES decryption key.
@@ -253,8 +274,8 @@ pub enum AttestationOutcome {
 /// The cfg-free body of [`attestation_platforms`] — the arming decisions taken
 /// as plain booleans so every answer is assertable from one build (the
 /// `discovery_core::capabilities_for` shape: while
-/// [`FAUNA_ANDROID_PLAY_INTEGRITY_KEYS`] is `None`, the android-armed answer is
-/// compiled by no other path).
+/// every [`FAUNA_ANDROID_PLAY_APPS`] entry is unarmed, the android-armed answer
+/// is compiled by no other path).
 pub fn attestation_platforms_for(ios_armed: bool, android_armed: bool) -> Vec<String> {
     let mut platforms = Vec::new();
     if ios_armed {
@@ -270,25 +291,52 @@ pub fn attestation_platforms_for(ios_armed: bool, android_armed: bool) -> Vec<St
 /// for — the `attestation_platforms` the `fauna.account.age_nonce` reply
 /// advertises, computed from the same arming [`verify_age_attestation`] reads.
 pub fn attestation_platforms() -> Vec<String> {
-    attestation_platforms_for(FAUNA_IOS_APP_ID.is_some(), android_key_material().is_some())
+    attestation_platforms_for(
+        !FAUNA_IOS_APP_IDS.is_empty(),
+        !android_arming().armed.is_empty(),
+    )
 }
 
-/// The android verifier's arming: the pinned Play Integrity key pair, decoded.
-/// `None` while the pair is unset **or fails to decode** — a malformed constant
-/// is a release bug (a unit test pins that the `Some` pair decodes), so it
-/// counts as unarmed on both sides of [`attestation_platforms`] and is logged,
-/// never a refusal of an admission that did nothing wrong.
-fn android_key_material() -> Option<PlayIntegrityKeyMaterial> {
-    match FAUNA_ANDROID_PLAY_INTEGRITY_KEYS?.material() {
-        Ok(material) => Some(material),
-        Err(e) => {
-            tracing::error!(
+/// One [`FAUNA_ANDROID_PLAY_APPS`] entry whose pinned pair decoded.
+#[derive(Debug, Clone)]
+pub struct ArmedPlayApp {
+    pub package: &'static str,
+    pub material: PlayIntegrityKeyMaterial,
+}
+
+/// The Play arm's arming, per pinned app.
+#[derive(Debug, Clone)]
+pub struct PlayArming {
+    /// The apps whose pair is pinned and decodes. Empty = android unarmed.
+    pub armed: Vec<ArmedPlayApp>,
+    /// Every pinned app is armed — no genuine verdict can come from an app
+    /// this nest cannot open (the half-armed ruling, [`pinned_play_app_for`]).
+    pub fully_armed: bool,
+}
+
+/// The android verifier's arming: each pinned app's Play Integrity key pair,
+/// decoded. A pair that fails to decode is a release bug (a unit test pins
+/// that every `Some` pair decodes), so it counts as unarmed for that app on
+/// both sides of [`attestation_platforms`] and is logged, never a refusal of
+/// an admission that did nothing wrong.
+fn android_arming() -> PlayArming {
+    let mut armed = Vec::new();
+    for app in FAUNA_ANDROID_PLAY_APPS {
+        let Some(keys) = app.keys else { continue };
+        match keys.material() {
+            Ok(material) => armed.push(ArmedPlayApp {
+                package: app.package,
+                material,
+            }),
+            Err(e) => tracing::error!(
                 error = e,
-                "pinned Play Integrity keys fail to decode; android attestation is unarmed"
-            );
-            None
+                package = app.package,
+                "pinned Play Integrity keys fail to decode; that app's android attestation is unarmed"
+            ),
         }
     }
+    let fully_armed = armed.len() == FAUNA_ANDROID_PLAY_APPS.len();
+    PlayArming { armed, fully_armed }
 }
 
 /// Verify one attested age claim (`family-safety.md` § The account age band →
@@ -310,9 +358,9 @@ pub async fn verify_age_attestation(
     // never logged — so an unknown token costs nothing.
     match attestation.platform.as_str() {
         AGE_ATTESTATION_PLATFORM_IOS => {
-            let Some(app_id) = FAUNA_IOS_APP_ID else {
+            if FAUNA_IOS_APP_IDS.is_empty() {
                 return Ok(AttestationOutcome::CannotCheck);
-            };
+            }
             let nonce = parse_hex_32(&attestation.nonce).ok_or("malformed nonce")?;
             let key_id = parse_hex_32(&attestation.key_id).ok_or("malformed key id")?;
             // Consume FIRST (single-use, anti-grind): a claim that fails below
@@ -320,40 +368,38 @@ pub async fn verify_age_attestation(
             if !state.auth.age_nonce_store.consume(&nonce).await {
                 return Err("unknown, expired, or already-used nonce");
             }
-            let message = age_claim_signed_message(&nonce, band.as_str(), app_id, actor);
-            let client_data_hash: [u8; 32] = Sha256::digest(&message).into();
-            verify_app_attest(
+            verify_ios_age_attestation(
                 &attestation.attestation_object,
                 &key_id,
-                &client_data_hash,
-                app_id,
+                &nonce,
+                band,
+                actor,
+                FAUNA_IOS_APP_IDS,
                 APPLE_APP_ATTEST_ROOT_PEM,
                 now_secs() as i64,
             )?;
             Ok(AttestationOutcome::Verified(AgeBandProvenance::AttestedIos))
         }
         AGE_ATTESTATION_PLATFORM_ANDROID => {
-            let Some(material) = android_key_material() else {
+            let arming = android_arming();
+            if arming.armed.is_empty() {
                 return Ok(AttestationOutcome::CannotCheck);
-            };
+            }
+            let token = &attestation.attestation_object;
+            // Picked BEFORE the nonce is touched: a token no armed app's key
+            // opens while a pinned app is unarmed is cannot-check, and a
+            // cannot-check attestation leaves its nonce unconsumed.
+            let pick = pinned_play_app_for(token, &arming.armed, arming.fully_armed);
+            if matches!(pick, Ok(None)) {
+                return Ok(AttestationOutcome::CannotCheck);
+            }
             let nonce = parse_hex_32(&attestation.nonce).ok_or("malformed nonce")?;
             // Consume FIRST — same anti-grind reasoning as the iOS arm.
             if !state.auth.age_nonce_store.consume(&nonce).await {
                 return Err("unknown, expired, or already-used nonce");
             }
-            let message = age_claim_signed_message(
-                &nonce,
-                band.as_str(),
-                FAUNA_ANDROID_APPLICATION_ID,
-                actor,
-            );
-            verify_play_integrity(
-                &attestation.attestation_object,
-                &message,
-                FAUNA_ANDROID_APPLICATION_ID,
-                &material,
-                now_secs(),
-            )?;
+            let app = pick?.ok_or("no pinned Play app's key opens the verdict")?;
+            verify_android_age_attestation(token, &nonce, band, actor, app, now_secs())?;
             Ok(AttestationOutcome::Verified(
                 AgeBandProvenance::AttestedAndroid,
             ))
@@ -375,6 +421,58 @@ fn parse_hex_32(hex_str: &str) -> Option<[u8; 32]> {
 
 /// Apple's nonce-carrying certificate extension on the credential certificate.
 const APPLE_NONCE_EXTENSION_OID: &str = "1.2.840.113635.100.8.2";
+
+/// The pinned App ID whose SHA-256 is the attestation's RP-ID hash — the
+/// App ID of the bundle that ran App Attest. Only the attestation's
+/// `authData` names it, and only a pinned entry can answer: no App ID is ever
+/// read from the client. No match refuses (outcome 2 — an attestation from a
+/// bundle this nest does not pin).
+pub fn pinned_app_id_for<'a>(
+    attestation_object: &[u8],
+    pinned: &[&'a str],
+) -> Result<&'a str, &'static str> {
+    let parsed = parse_attestation_object(attestation_object)?;
+    let rp_id_hash = parsed
+        .auth_data
+        .get(..32)
+        .ok_or("authenticator data too short")?;
+    pinned
+        .iter()
+        .copied()
+        .find(|app_id| Sha256::digest(app_id.as_bytes()).as_slice() == rp_id_hash)
+        .ok_or("RP ID hash matches no pinned app id")
+}
+
+/// The iOS arm of an attested age claim, pure: pick the pinned App ID the
+/// attestation's RP-ID hash names ([`pinned_app_id_for`]), rebuild
+/// [`age_claim_signed_message`] with THAT App ID, and verify the object
+/// against it ([`verify_app_attest`]). The App ID the RP-ID hash names and
+/// the one the claim was signed over must therefore be the same: an
+/// attestation from one bundle over a message naming the other fails the
+/// nonce binding. The caller has already consumed `nonce`.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_ios_age_attestation(
+    attestation_object: &[u8],
+    key_id: &[u8; 32],
+    nonce: &[u8; 32],
+    band: AgeBand,
+    actor: &[u8; 32],
+    pinned: &[&str],
+    trust_root_pem: &str,
+    now_secs: i64,
+) -> Result<(), &'static str> {
+    let app_id = pinned_app_id_for(attestation_object, pinned)?;
+    let message = age_claim_signed_message(nonce, band.as_str(), app_id, actor);
+    let client_data_hash: [u8; 32] = Sha256::digest(&message).into();
+    verify_app_attest(
+        attestation_object,
+        key_id,
+        &client_data_hash,
+        app_id,
+        trust_root_pem,
+        now_secs,
+    )
+}
 
 /// Verify an App Attest **attestation object** (the `attestKey` output; the
 /// per-operation `generateAssertion` flow is not this ceremony — an age claim
@@ -500,6 +598,67 @@ pub fn verify_app_attest(
 // parameters so unit tests substitute a synthetic pair without any test-only
 // backdoor)
 // ---------------------------------------------------------------------------
+
+/// The pinned android app whose response-encryption key opens the verdict
+/// token's envelope — the app whose Play record the verdict was minted for,
+/// since Play Console issues the pair per app. Only the token names it, and
+/// only a pinned entry's key can answer: no package is ever read from the
+/// client. `A256KW` is an integrity-checked unwrap (RFC 3394's IV check), so
+/// another app's key does not open it.
+///
+/// - `Ok(Some(app))` — `app`'s key opened it; the caller verifies against
+///   `app` alone ([`verify_android_age_attestation`]).
+/// - `Ok(None)` — **cannot check (the half-armed ruling, `family-safety.md`
+///   § *An attestation the nest cannot check*)**: no armed app's key opens it
+///   while some pinned app is unarmed, so it may be that app's genuine
+///   verdict — exactly what an unarmed platform's would be.
+/// - `Err(_)` — refused (outcome 2): a malformed or off-profile envelope, or,
+///   with every pinned app armed, a token none of their keys opens.
+pub fn pinned_play_app_for<'a>(
+    token: &[u8],
+    armed: &'a [ArmedPlayApp],
+    fully_armed: bool,
+) -> Result<Option<&'a ArmedPlayApp>, &'static str> {
+    let token = std::str::from_utf8(token).map_err(|_| "token is not ASCII")?;
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 5 {
+        return Err("token is not a five-part JWE");
+    }
+    let header: serde_json::Value =
+        serde_json::from_slice(&b64url(parts[0]).ok_or("malformed JWE header")?)
+            .map_err(|_| "unparseable JWE header")?;
+    if header.get("alg").and_then(|v| v.as_str()) != Some("A256KW") {
+        return Err("JWE key algorithm is not A256KW");
+    }
+    let wrapped_cek = b64url(parts[1]).ok_or("malformed JWE encrypted key")?;
+    match armed
+        .iter()
+        .find(|app| aes_key_unwrap(&app.material.decryption_key, &wrapped_cek).is_ok())
+    {
+        Some(app) => Ok(Some(app)),
+        None if fully_armed => Err("no pinned Play app's key opens the verdict"),
+        None => Ok(None),
+    }
+}
+
+/// The android arm of an attested age claim, pure: rebuild
+/// [`age_claim_signed_message`] with the package of the app whose key opened
+/// the token ([`pinned_play_app_for`]) and verify the verdict against that app
+/// alone ([`verify_play_integrity`]) — both package fields must name it and
+/// the nonce must bind a message signed over it, so a verdict for one app
+/// opened under the other's key, or one app's verdict over a message naming
+/// the other, refuses. The caller has already consumed `nonce`.
+pub fn verify_android_age_attestation(
+    token: &[u8],
+    nonce: &[u8; 32],
+    band: AgeBand,
+    actor: &[u8; 32],
+    app: &ArmedPlayApp,
+    now_secs: u64,
+) -> Result<(), &'static str> {
+    let message = age_claim_signed_message(nonce, band.as_str(), app.package, actor);
+    verify_play_integrity(token, &message, app.package, &app.material, now_secs)
+}
 
 /// Verify a Play Integrity **classic-request verdict token** for one attested
 /// age claim. `claim_message` is the exact [`age_claim_signed_message`]; the
@@ -977,6 +1136,7 @@ impl<'a> Cbor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fauna_protocol::age::{FAUNA_IOS_APP_ID, FAUNA_IOS_KIDS_APP_ID};
     use rcgen::{BasicConstraints, CertificateParams, CustomExtension, DnType, IsCa, KeyPair};
 
     const TEST_APP_ID: &str = "TESTTEAM.social.fauna.fauna";
@@ -1017,6 +1177,20 @@ mod tests {
     }
 
     fn build_fixture(mutate_auth_data: impl FnOnce(&mut Vec<u8>)) -> Fixture {
+        build_fixture_for(
+            TEST_APP_ID,
+            Sha256::digest(b"the client data").into(),
+            mutate_auth_data,
+        )
+    }
+
+    /// [`build_fixture`] with the RP-ID (the App ID the attesting bundle runs
+    /// under) and the client-data hash chosen by the caller.
+    fn build_fixture_for(
+        rp_id: &str,
+        client_data_hash: [u8; 32],
+        mutate_auth_data: impl FnOnce(&mut Vec<u8>),
+    ) -> Fixture {
         let root_key = KeyPair::generate().expect("root keygen");
         let mut root_params = CertificateParams::new(Vec::<String>::new()).expect("root params");
         root_params
@@ -1040,7 +1214,7 @@ mod tests {
 
         // authData: rpIdHash ‖ flags ‖ counter=0 ‖ aaguid ‖ credIdLen ‖ credId
         let mut auth_data = Vec::new();
-        auth_data.extend_from_slice(&Sha256::digest(TEST_APP_ID.as_bytes()));
+        auth_data.extend_from_slice(&Sha256::digest(rp_id.as_bytes()));
         auth_data.push(0x40); // AT flag
         auth_data.extend_from_slice(&[0, 0, 0, 0]);
         auth_data.extend_from_slice(b"appattest\0\0\0\0\0\0\0");
@@ -1048,7 +1222,6 @@ mod tests {
         auth_data.extend_from_slice(&key_id);
         mutate_auth_data(&mut auth_data);
 
-        let client_data_hash: [u8; 32] = Sha256::digest(b"the client data").into();
         let mut nonce_input = auth_data.clone();
         nonce_input.extend_from_slice(&client_data_hash);
         let nonce: [u8; 32] = Sha256::digest(&nonce_input).into();
@@ -1201,6 +1374,76 @@ mod tests {
         assert_eq!(err, "key id does not match the attested public key");
     }
 
+    // ── The iOS arm over BOTH pinned App IDs (the main app + Fauna Kids) ──
+
+    const ACTOR: [u8; 32] = [7; 32];
+    const NONCE: [u8; 32] = [9; 32];
+
+    /// An attestation from the bundle `rp_id` over a claim message naming
+    /// `signed_app_id`, checked against the shipped pinned set.
+    fn verify_ios_pair(rp_id: &str, signed_app_id: &str) -> Result<(), &'static str> {
+        let message =
+            age_claim_signed_message(&NONCE, AgeBand::Teen13To15.as_str(), signed_app_id, &ACTOR);
+        let f = build_fixture_for(rp_id, Sha256::digest(&message).into(), |_| {});
+        verify_ios_age_attestation(
+            &f.attestation_object,
+            &f.key_id,
+            &NONCE,
+            AgeBand::Teen13To15,
+            &ACTOR,
+            FAUNA_IOS_APP_IDS,
+            &f.root_pem,
+            now(),
+        )
+    }
+
+    #[test]
+    fn the_main_app_attestation_verifies() {
+        verify_ios_pair(FAUNA_IOS_APP_ID, FAUNA_IOS_APP_ID).expect("main app verifies");
+    }
+
+    #[test]
+    fn the_kids_app_attestation_verifies() {
+        verify_ios_pair(FAUNA_IOS_KIDS_APP_ID, FAUNA_IOS_KIDS_APP_ID).expect("kids app verifies");
+    }
+
+    /// The RP-ID hash names one pinned App ID and the signed message the
+    /// other: the nest signs over the one the hash names, so the client's
+    /// message no longer binds — refused, both ways round.
+    #[test]
+    fn a_mismatched_app_id_pair_is_refused() {
+        for (rp_id, signed) in [
+            (FAUNA_IOS_KIDS_APP_ID, FAUNA_IOS_APP_ID),
+            (FAUNA_IOS_APP_ID, FAUNA_IOS_KIDS_APP_ID),
+        ] {
+            assert_eq!(
+                verify_ios_pair(rp_id, signed),
+                Err("attestation nonce mismatch"),
+                "rp {rp_id} / signed {signed}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unpinned_bundle_is_refused() {
+        let other = "7457N3M72H.social.fauna.other";
+        assert_eq!(
+            verify_ios_pair(other, other),
+            Err("RP ID hash matches no pinned app id")
+        );
+    }
+
+    #[test]
+    fn the_pinned_app_id_is_chosen_by_the_rp_id_hash() {
+        for app_id in FAUNA_IOS_APP_IDS {
+            let f = build_fixture_for(app_id, [0; 32], |_| {});
+            assert_eq!(
+                pinned_app_id_for(&f.attestation_object, FAUNA_IOS_APP_IDS),
+                Ok(*app_id)
+            );
+        }
+    }
+
     #[test]
     fn indefinite_length_cbor_is_refused() {
         // 0xBF = indefinite-length map — CTAP2 canonical form never emits it,
@@ -1233,8 +1476,8 @@ mod tests {
         assert_eq!(
             attestation_platforms(),
             attestation_platforms_for(
-                FAUNA_IOS_APP_ID.is_some(),
-                FAUNA_ANDROID_PLAY_INTEGRITY_KEYS.is_some()
+                !FAUNA_IOS_APP_IDS.is_empty(),
+                FAUNA_ANDROID_PLAY_APPS.iter().any(|app| app.keys.is_some())
             )
         );
     }
@@ -1243,9 +1486,24 @@ mod tests {
     /// this test, never a family's admission (it would read as unarmed).
     #[test]
     fn a_pinned_play_integrity_key_pair_decodes() {
-        if let Some(keys) = FAUNA_ANDROID_PLAY_INTEGRITY_KEYS {
-            keys.material().expect("pinned Play Integrity keys decode");
+        for app in FAUNA_ANDROID_PLAY_APPS {
+            if let Some(keys) = app.keys {
+                keys.material().expect("pinned Play Integrity keys decode");
+            }
         }
+    }
+
+    /// The Play arm pins both android apps, each its own Play record.
+    #[test]
+    fn the_play_arm_pins_the_main_and_kids_packages() {
+        let packages: Vec<&str> = FAUNA_ANDROID_PLAY_APPS.iter().map(|a| a.package).collect();
+        assert_eq!(
+            packages,
+            vec![
+                fauna_core::platform_ids::ANDROID_APPLICATION_ID,
+                fauna_core::platform_ids::ANDROID_KIDS_APPLICATION_ID,
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1354,6 +1612,8 @@ mod tests {
     }
 
     const PLAY_NOW: u64 = 1_800_000_000;
+    const PLAY_CLAIM_NONCE: [u8; 32] = [0x11; 32];
+    const PLAY_CLAIM_ACTOR: [u8; 32] = [0x22; 32];
 
     /// A synthetic Play Integrity classic-request verdict token: an `ES256`
     /// JWS over the verdict JSON, sealed in an `A256KW`+`A256GCM` JWE — the
@@ -1372,25 +1632,49 @@ mod tests {
         signing_key: &p256::ecdsa::SigningKey,
         mutate_verdict: impl FnOnce(&mut serde_json::Value),
     ) -> PlayFixture {
+        use rand::RngCore;
+        let mut kek = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut kek);
+        play_fixture_for(
+            &kek,
+            signing_key,
+            FAUNA_ANDROID_APPLICATION_ID,
+            FAUNA_ANDROID_APPLICATION_ID,
+            mutate_verdict,
+        )
+    }
+
+    /// The general fixture: a verdict Google minted for `package`, over a
+    /// claim the app signed naming `signed_package`, sealed under `kek` and
+    /// signed by `signing_key` — one app's Play Console pair.
+    fn play_fixture_for(
+        kek: &[u8; 32],
+        signing_key: &p256::ecdsa::SigningKey,
+        package: &str,
+        signed_package: &str,
+        mutate_verdict: impl FnOnce(&mut serde_json::Value),
+    ) -> PlayFixture {
         use base64::Engine as _;
         use p256::ecdsa::signature::Signer;
         use p256::pkcs8::EncodePublicKey;
         use rand::RngCore;
         let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
 
-        let nonce = [0x11u8; 32];
-        let actor = [0x22u8; 32];
-        let message =
-            age_claim_signed_message(&nonce, "13-15", FAUNA_ANDROID_APPLICATION_ID, &actor);
+        let message = age_claim_signed_message(
+            &PLAY_CLAIM_NONCE,
+            "13-15",
+            signed_package,
+            &PLAY_CLAIM_ACTOR,
+        );
         let mut verdict = serde_json::json!({
             "requestDetails": {
-                "requestPackageName": FAUNA_ANDROID_APPLICATION_ID,
+                "requestPackageName": package,
                 "nonce": b64(&Sha256::digest(&message)),
                 "timestampMillis": (PLAY_NOW * 1000).to_string(),
             },
             "appIntegrity": {
                 "appRecognitionVerdict": "PLAY_RECOGNIZED",
-                "packageName": FAUNA_ANDROID_APPLICATION_ID,
+                "packageName": package,
                 "certificateSha256Digest": ["6a6a1474b5cbbb2b1aa57e0bc3"],
                 "versionCode": "42",
             },
@@ -1413,10 +1697,9 @@ mod tests {
         let sig: p256::ecdsa::Signature = signing_key.sign(signing_input.as_bytes());
         let jws = format!("{signing_input}.{}", b64(&sig.to_bytes()));
 
-        let mut kek = [0u8; 32];
+        let kek = *kek;
         let mut cek = [0u8; 32];
         let mut iv = [0u8; 12];
-        rand::rngs::OsRng.fill_bytes(&mut kek);
         rand::rngs::OsRng.fill_bytes(&mut cek);
         rand::rngs::OsRng.fill_bytes(&mut iv);
         let jwe_header = b64(br#"{"alg":"A256KW","enc":"A256GCM"}"#);
@@ -1456,6 +1739,181 @@ mod tests {
             &f.keys,
             PLAY_NOW,
         )
+    }
+
+    /// One app's Play Console pair, as a test generates it.
+    struct PlayPair {
+        kek: [u8; 32],
+        signer: p256::ecdsa::SigningKey,
+    }
+
+    fn play_pair() -> PlayPair {
+        use rand::RngCore;
+        let mut kek = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut kek);
+        PlayPair {
+            kek,
+            signer: p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng),
+        }
+    }
+
+    fn armed(package: &'static str, pair: &PlayPair) -> ArmedPlayApp {
+        use p256::pkcs8::EncodePublicKey;
+        ArmedPlayApp {
+            package,
+            material: PlayIntegrityKeyMaterial {
+                decryption_key: pair.kek,
+                verification_key_der: pair
+                    .signer
+                    .verifying_key()
+                    .to_public_key_der()
+                    .expect("spki")
+                    .as_bytes()
+                    .to_vec(),
+            },
+        }
+    }
+
+    /// A token `pair` sealed for `package` over a claim signed naming
+    /// `signed_package`.
+    fn play_token(pair: &PlayPair, package: &str, signed_package: &str) -> Vec<u8> {
+        play_fixture_for(&pair.kek, &pair.signer, package, signed_package, |_| {}).token
+    }
+
+    /// Pick the app from `entries`, then verify against it — the android arm
+    /// of `verify_age_attestation` minus the nonce store.
+    fn verify_android(
+        token: &[u8],
+        entries: &[ArmedPlayApp],
+        fully_armed: bool,
+    ) -> Result<Option<&'static str>, &'static str> {
+        let Some(app) = pinned_play_app_for(token, entries, fully_armed)? else {
+            return Ok(None);
+        };
+        verify_android_age_attestation(
+            token,
+            &PLAY_CLAIM_NONCE,
+            AgeBand::Teen13To15,
+            &PLAY_CLAIM_ACTOR,
+            app,
+            PLAY_NOW,
+        )?;
+        Ok(Some(app.package))
+    }
+
+    #[test]
+    fn each_pinned_play_app_verifies_under_its_own_pair() {
+        let (main, kids) = (play_pair(), play_pair());
+        let entries = [
+            armed(FAUNA_ANDROID_APPLICATION_ID, &main),
+            armed(FAUNA_ANDROID_KIDS_APPLICATION_ID, &kids),
+        ];
+        let main_token = play_token(
+            &main,
+            FAUNA_ANDROID_APPLICATION_ID,
+            FAUNA_ANDROID_APPLICATION_ID,
+        );
+        let kids_token = play_token(
+            &kids,
+            FAUNA_ANDROID_KIDS_APPLICATION_ID,
+            FAUNA_ANDROID_KIDS_APPLICATION_ID,
+        );
+        assert_eq!(
+            verify_android(&main_token, &entries, true),
+            Ok(Some(FAUNA_ANDROID_APPLICATION_ID))
+        );
+        assert_eq!(
+            verify_android(&kids_token, &entries, true),
+            Ok(Some(FAUNA_ANDROID_KIDS_APPLICATION_ID))
+        );
+    }
+
+    #[test]
+    fn a_verdict_naming_another_app_than_the_key_that_opened_it_is_refused() {
+        let (main, kids) = (play_pair(), play_pair());
+        let entries = [
+            armed(FAUNA_ANDROID_APPLICATION_ID, &main),
+            armed(FAUNA_ANDROID_KIDS_APPLICATION_ID, &kids),
+        ];
+        // A kids verdict sealed under the MAIN app's pair: the main entry is
+        // the one its key opens, and the verdict does not name it.
+        let crossed = play_token(
+            &main,
+            FAUNA_ANDROID_KIDS_APPLICATION_ID,
+            FAUNA_ANDROID_KIDS_APPLICATION_ID,
+        );
+        assert_eq!(
+            verify_android(&crossed, &entries, true),
+            Err("verdict was requested for another package")
+        );
+        // A genuine kids verdict over a claim the app signed naming the main
+        // package: the nonce binds a message the nest never rebuilds.
+        let mis_signed = play_token(
+            &kids,
+            FAUNA_ANDROID_KIDS_APPLICATION_ID,
+            FAUNA_ANDROID_APPLICATION_ID,
+        );
+        assert_eq!(
+            verify_android(&mis_signed, &entries, true),
+            Err("verdict nonce does not bind this claim")
+        );
+    }
+
+    #[test]
+    fn a_kids_token_checked_against_the_main_entry_alone_is_refused() {
+        let (main, kids) = (play_pair(), play_pair());
+        let kids_token = play_token(
+            &kids,
+            FAUNA_ANDROID_KIDS_APPLICATION_ID,
+            FAUNA_ANDROID_KIDS_APPLICATION_ID,
+        );
+        let main_entry = armed(FAUNA_ANDROID_APPLICATION_ID, &main);
+        // Verified straight against the main entry, it fails at the envelope.
+        assert_eq!(
+            verify_android_age_attestation(
+                &kids_token,
+                &PLAY_CLAIM_NONCE,
+                AgeBand::Teen13To15,
+                &PLAY_CLAIM_ACTOR,
+                &main_entry,
+                PLAY_NOW,
+            ),
+            Err("key unwrap integrity check failed")
+        );
+        // With only the main entry pinned, no key opens it: refused.
+        assert_eq!(
+            verify_android(&kids_token, std::slice::from_ref(&main_entry), true),
+            Err("no pinned Play app's key opens the verdict")
+        );
+    }
+
+    /// The half-armed ruling: the main app armed, Fauna Kids pinned but
+    /// unarmed. The kids app's genuine verdict opens under no armed key, so it
+    /// is cannot-check (`Ok(None)`), while the main app still verifies.
+    #[test]
+    fn a_half_armed_play_arm_cannot_check_a_token_no_armed_key_opens() {
+        let (main, kids) = (play_pair(), play_pair());
+        let entries = [armed(FAUNA_ANDROID_APPLICATION_ID, &main)];
+        let kids_token = play_token(
+            &kids,
+            FAUNA_ANDROID_KIDS_APPLICATION_ID,
+            FAUNA_ANDROID_KIDS_APPLICATION_ID,
+        );
+        assert_eq!(verify_android(&kids_token, &entries, false), Ok(None));
+        let main_token = play_token(
+            &main,
+            FAUNA_ANDROID_APPLICATION_ID,
+            FAUNA_ANDROID_APPLICATION_ID,
+        );
+        assert_eq!(
+            verify_android(&main_token, &entries, false),
+            Ok(Some(FAUNA_ANDROID_APPLICATION_ID))
+        );
+        // A token off the pinned profile is still refused, half-armed or not.
+        assert_eq!(
+            verify_android(b"not.a.jwe", &entries, false),
+            Err("token is not a five-part JWE")
+        );
     }
 
     #[test]

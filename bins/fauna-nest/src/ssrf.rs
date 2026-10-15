@@ -246,6 +246,23 @@ pub async fn guarded_dial(
 /// and for how long, but not how much it may send back.
 pub use fauna_nest_http::capped::{CappedBody, CappedReadError, read_capped, read_prefix};
 
+/// Whether the ActivityPub loopback exemption is open: a `test-hooks` build with
+/// `FAUNA_TEST_AP_ALLOW_LOOPBACK` set. Always `false` in a shipped build.
+///
+/// Lives here, not in the `activitypub` tree it serves, so its feature split
+/// (`test-hooks` on / off) is compiled by both `nest-lib-test-check` arms.
+#[must_use]
+pub fn ap_loopback_hook_open() -> bool {
+    #[cfg(feature = "test-hooks")]
+    {
+        std::env::var_os("FAUNA_TEST_AP_ALLOW_LOOPBACK").is_some()
+    }
+    #[cfg(not(feature = "test-hooks"))]
+    {
+        false
+    }
+}
+
 /// A loopback HTTP server that answers one request with a canned head and body,
 /// for the capped-read pins here and at their callers. `endless` streams `body`
 /// forever after the head — a remote that never stops sending — which only a

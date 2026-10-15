@@ -73,8 +73,10 @@ pub const BLUESKY_LEG_LABEL: &str = "Bluesky";
 /// The leg's declared glyph.
 pub const BLUESKY_LEG_GLYPH: &str = "butterfly";
 /// The leg's address grammar: the peer's DID — what the chat service names a
-/// convo member by, and what the room and the gate key on.
-pub const BLUESKY_LEG_ADDRESS_GRAMMAR: &str = "^did:(plc|web):[A-Za-z0-9._:%-]{1,256}$";
+/// convo member by, and what the room and the gate key on — or a handle, with
+/// or without its leading `@`, which `conversation.rooms.open` resolves to the
+/// DID under the account's session (`crate::bluesky::dm_leg::far_room_id`).
+pub const BLUESKY_LEG_ADDRESS_GRAMMAR: &str = r"^(did:(plc|web):[A-Za-z0-9._:%-]{1,256}|@?([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]([A-Za-z0-9-]*[A-Za-z0-9])?)$";
 /// The principal id the Bluesky leg's rooms seat as their bridge member.
 pub const BLUESKY_LEG_PRINCIPAL_ID: [u8; 16] = *b"fauna:bsky-leg\0\0";
 
@@ -88,11 +90,22 @@ pub const ACTIVITYPUB_LEG_LABEL: &str = "Fediverse";
 /// The leg's declared glyph.
 pub const ACTIVITYPUB_LEG_GLYPH: &str = "globe";
 /// The leg's address grammar: the peer's actor URI — the identity an inbox
-/// delivery's HTTP signature proves, and what the room and the gate key on.
+/// delivery's HTTP signature proves, and what the room and the gate key on —
+/// or the two-`@` `@user@host` it is known by, which `conversation.rooms.open`
+/// resolves by WebFinger (`crate::activitypub::dm_leg::far_room_id`); a bare
+/// `user@host` is an email address to every app's address probe.
 /// Unbounded repetitions on purpose: the family bounds a far id's length
 /// itself, and a counted repetition over a Unicode class outgrows the
 /// grammar compiler's size limit.
-pub const ACTIVITYPUB_LEG_ADDRESS_GRAMMAR: &str = r"^https://[^\s/]+/\S+$";
+pub const ACTIVITYPUB_LEG_ADDRESS_GRAMMAR: &str = r"^(https://[^\s/]+/\S+|@[^\s@/:?#%]+@([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)$";
+/// [`ACTIVITYPUB_LEG_ADDRESS_GRAMMAR`] widened by the AP loopback test hook
+/// (`crate::ssrf::ap_loopback_hook_open` — a `test-hooks` build with
+/// `FAUNA_TEST_AP_ALLOW_LOOPBACK` set, never a shipped one): an `http` actor
+/// URI on a loopback host and an `@user@<loopback>:<port>` account too — the
+/// in-test fediverse server's spellings, so a journey can open a room from the
+/// picker with a peer only the dial-side hook lets the nest reach. The dial
+/// itself is still the hook's to permit (`activitypub::outbound`).
+pub const ACTIVITYPUB_LEG_LOOPBACK_TEST_GRAMMAR: &str = r"^(https://[^\s/]+/\S+|http://(127(\.[0-9]{1,3}){3}|localhost)(:[0-9]{1,5})?/\S+|@[^\s@/:?#%]+@([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?|@[^\s@/:?#%]+@(127(\.[0-9]{1,3}){3}|localhost)(:[0-9]{1,5})?)$";
 /// The principal id the ActivityPub leg's rooms seat as their bridge member.
 pub const ACTIVITYPUB_LEG_PRINCIPAL_ID: [u8; 16] = *b"fauna:ap-leg\0\0\0\0";
 
@@ -164,10 +177,20 @@ pub fn bluesky_leg_block() -> BridgeBlock {
 /// The ActivityPub leg's declared block: a one-to-one text rail.
 #[must_use]
 pub fn activitypub_leg_block() -> BridgeBlock {
+    activitypub_leg_block_with(crate::ssrf::ap_loopback_hook_open())
+}
+
+/// [`activitypub_leg_block`] with the loopback test hook's state given, so the
+/// shipped grammar is pinned without touching the process environment.
+fn activitypub_leg_block_with(loopback_hook: bool) -> BridgeBlock {
     leg_block(
         ACTIVITYPUB_LEG_BRIDGE_ID,
         ACTIVITYPUB_LEG_GLYPH,
-        ACTIVITYPUB_LEG_ADDRESS_GRAMMAR,
+        if loopback_hook {
+            ACTIVITYPUB_LEG_LOOPBACK_TEST_GRAMMAR
+        } else {
+            ACTIVITYPUB_LEG_ADDRESS_GRAMMAR
+        },
         false,
     )
 }
@@ -1116,10 +1139,56 @@ mod leg_block_tests {
     fn each_leg_grammar_admits_its_own_address() {
         assert!(bluesky_leg_block().address_matches("did:plc:ewvi7nxzyoun6zhxrhs64oiz"));
         assert!(bluesky_leg_block().address_matches("did:web:example.com"));
-        assert!(!bluesky_leg_block().address_matches("alice.bsky.social"));
-        assert!(activitypub_leg_block().address_matches("https://remote.example/users/bob"));
-        assert!(!activitypub_leg_block().address_matches("http://remote.example/users/bob"));
-        assert!(!activitypub_leg_block().address_matches("bob@remote.example"));
+        for handle in ["alice.bsky.social", "@Alice.Example.Com"] {
+            assert!(bluesky_leg_block().address_matches(handle), "{handle}");
+        }
+        for not_one in ["alice", "@alice@remote.example", "-a.example"] {
+            assert!(!bluesky_leg_block().address_matches(not_one), "{not_one}");
+        }
+        let ap = activitypub_leg_block_with(false);
+        assert!(ap.address_matches("https://remote.example/users/bob"));
+        assert!(ap.address_matches("@bob@remote.example"));
+        assert!(ap.address_matches("@Bob@Social.Example"));
+        for not_one in [
+            "http://remote.example/users/bob",
+            "bob@remote.example",
+            "@bob",
+            "@bob@localhost",
+            "@bob@remote.example/x",
+            "alice.bsky.social",
+        ] {
+            assert!(!ap.address_matches(not_one), "{not_one}");
+        }
+    }
+
+    /// The shipped ActivityPub grammar admits no loopback spelling — `https`
+    /// and a dotted DNS host only (ruling 2 (d), and the SSRF posture of
+    /// `network-exposure.md`); only the loopback test hook widens it, and
+    /// only to loopback: a private-range host stays refused even then.
+    #[test]
+    fn activitypub_grammar_admits_loopback_under_the_test_hook_only() {
+        let shipped = activitypub_leg_block_with(false);
+        let hooked = activitypub_leg_block_with(true);
+        for address in [
+            "@frank@127.0.0.1:41234",
+            "@frank@localhost:41234",
+            "http://127.0.0.1:41234/users/frank",
+        ] {
+            assert!(!shipped.address_matches(address), "{address}");
+            assert!(hooked.address_matches(address), "{address}");
+        }
+        for address in ["https://remote.example/users/bob", "@bob@remote.example"] {
+            assert!(hooked.address_matches(address), "{address}");
+        }
+        for not_one in [
+            "@bob@10.0.0.1:80",
+            "@bob@remote.example:8443",
+            "http://remote.example/users/bob",
+            "http://10.0.0.1/users/bob",
+            "bob@127.0.0.1:41234",
+        ] {
+            assert!(!hooked.address_matches(not_one), "{not_one}");
+        }
     }
 }
 

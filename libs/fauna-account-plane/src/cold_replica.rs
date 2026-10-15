@@ -1,16 +1,17 @@
 //! The **throwaway fleet-scope replica** — a process that hosts no account
 //! store reads the account's fleet-only kinds through the plane's own code.
 //!
-//! Two readers need it, one per key source (`on-demand-files.md` § Shared
+//! Two readers need it, one per key source (`on-demand-files-shared-sets.md` § Shared
 //! sets on a capability host, decision 1′, which owns the design; `nest/
 //! box-recovery.md` § The plane-era recovery floor, *(b)*, the first reader):
 //!
 //! - [`ColdKeySource::Seed`] — the box-recovery **cold read**
 //!   ([`crate::deployment_seed_recovery::cold_read_deployment_seeds`]): a
 //!   device holding the identity seed and no store. Its generations key
-//!   through one unfiltered `fauna.generation.escrow.get`, each wrap opened
-//!   with the seed-derived escrow secret against the commitment of the walked
-//!   mint it names ([`EscrowOpener`]).
+//!   from the walked `fauna.state.escrow-wrap` rows first, and only for what
+//!   those leave unkeyed through one unfiltered `fauna.generation.escrow.get`,
+//!   each wrap opened with the seed-derived escrow secret against the
+//!   commitment of the walked mint it names ([`EscrowOpener`]).
 //! - [`ColdKeySource::Device`] — a **capability host** (apple's File Provider
 //!   extension, android's SAF provider): a process of an enrolled device,
 //!   holding the machine principal's writer secret and no store. Its
@@ -182,18 +183,17 @@ impl<R: RpcRequester> ColdFleetReplica<R> {
         Ok(keyed)
     }
 
-    /// The escrow arm: one unfiltered escrow read, every wrap opened against
-    /// the walked mint it names. No receipt is consulted and no holder is
-    /// trusted — what a wrap is trusted for is its commitment check (`nest/
-    /// box-recovery.md` § The plane-era recovery floor, *(b)*).
+    /// The escrow arm, plane-first (`account-replica-posture.md` § *Escrow
+    /// custody*, ruling (2)): every walked mint is opened from the merged
+    /// `fauna.state.escrow-wrap` row first, and only when some mint is left
+    /// unkeyed is the door asked — one unfiltered escrow read, every wrap
+    /// opened against the walked mint it names. No receipt is consulted and
+    /// no holder is trusted — what a wrap is trusted for is its commitment
+    /// check (`nest/box-recovery.md` § The plane-era recovery floor, *(b)*).
     async fn key_from_escrow(&self, seed: &[u8; 32]) -> Result<usize> {
-        let reply: EscrowGetReply = self
-            .rpc
-            .request(KIND_ESCROW_GET, EscrowGetRequest::default())
-            .await
-            .map_err(|e| anyhow::anyhow!("throwaway replica: {KIND_ESCROW_GET}: {e}"))?;
         let opener = EscrowOpener::new(seed, &self.trust.root);
         let mut keyed = 0;
+        let mut unkeyed = Vec::new();
         for entry in live_rows(&self.store, KIND_GENERATION_MINT).await? {
             let Some((generation_id, core)) = minted_core(&entry) else {
                 continue;
@@ -201,6 +201,26 @@ impl<R: RpcRequester> ColdFleetReplica<R> {
             if self.keys.holds(&generation_id) {
                 continue;
             }
+            match opener
+                .open_plane_row(&self.store, &generation_id, &core)
+                .await?
+            {
+                Some(key) => {
+                    self.keys.record_generation_key(&generation_id, &key);
+                    keyed += 1;
+                }
+                None => unkeyed.push((generation_id, core)),
+            }
+        }
+        if unkeyed.is_empty() {
+            return Ok(keyed);
+        }
+        let reply: EscrowGetReply = self
+            .rpc
+            .request(KIND_ESCROW_GET, EscrowGetRequest::default())
+            .await
+            .map_err(|e| anyhow::anyhow!("throwaway replica: {KIND_ESCROW_GET}: {e}"))?;
+        for (generation_id, core) in unkeyed {
             if let Some(key) = opener.open(&reply.wraps, &generation_id, &core) {
                 self.keys.record_generation_key(&generation_id, &key);
                 keyed += 1;
@@ -255,6 +275,17 @@ impl<R: RpcRequester> ColdFleetReplica<R> {
     /// A stored row the fold refuses.
     pub async fn read_folder_keys(&self) -> Result<FoldersConfig> {
         crate::folder_key_rows::read_folder_keys(&self.store).await
+    }
+
+    /// The account's mail custody as the last walk left it, through the
+    /// plane's own fold ([`crate::mail_rows::read_mail`]) — `fauna.state.mail`
+    /// is fleet-only and `GenerationTip`-sealed like the folder keys, so a
+    /// replica that opens one opens the other. The default when no row rests.
+    ///
+    /// # Errors
+    /// A stored row the fold refuses.
+    pub async fn read_mail(&self) -> Result<fauna_core::data::MailConfig> {
+        crate::mail_rows::read_mail(&self.store).await
     }
 
     /// The replica's store, for an in-crate reader's own fold.

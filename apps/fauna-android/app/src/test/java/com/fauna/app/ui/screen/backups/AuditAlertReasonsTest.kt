@@ -19,6 +19,7 @@ class AuditAlertReasonsTest {
         lastPassedAt = null,
         alertReason = null,
         alertReasons = reasons,
+        recoverOffered = false,
     )
 
     @Test

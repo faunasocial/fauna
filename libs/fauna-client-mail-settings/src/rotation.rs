@@ -9,12 +9,14 @@
 //! ([`MailRows::owed_rewrap`], *The generation marker*), so a credential
 //! another device adds mid-rotation is re-wrapped instead of dropped.
 
-use fauna_core::data::{MailCredential, MsekFingerprint, PriorMsekRetirement, Timestamp};
+use fauna_core::data::{
+    MailConfig, MailCredential, MsekFingerprint, PriorMsekRetirement, Timestamp,
+};
 use fauna_core::mail_rows::{MailRotationSentinel, MailStateRow};
 use fauna_core::secret::SecretArray32;
 use fauna_mls::wrapped_blob::derive_recipient_hpke_keypair;
 
-use crate::credential::Credential;
+use crate::credential::{Credential, derive_credential_id};
 use crate::error::DispatchError;
 use crate::machine::{MailSettingsMachine, fresh_msek};
 use crate::state::SettingsStatus;
@@ -74,6 +76,14 @@ pub(crate) async fn start_rotation(
             ..MailStateRow::recreatable_of(&mail)
         })
         .await?;
+    // ...and to the nest's state plane, acknowledged, before the first nest
+    // write below: a replica that hydrates from the nest — a sibling, or this
+    // device relaunched over a fresh store — must meet the sentinel, never the
+    // bare pre-rotation `msek`, beside blobs the rotation moved
+    // (`mail-credentials.md` § Hard revoke → *Published before the nest
+    // moves*). Unacknowledged → stop here, resumable; nothing on the nest
+    // moved.
+    machine.mail_store().publish().await?;
 
     // Revoke each excluded credential — both resting blobs at the nest, then
     // the row's soft-revoke marker, exactly the revoke gesture's order. A
@@ -108,7 +118,69 @@ pub(crate) async fn resume_rotation(machine: &MailSettingsMachine) -> Result<(),
     let Some(sentinel) = rows.state.as_ref().and_then(|s| s.pending_rotation.clone()) else {
         return Ok(());
     };
+    // The sentinel may never have reached the nest (a crash, or an offline
+    // nest, between its write and `start_rotation`'s publish): publish it
+    // before the loop's first nest write, as the start does.
+    machine.mail_store().publish().await?;
     drive_rotation_loop(machine, sentinel.new_msek).await
+}
+
+/// First-enable — the fresh arm of `EnableMail` — run as the **degenerate
+/// rotation** onto the MSEK the account already holds (`msek`, minted or
+/// dormant): one credential, nothing to retire (`mail-credentials.md`
+/// § Partial-state-during-minting). Running it under the resume sentinel is
+/// what makes a stop anywhere in its blob set — a crash, or a refused nest
+/// call — read pending on every app and resume to a working mailbox, rather
+/// than leave a mailbox that reads off beside blobs the nest already holds.
+///
+/// The degenerate shape is told apart by state alone: the sentinel names the
+/// standing `msek` ([`drive_rotation_loop`]'s `onto_standing_msek`), and the
+/// email flag says whether the submission tokens (first-enable's step 4) are
+/// owed — so it is written here, with the sentinel, before any nest call.
+pub(crate) async fn first_enable(
+    machine: &MailSettingsMachine,
+    msek: SecretArray32,
+    mail: &MailConfig,
+    display_name: String,
+    credential: &Credential,
+) -> Result<(), DispatchError> {
+    machine
+        .mail_store()
+        .write_state(MailStateRow {
+            mail_enabled: Some(true),
+            pending_rotation: Some(MailRotationSentinel {
+                new_msek: msek.clone(),
+            }),
+            ..MailStateRow::recreatable_of(mail)
+        })
+        .await?;
+    // Published before the nest moves, as a rotation's sentinel is: a replica
+    // hydrating from the nest must meet the pending enable, never an email-off
+    // mailbox beside blobs this enable provisioned.
+    machine.mail_store().publish().await?;
+
+    // The row, with its secret, BEFORE any blob is wrapped under it: the
+    // secret is what every later step seals under, so a stop after this
+    // leaves it in custody for the resume. Its generation marker is unset —
+    // the row is owed its wrap, and the loop below records it once wrapped.
+    let rows = machine.mail_store().load_rows().await?;
+    let credential_id = derive_credential_id(&display_name, &rows.spent_credential_ids());
+    machine
+        .mail_store()
+        .put_credential(MailCredential {
+            credential_id,
+            display_name,
+            kind: credential.kind().into(),
+            secret: credential.as_bytes().to_vec().into(),
+            created_at: Timestamp::now_secs() as u64,
+            updated_at: Timestamp::default(),
+            wrapped_under: None,
+            revoked_at_unix: None,
+            burned: None,
+        })
+        .await?;
+
+    drive_rotation_loop(machine, msek).await
 }
 
 /// Steps (d)–(f) of the rotation flow under the sentinel's `new_msek`;
@@ -121,6 +193,10 @@ async fn drive_rotation_loop(
     let rows = machine.mail_store().load_rows().await?;
     machine.set_snapshot_from(&rows);
     let mail = rows.config();
+    // The sentinel names the MSEK already standing: first-enable's degenerate
+    // rotation ([`first_enable`]), or a rotation resumed after its finalize
+    // committed the swap but before it cleared the sentinel.
+    let onto_standing_msek = mail.msek.as_ref() == Some(&new_msek);
 
     // Step (d): always re-provision the snapshot under the new MSEK,
     // and re-register the new recipient-mail pubkey. Idempotent atomic
@@ -139,7 +215,7 @@ async fn drive_rotation_loop(
     // genuine duplicate. (Distinct rotations have distinct random MSEKs.)
     // The outgoing generation is retired NOW as far as the snapshot is
     // concerned (its pubkey stops being published at step d); finalize records
-    // its own instant, and the post-finalize `refresh_snapshot` re-carries it.
+    // its own instant, and the post-finalize re-provision below re-carries it.
     let mut mseks = vec![new_msek.to_array()];
     let mut retired_at_unix = Vec::new();
     if let Some(old) = mail.msek.as_ref().filter(|old| **old != new_msek) {
@@ -184,9 +260,12 @@ async fn drive_rotation_loop(
         let Some(credential) = rows.owed_rewrap(&new_msek).first().map(|c| (*c).clone()) else {
             break;
         };
-        machine.set_status(SettingsStatus::RotationInProgress {
-            credentials_remaining: rows.owed_rewrap(&new_msek).len() as u64,
-        });
+        if !onto_standing_msek {
+            // An enable reads "Syncing", never "rotation in progress".
+            machine.set_status(SettingsStatus::RotationInProgress {
+                credentials_remaining: rows.owed_rewrap(&new_msek).len() as u64,
+            });
+        }
         let blob = wrap::seal_msek_under_credential(
             &new_msek,
             &machine.actor_id(),
@@ -217,6 +296,25 @@ async fn drive_rotation_loop(
                     credential.credential_id
                 )));
             }
+        }
+    }
+
+    // First-enable's step 4: a submission token for every live credential and
+    // the mail subsystem on, while the sentinel still stands — a stop here
+    // resumes here. A rotation never needs it (its tokens are sealed under the
+    // credentials, which it does not change); so it runs only onto the standing
+    // MSEK, and only with email on — a calendar-only mailbox has no outbound
+    // half to provision. A post-swap resume of an email rotation passes this
+    // gate too, harmlessly: each token is an idempotent atomic replace.
+    if onto_standing_msek {
+        let mail = machine.mail_store().load().await?;
+        if mail.is_mail_enabled() {
+            for row in mail.live_credentials() {
+                machine
+                    .provision_submission_token(&row.credential_id, &wrap_credential(row)?)
+                    .await?;
+            }
+            machine.turn_mail_subsystem_on().await?;
         }
     }
 
@@ -340,6 +438,22 @@ async fn drive_rotation_loop(
             )));
         }
     }
+    // The snapshot must carry the retirement instants finalize RECORDED, not
+    // step (d)'s clock read for the outgoing generation, which precedes them
+    // by the whole re-wrap loop (seconds to minutes) — or the openers'
+    // seal-time trial order reads a different instant than the custody. When
+    // they differ (always across a clock-second boundary, and on a resume that
+    // kept an earlier recorded instant), re-provision from the committed
+    // custody; when they match, step (d)'s write already stands, so the
+    // snapshot is still written exactly once per rotation. The key list is
+    // unchanged since step (d), so no publication order is at stake here.
+    let mail = machine.mail_store().load().await?;
+    let recorded = mail.prior_retired_at_unix();
+    if recorded != retired_at_unix {
+        machine
+            .provision_snapshot_for(&MailSettingsMachine::snapshot_mseks(&mail), &recorded)
+            .await?;
+    }
     machine.refresh_snapshot().await?;
 
     // The MSEK swap is durably committed and the sentinel cleared. Best-effort
@@ -350,6 +464,15 @@ async fn drive_rotation_loop(
     // heals at its next renew). The early exit inside covers the common
     // no-bounded-grants path with no discovery RPC.
     machine.heal_outstanding_bounded_grants().await;
+
+    // The rotation is done only once the nest's state plane holds it: the
+    // swap, the outgoing generation's row and the cleared sentinel reach the
+    // nest, acknowledged, before the page reads "up to date". Without it a
+    // replica hydrating from the nest right after — this device relaunched
+    // over a fresh store — reads the sentinel and offers a resume of a
+    // rotation that already finished. Unacknowledged → the error says so; the
+    // rows stay owed and the runtime's next publish carries them.
+    machine.mail_store().publish().await?;
     Ok(())
 }
 

@@ -44,6 +44,11 @@ _AGENT_JS = Path(__file__).parent.parent / "web-bridge" / "agent.js"
 # family this ceiling used to be the only defense against).
 HEAVY_BOOT_TIMEOUT_S = 400.0
 
+# How long a readiness probe may keep waiting out navigations (`_probe_js`):
+# inside HEAVY_BOOT_TIMEOUT_S, so a page that never stops navigating gets the
+# bridge's own "still navigating" message, not a bare socket timeout.
+_PROBE_NAVIGATION_BUDGET_S = HEAVY_BOOT_TIMEOUT_S - 30
+
 # Mirrors `fauna_e2e_agent::FOCUS_MOVE_MAX_TIMES` — the shared upper bound on
 # both `focus_move`'s `times` and the number of real key presses `switch_pane`
 # will throw at the real door before concluding the target region is
@@ -73,6 +78,11 @@ class WebBridgeDriver(HttpBridgeDriver):
     #: web the `localStorage` key (`fauna_client_core::nest_trust::
     #: E2E_TRUST_NEST_IDENTITY`).
     _TRUST_SEED_KEY = "FAUNA_E2E_TRUST_NEST_IDENTITY"
+
+    #: The admin DNS page's compressed-clock knob — the native environment
+    #: variable, and on web the `localStorage` key the automation surface reads
+    #: (`apps/fauna-web/src/lib/e2e-automation.ts`).
+    _DNS_RECHECK_KEY = "FAUNA_DNS_RECHECK_SECS"
 
     def declare_region_for_relaunch(self, region: str, registry_hex: str) -> bool:
         """Web's twin of the native environment seam: a page reads no
@@ -119,6 +129,10 @@ class WebBridgeDriver(HttpBridgeDriver):
         self._page_id: str = "1"
         self._spa_url: str | None = None
         self._twin_of: "WebBridgeDriver | None" = None
+        # True for a second tab in another driver's BrowserContext
+        # (`open_same_context_tab`): its store is that driver's, so its teardown
+        # discards no machine (`_discards_machine_at_teardown`).
+        self._shares_context: bool = False
         # True between an unclean kill (page closed, context+localStorage kept) and
         # the relaunch that reopens the page — the crash-recovery journeys' contract
         # (see supports_unclean_kill / kill_uncleanly / recover below).
@@ -201,6 +215,7 @@ class WebBridgeDriver(HttpBridgeDriver):
         tab._agent_code = self._agent_code
         tab._spa_url = self._spa_url
         tab._twin_of = self
+        tab._shares_context = True
         tab._inject_agent()
         return tab
 
@@ -305,8 +320,20 @@ class WebBridgeDriver(HttpBridgeDriver):
                 "  return true;"
                 "})()"
             )
+        # The admin DNS page's compressed clocks (`FAUNA_DNS_RECHECK_SECS`), the
+        # same twin: stored for every later install of the automation surface
+        # (a reload loses the wasm flag) and applied to this page now.
+        recheck = (config.get("environment") or {}).get(self._DNS_RECHECK_KEY)
+        if recheck:
+            self._execute_js(
+                "(async () => {"
+                f"  localStorage.setItem({json_mod.dumps(self._DNS_RECHECK_KEY)}, {json_mod.dumps(recheck)});"
+                f"  await window.__fauna_setDnsRecheckSecsForTest?.({int(recheck)});"
+                "  return true;"
+                "})()"
+            )
 
-    def teardown(self) -> None:
+    def _stop_app(self) -> None:
         # A twin owns only its page: close it and leave the bridge, Chromium,
         # and the chromium flock to the primary driver it was opened from.
         if self._twin_of is not None:
@@ -334,7 +361,7 @@ class WebBridgeDriver(HttpBridgeDriver):
         this often runs right after a navigation, against a main thread the
         SPA boot may still be pegging (see HEAVY_BOOT_TIMEOUT_S)."""
         if self._agent_code:
-            self._execute_js(self._agent_code, timeout=HEAVY_BOOT_TIMEOUT_S)
+            self._probe_js(self._agent_code)
 
     def _ensure_agent(self) -> None:
         """Re-inject agent if lost, and wait for SPA hydration (stores available).
@@ -343,19 +370,15 @@ class WebBridgeDriver(HttpBridgeDriver):
         the first page-bound call, so its evaluate is the one that waits out
         the whole SPA boot on a loaded box — it gets the boot-class ceiling,
         never the shared RPC default (see HEAVY_BOOT_TIMEOUT_S)."""
-        has_agent = self._execute_js(
-            "typeof window.__faunaTestAgent !== 'undefined'",
-            timeout=HEAVY_BOOT_TIMEOUT_S,
-        )
+        has_agent = self._probe_js("typeof window.__faunaTestAgent !== 'undefined'")
         if not has_agent:
             self._inject_agent()
         # Wait for Svelte stores to be available (SPA hydration complete)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
-            ready = self._execute_js(
+            ready = self._probe_js(
                 "typeof window.__faunaTestAgent !== 'undefined' "
-                "&& typeof window.__fauna_stores !== 'undefined'",
-                timeout=HEAVY_BOOT_TIMEOUT_S,
+                "&& typeof window.__fauna_stores !== 'undefined'"
             )
             if ready:
                 return
@@ -369,11 +392,30 @@ class WebBridgeDriver(HttpBridgeDriver):
         """Execute JavaScript in the browser context (internal use only)."""
         return self._post("/execute", {"script": script, "arg": arg}, timeout=timeout).get("result")
 
+    def _probe_js(self, script: str):
+        """A READINESS probe's evaluate (agent present? stores up?), carried
+        across a navigation: the SPA may be navigating when a probe runs — a
+        reload, the reset action's hard navigation, the login flow's — and the
+        question has the same meaning on the new document, so the bridge waits
+        for its `load` and asks again instead of failing setup with "Execution
+        context was destroyed" (web-bridge `evaluate_across_navigation`). Never
+        for a test body's evaluate (`_execute_js`, `eval_js`): a navigation
+        under that is the test's business. The retry budget ends before this
+        call's boot-class socket ceiling, so an exhausted budget answers with
+        its own message."""
+        return self._post(
+            "/execute",
+            {"script": script, "arg": None, "across_navigation": True,
+             "navigation_budget_s": _PROBE_NAVIGATION_BUDGET_S},
+            timeout=HEAVY_BOOT_TIMEOUT_S,
+        ).get("result")
+
     # --- Web-specific operations ---
 
-    def clear_and_type(self, element_id: str, text: str, *, scope: str | None = None) -> None:
+    def clear_and_type(self, element_id: str, text: str, *, index: int = 0,
+                       scope: str | None = None) -> None:
         """Clear and fill — uses the /element/fill endpoint for atomic operation."""
-        body: dict = {"id": element_id, "text": text}
+        body: dict = {"id": element_id, "text": text, "index": index}
         wire = self._scope_wire(scope)
         if wire:
             body["scope"] = wire
@@ -478,6 +520,34 @@ class WebBridgeDriver(HttpBridgeDriver):
         a fresh data dir unless asked not to."""
         return True
 
+    # --- A discarded driver retires its machine (convention 10) ---
+
+    def _discards_machine_at_teardown(self) -> bool:
+        """True unless this driver is a second tab in another driver's
+        BrowserContext. Web's machine is the BrowserContext: `launch()` creates
+        a fresh one and `teardown()` closes it, `localStorage` and all, and a
+        twin page (`open_twin_page`) owns a context of its own — so a primary
+        driver or a twin always throws its machine away. Every relaunch keeps
+        the context (`preserve_state_across_relaunch()` is true by
+        construction, and pins nothing a teardown would respect), so the
+        native drivers' pin exclusion has nothing to read here. A same-context
+        tab shares its creator's store: retiring it would sign the creator's
+        machine out."""
+        return not self._shares_context
+
+    def _current_slots(self) -> dict[str, dict] | None:
+        """The page's own `localStorage` slots — web keeps the account store
+        there, beside the registry (`_attached_slots`). A page an unclean kill
+        closed is reopened in its kept context first, as `reset()` does: the
+        machine is still signed in, only its page is gone."""
+        if self._app_killed:
+            try:
+                self._fresh_boot()
+            except Exception as exc:  # noqa: BLE001 — a teardown never fails a test
+                print(f"[e2e] discarded machine: could not reopen the page ({exc})")
+                return None
+        return self._attached_slots()
+
     # NOTE: no `relaunch_preserves_injected_identity()` override — web INHERITS the
     # base True, and the override that used to sit here (2026-08-05) was built on a
     # premise that was simply false. It claimed `logged_in_app`'s `set_state`
@@ -532,6 +602,13 @@ class WebBridgeDriver(HttpBridgeDriver):
             self._app_killed = False
         else:
             self._execute_js("location.reload()", timeout=HEAVY_BOOT_TIMEOUT_S)
+        # ⚠ Known convention-14 debt, kept deliberately: replacing this sleep
+        # with "wait for the reloaded document's `load`, then inject" (tried
+        # 2026-10-14, both as Playwright's `page.reload()` and as this reload
+        # awaited bridge-side) turned 8 of the 20 two-account web tests red
+        # (`account-switcher-list` never mounts after `_auth_on_account_page`'s
+        # hard_reload) — mechanism unresolved. A navigation landing under the
+        # probes below is survived by `_probe_js`.
         time.sleep(0.8)
         self._inject_agent()
         self._ensure_agent()
@@ -542,6 +619,37 @@ class WebBridgeDriver(HttpBridgeDriver):
         it, else a full page reload. After it, the agent is re-injected and the SPA
         has rehydrated."""
         self._fresh_boot()
+
+    def serve_from(self, spa_url: str):
+        """Drive a fresh page served from ``spa_url`` — a dedicated nest's own
+        SPA proxy — until the returned ``restore()`` is called.
+
+        Web is single-origin: a production page is served by the nest it talks
+        to, and its CSP (``media-src 'self' blob:``, ``svelte.config.js``) lets
+        a ``<video src>`` reach only that origin. A page on the session SPA
+        proxy signed in to a dedicated nest's proxy is cross-origin by port, so
+        a journey that plays nest-served media on a dedicated nest drives a
+        page on that nest's proxy instead. The page opens in its own context
+        (``open_twin_page``'s mechanism) — sign in after this; ``restore()``
+        closes it and hands the driver back its original page, untouched.
+        ``spa_url`` is the proxy's root, as ``_serve_spa_proxy`` returns it; the
+        page opens on its ``/app/`` (the launch URL's shape — the bare root
+        redirects, a navigation under the agent's injection)."""
+        spa_url = spa_url.rstrip("/") + "/app/"
+        resp = self._post("/page", {"url": spa_url})
+        original = (self._page_id, self._spa_url)
+        self._page_id, self._spa_url = str(resp["page_id"]), spa_url
+        self._inject_agent()
+
+        def restore() -> None:
+            page = self._page_id
+            self._page_id, self._spa_url = original
+            try:
+                self._delete(f"/page?page={page}")
+            except Exception:
+                pass
+
+        return restore
 
     def recover(self) -> bool:
         """Relaunch the app as a fresh SPA boot (the crash-recovery journeys call
@@ -977,11 +1085,21 @@ class WebBridgeDriver(HttpBridgeDriver):
         # The reset action ends in a hard `location.href` navigation (agent.js —
         # wasm module reinit needs a real reload, not SvelteKit's client-side
         # goto), so it's exactly as heavy as `_fresh_boot`'s reload/relaunch and
-        # shares the same generous ceiling (HEAVY_BOOT_TIMEOUT_S, above).
-        self._execute_js(
-            "window.__faunaTestAgent.applyPatch({__action: 'reset'})",
+        # shares the same generous ceiling (HEAVY_BOOT_TIMEOUT_S, above). That
+        # navigation can commit before the evaluate's result comes back — the
+        # action's own outcome, not a failure — so the bridge answers it as
+        # done (`navigates`, web-bridge `evaluate_that_navigates`) instead of
+        # "Execution context was destroyed".
+        self._post(
+            "/execute",
+            {"script": "window.__faunaTestAgent.applyPatch({__action: 'reset'})",
+             "arg": None, "navigates": True},
             timeout=HEAVY_BOOT_TIMEOUT_S,
         )
+        # Same convention-14 debt as `_fresh_boot`'s sleep (see there): awaiting
+        # the new document's load here is the untried twin of what broke the
+        # two-account tests, so the old timing is kept; `_probe_js` survives
+        # the navigation landing under the probe.
         time.sleep(0.3)
         # Re-inject agent in case goto() triggered a full reload
         self._ensure_agent()

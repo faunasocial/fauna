@@ -132,6 +132,30 @@ public class ScreenTimeCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task AdvanceTestClockAndTickAsync_MovesTheWindowVerdictToo()
+    {
+        // The twin of fauna_core::screen_time's
+        // advancing_the_test_clock_moves_the_window_verdict_too: the e2e fake
+        // clock must move the WINDOW verdict, not only the budget one. The
+        // allowed window opens 30 minutes from the real now, so the ward
+        // starts locked; advancing the test clock 60 minutes lands inside it.
+        // A cache reading a fresh OS clock for the window would stay locked.
+        var nowLocal = DateTimeOffset.Now;
+        var nowMinutes = nowLocal.Hour * 60 + nowLocal.Minute;
+        ScreenTimeCache.SetWardScreenTime(
+            FfiScreenTimePolicyFixture.Make(
+                windowStart: (ushort)((nowMinutes + 30) % 1440),
+                windowEnd: (ushort)((nowMinutes + 240) % 1440)),
+            guardianHandle: "guardian1",
+            usageTodayMinutes: null);
+        Assert.NotNull(ScreenTimeCache.LockMessage);
+
+        await ScreenTimeCache.AdvanceTestClockAndTickAsync(60, new MockNestRpcClient());
+
+        Assert.Null(ScreenTimeCache.LockMessage);
+    }
+
+    [Fact]
     public void Reset_DropsGuardianAndPolicyAndUsage()
     {
         ScreenTimeCache.SetWardScreenTime(

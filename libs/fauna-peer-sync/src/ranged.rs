@@ -33,6 +33,13 @@ pub const MAX_ROUNDS: usize = 512;
 /// (`fauna_peer_channel::MAX_FRAME_LEN`) with room for the envelope.
 pub const MAX_BODY_BYTES_PER_REPLY: usize = 700 * 1024;
 
+/// One change-row page's bound — both peer legs' row doors
+/// (`fauna.peer.sync.changes.list`, `fauna.peer.share.changes.list`) read it,
+/// so the same-account and cross-user pages cannot drift apart. Sized under the
+/// frame: a row is metadata-sized. A server asks its store for one row more, so
+/// `more` is a fact. A Rust constant — never a knob.
+pub const MAX_ROWS_PER_PAGE: u32 = 64;
+
 /// What a key the peer reports missing does to the pull.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Missing {
@@ -400,6 +407,57 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("no progress"), "{err:#}");
+    }
+
+    /// A slice declaring a length over the largest stored chunk is refused on
+    /// the round that carries it — before a second round, and with the bytes it
+    /// brought still counted. The bail sits ahead of any `Missing` policy read,
+    /// so one policy suffices.
+    #[tokio::test]
+    async fn a_declared_length_over_the_ceiling_is_refused_on_the_first_slice() {
+        let (key, bytes) = body(1_000, 4);
+        let mut arrived = 0;
+        let mut calls = 0;
+        let err = assemble(&[key], "f", Missing::Reported, &mut arrived, |w| {
+            calls += 1;
+            let r = Round {
+                slices: vec![Slice {
+                    store_key: w[0].0.digest().to_vec(),
+                    offset: 0,
+                    bytes: bytes.clone(),
+                    total_len: MAX_STORED_CHUNK_BODY + 1,
+                }],
+                missing: Vec::new(),
+            };
+            async move { Ok(r) }
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains(&MAX_STORED_CHUNK_BODY.to_string()),
+            "the error must name the ceiling: {err:#}"
+        );
+        assert_eq!(calls, 1, "refused on the slice that declares it");
+        assert_eq!(arrived, 1_000, "the refused slice's bytes still crossed");
+    }
+
+    /// The bound itself is honest: a body of exactly the largest stored chunk
+    /// assembles whole across reply-budget slices, under both miss policies.
+    #[tokio::test]
+    async fn a_body_of_exactly_the_ceiling_assembles_whole() {
+        let (key, bytes) = body(MAX_STORED_CHUNK_BODY as usize, 5);
+        let held = HashMap::from([(key, bytes.clone())]);
+        for policy in [Missing::Fails, Missing::Reported] {
+            let mut arrived = 0;
+            let out = assemble(&[key], "f", policy, &mut arrived, |w| {
+                let r = serve(&held, w, MAX_BODY_BYTES_PER_REPLY);
+                async move { Ok(r) }
+            })
+            .await
+            .unwrap();
+            assert!(out.bodies[&key] == bytes, "{policy:?}: body differs");
+            assert_eq!(arrived, MAX_STORED_CHUNK_BODY);
+        }
     }
 
     /// The serve half: an offset past the end is refused; the end itself is

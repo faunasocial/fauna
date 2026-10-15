@@ -1,11 +1,15 @@
 package com.fauna.app.ui.viewmodel
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.fauna.app.R
 import com.fauna.app.core.ApiClient
+import com.fauna.app.ui.util.getStringFmt
 import com.fauna.ffi.FfiAdminMembershipTier
 import com.fauna.ffi.FfiAdminTier
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -27,7 +31,17 @@ import javax.inject.Inject
 @HiltViewModel
 class AdminSettingsVM @Inject constructor(
     private val api: ApiClient,
+    /** For the localized add-tier error string (the AdminNestVM pattern). */
+    @ApplicationContext private val appContext: Context,
 ) : ViewModel() {
+
+    /**
+     * Bumped each time `fauna.admin.tiers.create` succeeds; the add-a-tier form
+     * keys its drafts on it, so the form clears only after the nest accepted the
+     * tier (a refused name keeps what was typed).
+     */
+    private val _tierAddGeneration = MutableStateFlow(0)
+    val tierAddGeneration: StateFlow<Int> = _tierAddGeneration
 
     /** Tier definitions backing the indexed `admin-settings-tier-item` rows. */
     private val _tiers = MutableStateFlow<List<FfiAdminTier>>(emptyList())
@@ -84,6 +98,35 @@ class AdminSettingsVM @Inject constructor(
                 _tiers.value = api.adminTiersList()
             } catch (e: Exception) {
                 _actionError.value = e.message
+            }
+        }
+    }
+
+    /**
+     * Define a new tier via `fauna.admin.tiers.create`, then refetch so the new
+     * row appears (admin.md § 3 → *Defining a new tier*). The name is trimmed and
+     * the caps already parsed by the form through the shared `parse_cap`; a nest
+     * refusal (empty / taken name) is worded through `add_tier_error`.
+     */
+    fun addTier(
+        name: String,
+        maxInboxBytes: Long,
+        maxStorageBytes: Long,
+        maxDevices: Long,
+        maxBlobSize: Long,
+        maxFeeds: Long,
+    ) {
+        viewModelScope.launch {
+            _actionError.value = null
+            try {
+                api.adminTiersCreate(name, maxInboxBytes, maxStorageBytes, maxDevices, maxBlobSize, maxFeeds)
+                _tiers.value = api.adminTiersList()
+                _tierAddGeneration.value += 1
+            } catch (e: Exception) {
+                _actionError.value = appContext.getStringFmt(
+                    R.string.admin_settings_page_add_tier_error,
+                    e.message ?: "",
+                )
             }
         }
     }

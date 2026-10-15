@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 /// (`p2p.md` § Wormability walk). dag-cbor via the store's canonical
 /// encoding; additive at rest. One cache, one owner: the native peer leg
 /// writes it on every pass; the driver's handle only re-serves the read
-/// (`AccountStoreHandle::cached_nest_capabilities`), so the row's shape lives
+/// (`AccountStoreHandle::cached_nest_facts`), so the row's shape lives
 /// beside the driver.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerLegNestFacts {
@@ -164,6 +164,11 @@ pub struct DialPass {
     pub targets: usize,
     /// Siblings that completed mutual admission this pass.
     pub admitted: usize,
+    /// Of [`Self::admitted`], the siblings whose connection ran over a relay
+    /// when their walks completed (`PeerConn::path`, read live) — the leg as
+    /// it runs between two devices with no direct path (`p2p.md` § The
+    /// relay, *What it carries*).
+    pub admitted_relayed: usize,
     /// Wire rows applied across every scope walked over dialed channels.
     pub applied: usize,
     /// Content blocks fetched over dialed channels (want-list pull).
@@ -176,6 +181,16 @@ pub struct DialPass {
     /// Targets that failed anywhere in dial → admit → walk (absorbed —
     /// per-target isolation; the next pass retries).
     pub failed: usize,
+    /// NEST-form custodians the restore arm dialed this pass — non-zero only
+    /// on a pass whose own nest did not answer (ruling 6 of the
+    /// custodian-NEST serve door; `fauna_sync_engine::custodian_nest_restore`).
+    pub nest_custodians: usize,
+    /// Of those, the ones whose fleet handshake admitted and whose
+    /// account-state walks completed.
+    pub nest_custodians_admitted: usize,
+    /// NEST-form custodians withheld before any dial — a revoked grant in the
+    /// dialer's own view, or a URL the counterparty policy refuses.
+    pub nest_custodians_withheld: usize,
     /// What each admitted peer carried about itself (T13 step 4), keyed by
     /// the channel-proven key. The pump folds these into the
     /// `custodian-endpoints` rows; a sibling's entry is ignored there, its

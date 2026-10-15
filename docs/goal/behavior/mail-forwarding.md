@@ -97,7 +97,7 @@ Where:
 - **`sender_domain`** — the original sender's domain, dot-replaced as needed (the address localpart can contain literal `=` characters; we URL-style escape `=` and `@` in the encoded form per the SRS spec).
 - **`sender_localpart`** — the original sender's localpart.
 
-**SRS secret** — a per-deployment random 32-byte value stored in nest, never visible to users; rotated on admin action only (knob `mail.forward.rotate_srs_secret` — action button, not a value: `admin-mail-forward-srs-secret-rotate-button` on the flat `admin-mail` page, a PROPOSED id since 2026-10-01 that waits on the user's rule-A sign-off together with its unsubscribe-secret twin, with the same two-click confirm — `mail-mass-mailing.md` § Secret rotation; the nest kind is built, no test rotates it, and no app has the button). On rotation, in-flight SRS-encoded bounces issued under the old secret are decodable until they expire (a 2-secret window is held during the rotation overlap, per the SRS-spec'd rotation pattern).
+**SRS secret** — a per-deployment random 32-byte value stored in nest, never visible to users; rotated on admin action only (knob `mail.forward.rotate_srs_secret` — action button, not a value: `admin-mail-forward-srs-secret-rotate-button` on the flat `admin-mail` page, a PROPOSED id since 2026-10-01 that waits on the user's rule-A sign-off together with its unsubscribe-secret twin, with the same two-click confirm — `mail-mass-mailing.md` § Secret rotation; the nest kind is built and witnessed end to end by the tier_3 SRS-rotation bounce test, and no app has the button). On rotation, in-flight SRS-encoded bounces issued under the old secret are decodable until they expire (a 2-secret window is held during the rotation overlap, per the SRS-spec'd rotation pattern).
 
 ### SRS1= (chained SRS)
 
@@ -443,16 +443,22 @@ The forwarding pipeline is being built shared-Rust-first
 
 **Not yet built (target-state above; tracked internally):**
 
-- **The per-account forward-all and hourly-limit app UI is built on tui only (2026-09-27).** tui's
+- **The per-account forward-all and hourly-limit app UI is built on tui, web, linux, android and windows (tui 2026-09-27; web, linux, android 2026-10-11; windows 2026-10-13).** tui's
   `mail-settings` page carries the Forwarding section — `mail-settings-forward-all-to-input` and
   `mail-settings-forward-per-hour-input` (ui.yaml, allocated with this track), each committed on Enter
   over `MailAccountClient::set_forward_all_to_and_reload` / `set_forward_per_hour_and_reload` and
   shown while mail is enabled. The drafts are checked first by the shared
   `fauna_client_mail_settings::{parse_forward_all_to_draft, parse_forward_per_hour_draft}` (the same
   `fauna_mail` validators the nest runs, rendered as `LocalizedText`), bounded by the ceiling the read
-  returns. The other six apps have neither field yet — the batched trickle-down, which also lifts the
-  parsers and the two `_and_reload` calls across FFI/WASM (the `spam_threshold_override` pair is the
-  precedent).
+  returns. web, linux and android paint the same two inputs (shown while mail is enabled, Enter or the
+  IME Done key commits, refusals on `error-message`), over the parsers exported as
+  `forward_all_to_draft_outcome` / `forward_per_hour_draft_outcome` / `forward_per_hour_hint` (UniFFI +
+  WASM) and the four `forward_all_to_*` / `forward_per_hour_*` calls (`fauna-ffi`'s `mail_forwarding.rs`,
+  `fauna-wasm`'s `forwardAllToGet/Set`, `forwardPerHourGet/Set`). The journey
+  `test_mail_forwarding_settings.py` is green on tui, web and linux; android's emulator run is not yet
+  witnessed. windows paints the same two inputs over the same calls through its `INestRpcClient`
+  seam; its e2e run is not yet witnessed. macOS and iOS have neither field yet —
+  they are built and tested on their own machines.
 - **The per-rule `forward` dispatch arm is WIRED (2026-09-24), in both copy modes (redirect 2026-09-25).** Each fired
   Forward is stashed during composition and, after the recipient's local delivery commits, dispatched
   through the shared `dispatchForward` (`bins/fauna-bridges/internal/mta/server.go` `dispatchFilterForwards`) attributed to

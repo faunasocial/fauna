@@ -372,6 +372,16 @@ class SettingsActions:
                 return mode
         return ""
 
+    def set_spam_threshold(self, value: str) -> None:
+        """Type a value into `spam-threshold` on the Privacy page (no save)."""
+        self._navigate_subpage("privacy")
+        self.driver.wait_for("spam-preferences")
+        self.driver.clear_and_type("spam-threshold", value)
+
+    def get_spam_threshold_band(self) -> str:
+        """The band word shown beside `spam-threshold` (Aggressive / Moderate / Permissive)."""
+        return self.driver.get_text("spam-threshold-band")
+
     def save_spam_preferences(self, spam_threshold: str = "",
                                phishing_threshold: str = "") -> None:
         """Adjust and save spam preferences."""
@@ -1029,7 +1039,12 @@ class SettingsActions:
         # and status, and on a long Status page a rendered line one scroll away
         # reads as absent to windows' `IsOffscreen` — which graded a correct build
         # red (`test_a_feature_the_admin_turned_off_shows_restricted_with_its_reason`).
-        if self.driver.is_visible_scrolled("feature-limits-restriction", scope=scope):
+        # `count` first: on web the scrolled probe is Playwright's
+        # wait-for-appearance, which spends the whole bridge timeout (and dies
+        # "not attached") on a line that is genuinely absent.
+        if self.driver.count(
+            "feature-limits-restriction", scope=scope
+        ) > 0 and self.driver.is_visible_scrolled("feature-limits-restriction", scope=scope):
             row["restriction"] = self.driver.get_text(
                 "feature-limits-restriction", scope=scope
             )

@@ -168,3 +168,38 @@ def test_unset_dav_toggles_follow_mail_and_only_an_explicit_set_witnesses_intent
     # independence is per-axis, not a blanket detach.
     assert bool(cfg["carddav_enabled"]) is False, cfg
     assert bool(cfg["webdav_enabled"]) is False, cfg
+
+
+@pytest.mark.feature("admin-calendar-contacts-files")
+def test_an_explicit_dav_setting_is_what_the_nest_reports(dav_unclaimed_nest):
+    """An explicit contacts or files setting holds against mail, and an
+    explicit off on any of the three holds while mail is on
+    (``caldav-server.md`` § Independent enablement). The test above covers
+    calendar switched on; this covers contacts and files switched on with mail
+    off, then all three switched off with mail on."""
+    nest = dav_unclaimed_nest
+    port = nest["port"]
+    sk = _claim_local(port)
+
+    with _admin(port, sk) as admin:
+        admin.call("fauna.bridges.set_mail_enabled", {"enabled": False})
+        admin.call("fauna.bridges.set_carddav_enabled", {"enabled": True})
+        admin.call("fauna.bridges.set_webdav_enabled", {"enabled": True})
+        cfg = admin.call("fauna.bridges.get_mail_config", {})
+    assert bool(cfg["mail_enabled"]) is False, cfg
+    assert bool(cfg["carddav_enabled"]) is True, f"explicit contacts on must hold with mail off: {cfg!r}"
+    assert bool(cfg["webdav_enabled"]) is True, f"explicit files on must hold with mail off: {cfg!r}"
+    assert bool(cfg["caldav_enabled"]) is False, f"the unset calendar switch still follows mail: {cfg!r}"
+
+    with _admin(port, sk) as admin:
+        admin.call("fauna.bridges.set_mail_enabled", {"enabled": True})
+        for kind in (
+            "fauna.bridges.set_caldav_enabled",
+            "fauna.bridges.set_carddav_enabled",
+            "fauna.bridges.set_webdav_enabled",
+        ):
+            admin.call(kind, {"enabled": False})
+        cfg = admin.call("fauna.bridges.get_mail_config", {})
+    assert bool(cfg["mail_enabled"]) is True, cfg
+    for axis in ("caldav_enabled", "carddav_enabled", "webdav_enabled"):
+        assert bool(cfg[axis]) is False, f"an explicit off on {axis} must hold with mail on: {cfg!r}"

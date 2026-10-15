@@ -417,8 +417,8 @@ public sealed class DirectNestClient : INestHttpClient
     }
 
     // GetNodeInfoAsync removed — the GET /api/v1/node-info twin was deleted
-    // nest-side; the admin dashboard reads the version from fauna.admin.status
-    // (NestRpcClient.AdminStatusAsync).
+    // nest-side; the admin dashboard reads the version through the shared card
+    // set (NestRpcClient.AdminDashboardSnapshotAsync).
 
     // ── Messaging ──
     // The whole messaging surface left this plane — direct + group send and
@@ -689,12 +689,14 @@ public sealed class DirectNestClient : INestHttpClient
         return await resp.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
     }
 
+    public string NestUrl => _nestUrl;
+
     // Email Filters (`fauna.email.filters.*`, NestRpcClient) — the HTTP twins
     // were deleted nest-side.
 
     // ── Admin ──
     // Stats (fauna.admin.stats) and the is-admin gate (fauna.account.am_i_admin)
-    // moved to WS-RPC (INestRpcClient.AdminStatsAsync / AmIAdminAsync); the
+    // moved to WS-RPC (INestRpcClient.AdminDashboardSnapshotAsync / AmIAdminAsync); the
     // /admin/api/stats twin was deleted nest-side, so nothing remains here.
 
     // User administration (users / invite codes / invite requests) moved to the

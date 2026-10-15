@@ -26,22 +26,24 @@ use fauna_protocol::bridge_routing::{
     EnableAccountAliasReply, EnableAccountAliasRequest, ExtendPrimaryDomainRenameGraceReply,
     ExtendPrimaryDomainRenameGraceRequest, ForceRotateDkimReply, ForceRotateDkimRequest,
     GenerateDisposableAliasRequest, GetForwardAllToReply, GetForwardAllToRequest,
-    GetForwardPerHourReply, GetForwardPerHourRequest, GetPrimaryDomainRenameStatusReply,
-    GetPrimaryDomainRenameStatusRequest, GetSpamBaselineStateReply, GetSpamBaselineStateRequest,
-    GetSpamThresholdOverrideReply, GetSpamThresholdOverrideRequest, ImportAccountAliasesReply,
-    ImportAccountAliasesRequest, ImportAliasOutcome, ListAccountAliasHitsReply,
-    ListAccountAliasHitsRequest, ListAccountAliasesReply, ListAccountAliasesRequest,
-    ListAccountListsReply, ListAccountListsRequest, ListForwardersReply, ListForwardersRequest,
-    ListListMembersRequest, ListLocalDomainsReply, ListLocalDomainsRequest,
-    ListPrimaryDomainRenamesReply, ListPrimaryDomainRenamesRequest, ListSpamTrainingHistoryReply,
-    ListSpamTrainingHistoryRequest, ProvisionSelfSignedCertReply, ProvisionSelfSignedCertRequest,
-    PublishSpamBaselineReply, PublishSpamBaselineRequest, PutPolicyReply, RemoveLocalDomainReply,
-    RemoveLocalDomainRequest, ResetSpamModelReply, ResetSpamModelRequest, RestoreLocalDomainReply,
-    RestoreLocalDomainRequest, RestoreRealTlsCertReply, RestoreRealTlsCertRequest,
-    ResubscribeListMemberReply, ResubscribeListMemberRequest, RevokeAccountAliasReply,
-    RevokeAccountAliasRequest, RoleAddressKind, SetBaselineContributionReply,
-    SetBaselineContributionRequest, SetCatchAllActorReply, SetCatchAllActorRequest,
-    SetForwardAllToReply, SetForwardAllToRequest, SetForwardPerHourReply, SetForwardPerHourRequest,
+    GetForwardPerHourReply, GetForwardPerHourRequest, GetMailQuotasReply, GetMailQuotasRequest,
+    GetMailSwitchesReply, GetMailSwitchesRequest, GetMessageScanResultRequest,
+    GetPrimaryDomainRenameStatusReply, GetPrimaryDomainRenameStatusRequest,
+    GetSpamBaselineStateReply, GetSpamBaselineStateRequest, GetSpamThresholdOverrideReply,
+    GetSpamThresholdOverrideRequest, ImportAccountAliasesReply, ImportAccountAliasesRequest,
+    ImportAliasOutcome, ListAccountAliasHitsReply, ListAccountAliasHitsRequest,
+    ListAccountAliasesReply, ListAccountAliasesRequest, ListAccountListsReply,
+    ListAccountListsRequest, ListForwardersReply, ListForwardersRequest, ListListMembersRequest,
+    ListLocalDomainsReply, ListLocalDomainsRequest, ListPrimaryDomainRenamesReply,
+    ListPrimaryDomainRenamesRequest, ListSpamTrainingHistoryReply, ListSpamTrainingHistoryRequest,
+    ProvisionSelfSignedCertReply, ProvisionSelfSignedCertRequest, PublishSpamBaselineReply,
+    PublishSpamBaselineRequest, PutPolicyReply, RemoveLocalDomainReply, RemoveLocalDomainRequest,
+    ResetSpamModelReply, ResetSpamModelRequest, RestoreLocalDomainReply, RestoreLocalDomainRequest,
+    RestoreRealTlsCertReply, RestoreRealTlsCertRequest, ResubscribeListMemberReply,
+    ResubscribeListMemberRequest, RevokeAccountAliasReply, RevokeAccountAliasRequest,
+    RoleAddressKind, SetBaselineContributionReply, SetBaselineContributionRequest,
+    SetCatchAllActorReply, SetCatchAllActorRequest, SetForwardAllToReply, SetForwardAllToRequest,
+    SetForwardPerHourReply, SetForwardPerHourRequest, SetMailSwitchesReply, SetMailSwitchesRequest,
     SetRoleAddressReply, SetRoleAddressRequest, SetSpamThresholdOverrideReply,
     SetSpamThresholdOverrideRequest, SpamHistoryOp, StartPrimaryDomainRenameReply,
     StartPrimaryDomainRenameRequest, UnsubscribeListMemberReply, UnsubscribeListMemberRequest,
@@ -78,7 +80,7 @@ use fauna_protocol::wrapped_blob::{
     SetAutoEnableMailForNewUsersReply, SetAutoEnableMailForNewUsersRequest, SetCalDavEnabledReply,
     SetCalDavEnabledRequest, SetCaldavPortReply, SetCaldavPortRequest, SetCardDavEnabledReply,
     SetCardDavEnabledRequest, SetMailEnabledReply, SetMailEnabledRequest, SetWebDavEnabledReply,
-    SetWebDavEnabledRequest, SpamModelHolderCopy,
+    SetWebDavEnabledRequest, SpamModelHolderCopy, SpamModelPrecondition,
 };
 // The auto-enable-mail-for-new-users knob is a *client-read* deployment default
 // surfaced on `fauna.setup.status` (not in `FetchConfigReply`); the admin read
@@ -119,10 +121,21 @@ pub use fauna_protocol::bridge_routing::{
 pub use fauna_protocol::bridge_routing::{
     AliasPolicy, GetAliasPolicyRequest, PutAliasPolicyRequest,
 };
+// The deployment-wide DMARC catalog payload + its admin read twin
+// (`get_dmarc_policy` → the effective `DmarcReportingPolicy`).
+pub use fauna_protocol::bridge_routing::{
+    DmarcReportingPolicy, GetDmarcPolicyRequest, PutDmarcPolicyRequest,
+};
 // The admin read twin of `fetch_config`: `get_mail_config` returns the overlaid
 // effective `FetchConfigReply` so the `admin-mail` policy form hydrates before
 // edit (see `MailAdminClient::get_mail_config`).
 pub use fauna_protocol::bridge_routing::{FetchConfigReply, GetMailConfigRequest};
+// The user's own message's scan verdict (`MailAccountClient::
+// get_message_scan_result`), re-exported so the message detail reads it
+// without depending on `fauna-protocol` directly.
+pub use fauna_protocol::bridge_routing::{
+    ClamavVerdict, GetMessageScanResultReply, RspamdRuleContribution, RspamdScore, ScanActionTaken,
+};
 
 pub mod atproto;
 pub mod atproto_credential;
@@ -133,6 +146,7 @@ pub mod follow_requests;
 pub mod labels;
 pub mod link_block;
 pub mod nostr_settings;
+pub mod plugins;
 pub mod settings;
 pub use atproto::AtprotoSettingsClient;
 pub use credential_id::derive_credential_id;
@@ -143,6 +157,7 @@ pub use labels::{
 };
 pub use link_block::{LinkBlock, applicable_modes, link_block, link_block_of, mode_applies};
 pub use nostr_settings::{BridgeToggleOption, nostr_content_toggle_options};
+pub use plugins::{InstalledPluginRow, PluginsClient, installed_plugin_row};
 pub use settings::{RELAY_LIST_KEY, bool_setting, relay_list_setting};
 
 // ── Content-processor holder discovery ──────────────────────────────
@@ -1466,6 +1481,32 @@ impl<R: RpcRequester> MailAdminClient<R> {
             .await
     }
 
+    /// `fauna.bridges.put_dmarc_policy` — set the deployment-wide
+    /// `mail.dmarc.*` catalog (the published record's tags, the forensic
+    /// opt-in, the two inbound-report retentions — `dmarc-reporting.md`
+    /// § Record shape, § Retention). Consumed nest-side by the DNS surface's
+    /// record assembler and the daily prunes, not projected to the bridge.
+    /// Full PUT; `None` ⇒ the catalog default.
+    pub async fn put_dmarc_policy(&self, policy: PutDmarcPolicyRequest) -> Result<(), R::Error> {
+        let _: PutPolicyReply = self
+            .nest
+            .request("fauna.bridges.put_dmarc_policy", policy)
+            .await?;
+        Ok(())
+    }
+
+    /// `fauna.bridges.get_dmarc_policy` — the **admin read twin** of
+    /// `put_dmarc_policy`: the effective (override-or-default) catalog, so the
+    /// `admin-mail` DMARC group hydrates before edit. Admin-class, read-only.
+    pub async fn get_dmarc_policy(&self) -> Result<DmarcReportingPolicy, R::Error> {
+        self.nest
+            .request(
+                "fauna.bridges.get_dmarc_policy",
+                GetDmarcPolicyRequest::default(),
+            )
+            .await
+    }
+
     /// `fauna.bridges.create_forwarder` — create an admin external forwarder
     /// (`mail-aliases.md` § Kind 7): an address with no local mailbox that
     /// forwards inbound to `forward_target`, attributed to the calling admin.
@@ -1625,6 +1666,35 @@ impl<R: RpcRequester> MailAccountClient<R> {
                     alias_id: ByteBuf::from(alias_id),
                     pattern: pattern.into(),
                     controls,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// The disposable "extend" (`mail-aliases.md` § Don't do these: "the user
+    /// can extend (edit) before expiry"): [`Self::update_account_alias`] with a
+    /// new expiry in epoch millis, which must lie in the future. The row's
+    /// current `pattern` and `controls` ride along unchanged (the update is a
+    /// full overwrite). Anything but a still-alive disposable is refused with
+    /// `fauna.bridges.alias_not_extendable`.
+    pub async fn extend_disposable_alias(
+        &self,
+        alias_id: Vec<u8>,
+        pattern: impl Into<String>,
+        controls: AliasControls,
+        expires_at_ms: u64,
+    ) -> Result<(), R::Error> {
+        let _: UpdateAccountAliasReply = self
+            .nest
+            .request(
+                "fauna.bridges.update_account_alias",
+                UpdateAccountAliasRequest {
+                    alias_id: ByteBuf::from(alias_id),
+                    pattern: pattern.into(),
+                    controls,
+                    expires_at_ms: Some(expires_at_ms),
                 },
             )
             .await?;
@@ -1816,6 +1886,50 @@ impl<R: RpcRequester> MailAccountClient<R> {
         self.get_forward_per_hour().await
     }
 
+    /// `fauna.bridges.get_mail_switches` — the calling actor's receive and
+    /// send switches (`mail-policy-config.md` § Tier 3, both on by default).
+    /// Replay-safe pure read.
+    pub async fn get_mail_switches(&self) -> Result<GetMailSwitchesReply, R::Error> {
+        self.nest
+            .request("fauna.bridges.get_mail_switches", GetMailSwitchesRequest {})
+            .await
+    }
+
+    /// `fauna.bridges.set_mail_switches` then a confirming re-read, the
+    /// [`Self::set_forward_all_to_and_reload`] shape. A `None` switch keeps its
+    /// stored value. With receiving off the nest refuses mail to the account's
+    /// addresses (role addresses excepted); with sending off every send door
+    /// refuses with `fauna.bridges.send_disabled`.
+    pub async fn set_mail_switches_and_reload(
+        &self,
+        receive_enabled: Option<bool>,
+        send_enabled: Option<bool>,
+    ) -> Result<GetMailSwitchesReply, R::Error> {
+        let _: SetMailSwitchesReply = self
+            .nest
+            .request(
+                "fauna.bridges.set_mail_switches",
+                SetMailSwitchesRequest {
+                    receive_enabled,
+                    send_enabled,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        self.get_mail_switches().await
+    }
+
+    /// `fauna.bridges.get_mail_quotas` — the calling actor's own mailbox
+    /// quota (bytes + message count, used and limit) and daily submission
+    /// allowance (remote RECIPIENT units spent today and the daily maximum),
+    /// for the `mail-settings` readout (`imap-server.md` § Composition with
+    /// submission quota). Replay-safe pure read; debits nothing.
+    pub async fn get_mail_quotas(&self) -> Result<GetMailQuotasReply, R::Error> {
+        self.nest
+            .request("fauna.bridges.get_mail_quotas", GetMailQuotasRequest {})
+            .await
+    }
+
     /// `fauna.bridges.get_spam_threshold_override` — the calling actor's
     /// per-account spam-folder threshold in whole points, or `None` when the
     /// account follows the admin default (`mail-aliases.md` § Spam-threshold
@@ -1863,6 +1977,30 @@ impl<R: RpcRequester> MailAccountClient<R> {
         self.set_spam_threshold_override(spam_threshold_override)
             .await?;
         self.get_spam_threshold_override().await
+    }
+
+    /// `fauna.bridges.get_message_scan_result` — the perimeter scan verdict
+    /// (ClamAV verdict, rspamd score, what the nest did with the message) of
+    /// one message the caller received, keyed by the 32-byte
+    /// `InboxMessage.message_id` (`mail-content-scanning.md` § User sees their
+    /// own message's row). A message that is not the caller's — or that no
+    /// scanner touched — answers `fauna.bridges.not_found`, which the message
+    /// detail shows as "no scan details". Hiding the row under the account's
+    /// `scan_result_visible` toggle is the app's rendering decision, not this
+    /// read's. Replay-safe pure read.
+    pub async fn get_message_scan_result(
+        &self,
+        message_id: Vec<u8>,
+    ) -> Result<GetMessageScanResultReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.bridges.get_message_scan_result",
+                GetMessageScanResultRequest {
+                    message_id,
+                    extra: Default::default(),
+                },
+            )
+            .await
     }
 
     // ── User-tier spam-classifier management (the `mail-spam` page) ──────────
@@ -1963,6 +2101,7 @@ impl<R: RpcRequester> MailAccountClient<R> {
         sample_count: u32,
         history_op: Option<SpamHistoryOp>,
         holder_copy: Option<SpamModelHolderCopy>,
+        expected_model: Option<SpamModelPrecondition>,
     ) -> Result<PutSpamModelOutcome, R::Error> {
         let reply: PutSpamModelReply = self
             .nest
@@ -1978,6 +2117,10 @@ impl<R: RpcRequester> MailAccountClient<R> {
                     // model; `None` ⇒ opted out / no holder / server-path write, and
                     // the nest leaves the stored copy untouched.
                     holder_copy,
+                    // The compare-and-swap precondition (`mail-spam.md`
+                    // § Transactional update): the stored model this write was
+                    // computed from; `None` ⇒ last-write-wins.
+                    expected_model: expected_model.map(SpamModelPrecondition::to_wire),
                     // `actor_id` left unset (Default): this is the client's own-key
                     // path — the connection's actor is the subject (naming any other
                     // actor is rejected for a `User`/`Admin`; only the `BridgeMda`
@@ -2379,6 +2522,17 @@ mod tests {
             "fauna.bridges.list_forwarders" => {
                 fauna_protocol::encode_canonical(&ListForwardersReply { forwarders: vec![] })
             }
+            "fauna.bridges.get_message_scan_result" => {
+                fauna_protocol::encode_canonical(&GetMessageScanResultReply {
+                    message_id: vec![0x44u8; 32],
+                    received_at: 1_700_000_000,
+                    scanned_at: 1_700_000_000,
+                    clamav_verdict: ClamavVerdict::Clean,
+                    rspamd_score: None,
+                    action_taken: ScanActionTaken::Delivered,
+                    extra: Default::default(),
+                })
+            }
             "fauna.bridges.get_forward_all_to" => {
                 fauna_protocol::encode_canonical(&GetForwardAllToReply {
                     forward_all_to: Some("alice@example.net".into()),
@@ -2589,6 +2743,9 @@ mod tests {
             }
             "fauna.bridges.get_alias_policy" => {
                 fauna_protocol::encode_canonical(&AliasPolicy::default())
+            }
+            "fauna.bridges.get_dmarc_policy" => {
+                fauna_protocol::encode_canonical(&DmarcReportingPolicy::default())
             }
             "fauna.bridges.fetch_spam_model" => {
                 fauna_protocol::encode_canonical(&FetchSpamModelReply {
@@ -3139,6 +3296,35 @@ mod tests {
     }
 
     #[test]
+    fn get_dmarc_policy_composes_kind_and_decodes_reply() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = MailAdminClient::new(rec.clone());
+
+        let policy = block_on(client.get_dmarc_policy()).expect("infallible mock");
+        let (kind, _payload) = last_call(&rec);
+        assert_eq!(kind, "fauna.bridges.get_dmarc_policy");
+        assert_eq!(policy, DmarcReportingPolicy::default());
+    }
+
+    #[test]
+    fn put_dmarc_policy_composes_kind_and_payload() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = MailAdminClient::new(rec.clone());
+        let policy = PutDmarcPolicyRequest {
+            ruf_publish: Some(true),
+            forensic_retention_days: Some(60),
+            ..Default::default()
+        };
+        block_on(client.put_dmarc_policy(policy.clone())).expect("infallible mock");
+        let (kind, payload) = last_call(&rec);
+        assert_eq!(kind, "fauna.bridges.put_dmarc_policy");
+        assert_eq!(
+            policy,
+            fauna_protocol::decode_strict::<PutDmarcPolicyRequest>(&payload).unwrap()
+        );
+    }
+
+    #[test]
     fn put_alias_policy_composes_kind_and_payload() {
         let rec = std::sync::Arc::new(RecordingRequester::new(reply));
         let client = MailAdminClient::new(rec.clone());
@@ -3338,6 +3524,20 @@ mod tests {
         assert_eq!(kind, "fauna.bridges.get_spam_threshold_override");
         let _req: GetSpamThresholdOverrideRequest =
             fauna_protocol::decode_strict(&payload).expect("decodes as request");
+    }
+
+    #[test]
+    fn get_message_scan_result_composes_kind_and_payload() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = MailAccountClient::new(rec.clone());
+        let got =
+            block_on(client.get_message_scan_result(vec![0x44u8; 32])).expect("infallible mock");
+        assert_eq!(got.action_taken, ScanActionTaken::Delivered);
+        let (kind, payload) = last_call(&rec);
+        assert_eq!(kind, "fauna.bridges.get_message_scan_result");
+        let req: GetMessageScanResultRequest =
+            fauna_protocol::decode_strict(&payload).expect("decodes as request");
+        assert_eq!(req.message_id, vec![0x44u8; 32]);
     }
 
     #[test]
@@ -3703,7 +3903,7 @@ mod tests {
         // sample count; the reply is a bare ack (the default mock arm). A model-only
         // write (e.g. a social train that keeps the server's no-history parity)
         // carries `history_op: None`.
-        let outcome = block_on(client.put_spam_model(vec![0xAAu8; 96], 42, None, None))
+        let outcome = block_on(client.put_spam_model(vec![0xAAu8; 96], 42, None, None, None))
             .expect("infallible mock");
         assert_eq!(
             outcome,
@@ -3731,7 +3931,7 @@ mod tests {
             sealed_copy: vec![0x22u8; 64],
             ..Default::default()
         };
-        block_on(client.put_spam_model(vec![0xAAu8; 96], 5, None, Some(copy.clone())))
+        block_on(client.put_spam_model(vec![0xAAu8; 96], 5, None, Some(copy.clone()), None))
             .expect("infallible mock");
         let (_, payload) = last_call(&rec);
         let req: PutSpamModelRequest =
@@ -3750,6 +3950,7 @@ mod tests {
             Some(SpamHistoryOp::Delete {
                 history_id: vec![0x01u8; 16],
             }),
+            None,
             None,
         ))
         .expect("infallible mock");

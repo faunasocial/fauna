@@ -178,6 +178,12 @@ A folder someone has shared with you appears there too once you have
 accepted it, named with whoever shared it — "Trip photos (alice)" — so it
 can't be mistaken for a folder of your own. If it was shared with you to
 read only, you can browse and open its files but not change them.
+Each folder's row in Settings → Folders has a **Show in Files** switch, on by
+default: turn it off to hide that folder from the file browser on this phone
+only, and back on to bring it back — your other devices aren't affected. On a
+folder shared with you the switch only hides or shows it. A folder this phone
+already keeps in sync from one of your own phone folders shows a note instead
+of the switch, because that folder is already on the phone.
 Editing, creating, renaming and deleting files there is on its way: until it
 arrives, a change you make there stays safely on your phone rather than
 reaching your nest.
@@ -206,8 +212,7 @@ folder "serve over WebDAV" (off by default, per folder), and then:
 Flagging a set that already holds files makes those files reachable too: the
 app you flip the switch in re-locks the set's existing files to the set's
 WebDAV key before it finishes, even on a phone or in the browser, with no
-computer syncing the set. (The Windows app does not do this yet — flip the
-switch from another app.)
+computer syncing the set.
 
 Your storage quota is visible over WebDAV too, so tools that show "space
 remaining" work.
@@ -235,24 +240,36 @@ syncing after you disconnect. You can turn it back off the same way.
 By default your nest keeps a copy of everything in a folder, so a device can
 catch up even when your other devices are asleep. For a folder you'd rather
 keep only on your own machines, open it under **Settings → Folders** and set
-**Content kept on the nest** to **Metadata only**.
+**Content kept on the nest** to **Metadata only**. A public folder keeps its
+content on the nest so anyone following it can read it, so a folder can't be
+both public and metadata-only: make it private or shared first, or set it back
+to full before making it public.
 
 With that on, the file names, edits and snapshots still travel through your nest
 as usual — but the file *contents* never rest on it. They move directly between
-your devices, relayed through the nest only while a device holding them is
-online. Turning it on asks you to confirm one thing plainly: the nest deletes
+your devices when they can reach each other, and are otherwise relayed through
+the nest, only while a device holding them is online. Turning it on asks you to confirm one thing plainly: the nest deletes
 its copy now, so if your devices lose the files, the nest can't bring them back.
 Turn it back to **Full** any time and your devices re-fill the nest's copy.
 Because the nest keeps no copy of such a folder's contents, the Media page's
 **Upload** won't put a file into it — it tells you so instead. Add the file to
 the folder on a device that syncs it.
 
-**One limit today:** the contents pass between computers that sync the folder —
-your desktop and your laptop, say — while the one holding a file is switched on
-and signed in. Opening one of its files from a phone, the web app or the Media
-page of a device that doesn't sync the folder is still on its way: there the
-file is listed and can't be opened yet. Keep a folder on **Full** if you need
-its files on those devices now.
+A file you add or change in such a folder stays on the device you made it on,
+because that device may hold the only copy: freeing its space is refused, and
+on Windows, File Explorer shows it as always kept on this device. A file that
+arrived from another of your devices can still have its space freed. If you
+turn the folder back to **Full**, those files stay marked as kept until you
+free their space yourself.
+
+A file in such a folder opens wherever you look for it — on a computer that
+syncs the folder, or from the Media page of any app, a phone or the web app
+included — while a device holding it is switched on and signed in; the Media
+page tells you whether one is.
+
+**One limit today:** only a computer can be the device holding the files. A
+phone can open them, but a file you add there can't yet be passed on to your
+other devices. Keep a folder on **Full** if its files start out on a phone.
 
 It's the strongest privacy setting for a folder — the contents touch the nest's
 disk in no form at all — in exchange for needing one of your own devices awake
@@ -270,9 +287,13 @@ them; Fauna will tell you to turn serving off first.)
   in the Media browser on any app to restore any older version in place, or on
   Windows, right-click a synced file → **Fauna → Version history**.)
 - **No LAN-scan magic.** Devices find each other through your nest, encrypted,
-  wherever they are. Two devices on the same network sync via the nest too —
-  simple, predictable, and it means "works at home" is never different from
-  "works from a hotel".
+  wherever they are — nothing broadcasts or scans your network. When two of your
+  computers can reach each other directly (on the same network, say), a file's
+  contents travel straight from one to the other, encrypted, and your nest never
+  sees them; the file names and edits still go through your nest. There is
+  nothing to set up, and when the direct path isn't there the file simply comes
+  through your nest instead, so "works at home" is never different from "works
+  from a hotel".
 
 ## Where this stands today
 
@@ -283,11 +304,11 @@ them; Fauna will tell you to turn serving off first.)
 | Per-set device participation + read-only devices | **Available** |
 | Device list, removal with sole-source guard, session revocation, emergency lockout | **Available** |
 | A NAS or server as a sync device, set up from the terminal app over SSH | **Available** — it keeps syncing after you log out once you turn that on |
-| Keep a folder's contents off the nest ("Metadata only") | **Available** on every app. Contents pass between computers that sync the folder, relayed through the nest without resting there; opening them from a phone, the web app or a device that doesn't sync the folder is **on its way** |
+| Keep a folder's contents off the nest ("Metadata only") | **Available** on every app. Contents are relayed through the nest without resting there, from a computer that holds them to any app that opens them; a phone as the device holding them is **on its way** |
 | Per-file status badges | **Full per-file status Available** on macOS/iOS; Windows additionally shows real per-file status as native File Explorer cloud-icon overlays; web, Android, and the Linux media page show simplified status (a file always reads as synced there) |
 | One device at a time (exclusive editing) for unmergeable files | **Available** — switched on per folder; the folder's row names the device editing it |
 | Conflict detection + automatic resolution | **Available** — text merge or latest-wins, with a per-set review list to override the automatic choice |
-| On-demand files / free-up-space | **Available on Windows**; **macOS Finder + iOS Files-app locations built** (per-set Show in Finder / Show in Files switch, on by default); **Android file-browser location built** (browse and open; editing on its way); **Linux per-folder on-demand switch built** (needs the `fuse3` package; no free-up-space menu yet) |
+| On-demand files / free-up-space | **Available on Windows**; **macOS Finder + iOS Files-app locations built** (per-set Show in Finder / Show in Files switch, on by default); **Android file-browser location built** (per-folder Show in Files switch, on by default; browse and open; editing on its way); **Linux per-folder on-demand switch built** (needs the `fuse3` package; no free-up-space menu yet) |
 | WebDAV serving (Finder/Dolphin/rclone read-write) | **Server complete & tested**; the per-set toggle is available on every app (web, Windows, macOS, iOS, Linux, Android, terminal app); Windows Explorer's own native write **planned** (needs locking) |
 | Selective sync (include/exclude paths inside a set) | **Available** — an edit reaches every signed-in device within a scan cycle, no restart |
 | Per-file version history browser | **Available on every app** — Windows also gets a File Explorer right-click → Fauna → Version history shortcut; every app can restore an older version in place |

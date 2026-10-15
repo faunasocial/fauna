@@ -331,6 +331,12 @@ export interface InviteRequestSnapshot {
    * `docs/goal/behavior/onboarding.md` Architectural rule 4. Refreshed on every
    * `inviteRequestSnapshot()` read. */
   oob_message: LocalizedText;
+  /** The "this account will be supervised by …" sentence for a verified
+   * supervised code (names the guardian, and the age band when the code was
+   * minted with one), derived in shared Rust per Architectural rule 4. Its
+   * `{band}` argument is a nested key — render with `resolveLocalizedNested`.
+   * Absent/null for an ordinary code. */
+  supervised_notice?: LocalizedText | null;
 }
 
 // ── "Almost ready" (awaiting manual DNS) snapshot ──
@@ -646,6 +652,14 @@ export interface Machine {
   /** Resolved mail-mode for the toggle's checked state — the user's choice,
    * else the handle real-domain default. See onboarding.md §5. */
   provisionMailModeEnabled(): boolean;
+  /** `vps-config-update-channel-row[<id>]`: which builds the box's updater
+   * follows (`stable` / `test` / `dev`). An id naming no channel is ignored.
+   * See onboarding-provisioning.md §5. */
+  setProvisionUpdateChannel(channelId: string): void;
+  /** The selected update channel's id — the user's choice, else `stable`. */
+  provisionUpdateChannel(): string;
+  /** The i18n key of a channel row's description at the running product version (`''` for an unknown id). */
+  updateChannelDescriptionKey(channelId: string): string;
   selectVpsLocation(id: string): void;
   confirmPrice(): void;
   back(): void;
@@ -769,6 +783,14 @@ export interface Machine {
    * ui.yaml scopes `awaiting-dns-copy-button` to this page's required
    * elements. */
   awaitingDnsCopyEnabled(): boolean;
+  /** Whether the "Use a different nest" exit is live — off only while a claim
+   * is in flight, ON during a bare probe (a box that never answers lives in
+   * `Checking`). */
+  awaitingDnsFallthroughEnabled(): boolean;
+  /** The exit itself: the machine clears the slot through its own injected
+   * store and re-lands at `handle_entry` holding the identity. Callers do
+   * nothing else — never `registryClearAwaitingDns` (active-account addressed). */
+  abandonAwaitingManualDns(): void;
   /** Relaunch hydration from the long-term store's awaiting-manual-dns slot.
    * Call `seedIdentity(secret)` FIRST (so the eventual claim can sign). Sets
    * `wizardOutcome()` to `AwaitingManualDns` — exactly what the same-session
@@ -895,6 +917,16 @@ export interface Machine {
   takePendingRecoverySecret(): string | undefined;
   /** `restore-from-recovery-kit-button` on identity_choice. */
   beginRecoveryEntry(): void;
+  /** `emergency-lockout-entry-button` on identity_choice — the signed-out lock
+   *  door (`ui/sessions.md` § Layout & flow → *The signed-out door*). */
+  beginEmergencyLockoutEntry(): void;
+  /** `sessions-lockout-button` on `emergency_lockout_entry`. Resolves to JSON
+   *  `{lockedUntil: number|null, message: LocalizedText|null}`: `lockedUntil`
+   *  set means the lock landed and the wizard is back on identity_choice;
+   *  otherwise `message` is the shared refusal line and the step stays.
+   *  Reads the account off the machine's handle slot (`setCurrentHandle`
+   *  first). Nothing typed is persisted. */
+  submitEmergencyLockout(secretInput: string, confirmWord: string): Promise<string>;
   /** `recovery-entry-submit-button`. `restored` → the seed is back (the proxy
    *  commits it like an import); `superseded` → route to
    *  `beginImportIdentityWithReason`; `message` → the shared outcome text to
@@ -1052,6 +1084,14 @@ export function setAppendMode(on: boolean): void {
 }
 
 let _pendingBaseUrls: Record<string, string> | undefined = undefined;
+
+/** The provider base-URL override for `key`, as the wizard's own machine is
+ *  built with it — what the `nest_retire` page's machine takes at construction
+ *  (the same `vps` key, exactly as tui reads it off the wizard). Only a test
+ *  build ever sets one; production reads `undefined`. */
+export function pendingProviderBaseUrl(key: string): string | undefined {
+  return _pendingBaseUrls?.[key];
+}
 
 export function setPendingProviderBaseUrls(urls: Record<string, string>): void {
   _pendingBaseUrls = urls;

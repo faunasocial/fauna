@@ -4,6 +4,13 @@ use super::CacheDb;
 use anyhow::{Context, Result};
 use rusqlite::OptionalExtension;
 
+/// The most push-subscription rows one actor may hold. A real account has a
+/// handful of installs; a hard-coded constant because nobody has a reason to
+/// choose it (`principles.md` § One configuration surface). Over the cap the
+/// least recently armed row is evicted, never the subscribe refused
+/// (`apps/common.md` § Registration, the per-actor cap ruling).
+pub const MAX_PUSH_SUBSCRIPTIONS_PER_ACTOR: i64 = 16;
+
 /// A single push subscription row.
 pub struct PushSubscription {
     pub id: i64,
@@ -13,6 +20,9 @@ pub struct PushSubscription {
     pub endpoint: String,
     pub key_p256dh: Option<String>,
     pub key_auth: Option<String>,
+    /// When the row was last armed: set at insert and refreshed by every
+    /// re-arm of the same `(actor_id, device_id)`. Despite the name, this is
+    /// the recency key the cap evicts on and the list orders on.
     pub created_at: i64,
 }
 
@@ -75,17 +85,35 @@ impl CacheDb {
                 transport   = excluded.transport,
                 endpoint    = excluded.endpoint,
                 key_p256dh  = excluded.key_p256dh,
-                key_auth    = excluded.key_auth",
+                key_auth    = excluded.key_auth,
+                created_at  = excluded.created_at",
             rusqlite::params![
                 actor_id, device_id, transport, endpoint, key_p256dh, key_auth, now,
             ],
         )
         .context("upsert push subscription")?;
 
+        // Cap the actor's rows: keep the just-armed one, then the most
+        // recently armed, and drop the rest (`apps/common.md` § Registration →
+        // *A cap on rows per actor*). Same lock as the upsert, so no caller
+        // ever observes the actor over the cap.
+        conn.execute(
+            "DELETE FROM push_subscriptions
+             WHERE actor_id = ?1
+               AND id NOT IN (
+                   SELECT id FROM push_subscriptions
+                   WHERE actor_id = ?1
+                   ORDER BY (device_id = ?2) DESC, created_at DESC, id DESC
+                   LIMIT ?3)",
+            rusqlite::params![actor_id, device_id, MAX_PUSH_SUBSCRIPTIONS_PER_ACTOR],
+        )
+        .context("evict over-cap push subscriptions")?;
+
         Ok(())
     }
 
-    /// List all push subscriptions for a given actor.
+    /// List all push subscriptions for a given actor, most recently armed
+    /// first, so a dispatch deadline cuts off the stalest rows.
     pub async fn list_push_subscriptions(&self, actor_id: &[u8]) -> Result<Vec<PushSubscription>> {
         let actor_id = actor_id.to_vec();
         let conn = self.conn.lock().await;
@@ -96,7 +124,7 @@ impl CacheDb {
                         key_p256dh, key_auth, created_at
                  FROM push_subscriptions
                  WHERE actor_id = ?1
-                 ORDER BY created_at",
+                 ORDER BY created_at DESC, id DESC",
             )
             .context("prepare list_push_subscriptions")?;
 
@@ -243,6 +271,89 @@ mod tests {
             subs_a_after.len(),
             1,
             "deleting actor B's subscription must not touch actor A's row"
+        );
+    }
+
+    async fn arm(db: &CacheDb, actor: &[u8; 32], device: &str) {
+        db.upsert_push_subscription(
+            actor,
+            device,
+            "web-push",
+            "https://example.com/push",
+            Some("p"),
+            Some("a"),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Pin the arm time of one row, so recency ordering is testable at
+    /// one-second clock resolution.
+    async fn backdate(db: &CacheDb, actor: &[u8; 32], device: &str, at: i64) {
+        let conn = db.conn.lock().await;
+        conn.execute(
+            "UPDATE push_subscriptions SET created_at = ?3 WHERE actor_id = ?1 AND device_id = ?2",
+            rusqlite::params![actor.to_vec(), device, at],
+        )
+        .unwrap();
+    }
+
+    /// The cap (`apps/common.md` § Registration, the per-actor cap ruling):
+    /// a new device past the cap evicts the least recently armed row and the
+    /// subscribe still succeeds; another actor's rows are untouched.
+    #[tokio::test]
+    async fn new_device_over_the_cap_evicts_the_least_recently_armed() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let actor = [1u8; 32];
+        let other = [2u8; 32];
+        arm(&db, &other, "other-device").await;
+        for i in 0..MAX_PUSH_SUBSCRIPTIONS_PER_ACTOR {
+            let device = format!("device-{i}");
+            arm(&db, &actor, &device).await;
+            backdate(&db, &actor, &device, 1_000 + i).await;
+        }
+        arm(&db, &actor, "newcomer").await;
+
+        let subs = db.list_push_subscriptions(&actor).await.unwrap();
+        assert_eq!(subs.len() as i64, MAX_PUSH_SUBSCRIPTIONS_PER_ACTOR);
+        assert_eq!(subs[0].device_id, "newcomer", "newest first");
+        assert!(
+            subs.iter().all(|s| s.device_id != "device-0"),
+            "the least recently armed row is the one evicted"
+        );
+        assert_eq!(db.list_push_subscriptions(&other).await.unwrap().len(), 1);
+    }
+
+    /// A re-arm is never refused and refreshes the row's recency: the live
+    /// device re-armed on every launch must not be the first one evicted.
+    #[tokio::test]
+    async fn rearm_moves_the_row_to_the_front_and_survives_the_cap() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let actor = [1u8; 32];
+        for i in 0..MAX_PUSH_SUBSCRIPTIONS_PER_ACTOR {
+            let device = format!("device-{i}");
+            arm(&db, &actor, &device).await;
+            backdate(&db, &actor, &device, 1_000 + i).await;
+        }
+        // The oldest-registered device re-arms, then a newcomer arrives.
+        arm(&db, &actor, "device-0").await;
+        let subs = db.list_push_subscriptions(&actor).await.unwrap();
+        assert_eq!(subs[0].device_id, "device-0", "a re-arm moves to the front");
+        assert_eq!(subs.len() as i64, MAX_PUSH_SUBSCRIPTIONS_PER_ACTOR);
+
+        arm(&db, &actor, "newcomer").await;
+        let ids: Vec<_> = db
+            .list_push_subscriptions(&actor)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.device_id)
+            .collect();
+        assert!(ids.contains(&"device-0".to_string()), "re-armed row kept");
+        assert!(ids.contains(&"newcomer".to_string()));
+        assert!(
+            !ids.contains(&"device-1".to_string()),
+            "the now-stalest row goes"
         );
     }
 

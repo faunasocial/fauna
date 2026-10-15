@@ -27,6 +27,7 @@ import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from common.auth import register_user
+from helpers.backup_destinations import DestinationEnrollment
 from helpers.waiting import wait_until
 
 pytestmark = [
@@ -64,23 +65,6 @@ def _coverage(client, destination_label_hint: str) -> tuple[str, list[dict]]:
     return dest["destination_id"], dest.get("covered_folders", [])
 
 
-def _remove_the_only_destination(backups) -> None:
-    """Finalizer: remove the destination this test enrolled, if it is still there.
-
-    Best-effort on purpose — a test that already failed keeps its own diagnosis
-    rather than trading it for a teardown error (`test_offline_gate.py`'s
-    `_dismiss_remove_modal` posture). On a green run the test's last step has
-    already removed it, so this finds nothing to do.
-    """
-    try:
-        backups.navigate()
-        if backups.destination_count() == 1:
-            backups.remove_destination(0)
-            backups.wait_for_destination_count(0)
-    except Exception:
-        pass
-
-
 @pytest.mark.feature("backup-destinations-and-restore")
 def test_folder_destination_place_attach_and_detach(
     logged_in_app, nest_instance, second_nest, test_user, request
@@ -103,17 +87,15 @@ def test_folder_destination_place_attach_and_detach(
     # Enroll the destination through the Backups page — the same UI door a
     # user takes, and the prerequisite the folders-page section needs (with
     # no enrolled destination it deliberately does not paint).
-    b.navigate()
-    enrolled_here = b.destination_count() == 0
-    if enrolled_here:
-        b.add_destination(second_nest["url"], name="Offsite")
-        b.wait_for_destination_count(1)
-        # `test_user` is session-scoped, so a destination left behind is every
-        # later module's input: `test_nest_trust.py` enrolls its own and counts
-        # exactly one. The last step removes it; this
-        # covers a run that fails before getting there. A destination this
-        # test did not enroll is not its to remove.
-        request.addfinalizer(lambda: _remove_the_only_destination(b))
+    # Enroll alone, so the one enrolled below is the `destinations[0]`
+    # `_coverage` reads, and leave none: `test_user` is session-scoped, so a
+    # destination left behind is every later module's input
+    # (`test_nest_trust.py` enrolls its own and counts exactly one). The last
+    # step removes it; the finalizer covers a run that fails before getting
+    # there, and raises if it cannot.
+    dest = DestinationEnrollment(app, nest_instance, test_user)
+    request.addfinalizer(dest.leave_none)
+    dest.add_destination(second_nest["url"], "Offsite")
 
     # Fixture: one ordinary folder via the wizard.
     name = f"covered-{secrets.token_hex(4)}"
@@ -121,7 +103,7 @@ def test_folder_destination_place_attach_and_detach(
     b.create_folder_via_wizard(name)
 
     # ── Attach, through the folder's own expanded row. ──
-    row = b.find_and_expand_folder(name)
+    b.find_and_expand_folder(name)
     app.driver.wait_for("folder-destination-attach-select", timeout=15.0)
     client = _user_client(nest_instance, test_user)
     destination_id, covered_before = _coverage(client, "Offsite")
@@ -131,7 +113,16 @@ def test_folder_destination_place_attach_and_detach(
     app.driver.click("folder-destination-attach-button")
 
     # The section repaints from the nest's answer: the attached row appears.
-    app.driver.wait_for("folder-destination-row", timeout=15.0)
+    wait_until(
+        lambda: app.driver.is_visible("folder-destination-row"),
+        15.0,
+        diagnose=lambda: (
+            f"the attach of {name!r} to destination {destination_id} painted no "
+            f"folder-destination-row; attach-select="
+            f"{app.driver.is_visible('folder-destination-attach-select')} "
+            f"error={app.error_text()!r}"
+        ),
+    )
     assert "Offsite" in app.driver.get_text("folder-destination-row"), (
         f"the attached row carries the destination's display name; "
         f"error={app.error_text()!r}"
@@ -154,18 +145,22 @@ def test_folder_destination_place_attach_and_detach(
     # flip): the row is still painted, and no attach select remains for the
     # one-and-only destination.
     b.navigate_folders()
-    # Some clients (e.g. linux, whose destination-places section repaints
-    # in place and never rebuilds the folder list on its own) leave the
-    # expander OPEN across a `navigate_folders()` that changes no nav state
-    # — collapse it explicitly so the following `find_and_expand_folder`
-    # genuinely re-expands rather than toggling an already-open row SHUT
-    # (`test_folder_place_editor.py`'s idiom). A client whose own repaint
-    # already re-collapsed the row (e.g. one that rebuilds the list on every
-    # observer tick) skips the extra toggle.
-    if app.driver.is_visible("folder-destination-row"):
-        b.expand_folder(row)  # collapse (the expander is a toggle)
-    b.find_and_expand_folder(name)
-    app.driver.wait_for("folder-destination-row", timeout=15.0)
+    # Whether the row is still open here differs by app (linux keeps it open
+    # across a `navigate_folders()` that changes no nav state, and across its
+    # list rebuilds — `restore_expansion`), and the destination row itself is
+    # filled by an async read, so it cannot say which: a toggle chosen from
+    # one read of it shut the row on linux. `open_folder` toggles and checks a
+    # body widget every open owner row paints synchronously, so the row ends
+    # OPEN either way — after a real collapse + re-expand where it was open.
+    b.open_folder(name)
+    wait_until(
+        lambda: app.driver.is_visible("folder-destination-row"),
+        15.0,
+        diagnose=lambda: (
+            f"the re-expanded {name!r} painted no folder-destination-row; "
+            f"error={app.error_text()!r}"
+        ),
+    )
     assert app.driver.is_absent("folder-destination-attach-select"), (
         "every enrolled destination is attached, so nothing is attachable"
     )
@@ -189,11 +184,10 @@ def test_folder_destination_place_attach_and_detach(
     # The destination itself is untouched — a per-folder detach is never a
     # destination removal.
     b.navigate()
-    assert b.destination_count() == 1
+    b.wait_for_destination_count(1)
 
     # Leave the session actor as found: remove the destination this test
     # enrolled, and wait for it to go, so a remove that does not take is this
     # test's red rather than a later module's wrong count.
-    if enrolled_here:
-        b.remove_destination(0)
-        b.wait_for_destination_count(0)
+    b.remove_destination(0)
+    b.wait_for_destination_count(0)

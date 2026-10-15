@@ -556,6 +556,21 @@ uint64_t uniffi_fauna_ffi_fn_method_ffiadminclient_membership_tiers_list(uint64_
 uint64_t uniffi_fauna_ffi_fn_method_ffiadminclient_membership_tiers_set(uint64_t ptr, RustBuffer tier_name, RustBuffer admin_tier, RustBuffer lapse_tier
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIADMINCLIENT_PENDING_ACTION_APPROVE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIADMINCLIENT_PENDING_ACTION_APPROVE
+uint64_t uniffi_fauna_ffi_fn_method_ffiadminclient_pending_action_approve(uint64_t ptr, int64_t id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIADMINCLIENT_PENDING_ACTION_CANCEL
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIADMINCLIENT_PENDING_ACTION_CANCEL
+uint64_t uniffi_fauna_ffi_fn_method_ffiadminclient_pending_action_cancel(uint64_t ptr, int64_t id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIADMINCLIENT_PENDING_ACTIONS_LIST
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIADMINCLIENT_PENDING_ACTIONS_LIST
+uint64_t uniffi_fauna_ffi_fn_method_ffiadminclient_pending_actions_list(uint64_t ptr
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIADMINCLIENT_REQUEST_HOST_RESTART
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIADMINCLIENT_REQUEST_HOST_RESTART
 uint64_t uniffi_fauna_ffi_fn_method_ffiadminclient_request_host_restart(uint64_t ptr
@@ -618,7 +633,7 @@ uint64_t uniffi_fauna_ffi_fn_method_ffiadminclient_users_cancel_eviction(uint64_
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIADMINCLIENT_USERS_CREATE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIADMINCLIENT_USERS_CREATE
-uint64_t uniffi_fauna_ffi_fn_method_ffiadminclient_users_create(uint64_t ptr, RustBuffer actor_id, RustBuffer tier, RustBuffer handle
+uint64_t uniffi_fauna_ffi_fn_method_ffiadminclient_users_create(uint64_t ptr, RustBuffer actor_id, RustBuffer tier, RustBuffer handle, RustBuffer guardian_actor, RustBuffer age_band
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIADMINCLIENT_USERS_EVICT
@@ -644,26 +659,6 @@ uint64_t uniffi_fauna_ffi_fn_method_ffiadminclient_users_suspend(uint64_t ptr, R
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIADMINCLIENT_USERS_UPDATE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIADMINCLIENT_USERS_UPDATE
 uint64_t uniffi_fauna_ffi_fn_method_ffiadminclient_users_update(uint64_t ptr, RustBuffer actor_id, RustBuffer tier, RustBuffer label
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_CLONE_FFIBLUESKYCLIENT
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_CLONE_FFIBLUESKYCLIENT
-uint64_t uniffi_fauna_ffi_fn_clone_ffiblueskyclient(uint64_t handle, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FREE_FFIBLUESKYCLIENT
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FREE_FFIBLUESKYCLIENT
-void uniffi_fauna_ffi_fn_free_ffiblueskyclient(uint64_t handle, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIBLUESKYCLIENT_THREAD_BY_AT_URI
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIBLUESKYCLIENT_THREAD_BY_AT_URI
-uint64_t uniffi_fauna_ffi_fn_method_ffiblueskyclient_thread_by_at_uri(uint64_t ptr, RustBuffer uri
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIBLUESKYCLIENT_THREAD_BY_POST_ID
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIBLUESKYCLIENT_THREAD_BY_POST_ID
-uint64_t uniffi_fauna_ffi_fn_method_ffiblueskyclient_thread_by_post_id(uint64_t ptr, RustBuffer post_id_hex
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_CLONE_FFIBRIDGESCLIENT
@@ -1101,66 +1096,6 @@ uint64_t uniffi_fauna_ffi_fn_method_ffifamilyclient_transfer_decline(uint64_t pt
 uint64_t uniffi_fauna_ffi_fn_method_ffifamilyclient_usage_report(uint64_t ptr, uint32_t minutes, int32_t utc_offset_minutes
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_CLONE_FFIFEEDCLIENT
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_CLONE_FFIFEEDCLIENT
-uint64_t uniffi_fauna_ffi_fn_clone_ffifeedclient(uint64_t handle, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FREE_FFIFEEDCLIENT
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FREE_FFIFEEDCLIENT
-void uniffi_fauna_ffi_fn_free_ffifeedclient(uint64_t handle, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_CONTRIBUTORS_GRANT
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_CONTRIBUTORS_GRANT
-uint64_t uniffi_fauna_ffi_fn_method_ffifeedclient_feed_contributors_grant(uint64_t ptr, RustBuffer feed_id, RustBuffer nest_url, RustBuffer author_id
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_CONTRIBUTORS_LIST
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_CONTRIBUTORS_LIST
-uint64_t uniffi_fauna_ffi_fn_method_ffifeedclient_feed_contributors_list(uint64_t ptr, RustBuffer feed_id
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_CONTRIBUTORS_REVOKE
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_CONTRIBUTORS_REVOKE
-uint64_t uniffi_fauna_ffi_fn_method_ffifeedclient_feed_contributors_revoke(uint64_t ptr, RustBuffer feed_id, RustBuffer nest_url, RustBuffer author_id
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_CREATE
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_CREATE
-uint64_t uniffi_fauna_ffi_fn_method_ffifeedclient_feed_create(uint64_t ptr, RustBuffer name, RustBuffer rules, RustBuffer combination, RustBuffer scope, RustBuffer contributor_seeds
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_DELETE
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_DELETE
-uint64_t uniffi_fauna_ffi_fn_method_ffifeedclient_feed_delete(uint64_t ptr, RustBuffer feed_id
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_GET
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_GET
-uint64_t uniffi_fauna_ffi_fn_method_ffifeedclient_feed_get(uint64_t ptr, RustBuffer feed_id
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_LIST
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_LIST
-uint64_t uniffi_fauna_ffi_fn_method_ffifeedclient_feed_list(uint64_t ptr
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_LOCAL_POSTS
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_LOCAL_POSTS
-uint64_t uniffi_fauna_ffi_fn_method_ffifeedclient_feed_local_posts(uint64_t ptr, RustBuffer cursor, RustBuffer limit, RustBuffer search
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_POSTS
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_POSTS
-uint64_t uniffi_fauna_ffi_fn_method_ffifeedclient_feed_posts(uint64_t ptr, RustBuffer feed_id, RustBuffer cursor, RustBuffer limit, RustBuffer order, RustBuffer score_cursor, RustBuffer score_cursor_created_at, RustBuffer search
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_UPDATE
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFEEDCLIENT_FEED_UPDATE
-uint64_t uniffi_fauna_ffi_fn_method_ffifeedclient_feed_update(uint64_t ptr, RustBuffer feed_id, RustBuffer name, RustBuffer rules, RustBuffer combination
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_CLONE_FFIFOLDERSCLIENT
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_CLONE_FFIFOLDERSCLIENT
 uint64_t uniffi_fauna_ffi_fn_clone_ffifoldersclient(uint64_t handle, RustCallStatus *out_status
@@ -1426,11 +1361,6 @@ RustBuffer uniffi_fauna_ffi_fn_method_ffinestclient_actor_id_hex(uint64_t ptr, R
 uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_admin(uint64_t ptr, RustCallStatus *out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_BLUESKY
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_BLUESKY
-uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_bluesky(uint64_t ptr, RustCallStatus *out_status
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_BRIDGES
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_BRIDGES
 uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_bridges(uint64_t ptr, RustCallStatus *out_status
@@ -1476,11 +1406,6 @@ uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_email(uint64_t ptr, RustCallSt
 uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_family(uint64_t ptr, RustCallStatus *out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_FEED
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_FEED
-uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_feed(uint64_t ptr, RustCallStatus *out_status
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_FOLDERS
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_FOLDERS
 uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_folders(uint64_t ptr, RustCallStatus *out_status
@@ -1489,6 +1414,11 @@ uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_folders(uint64_t ptr, RustCall
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_INBOX
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_INBOX
 uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_inbox(uint64_t ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_LOOK_FOR_NEWER_RELEASE_AT_SIGN_IN
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_LOOK_FOR_NEWER_RELEASE_AT_SIGN_IN
+uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_look_for_newer_release_at_sign_in(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_MODERATION
@@ -1519,11 +1449,6 @@ uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_push(uint64_t ptr, RustCallSta
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_PUSH_REGISTRATION
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_PUSH_REGISTRATION
 uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_push_registration(uint64_t ptr, RustBuffer intent_path, RustBuffer actor_id, RustBuffer device_id, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_SEARCH
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_SEARCH
-uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_search(uint64_t ptr, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_SESSION_ENDING_VERDICT
@@ -1779,21 +1704,6 @@ RustBuffer uniffi_fauna_ffi_fn_method_ffipushregistration_intent(uint64_t ptr, R
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIPUSHREGISTRATION_REARM
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIPUSHREGISTRATION_REARM
 uint64_t uniffi_fauna_ffi_fn_method_ffipushregistration_rearm(uint64_t ptr, RustBuffer subscription
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_CLONE_FFISEARCHCLIENT
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_CLONE_FFISEARCHCLIENT
-uint64_t uniffi_fauna_ffi_fn_clone_ffisearchclient(uint64_t handle, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FREE_FFISEARCHCLIENT
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FREE_FFISEARCHCLIENT
-void uniffi_fauna_ffi_fn_free_ffisearchclient(uint64_t handle, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFISEARCHCLIENT_QUERY
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFISEARCHCLIENT_QUERY
-uint64_t uniffi_fauna_ffi_fn_method_ffisearchclient_query(uint64_t ptr, RustBuffer query, RustBuffer content_type, RustBuffer before, RustBuffer after, RustBuffer limit, RustBuffer offset
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_CLONE_FFISNAPSHOTSCLIENT
@@ -2321,16 +2231,6 @@ int8_t uniffi_fauna_ffi_fn_func_ward_contact_ask_pending(RustBuffer asks, RustBu
 RustBuffer uniffi_fauna_ffi_fn_func_ward_feed_request_state(RustBuffer asks, RustBuffer bridge_id, RustBuffer operation, RustBuffer target, RustCallStatus *out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_ENCODE_FILTER_RULE
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_ENCODE_FILTER_RULE
-RustBuffer uniffi_fauna_ffi_fn_func_encode_filter_rule(RustBuffer rule_type, RustBuffer value, int8_t required, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_NORMALIZE_FILTER_RULES
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_NORMALIZE_FILTER_RULES
-RustBuffer uniffi_fauna_ffi_fn_func_normalize_filter_rules(RustBuffer rules, RustCallStatus *out_status
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_DEFAULT_RESCAN_INTERVAL_SECS
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_DEFAULT_RESCAN_INTERVAL_SECS
 uint64_t uniffi_fauna_ffi_fn_func_default_rescan_interval_secs(RustCallStatus *out_status
@@ -2400,7 +2300,7 @@ RustBuffer uniffi_fauna_ffi_fn_func_short_nest_id(RustBuffer id, RustCallStatus 
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_BUILD_SIGNED_LABELER_METADATA
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_BUILD_SIGNED_LABELER_METADATA
-RustBuffer uniffi_fauna_ffi_fn_func_build_signed_labeler_metadata(RustBuffer signing_seed, RustBuffer wasm_bytes, uint64_t version, int8_t needs_text, int8_t needs_hashtags, int8_t needs_media_metadata, int8_t needs_author, int8_t needs_attachment_bytes, uint64_t max_memory_bytes, uint64_t max_cpu_microseconds, uint64_t updated_at, RustCallStatus *out_status
+RustBuffer uniffi_fauna_ffi_fn_func_build_signed_labeler_metadata(RustBuffer signing_seed, RustBuffer wasm_bytes, uint64_t version, int8_t needs_text, int8_t needs_hashtags, int8_t needs_media_metadata, int8_t needs_author, int8_t needs_attachment_bytes, uint16_t label_abi, uint64_t max_memory_bytes, uint64_t max_cpu_microseconds, uint64_t updated_at, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_ENCODE_TEXT_MODEL_ARTIFACT_AT_VERSION
@@ -2765,6 +2665,11 @@ uint64_t uniffi_fauna_ffi_fn_func_classify_attendee_transport(RustBuffer addr
 RustBuffer uniffi_fauna_ffi_fn_func_classify_recipient(RustBuffer input, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_FIND_USER
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_FIND_USER
+uint64_t uniffi_fauna_ffi_fn_func_find_user(RustBuffer home_url, RustBuffer handle, RustBuffer domain
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_RESOLVE_CALENDAR_SELECTION
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_RESOLVE_CALENDAR_SELECTION
 RustBuffer uniffi_fauna_ffi_fn_func_resolve_calendar_selection(RustBuffer selected, RustBuffer existing_ids, RustCallStatus *out_status
@@ -2793,11 +2698,6 @@ RustBuffer uniffi_fauna_ffi_fn_func_spam_threshold_band(uint16_t threshold_per_m
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_MINT_KEY_BLOB
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_MINT_KEY_BLOB
 RustBuffer uniffi_fauna_ffi_fn_func_mint_key_blob(RustBuffer signer_secret, RustBuffer signer_auth, RustBuffer tier, uint64_t rotated_at, RustBuffer subscribers, RustBuffer subscriber_eks, RustBuffer wrapped_key, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_CLASSIFY_TEXT
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_CLASSIFY_TEXT
-RustBuffer uniffi_fauna_ffi_fn_func_classify_text(RustBuffer text, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_FORGET_NEST_IDENTITY_PIN
@@ -3497,18 +3397,6 @@ uint16_t uniffi_fauna_ffi_checksum_func_ward_feed_request_state(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_ENCODE_FILTER_RULE
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_ENCODE_FILTER_RULE
-uint16_t uniffi_fauna_ffi_checksum_func_encode_filter_rule(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_NORMALIZE_FILTER_RULES
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_NORMALIZE_FILTER_RULES
-uint16_t uniffi_fauna_ffi_checksum_func_normalize_filter_rules(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_DEFAULT_RESCAN_INTERVAL_SECS
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_DEFAULT_RESCAN_INTERVAL_SECS
 uint16_t uniffi_fauna_ffi_checksum_func_default_rescan_interval_secs(void
@@ -4025,6 +3913,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_classify_recipient(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_FIND_USER
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_FIND_USER
+uint16_t uniffi_fauna_ffi_checksum_func_find_user(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_RESOLVE_CALENDAR_SELECTION
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_RESOLVE_CALENDAR_SELECTION
 uint16_t uniffi_fauna_ffi_checksum_func_resolve_calendar_selection(void
@@ -4058,12 +3952,6 @@ uint16_t uniffi_fauna_ffi_checksum_func_spam_threshold_band(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_MINT_KEY_BLOB
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_MINT_KEY_BLOB
 uint16_t uniffi_fauna_ffi_checksum_func_mint_key_blob(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_CLASSIFY_TEXT
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_CLASSIFY_TEXT
-uint16_t uniffi_fauna_ffi_checksum_func_classify_text(void
     
 );
 #endif
@@ -4253,6 +4141,24 @@ uint16_t uniffi_fauna_ffi_checksum_method_ffiadminclient_membership_tiers_set(vo
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIADMINCLIENT_PENDING_ACTION_APPROVE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIADMINCLIENT_PENDING_ACTION_APPROVE
+uint16_t uniffi_fauna_ffi_checksum_method_ffiadminclient_pending_action_approve(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIADMINCLIENT_PENDING_ACTION_CANCEL
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIADMINCLIENT_PENDING_ACTION_CANCEL
+uint16_t uniffi_fauna_ffi_checksum_method_ffiadminclient_pending_action_cancel(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIADMINCLIENT_PENDING_ACTIONS_LIST
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIADMINCLIENT_PENDING_ACTIONS_LIST
+uint16_t uniffi_fauna_ffi_checksum_method_ffiadminclient_pending_actions_list(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIADMINCLIENT_REQUEST_HOST_RESTART
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIADMINCLIENT_REQUEST_HOST_RESTART
 uint16_t uniffi_fauna_ffi_checksum_method_ffiadminclient_request_host_restart(void
@@ -4358,18 +4264,6 @@ uint16_t uniffi_fauna_ffi_checksum_method_ffiadminclient_users_suspend(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIADMINCLIENT_USERS_UPDATE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIADMINCLIENT_USERS_UPDATE
 uint16_t uniffi_fauna_ffi_checksum_method_ffiadminclient_users_update(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIBLUESKYCLIENT_THREAD_BY_AT_URI
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIBLUESKYCLIENT_THREAD_BY_AT_URI
-uint16_t uniffi_fauna_ffi_checksum_method_ffiblueskyclient_thread_by_at_uri(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIBLUESKYCLIENT_THREAD_BY_POST_ID
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIBLUESKYCLIENT_THREAD_BY_POST_ID
-uint16_t uniffi_fauna_ffi_checksum_method_ffiblueskyclient_thread_by_post_id(void
     
 );
 #endif
@@ -4763,66 +4657,6 @@ uint16_t uniffi_fauna_ffi_checksum_method_ffifamilyclient_usage_report(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_CONTRIBUTORS_GRANT
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_CONTRIBUTORS_GRANT
-uint16_t uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_contributors_grant(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_CONTRIBUTORS_LIST
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_CONTRIBUTORS_LIST
-uint16_t uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_contributors_list(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_CONTRIBUTORS_REVOKE
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_CONTRIBUTORS_REVOKE
-uint16_t uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_contributors_revoke(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_CREATE
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_CREATE
-uint16_t uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_create(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_DELETE
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_DELETE
-uint16_t uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_delete(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_GET
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_GET
-uint16_t uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_get(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_LIST
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_LIST
-uint16_t uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_list(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_LOCAL_POSTS
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_LOCAL_POSTS
-uint16_t uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_local_posts(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_POSTS
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_POSTS
-uint16_t uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_posts(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_UPDATE
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFEEDCLIENT_FEED_UPDATE
-uint16_t uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_update(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFOLDERSCLIENT_BACKFILL_SEALED_FIELDS
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFOLDERSCLIENT_BACKFILL_SEALED_FIELDS
 uint16_t uniffi_fauna_ffi_checksum_method_ffifoldersclient_backfill_sealed_fields(void
@@ -5045,12 +4879,6 @@ uint16_t uniffi_fauna_ffi_checksum_method_ffinestclient_admin(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_BLUESKY
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_BLUESKY
-uint16_t uniffi_fauna_ffi_checksum_method_ffinestclient_bluesky(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_BRIDGES
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_BRIDGES
 uint16_t uniffi_fauna_ffi_checksum_method_ffinestclient_bridges(void
@@ -5105,12 +4933,6 @@ uint16_t uniffi_fauna_ffi_checksum_method_ffinestclient_family(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_FEED
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_FEED
-uint16_t uniffi_fauna_ffi_checksum_method_ffinestclient_feed(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_FOLDERS
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_FOLDERS
 uint16_t uniffi_fauna_ffi_checksum_method_ffinestclient_folders(void
@@ -5120,6 +4942,12 @@ uint16_t uniffi_fauna_ffi_checksum_method_ffinestclient_folders(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_INBOX
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_INBOX
 uint16_t uniffi_fauna_ffi_checksum_method_ffinestclient_inbox(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_LOOK_FOR_NEWER_RELEASE_AT_SIGN_IN
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_LOOK_FOR_NEWER_RELEASE_AT_SIGN_IN
+uint16_t uniffi_fauna_ffi_checksum_method_ffinestclient_look_for_newer_release_at_sign_in(void
     
 );
 #endif
@@ -5156,12 +4984,6 @@ uint16_t uniffi_fauna_ffi_checksum_method_ffinestclient_push(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_PUSH_REGISTRATION
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_PUSH_REGISTRATION
 uint16_t uniffi_fauna_ffi_checksum_method_ffinestclient_push_registration(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_SEARCH
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_SEARCH
-uint16_t uniffi_fauna_ffi_checksum_method_ffinestclient_search(void
     
 );
 #endif
@@ -5378,12 +5200,6 @@ uint16_t uniffi_fauna_ffi_checksum_method_ffipushregistration_intent(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIPUSHREGISTRATION_REARM
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIPUSHREGISTRATION_REARM
 uint16_t uniffi_fauna_ffi_checksum_method_ffipushregistration_rearm(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFISEARCHCLIENT_QUERY
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFISEARCHCLIENT_QUERY
-uint16_t uniffi_fauna_ffi_checksum_method_ffisearchclient_query(void
     
 );
 #endif

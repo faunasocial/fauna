@@ -33,6 +33,10 @@ public class AccountSwitcherViewModelTests
     /// probes the real install base's lock files.</summary>
     private static FfiEraseRemoveBlocked? NobodyServes(string _) => null;
 
+    /// <summary>An erase that records which account it was asked for and finishes at once.</summary>
+    private static Func<string, Task> Recording(List<string> erased) =>
+        actor => { erased.Add(actor); return Task.CompletedTask; };
+
     // ── Row projection ──
 
     /// <summary>Rows follow the registry's add order (one switcher row per entry), and the
@@ -209,7 +213,7 @@ public class AccountSwitcherViewModelTests
     /// that only refreshes on navigate-to would hang there.
     /// </summary>
     [Fact]
-    public void Remove_CallsRegistry_AndShrinksTheBoundCollectionInPlace()
+    public async Task Remove_CallsRegistry_AndShrinksTheBoundCollectionInPlace()
     {
         var fake = new FakeAccountRegistry(
             active: ActorA,
@@ -220,14 +224,14 @@ public class AccountSwitcherViewModelTests
             });
         var erased = new List<string>();
         var vm = new AccountSwitcherViewModel(
-            fake, eraseAccountState: erased.Add, removeAccountBlocked: NobodyServes);
+            fake, eraseAccountState: Recording(erased), removeAccountBlocked: NobodyServes);
         vm.Refresh();
         var bound = vm.Accounts;           // the instance the page bound to
         var changes = 0;
         NotifyCollectionChangedEventHandler handler = (_, _) => changes++;
         bound.CollectionChanged += handler;
 
-        vm.Remove(ActorB);
+        await vm.RemoveAsync(ActorB);
 
         Assert.Equal(new[] { ActorB }, fake.Removed);
         // Erasure follows scope: a successful remove also erases the account's
@@ -240,10 +244,41 @@ public class AccountSwitcherViewModelTests
         Assert.Null(vm.ErrorMessage);
     }
 
+    /// <summary>
+    /// The erase waits for the removed account's store to stop
+    /// (<c>AccountStateDir.EraseWhenStoppedAsync</c>), and after a switch that stop can
+    /// still be running. The row goes as soon as the registry has removed the account,
+    /// so the user is never offered a second remove of an account that is already gone,
+    /// and the remove completes only once the erase has run.
+    /// </summary>
+    [Fact]
+    public async Task Remove_TheRowGoesAtOnce_AndTheRemoveFinishesOnlyAfterTheErase()
+    {
+        var fake = new FakeAccountRegistry(
+            active: ActorA,
+            entries: new[] { FakeAccountRegistry.Entry(ActorA), FakeAccountRegistry.Entry(ActorB) });
+        var erasing = new TaskCompletionSource();
+        var erased = new List<string>();
+        var vm = new AccountSwitcherViewModel(
+            fake,
+            eraseAccountState: actor => { erased.Add(actor); return erasing.Task; },
+            removeAccountBlocked: NobodyServes);
+        vm.Refresh();
+
+        var removing = vm.RemoveAsync(ActorB);
+
+        Assert.Equal(new[] { ActorB }, erased);
+        Assert.Equal(ActorA, Assert.Single(vm.Accounts).ActorId);
+        Assert.False(removing.IsCompleted, "the remove finished before its erase did");
+        erasing.SetResult();
+        await removing;
+        Assert.Null(vm.ErrorMessage);
+    }
+
     /// <summary>A registry rejection surfaces on the page's <c>error-message</c> banner and
     /// leaves the list intact.</summary>
     [Fact]
-    public void Remove_Failure_SurfacesTheErrorAndKeepsTheList()
+    public async Task Remove_Failure_SurfacesTheErrorAndKeepsTheList()
     {
         var fake = new FakeAccountRegistry(
             active: ActorA,
@@ -255,10 +290,10 @@ public class AccountSwitcherViewModelTests
         { ThrowOnRemove = true };
         var erased = new List<string>();
         var vm = new AccountSwitcherViewModel(
-            fake, eraseAccountState: erased.Add, removeAccountBlocked: NobodyServes);
+            fake, eraseAccountState: Recording(erased), removeAccountBlocked: NobodyServes);
         vm.Refresh();
 
-        vm.Remove(ActorB);
+        await vm.RemoveAsync(ActorB);
 
         Assert.NotNull(vm.ErrorMessage);
         // A rejected removal must NOT erase the account's stores (the account is
@@ -275,7 +310,7 @@ public class AccountSwitcherViewModelTests
     /// on <c>error-message</c>, and nothing is removed or erased.
     /// </summary>
     [Fact]
-    public void Remove_TheServedAccount_IsRefusedWithTheThisWindowLine_AndTouchesNothing()
+    public async Task Remove_TheServedAccount_IsRefusedWithTheThisWindowLine_AndTouchesNothing()
     {
         var line = new uniffi.fauna_core.LocalizedText(
             "settings.remove_account_blocked_this_window", new Dictionary<string, string>());
@@ -287,7 +322,7 @@ public class AccountSwitcherViewModelTests
         var asked = new List<string>();
         var vm = new AccountSwitcherViewModel(
             fake,
-            eraseAccountState: erased.Add,
+            eraseAccountState: Recording(erased),
             removeAccountBlocked: actor =>
             {
                 asked.Add(actor);
@@ -295,7 +330,7 @@ public class AccountSwitcherViewModelTests
             });
         vm.Refresh();
 
-        vm.Remove(ActorB);
+        await vm.RemoveAsync(ActorB);
 
         Assert.Equal(new[] { ActorB }, asked);
         Assert.Empty(fake.Removed);
@@ -308,7 +343,7 @@ public class AccountSwitcherViewModelTests
     /// app or another on the same login) serves is refused with the other-window line, and
     /// nothing is removed or erased.</summary>
     [Fact]
-    public void Remove_AnAccountASiblingServes_IsRefusedWithTheOtherWindowLine()
+    public async Task Remove_AnAccountASiblingServes_IsRefusedWithTheOtherWindowLine()
     {
         var line = new uniffi.fauna_core.LocalizedText(
             "settings.remove_account_blocked_other_window", new Dictionary<string, string>());
@@ -318,11 +353,11 @@ public class AccountSwitcherViewModelTests
         var erased = new List<string>();
         var vm = new AccountSwitcherViewModel(
             fake,
-            eraseAccountState: erased.Add,
+            eraseAccountState: Recording(erased),
             removeAccountBlocked: _ => new FfiEraseRemoveBlocked.ServedElsewhere(new[] { ActorB }, line));
         vm.Refresh();
 
-        vm.Remove(ActorB);
+        await vm.RemoveAsync(ActorB);
 
         Assert.Empty(fake.Removed);
         Assert.Empty(erased);

@@ -9,6 +9,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
@@ -24,6 +26,9 @@ import com.fauna.ffi.onboarding.FieldTypePlain
 import com.fauna.ffi.onboarding.OnboardingStep
 import com.fauna.ffi.onboarding.WizardOutcome
 import com.fauna.ffi.onboarding.serverTypeAllowedForMail
+import com.fauna.ffi.onboarding.updateChannelDescriptionKey
+import com.fauna.ffi.provisioning.UpdateChannel
+import uniffi.fauna_core.LocalizedText
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.launch
 import social.fauna.generated.Capability
@@ -40,6 +45,7 @@ class VpsConfigVM @Inject constructor(
     fun selectLocation(id: String) = host.machine.selectVpsLocation(id)
     fun selectServerType(id: String) = host.machine.selectVpsServerType(id)
     fun setProvisionMailMode(enabled: Boolean) = host.machine.setProvisionMailMode(enabled)
+    fun setUpdateChannel(channel: UpdateChannel) = host.machine.setProvisionUpdateChannel(channel)
     fun verify() = viewModelScope.launch { host.machine.verifyVps() }
     fun continueAction(onStep: (OnboardingStep) -> Unit) = viewModelScope.launch {
         host.machine.continueFromVps()
@@ -65,6 +71,7 @@ fun VpsConfigScreen(
     val continueBlockedReason = remember(tick) { vm.host.machine.vpsContinueBlockedReason() }
     val visibleFields = remember(tick) { vm.host.machine.visibleVpsFields() }
     val mailOn = remember(tick) { vm.host.machine.provisionMailModeEnabled() }
+    val updateChannel = remember(tick) { vm.host.machine.provisionUpdateChannel() }
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     // Twin of DnsConfigScreen's hosted-auth derivation — the CredentialsForm
@@ -227,6 +234,50 @@ fun VpsConfigScreen(
                             onClick = { vm.selectServerType(server.id) },
                         )
                         Text(server.id)
+                    }
+                }
+            }
+        }
+
+        // ── Update channel ──────────────────────────────────────────
+        // Which builds the box's updater follows. Outside the provider block on
+        // purpose: the choice does not depend on the provider, so it shows
+        // before one is picked. One keyed radio per channel
+        // (`vps-config-update-channel-row[<id>]`), in the shared enum's order,
+        // selection read from the shared getter. See onboarding-provisioning.md §5.
+        Spacer(Modifier.height(16.dp))
+        Column(Modifier.testTag(Ids.VPS_CONFIG_UPDATE_CHANNEL_ROW)) {
+            Text(
+                stringResource(R.string.onboarding_vps_config_update_channel_heading),
+                style = MaterialTheme.typography.titleSmall,
+            )
+            UpdateChannel.entries.forEach { channel ->
+                val label = when (channel) {
+                    UpdateChannel.STABLE -> stringResource(R.string.onboarding_vps_config_update_channel_stable_label)
+                    UpdateChannel.TEST -> stringResource(R.string.onboarding_vps_config_update_channel_test_label)
+                    UpdateChannel.DEV -> stringResource(R.string.onboarding_vps_config_update_channel_dev_label)
+                }
+                // The shared getter picks the description key (the compat-line
+                // wording for Test / Dev while the product major is 0); the
+                // screen only resolves it.
+                val desc = localized(LocalizedText(updateChannelDescriptionKey(channel), emptyMap())) ?: ""
+                val selected = channel == updateChannel
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .selectable(selected = selected, onClick = { vm.setUpdateChannel(channel) })
+                        .testTag("vps-config-update-channel-row[${channel.name.lowercase()}]")
+                        .semantics { stateDescription = if (selected) "on" else "off" },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(selected = selected, onClick = { vm.setUpdateChannel(channel) })
+                    Column(Modifier.padding(start = 8.dp)) {
+                        Text(label, style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            desc,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
             }

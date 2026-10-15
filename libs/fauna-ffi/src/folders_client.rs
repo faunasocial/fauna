@@ -244,7 +244,7 @@ pub fn folder_ref_is_valid(wire: String) -> bool {
 /// as lowercase hex, the set as its bare `FolderRef` wire string (what the
 /// Rust host and drain seams take), and the identifier's ref half — the one
 /// percent-encoded component the staging root is keyed by (the apple File
-/// Provider domain identifier, `on-demand-files.md` § Apple File Provider
+/// Provider domain identifier, `on-demand-files-apple.md` § Apple File Provider
 /// binding, *the actor-scoped device identity*).
 #[cfg(feature = "folders-author")]
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
@@ -468,7 +468,7 @@ where
 impl FfiFoldersClient {
     /// Every set the account holds, as the shared presence plan takes it —
     /// own folders and the folders shared with it, on this nest or another
-    /// (`on-demand-files.md` § Shared sets on a capability host, decision 3),
+    /// (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 3),
     /// read in the APP process over this seat's own folder-key custody. The
     /// twin of `capability_host_presence_sets`, which reads the capability
     /// hosts' replica; the mapping is one ([`presence_sets_over`]). `device_id`
@@ -666,7 +666,7 @@ impl FfiFoldersClient {
 
     /// Whether `device_id`'s place on `name` makes it a delivery seat for an
     /// on-demand presence — the `this_device_accepts` input of the shared
-    /// presence plan (`on-demand-files.md` § Apple File Provider binding:
+    /// presence plan (`on-demand-files-apple.md` § Apple File Provider binding:
     /// desired = own folders where this device's place has `accepts: true`).
     /// One `members.list` read through the one sanctioned seat rule
     /// (`SeatRead::delivers_presence`): no place, an unreadable place, or a

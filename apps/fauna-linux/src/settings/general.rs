@@ -222,11 +222,9 @@ pub fn build_general_page(rt: tokio::runtime::Handle) -> (gtk::Box, impl Fn() + 
                 use fauna_client::update_look::NewerReleaseCheck;
                 match answer {
                     NewerReleaseCheck::Newer { tag } => {
-                        btn.set_label(&gp::update_available(&tag));
-                        show_update_notice(
-                            tag.trim_start_matches('v'),
-                            &fauna_core::version::release_page_url(&tag),
-                        );
+                        let version = tag.trim_start_matches('v');
+                        btn.set_label(&gp::update_available(version));
+                        show_update_notice(version, &fauna_core::version::release_page_url(&tag));
                         crate::updater::notify_update_available(&tag);
                     }
                     NewerReleaseCheck::UpToDate => {

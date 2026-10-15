@@ -52,9 +52,78 @@ class MailSettingsVM @Inject constructor(
     /** The OAUTHBEARER token, shown once after a bearer credential is added. */
     val lastToken = MutableStateFlow<String?>(null)
 
+    // The Forwarding section's two fields (mail-forwarding.md § Per-account
+    // "forward all", § Per-account forward rate-limit):
+    // each holds the nest-confirmed value as text, repainted from the re-read —
+    // never the keystrokes. The ceiling is the nest's, returned beside the limit;
+    // the limit commit is inert until it is known.
+    val forwardAllTo = MutableStateFlow("")
+    val forwardPerHour = MutableStateFlow("")
+    val forwardCeiling = MutableStateFlow<UInt?>(null)
+
     init {
         hydrate()
+        hydrateForwarding()
         regeneratePassword()
+    }
+
+    private fun hydrateForwarding() {
+        viewModelScope.launch {
+            try {
+                forwardAllTo.value = api.forwardAllToGet().orEmpty()
+                publishForwardPerHour(api.forwardPerHourGet())
+            } catch (_: Exception) {
+                // One attempt: the transport already waits out a socket that has
+                // not landed yet (NestClient::request_inner).
+            }
+        }
+    }
+
+    private fun publishForwardPerHour(reply: com.fauna.ffi.ForwardPerHour) {
+        forwardPerHour.value = reply.value.toString()
+        forwardCeiling.value = reply.ceiling
+    }
+
+    /** Commit the forward-all draft. The shared parser decides first: a refused
+     *  draft names its reason on the error banner and sends nothing (the nest
+     *  would refuse it for the same reason — one rule, priority #2). Blank clears. */
+    fun commitForwardAllTo(draft: String) {
+        val address = when (val outcome = uniffi.fauna_client_mail_settings.forwardAllToDraftOutcome(draft)) {
+            is uniffi.fauna_client_mail_settings.ForwardAllToDraftOutcome.Clear -> null
+            is uniffi.fauna_client_mail_settings.ForwardAllToDraftOutcome.Set -> outcome.address
+            is uniffi.fauna_client_mail_settings.ForwardAllToDraftOutcome.Refused -> {
+                errorMessage.value = com.fauna.app.ui.util.resolveLocalized(context, outcome.message)
+                return
+            }
+        }
+        viewModelScope.launch {
+            try {
+                forwardAllTo.value = api.forwardAllToSet(address).orEmpty()
+                errorMessage.value = null
+            } catch (e: Exception) {
+                errorMessage.value = e.message
+            }
+        }
+    }
+
+    /** Commit the hourly-limit draft, bounded by the nest's ceiling. */
+    fun commitForwardPerHour(draft: String) {
+        val ceiling = forwardCeiling.value ?: return
+        val value = when (val outcome = uniffi.fauna_client_mail_settings.forwardPerHourDraftOutcome(draft, ceiling)) {
+            is uniffi.fauna_client_mail_settings.ForwardPerHourDraftOutcome.Value -> outcome.value
+            is uniffi.fauna_client_mail_settings.ForwardPerHourDraftOutcome.Refused -> {
+                errorMessage.value = com.fauna.app.ui.util.resolveLocalized(context, outcome.message)
+                return
+            }
+        }
+        viewModelScope.launch {
+            try {
+                publishForwardPerHour(api.forwardPerHourSet(value))
+                errorMessage.value = null
+            } catch (e: Exception) {
+                errorMessage.value = e.message
+            }
+        }
     }
 
     private fun hydrate() {

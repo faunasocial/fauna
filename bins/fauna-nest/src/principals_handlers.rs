@@ -10,8 +10,8 @@
 use fauna_protocol::{
     decode_strict as decode,
     principals::{
-        ListPrincipalsReply, ListPrincipalsRequest, PrincipalInfo, RevokePrincipalReply,
-        RevokePrincipalRequest,
+        ListPrincipalOpsReply, ListPrincipalOpsRequest, ListPrincipalsReply, ListPrincipalsRequest,
+        PRINCIPAL_OPS_PAGE, PrincipalInfo, RevokePrincipalReply, RevokePrincipalRequest,
     },
 };
 use serde_bytes::ByteBuf;
@@ -29,6 +29,12 @@ fn list_handler() -> RpcHandler {
         Box::pin(async move {
             require_permission(&state, &actor_id, "fauna.principals.list").await?;
             let _req: ListPrincipalsRequest = decode(&payload).map_err(malformed)?;
+            let now = u64::try_from(fauna_core::data::Timestamp::now_secs()).unwrap_or(0);
+            let mut oracle = state
+                .db
+                .principal_oracle_summaries(&actor_id, now)
+                .await
+                .map_err(internal)?;
             let principals = state
                 .db
                 .list_third_party_principals(&actor_id)
@@ -36,6 +42,7 @@ fn list_handler() -> RpcHandler {
                 .map_err(internal)?
                 .into_iter()
                 .map(|p| PrincipalInfo {
+                    oracle: oracle.remove(&p.principal_id),
                     principal_id: p.principal_id,
                     client_id: p.client_id,
                     holder_x25519: p.holder_x25519.map(ByteBuf::from),
@@ -50,11 +57,36 @@ fn list_handler() -> RpcHandler {
                     live_grants: p.live_grants,
                     bridge: p.declared_bridge,
                     service_auth: p.declared_service_auth,
+                    activitypub_peers: p.declared_activitypub_peers,
                     extra: Default::default(),
                 })
                 .collect();
             encode_reply(&ListPrincipalsReply {
                 principals,
+                extra: Default::default(),
+            })
+        })
+    })
+}
+
+/// `fauna.principals.ops` — one principal's oracle record, newest first, at
+/// most [`PRINCIPAL_OPS_PAGE`] rows: the per-operation half of the audit split
+/// (`key-material-hierarchy.md` § Audience: deployment infrastructure → *The
+/// oracle*), which only the custodian can observe — so this is the one nest
+/// read for operations, as the bunker roster's counters are for its apps. Not
+/// gated on the kill-switch, as the roster read is not.
+fn ops_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_permission(&state, &actor_id, "fauna.principals.ops").await?;
+            let req: ListPrincipalOpsRequest = decode(&payload).map_err(malformed)?;
+            let ops = state
+                .db
+                .list_principal_oracle_ops(&actor_id, &req.principal_id, PRINCIPAL_OPS_PAGE)
+                .await
+                .map_err(internal)?;
+            encode_reply(&ListPrincipalOpsReply {
+                ops,
                 extra: Default::default(),
             })
         })
@@ -140,6 +172,14 @@ pub fn register_principals_handlers(b: &mut RpcRouterBuilder) {
             forbid_replay: false,
             default_deadline: fetch,
             handler: list_handler(),
+        },
+    );
+    b.add(
+        "fauna.principals.ops",
+        RpcKindMeta {
+            forbid_replay: false,
+            default_deadline: fetch,
+            handler: ops_handler(),
         },
     );
     b.add(

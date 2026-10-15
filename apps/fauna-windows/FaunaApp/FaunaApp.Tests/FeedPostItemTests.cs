@@ -52,6 +52,26 @@ public class FeedPostItemTests
         Assert.Equal("\U0001F310", badge.Glyph); // activitypub → globe 🌐
     }
 
+    /// <summary><c>ui/feed.md</c> § Implementation status today,
+    /// <c>SourceKind::Bridged</c>: a token naming a bridge on the snapshot's roster
+    /// is that bridge's badge — its id, declared label and glyph; with no roster
+    /// entry the same token is the unknown source.</summary>
+    [Fact]
+    public void BridgedSource_NamesItsBridgeFromTheRoster()
+    {
+        var roster = new[] { new BridgeIdentitySnapshot("matrix", "Matrix", SourceGlyph.Globe) };
+
+        var item = FeedPostItem.ForSourceTest("fauna, matrix", roster);
+
+        Assert.Equal(2, item.SourceBadges.Count);
+        Assert.Equal("matrix", item.SourceBadges[1].Id);
+        Assert.Equal("Matrix", item.SourceBadges[1].Label);
+        Assert.Equal("\U0001F310", item.SourceBadges[1].Glyph); // declared globe 🌐
+
+        var unlisted = Assert.Single(FeedPostItem.ForSourceTest("matrix", []).SourceBadges);
+        Assert.Equal("\U0001F4E1", unlisted.Glyph); // unknown 📡
+    }
+
     [Fact]
     public void EmptySource_RendersNoBadge()
     {
@@ -353,6 +373,37 @@ public class FeedPostItemTests
 
         Assert.Equal("feedbeef", item.VideoThumbnailText);
         Assert.Equal("", item.VideoProxiedPath);
+    }
+
+    // ── What video-thumbnail plays (render-model.md § D6c → Inline playback): the tap asks
+    // the shared playback_source about the block the slot holds, so the card binds the block
+    // itself — a blob Video, else a bridged ProxiedVideo, the slot's own precedence.
+
+    [Fact]
+    public void ProxiedVideoBlock_IsTheBlockTheThumbnailPlays()
+    {
+        var item = ItemWith(new RenderBlock.ProxiedVideo(ProxiedClip, ""));
+
+        Assert.Equal(new RenderBlock.ProxiedVideo(ProxiedClip, ""), item.VideoBlock);
+    }
+
+    [Fact]
+    public void BlobVideo_IsTheBlockTheThumbnailPlays_OverAProxiedVideo()
+    {
+        var item = ItemWith(
+            new RenderBlock.Video("feedbeef", ""),
+            new RenderBlock.ProxiedVideo(ProxiedClip, ""));
+
+        Assert.Equal(new RenderBlock.Video("feedbeef", ""), item.VideoBlock);
+    }
+
+    [Fact]
+    public void NoVideoBlock_PlaysNothing()
+    {
+        var item = ItemWith(new RenderBlock.ProxiedImage(ProxiedPicture, ""));
+
+        Assert.Null(item.VideoBlock);
+        Assert.False(item.HasVideo);
     }
 
     [Fact]
@@ -783,6 +834,23 @@ public class FeedPostItemTests
         Assert.True(repost.IsRepostRow);
         Assert.Null(ordinary.RepostedPostId);
         Assert.False(ordinary.IsRepostRow);
+    }
+
+    /// <summary>The quote carrier (<c>PostSummary.quoted_post_id</c>) reaches the item,
+    /// so the harness state can name the post a quote quotes beside
+    /// <c>reposted_post_id</c> — an empty-commentary quote's card text is only its folded
+    /// embed, and a test finds it by its target (tui's key, ui/feed.md § The read model).
+    /// A quote is not a repost row.</summary>
+    [Fact]
+    public void QuotedPostId_Set_IsCarriedAndIsNotARepostRow()
+    {
+        var quote = new FeedPostItem(PostSummaryFixture.Make(document: EmptyDoc(), quotedPostId: "orig-1"));
+        var ordinary = new FeedPostItem(PostSummaryFixture.Make(document: EmptyDoc()));
+
+        Assert.Equal("orig-1", quote.QuotedPostId);
+        Assert.False(quote.IsRepostRow);
+        Assert.Null(ordinary.QuotedPostId);
+        Assert.False(quote.ContentEquals(ordinary));
     }
 
     [Fact]

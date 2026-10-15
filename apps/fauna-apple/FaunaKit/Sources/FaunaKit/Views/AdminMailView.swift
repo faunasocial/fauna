@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The flat admin **`admin-mail`** mail-policy page (`docs/goal/behavior/admin.md`
@@ -694,3 +697,4 @@ private struct MailAliasPolicySection: View {
         return p
     }
 }
+#endif // !FAUNA_KIDS

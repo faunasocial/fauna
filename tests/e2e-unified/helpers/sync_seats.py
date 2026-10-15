@@ -170,10 +170,22 @@ UNSUPPORTED_MODES = {"win32": ("tui",)}
 UNBUILT_MODES: dict[str, dict[str, str]] = {}
 
 
-def seat_sets_for_platform(sys_platform: str, seat_sets=None) -> tuple:
+def _owed(sys_platform: str, unbuilt) -> dict:
+    """The platform's unbuilt seat modes plus one caller's own (``unbuilt``)."""
+    return {**UNBUILT_MODES.get(sys_platform, {}), **(unbuilt or {}).get(sys_platform, {})}
+
+
+def seat_sets_for_platform(sys_platform: str, seat_sets=None, *, unbuilt=None) -> tuple:
     """The seat sets collectable on this OS — the given matrix (default
     :data:`DEFAULT_PAIRS`) minus any set naming a mode this platform cannot
     drive *or* has not built yet.
+
+    ``unbuilt`` is ONE caller's own debt, in :data:`UNBUILT_MODES`' shape: a
+    journey whose leg on some platform is still owed although the seat mode
+    itself is built there (the device-to-device transfer's linux and macOS
+    legs, whose seats sync in the seat module). It filters exactly as the
+    platform map does and :func:`unbuilt_note` prints it the same way, without
+    filing the platform's seat as unbuilt for every other caller.
 
     Length-agnostic on purpose: the same filter serves the two-seat matrix, the
     three-seat one, and any explicit set from :func:`seat_sets_from_env`. A
@@ -188,7 +200,7 @@ def seat_sets_for_platform(sys_platform: str, seat_sets=None) -> tuple:
     platform is left with nothing.
     """
     absent = tuple(UNSUPPORTED_MODES.get(sys_platform, ())) + tuple(
-        UNBUILT_MODES.get(sys_platform, {})
+        _owed(sys_platform, unbuilt)
     )
     return tuple(
         seat_set
@@ -237,9 +249,10 @@ def seat_sets_from_env(environ=None) -> tuple | None:
     return tuple(seat_sets)
 
 
-def unbuilt_note(sys_platform: str) -> str | None:
+def unbuilt_note(sys_platform: str, *, unbuilt=None) -> str | None:
     """What this platform is NOT collecting because nobody built it yet — or
-    None when it owes nothing.
+    None when it owes nothing. ``unbuilt`` adds one caller's own debt, as
+    :func:`seat_sets_for_platform` takes it.
 
     No silent caps: a platform that collects fewer seat sets than the matrix
     declares has to say so, or a green run reads as full coverage. Structural
@@ -247,7 +260,7 @@ def unbuilt_note(sys_platform: str) -> str | None:
     platform is missing, and repeating them every run would train readers to
     ignore the line that does matter.
     """
-    owed = UNBUILT_MODES.get(sys_platform, {})
+    owed = _owed(sys_platform, unbuilt)
     if not owed:
         return None
     return "\n".join(
@@ -328,7 +341,7 @@ def residue_note(token: str, seats) -> str | None:
     None when there is none.
 
     The shared-box rule's non-destructive carve-out (testing.md § shared-box
-    rule) is the *only* thing licensing an unattended run against example.com, and
+    rule) is the *only* thing licensing an unattended run against a live nest, and
     it is conditional on the run removing what it created. So a failed cleanup
     is not hygiene, it is the licence lapsing: the message has to name the files
     precisely enough that a human can finish the job from the log alone.
@@ -612,6 +625,26 @@ def adopted_rescan_ms(lines) -> set[int]:
     and every one of them must agree with the launch.
     """
     return {int(m.group(1)) for line in lines for m in _RESCAN_ARMED.finditer(line)}
+
+
+_CONVERGE_PASS = re.compile(r"local converge pass complete\b.*?\bclean=(true|false)\b")
+
+
+def converge_passes(lines) -> list[bool]:
+    """Every local converge pass an agent log says COMPLETED, in order — each
+    entry whether that pass ran clean.
+
+    The engine logs ``local converge pass complete clean=<bool>`` at the end of
+    every pass (``LocalWriteHost::converge`` in
+    ``fauna_sync_engine::always_resident``). A clean pass ran a full scan of the
+    folder and handed every file it took up to the uploader before the line, so
+    for a file already on disk when the pass began, a missing ``sync_entries``
+    row after a clean line is the engine's decision, not a delay — the causal
+    anchor :meth:`AppSeatDriver.await_clean_converge_pass` serves (convention 14).
+    """
+    return [
+        m.group(1) == "true" for line in lines for m in _CONVERGE_PASS.finditer(line)
+    ]
 
 
 def review_rows_for_run(rows, run_token: str) -> list:
@@ -973,34 +1006,101 @@ class AppSeatDriver:
 
     def stop(self) -> None:
         if self._driver is not None:
+            pipe = self._agent_pipe()
             self._driver.teardown()
             self._driver = None
             self._app = None
+            self._stop_surviving_agent(pipe)
 
     def stop_keeping_state(self) -> None:
         """Quit the app — and with it this seat's agent — keeping everything it
         wrote, so :meth:`restart` brings the SAME device back: its ``sync.db``
         and anchor, its binding, its signed-in store.
 
-        The driver's own teardown, never a kill: it reaps the agent the app
-        spawned as a group child (``drivers/tui.py::teardown``). The pin is
+        The driver's own teardown on unix, never a kill: it reaps the agent the
+        app spawned as a group child (``drivers/tui.py::teardown``). The pin is
         what keeps the private launch world across it — without it the
         relaunch would be a fresh device catching up from an empty anchor,
         which is first sync, not catch-up.
+
+        **windows quits through the bridge instead.** Its teardown also stops
+        the FlaUI bridge and drops the per-instance credential and data dirs,
+        so a seat stopped that way could never relaunch as the same device —
+        ``hard_reload`` would find no bridge to ask. The bridge's own app kill
+        (``kill_uncleanly``, the step every windows relaunch begins with in
+        ``drivers/windows.py::recover``) leaves both, and the pin keeps
+        ``recover`` from emptying the store.
         """
         assert self._driver.preserve_state_across_relaunch(), (
             f"[{self.name}] the {self.app_name} driver cannot keep its launch "
             f"state across a relaunch, so a restarted seat would be a new device "
             f"and a catch-up assertion would prove nothing"
         )
-        self._driver.teardown()
+        pipe = self._agent_pipe()
+        if self.app_name == "windows":
+            self._driver.kill_uncleanly()
+        else:
+            self._driver.teardown()
+        self._stop_surviving_agent(pipe)
+
+    def _agent_endpoint(self) -> tuple[str, str] | None:
+        """Where this seat's own agent answers: ``("unix", <socket>)`` or
+        ``("pipe", <Win32 pipe path>)``, whichever the driver publishes — or
+        None (not launched, or a driver that publishes neither).
+
+        The ONE place a seat chooses its agent's transport, so every reader of
+        the agent (:meth:`peer_files`) and the stop that follows a windows app
+        (:meth:`_stop_surviving_agent`) agree on which agent is this seat's."""
+        socket_path = getattr(self._driver, "sync_agent_socket", None)
+        if socket_path:
+            return "unix", socket_path
+        pipe = getattr(self._driver, "sync_agent_pipe", None)
+        if pipe:
+            return "pipe", pipe
+        return None
+
+    def _agent_pipe(self) -> str | None:
+        endpoint = self._agent_endpoint()
+        return endpoint[1] if endpoint and endpoint[0] == "pipe" else None
+
+    def _stop_surviving_agent(self, pipe: str | None) -> None:
+        """Stop this seat's agent if it outlived the app, through its own
+        ``Shutdown`` — never by killing it (the harness's process-safety rule).
+
+        A windows agent is built to outlive its app (``agent_spawner.rs``,
+        ``CREATE_NO_WINDOW``: it keeps syncing app-dead), so on windows "the app
+        quit" never says "the device is away": a stopped seat whose agent still
+        serves goes on handing its sibling chunks. Asked AFTER the app is gone,
+        so the app's convergence tick cannot respawn it. A unix seat has no
+        pipe and nothing to do: its agent is the app's group child, reaped by
+        the driver's teardown.
+
+        Measured 2026-10-09 on two clean runs of the device-to-device journeys:
+        the FlaUI bridge's app kill (``Kill(entireProcessTree: true)``) takes
+        the agent with it, because the app spawns it as its own child, so this
+        found nothing to stop. It is the guarantee, not the mechanism — for an
+        agent that is not the app's child (one adopted on the pipe) or an app
+        quit that is not a tree kill — and it says so when it does stop one."""
+        if pipe is None:
+            return
+        from helpers.windows_sync_agent import stop_agent_if_serving
+
+        stopped = stop_agent_if_serving(pipe)
+        if stopped is not None:
+            print(
+                f"[seats] {self.name}: its agent (pid {stopped}) outlived the "
+                f"{self.app_name} app — stopped through its own Shutdown",
+                flush=True,
+            )
 
     def restart(self, budget: float) -> float:
         """Relaunch after :meth:`stop_keeping_state` and wait until the engine
         serves the bound folder again; seconds waited.
 
         ``hard_reload`` on a pinned store waits for the app's own auto-login
-        (a real user's restart), and the agent resumes the binding it kept.
+        (a real user's restart), and the agent resumes the binding it kept —
+        on windows a fresh agent the relaunched app spawns on the same per-seat
+        pipe and data dir, which the frozen launch environment still names.
         """
         self._driver.hard_reload()
         return self.await_ready(budget)
@@ -1017,17 +1117,77 @@ class AppSeatDriver:
                 pass
         return lines
 
-    def local_conflicts(self, conflict_type: str) -> list[tuple[str, str | None]]:
-        """``(path, details)`` of this seat's ``sync_conflicts`` rows of one type.
+    def peer_files(self) -> dict | None:
+        """This seat's agent's same-account peer data plane reading —
+        ``{siblings, chunks, bytes, to_nest}`` off its ``GetServiceStatus``
+        reply (``fauna_ipc::sync::PeerFilesInfo``) — or ``None`` when the agent
+        cannot be asked (not up yet, or a driver that publishes no agent
+        endpoint). The observable that says whether a file body came from
+        another of the account's devices or from the nest. Asked on whichever
+        transport :meth:`_agent_endpoint` names — both clients speak the same
+        ``GetServiceStatus``."""
+        endpoint = self._agent_endpoint()
+        if endpoint is None:
+            return None
+        kind, address = endpoint
+        if kind == "unix":
+            from helpers.sync_agent_ipc_unix import SyncAgentClient
+        else:
+            from helpers.sync_agent_ipc import SyncAgentClient
 
-        Read off the agent's own state DBs (``fsid-<ref>.db`` per folder,
-        ``fauna_core::folder_keys::FolderRef::state_db_path``, under the
-        launch's private world), read-only — every DB under its ``sync`` tree,
-        so a rename of the per-folder file cannot quietly empty the read.
-        That table is where the engine records a change it will never apply
-        (`file-sync.md` § 5); no app renders it yet, so the row itself is the
-        observable — the review list reads the nest's ``conflicts.list``,
-        which this row never reaches.
+        try:
+            return SyncAgentClient(address, timeout=5.0).service_status().get("peer_files")
+        except Exception:
+            return None
+
+    def await_clean_converge_pass(self, budget: float) -> float:
+        """Poll until this seat's agent has logged a CLEAN local converge pass;
+        seconds waited.
+
+        Every pass counts, because the caller seeds its files before the seat
+        starts: the engine is built after they are on disk, so its first pass
+        already scanned them (:func:`converge_passes` says why a clean line is a
+        causal anchor). A file written while the seat runs needs a pass that
+        BEGAN after the write — two lines past the write, not one — which this
+        method does not offer.
+        """
+        started = time.monotonic()
+        deadline = started + budget
+        passes: list[bool] = []
+        while time.monotonic() < deadline:
+            passes = converge_passes(self.agent_log_lines())
+            if any(passes):
+                return time.monotonic() - started
+            time.sleep(1.0)
+        raise AssertionError(
+            f"[{self.name}] no clean local converge pass within {budget:.0f}s "
+            f"(passes logged: {passes or 'none'}) — without one, nothing proves "
+            f"this seat's engine ever scanned the folder, so no absence below "
+            f"would mean anything.\n{self.agent_log_note()}"
+        )
+
+    def sync_entry_paths(self) -> set[str]:
+        """Every path in this seat's ``sync_entries`` — what its engine took up.
+
+        Read off the agent's own state DBs read-only (``fsid-<ref>.db`` per
+        folder, ``fauna_core::folder_keys::FolderRef::state_db_path``, under the
+        launch's private world) — every DB under its ``sync`` tree, so a rename
+        of the per-folder file cannot quietly empty the read. A path the engine ignores never gets
+        a row: reconcile writes one for every scanned file before the uploader
+        sees it, so a row is the first trace an upload leaves.
+        """
+        return set(self.sync_entry_states())
+
+    def sync_entry_states(self) -> dict[str, tuple[str, bool]]:
+        """Every ``sync_entries`` row as ``{path: (state, holds_local_hash)}`` —
+        the engine's own record of whether it holds a file's bytes.
+
+        ``state`` is the row's stored word (``placeholder``, ``synced``, …,
+        ``fauna_account_store::db::SyncState``); ``holds_local_hash`` says the
+        engine recorded the identity of bytes on this device — a placeholder
+        row has none until a hydration records the served file
+        (``SyncEngine::mark_hydrated``). Same read-only DB sweep as
+        :meth:`sync_entry_paths`.
         """
         import sqlite3
 
@@ -1035,16 +1195,16 @@ class AppSeatDriver:
         assert config_home, f"[{self.name}] the driver exposes no launch root to search"
         dbs = sorted(Path(config_home).parent.glob("**/sync/**/*.db"))
         assert dbs, f"[{self.name}] no state DB under {Path(config_home).parent}"
-        rows: list[tuple[str, str | None]] = []
+        rows: dict[str, tuple[str, bool]] = {}
         for db in dbs:
             conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
             try:
-                rows += conn.execute(
-                    "SELECT path, details FROM sync_conflicts WHERE conflict_type = ?",
-                    (conflict_type,),
-                ).fetchall()
+                for path, state, local_hash in conn.execute(
+                    "SELECT path, state, local_hash FROM sync_entries"
+                ):
+                    rows[path] = (state, local_hash is not None)
             except sqlite3.OperationalError:
-                pass  # a state DB from another plane, with no conflicts table
+                pass  # a state DB from another plane, with no entries table
             finally:
                 conn.close()
         return rows

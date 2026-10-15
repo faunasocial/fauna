@@ -52,6 +52,9 @@ public sealed partial class AdminNestPage : Page
     /// (mirrors <c>NatModeChoiceView</c>'s <c>_syncingRadios</c>).</summary>
     private bool _syncingNatMode;
 
+    /// <summary>The same guard for the web-app origin radios.</summary>
+    private bool _syncingWebAppOrigin;
+
     public AdminNestPage()
     {
         this.InitializeComponent();
@@ -60,6 +63,10 @@ public sealed partial class AdminNestPage : Page
         // AdminNestView.regionSection.
         RegionSaveButton.FaunaGate("fauna.admin.region.set");
         RegionWithdrawButton.FaunaGate("fauna.admin.region.set");
+        // The web-app origin save is a genuine Admin-class wire write (kind
+        // OnlineOnly); the radios above it are the local buffer and dispatch
+        // nothing, so only the commit is gated (android's WebAppOriginSection).
+        WebAppOriginSaveButton.FaunaGate("fauna.admin.web_app_origin.set");
         // The admin pairing master switch — one `fauna.admin.services.update`
         // row (name "pairing"), the same kind linux declares on its own toggle
         // (apps/fauna-linux/src/views/admin.rs:2844). Found MISSING here by
@@ -113,6 +120,7 @@ public sealed partial class AdminNestPage : Page
             RenderPairingToggle();
             RenderOsMaintenance();
             RenderRegion();
+            RenderWebAppOrigin();
             RenderSeedRotate();
             // Fold the (empty) form once so the arm control opens with the
             // shared `arm_label` and its blocked reason, not a blank button.
@@ -375,6 +383,55 @@ public sealed partial class AdminNestPage : Page
         if (_natVm is null) return;
         await _natVm.SubmitCommand.ExecuteAsync(null);
         RenderNatMode();
+    }
+
+    // ── Web-app origin (fauna.admin.web_app_origin.{get,set}) ───────────────
+
+    /// <summary>Paint the section from the VM: radios unmarked and disabled until
+    /// the read lands and whenever <c>can_set</c> is false; the central label and
+    /// the status + scope lines are the shared view's. Guards the programmatic
+    /// <c>IsChecked</c> set so the <c>Checked</c> handlers don't re-select.</summary>
+    private void RenderWebAppOrigin()
+    {
+        if (_vm is null) return;
+        _syncingWebAppOrigin = true;
+        if (WebAppOriginBundledRadio.IsChecked != _vm.WebAppOriginBundledSelected)
+            WebAppOriginBundledRadio.IsChecked = _vm.WebAppOriginBundledSelected;
+        if (WebAppOriginCentralRadio.IsChecked != _vm.WebAppOriginCentralSelected)
+            WebAppOriginCentralRadio.IsChecked = _vm.WebAppOriginCentralSelected;
+        _syncingWebAppOrigin = false;
+        WebAppOriginBundledRadio.IsEnabled = _vm.WebAppOriginCanSet;
+        WebAppOriginCentralRadio.IsEnabled = _vm.WebAppOriginCanSet;
+        WebAppOriginCentralRadio.Content = _vm.WebAppOriginCentralLabel;
+        WebAppOriginStatusText.Text = _vm.WebAppOriginStatus;
+        WebAppOriginScopeText.Text = _vm.WebAppOriginScope;
+        WebAppOriginSaveButton.IsEnabled = _vm.WebAppOriginCanSave;
+    }
+
+    private void WebAppOriginBundledRadio_Checked(object sender, RoutedEventArgs e)
+    {
+        if (_syncingWebAppOrigin || _vm is null) return;
+        _vm.SelectWebAppOrigin(FfiWebAppOrigin.Bundled);
+        RenderWebAppOrigin();
+    }
+
+    private void WebAppOriginCentralRadio_Checked(object sender, RoutedEventArgs e)
+    {
+        if (_syncingWebAppOrigin || _vm is null) return;
+        _vm.SelectWebAppOrigin(FfiWebAppOrigin.Central);
+        RenderWebAppOrigin();
+    }
+
+    /// <summary>admin-nest-web-app-origin-save-button → commit the marked mode via
+    /// the VM and repaint from the set's reply (disabled mid-flight).</summary>
+    private async void WebAppOriginSaveButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null) return;
+        var save = _vm.SaveWebAppOriginAsync();
+        RenderWebAppOrigin();
+        await save;
+        RenderWebAppOrigin();
+        RenderError(_vm.Error);
     }
 
     // ── Deployment-identity rotation (box-recovery.md § Deployment-seed

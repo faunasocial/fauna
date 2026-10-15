@@ -661,7 +661,7 @@ mod tests {
         }));
 
         let parsed = parse_profile_record(&bytes).unwrap();
-        let walked = crate::record_refs::external_record_blob_refs(&bytes);
+        let walked = crate::record_refs::external_record_blob_refs(&bytes).unwrap();
         for cid in [parsed.avatar.unwrap(), parsed.banner.unwrap()] {
             assert!(
                 walked.contains(&cid),
@@ -698,7 +698,7 @@ mod tests {
             Some(cid.as_str()),
         );
         assert_eq!(
-            crate::record_refs::external_record_blob_refs(&bytes),
+            crate::record_refs::external_record_blob_refs(&bytes).unwrap(),
             vec![cid],
             "the walk must see the ref the parse sees — an unstamped \
              `atproto_blobs` row is deleted user media",

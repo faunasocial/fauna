@@ -34,3 +34,17 @@ pub fn manager() -> Arc<ConversationsManager> {
         })
         .clone()
 }
+
+/// Commit the new-thread picker's typed recipient as a chip: probe first, then
+/// commit, then re-derive the compose's list-send notes (the chip may be one of
+/// the account's own lists, `mail-mass-mailing.md` § Composing a list message).
+///
+/// The one body of the picker's on-accept handler (`views/conversations/detail.rs`)
+/// AND the test agent's `conversations_accept_recipient`, so the agent cannot
+/// under-honour the control it stands in for.
+pub async fn resolve_accept_and_refresh(m: &ConversationsManager) -> bool {
+    m.resolve_recipient().await;
+    let committed = m.accept_current_recipient_chip();
+    m.refresh_list_send(None).await;
+    committed
+}

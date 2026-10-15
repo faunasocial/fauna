@@ -226,6 +226,7 @@ mod tests {
             "fauna.posts.get" => fauna_protocol::encode_canonical(&PostGetReply {
                 body: ByteBuf::from(vec![0x01, 0x02]),
                 legal_takedown: None,
+                author_display: None,
                 extra: Default::default(),
             }),
             "fauna.posts.delete" => fauna_protocol::encode_canonical(&PostDeleteReply {

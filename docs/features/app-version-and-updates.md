@@ -34,12 +34,12 @@ Stamped 2026-09-26 at dc54d3d61e.
 | App | Status | Stamp |
 |---|---|---|
 | web |  no run recorded | |
-| linux | ✅ full | 0.1.2-dev+78e73031 standalone |
+| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
 | windows | ✅ full | 0.1.3-dev+74556739 standalone |
 | macos | ✅ full | 0.1.3-dev+1cf3db28 standalone |
 | ios |  no run recorded | |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+ef35c9ce.dirty standalone |
+| tui | ✅ full | 0.1.3-dev+e5c92300.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

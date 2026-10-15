@@ -159,7 +159,7 @@ func checkXMLDepth(body []byte, max int) error {
 // accessLogMiddleware emits one structured line per request. Low-volume
 // mutations (MKCOL/DELETE/MOVE/COPY/PROPPATCH) log at Info; high-volume
 // read/browse verbs (PROPFIND/GET/HEAD/OPTIONS) and PUT log at Debug so steady
-// client polling can't flood the log (the example.com 69 GB log lesson).
+// client polling can't flood the log (the live-nest 69 GB log lesson).
 func accessLogMiddleware(next http.Handler, logger *slog.Logger) http.Handler {
 	if logger == nil {
 		logger = slog.Default()

@@ -11,7 +11,7 @@ import UniformTypeIdentifiers
 /// rename surface the extension's write callbacks serve (`serve_ingest`/`serve_
 /// delete`/`serve_rename`, ack only on `UploadOutcome::recorded`) — except on a
 /// set the account holds as a reader, whose items advertise reading only
-/// (`FileProviderItemCapabilities`; `on-demand-files.md` § Shared sets on a
+/// (`FileProviderItemCapabilities`; `on-demand-files-shared-sets.md` § Shared sets on a
 /// capability host, decision 3).
 final class FileProviderItem: NSObject, NSFileProviderItem {
     let identifier: NSFileProviderItemIdentifier

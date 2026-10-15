@@ -6,7 +6,7 @@
   // `__FAUNA_PAYMENTS__`. The open itself stays the page's `openPayment`, whose
   // `isSafeNavUrl` guard is glue, not a payments face.
   import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import { PAYMENTS_IDS } from '$lib/components/payments/generatedIds';
 
   interface Props {
     onopen: () => void;
@@ -14,7 +14,7 @@
   let { onopen }: Props = $props();
 </script>
 
-<button class="btn" data-testid={IDS.SUBSCRIPTION_OFFER_PAYMENT_LINK} onclick={onopen}
+<button class="btn" data-testid={PAYMENTS_IDS.SUBSCRIPTION_OFFER_PAYMENT_LINK} onclick={onopen}
 >{t.subscriptions.payment_url}</button>
 
 <style>

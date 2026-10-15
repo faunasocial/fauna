@@ -90,7 +90,9 @@ fn button_label(check: &UpdateCheck) -> String {
         UpdateCheck::Checking => common::CHECKING.to_owned(),
         UpdateCheck::UpToDate => t::UP_TO_DATE.to_owned(),
         UpdateCheck::Failed => t::CHECK_FAILED.to_owned(),
-        UpdateCheck::Newer { tag } => t::general_page::update_available(tag),
+        UpdateCheck::Newer { tag } => {
+            t::general_page::update_available(tag.trim_start_matches('v'))
+        }
     }
 }
 
@@ -130,17 +132,18 @@ pub(super) async fn check() -> UpdateCheck {
     }
 }
 
-/// The once-per-sign-in look: a newer release's tag, or `None` (nothing newer,
-/// or a failed look — silent by rule). Same feed, same origin seam as
-/// [`check`].
-pub(super) async fn look() -> Option<String> {
-    fauna_client::update_look::look_at_sign_in_over_http(
-        &reqwest::Client::new(),
-        &feed_origin(),
-        &user_agent(),
-        CURRENT_VERSION,
-    )
-    .await
+/// The once-per-sign-in look: the tag of a newer release `nest` (the one just
+/// signed in to) reports, or `None` (nothing newer, the nest says nothing, or
+/// a failed look — silent by rule). Never the release host: only [`check`],
+/// the asked one, reads the feed.
+///
+/// The shared [`fauna_client::update_look::look_at_sign_in`], whose read is
+/// the connection's one `fauna.nest.info` reply
+/// (`fauna_protocol::read_nest_info`), which the sign-in's landing load reads
+/// too: one read serves both, where the look's own read was a second draw on
+/// the actor's discovery budget at every sign-in.
+pub(super) async fn look(nest: std::sync::Arc<fauna_client::NestClient>) -> Option<String> {
+    fauna_client::update_look::look_at_sign_in(&nest, CURRENT_VERSION).await
 }
 
 #[cfg(test)]
@@ -204,6 +207,10 @@ mod tests {
                 ids::SETTINGS_CHECK_UPDATES_BUTTON,
                 ids::UPDATE_AVAILABLE_NOTICE
             ]
+        );
+        assert_eq!(
+            text_of(&els, ids::SETTINGS_CHECK_UPDATES_BUTTON),
+            t::general_page::update_available("9.9.9")
         );
         let notice = text_of(&els, ids::UPDATE_AVAILABLE_NOTICE);
         assert!(notice.contains("9.9.9"), "{notice}");

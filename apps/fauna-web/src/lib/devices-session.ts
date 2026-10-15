@@ -73,6 +73,10 @@ async function build(secretHex: string, s: Session): Promise<DevicesMachine> {
   // Label custody: unwired, a sealed device/folder label degrades to its id-shaped
   // fallback instead of the name the owner set.
   machine.setLabelCustody(secretHex);
+  // The paired predecessor chain, AFTER the custody (a later setLabelCustody
+  // would wipe it): a successor's Folders page lists the sets it inherited.
+  // Walked inside wasm from `secretHex` — the raw keys never enter JS.
+  machine.setPredecessorChain(secretHex);
   // The audience attestor — the owner's signature a `public` flip carries
   // (encryption-at-rest.md § Readable classes → the declassification is
   // owner-attested). Unwired, the flip lands but every verifying seat keeps
@@ -81,7 +85,7 @@ async function build(secretHex: string, s: Session): Promise<DevicesMachine> {
   // The fleet door, through the account port (account-client-lifecycle.md
   // § The account port): a removal stages its fleet leg in this tab's account
   // runtime BEFORE the nest deletion and settles it on the outcome — the
-  // native removal (account-data-taxonomy.md § Fleet-scope reclamation, clause
+  // native removal (fleet-scope-reclamation.md § Fleet-scope reclamation, clause
   // (4)). With no runtime serving this account the removal is refused and
   // deletes nothing; `sharedRpcPort` above has loaded the core chunk.
   machine.setAccountPort(sharedAccountPort(secretHex));

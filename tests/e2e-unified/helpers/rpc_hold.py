@@ -67,20 +67,45 @@ def _post(port: int, path: str) -> dict:
     return json.loads(urllib.request.urlopen(req).read() or b"{}")
 
 
-def arm_rpc_hold(port: int, kind: str) -> None:
+def arm_rpc_hold(port: int, kind: str, *, pass_first: int = 0) -> None:
     """Park every subsequent request of ``kind`` until :func:`release_rpc_hold`.
 
     ``kind`` is the wire kind the nest registers (``fauna.inbox.mode.get``), not
     the client-side method name — the nest rejects an unregistered one with a
     400 rather than silently arming a gate nothing will ever reach, which would
     surface much later as "the app never sent the request".
+
+    ``pass_first`` lets that many requests of the kind run before the hold
+    starts parking — the window *part way through* a loop (a transfer's time
+    left exists only once something was processed), which releasing a hold and
+    re-arming it before the loop's next request would race. The budget is
+    spent at the nest's gate in arrival order (`rpc_hold_test_hook.rs`
+    § Passing the first N).
     """
-    _post(port, f"/api/v1/test/rpc-hold/{kind}")
+    query = f"?pass={pass_first}" if pass_first else ""
+    _post(port, f"/api/v1/test/rpc-hold/{kind}{query}")
+
+
+def hold_rpc_until_shutdown(port: int, kind: str) -> None:
+    """Park every subsequent request of ``kind`` until the nest begins a
+    graceful shutdown — or :func:`release_rpc_hold`, whichever comes first.
+
+    The in-flight-at-stop sibling of :func:`arm_rpc_hold`: a plain hold's
+    release is an HTTP call, which cannot reach a nest that has begun to stop,
+    so it can never stage "a request already sent when the stop began". This
+    hold is let go by the stop itself, its handler runs inside the
+    connection's drain, and its Reply is due before the 1001 close
+    (`transport-connection.md` § Graceful shutdown;
+    `rpc_hold_test_hook.rs` § Holding until shutdown). :func:`wait_for_held_rpc`
+    is the arrival proof to stop the nest on. Release it in a ``finally``
+    anyway: a test that fails before the stop leaves the kind armed.
+    """
+    _post(port, f"/api/v1/test/rpc-hold/{kind}/hold-until-shutdown")
 
 
 def rpc_hold_status(port: int, kind: str) -> dict:
-    """``{"armed", "refusing", "dropping", "holding", "released", "refused",
-    "dropped"}`` for ``kind``.
+    """``{"armed", "until_shutdown", "refusing", "dropping", "holding",
+    "passing", "released", "refused", "dropped"}`` for ``kind``.
 
     ``holding`` counts the requests parked *right now* — the arrival observable.
     ``released``, ``refused`` and ``dropped`` are cumulative over the nest
@@ -130,7 +155,7 @@ def wait_for_held_rpc(port: int, kind: str, *, count: int = 1,
     )
 
 
-def refuse_rpc(port: int, kind: str) -> None:
+def refuse_rpc(port: int, kind: str, *, as_: str | None = None) -> None:
     """Answer every request of ``kind`` with an error reply until
     :func:`release_rpc_hold` — the parked ones included.
 
@@ -140,8 +165,18 @@ def refuse_rpc(port: int, kind: str) -> None:
     with a failure no ordinary input provokes — a composer's failed send
     (`feed.md` § Errors & edge cases). Release it in a ``finally`` exactly like
     a hold: a refusing kind turns away every later test's requests too.
+
+    ``as_="outdated"`` refuses with the nest's own ``fauna.nest.outdated``
+    instead — the refusal of a nest that needs updating
+    (`version-compatibility.md` § Dimension 4). ``as_="unauthenticated"``
+    refuses with ``fauna.protocol.unauthenticated`` — what an older peer nest's
+    federation allowlist answers for a kind it predates; armed on a peer's
+    federation kind it stands that peer in for an outdated one
+    (`version-compatibility.md` § Dimension 5). The default is a code no app
+    recognises. The set is closed on the nest side (``Refusal``).
     """
-    _post(port, f"/api/v1/test/rpc-hold/{kind}/refuse")
+    query = f"?as={as_}" if as_ else ""
+    _post(port, f"/api/v1/test/rpc-hold/{kind}/refuse{query}")
 
 
 def wait_for_refused_rpc(port: int, kind: str, *, count: int = 1,

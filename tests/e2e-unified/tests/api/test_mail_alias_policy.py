@@ -14,6 +14,8 @@ are read by the MTA-class ``resolve_recipient`` (covered by the in-process
 Rust handler test ``subaddressing_disabled_via_policy_falls_through``).
 """
 
+import secrets
+
 import pytest
 
 from clients.ws_rpc_admin_client import RpcCallError, WsRpcAdminClient
@@ -22,6 +24,11 @@ from common.auth import create_actor_and_register
 pytestmark = pytest.mark.tier_3
 
 DOMAIN = "alias-policy-e2e.test"
+
+# The six mail role names (`fauna_mail::aliases::DEFAULT_RESERVED_LOCAL_PARTS`):
+# a floor the admin's reserved list adds to and never replaces
+# (`mail-aliases.md` § Reserved local-parts).
+ROLE_NAMES = ("postmaster", "abuse", "noc", "security", "dmarc-report", "tlsrpt")
 
 
 def _admin_client(nest_instance):
@@ -66,9 +73,13 @@ def test_admin_puts_alias_policy_over_wire(nest_instance):
                 "wildcard_prefix_enabled": True,
             },
         )
+        # The shared nest's later alias deliveries (plus-addressing among
+        # them) assume the defaults: put them back.
+        client.call("fauna.bridges.put_alias_policy", {})
     assert reply.get("ok") is True, f"put_alias_policy must return ok=true: {reply!r}"
 
 
+@pytest.mark.feature("admin-mail-policy")
 def test_non_admin_denied_on_put_alias_policy(nest_instance):
     """A User-class actor is rejected by the allowlist before any DB work."""
     user = create_actor_and_register(
@@ -108,4 +119,84 @@ def test_exact_alias_cap_enforced_from_put_alias_policy(nest_instance):
             )
         finally:
             # Restore the catalog default (all-None ⇒ const defaults).
+            admin.call("fauna.bridges.put_alias_policy", {})
+
+
+@pytest.mark.feature("admin-mail-policy")
+def test_admin_added_reserved_name_refused_then_freed_by_clearing(nest_instance):
+    """A name the admin adds to the reserved list is refused to a member, the
+    read twin reports it back as the admin's only addition, and saving the box
+    empty frees it again."""
+    admin = _admin_client(nest_instance)
+    user = create_actor_and_register(
+        nest_instance["port"], admin_signing_key=nest_instance["admin"]["signing_key"]
+    )
+    added = f"sales-{secrets.token_hex(4)}"
+    with admin:
+        # The box an app saves carries a role name too: harmless, never echoed.
+        admin.call(
+            "fauna.bridges.put_alias_policy",
+            {"reserved_local_parts": ["postmaster", added]},
+        )
+        try:
+            shown = admin.call("fauna.bridges.get_alias_policy", {})
+            assert shown["reserved_local_parts"] == [added], (
+                f"the read twin reports the admin's additions only: {shown!r}"
+            )
+            with _user_client(nest_instance, user) as uclient:
+                with pytest.raises(RpcCallError) as excinfo:
+                    _create_exact(uclient, added)
+            assert excinfo.value.code == "fauna.bridges.reserved_local_part", (
+                f"an admin-added name must be refused; got {excinfo.value.code!r}"
+            )
+
+            admin.call("fauna.bridges.put_alias_policy", {"reserved_local_parts": []})
+            with _user_client(nest_instance, user) as uclient:
+                created = _create_exact(uclient, added)
+            assert len(created["alias_id"]) == 16, created
+        finally:
+            admin.call("fauna.bridges.put_alias_policy", {})
+
+
+@pytest.mark.feature("admin-mail-policy")
+def test_role_names_refused_as_alias_and_handle_with_the_list_empty(nest_instance):
+    """With the admin's reserved list saved empty, every one of the six role
+    names is still refused as a member's alias and as a handle — the read twin
+    shows no additions, and nothing the admin's box holds frees them."""
+    admin = _admin_client(nest_instance)
+    user = create_actor_and_register(
+        nest_instance["port"], admin_signing_key=nest_instance["admin"]["signing_key"]
+    )
+    with admin:
+        admin.call("fauna.bridges.put_alias_policy", {"reserved_local_parts": []})
+        try:
+            shown = admin.call("fauna.bridges.get_alias_policy", {})
+            assert shown["reserved_local_parts"] == [], shown
+            with _user_client(nest_instance, user) as uclient:
+                for role in ROLE_NAMES:
+                    with pytest.raises(RpcCallError) as excinfo:
+                        _create_exact(uclient, role)
+                    assert excinfo.value.code == "fauna.bridges.reserved_local_part", (
+                        f"{role!r} as an alias with the list empty; got {excinfo.value.code!r}"
+                    )
+            # As a handle: the admission that gives a member a handle (and so a
+            # canonical address) refuses every role name too.
+            from nacl.signing import SigningKey
+
+            for role in ROLE_NAMES:
+                with pytest.raises(RpcCallError) as excinfo:
+                    admin.call(
+                        "fauna.admin.users.create",
+                        {
+                            "actor_id": bytes(SigningKey.generate().verify_key),
+                            "tier": "free",
+                            "label": "e2e-test",
+                            "handle": role,
+                        },
+                    )
+                assert excinfo.value.code == "fauna.admin.invalid_params", (
+                    f"{role!r} as a handle; got {excinfo.value.code!r}"
+                )
+                assert "reserved" in str(excinfo.value.details), excinfo.value.details
+        finally:
             admin.call("fauna.bridges.put_alias_policy", {})

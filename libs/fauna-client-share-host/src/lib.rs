@@ -88,11 +88,13 @@ impl ShareHostSeams {
             .map_err(|e| e.to_string())
     }
 
-    /// `SharePlaneHost::live_capabilities` — the shared brake read
-    /// (`fauna_sync_engine::share_glue::live_capabilities`), re-served here so
+    /// `SharePlaneHost::live_nest_facts` — the shared brake-and-relay read
+    /// (`fauna_sync_engine::share_glue::live_nest_facts`), re-served here so
     /// a leg's every app-agnostic answer reads off one struct.
-    pub async fn live_capabilities(&self) -> Result<Vec<String>, String> {
-        fauna_sync_engine::share_glue::live_capabilities(Arc::clone(&self.nest)).await
+    pub async fn live_nest_facts(
+        &self,
+    ) -> Result<fauna_sync_engine::peer_leg::PeerLegNestFacts, String> {
+        fauna_sync_engine::share_glue::live_nest_facts(Arc::clone(&self.nest)).await
     }
 
     /// `SharePlaneHost::transfer_policy` — the shared policy read

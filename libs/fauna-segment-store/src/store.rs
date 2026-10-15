@@ -89,7 +89,7 @@ impl FramedSegmentStore {
             // manifest or the DB mirror, and the writer was error-returned (the
             // sender tempfailed → will redeliver). `FramedSegment::create` uses
             // `create_new`, so without reclaiming it every future append for this
-            // scope fails `AlreadyExists` forever (the example.com 2026-06-13
+            // scope fails `AlreadyExists` forever (the live-nest 2026-06-13
             // mail-append outage: a 0-byte `seg-00000040.dat` permanently 451'd
             // all mail for the actor). Reclaim the `.dat` (+ any stale `.meta`).
             if path.exists() {
@@ -247,7 +247,7 @@ mod tests {
     /// crashed before the caller advanced the manifest (`save_atomic`) leaves
     /// an orphan `.dat` at `next_segment_id`. Because `FramedSegment::create`
     /// uses `create_new`, every subsequent append for that scope would then
-    /// fail `AlreadyExists` *forever* — the example.com 2026-06-13 mail-append
+    /// fail `AlreadyExists` *forever* — the live-nest 2026-06-13 mail-append
     /// outage (a 0-byte `seg-00000040.dat` permanently 451'd all mail for the
     /// actor). The rotation must reclaim the orphan, since a committed segment
     /// never sits at `next_segment_id`.

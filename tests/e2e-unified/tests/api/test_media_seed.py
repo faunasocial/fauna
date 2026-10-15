@@ -38,6 +38,7 @@ import pytest
 
 from clients.ws_rpc_admin_client import RpcCallError
 from common import create_actor_and_register
+from helpers.set_names import set_name_hash
 from common.auth import (
     _user_call,
     sync_changes_record,
@@ -75,23 +76,29 @@ def _path_hash(path: str) -> str:
     return blake3.blake3(path.encode()).hexdigest()
 
 
+def _key(set_name: str, path: str) -> str:
+    """The key :func:`_media_hashes` lists the item ``path`` of set ``set_name`` under."""
+    return f"{set_name_hash(set_name).hex()}/{_path_hash(path)}"
+
+
 def _media_hashes(port: str, url: str, secret_key: str) -> set[str]:
-    """The listing keyed hash-addressed: ``{folder}/{path_hash hex}``.
+    """The listing keyed hash-addressed: ``{folder_hash hex}/{path_hash hex}``.
 
     Post-S9-flip (2026-08-02) the plaintext ``path`` wire field serves the
     empty-string scrub sentinel for an ordinary set — the sealed pair
     (``path_sealed`` + ``path_hash``) is the only label — so a raw-RPC-seeded
     listing is asserted on ``path_hash``, never on rendered plaintext
     (``file-sync.md`` § Sealed names & paths, the ratified degrade). The
-    ``folder`` half stays plaintext: the set-name cutover is gated on the
-    per-app hash-sender batch and has not flipped."""
+    ``folder`` half is hash-addressed too: a set born sealed rests no plaintext
+    name, so its rows carry ``folder_hash`` (``path-sealing.md`` § the set-name
+    plane)."""
     reply = _user_call(port, secret_key, "fauna.media.list", {"limit": 1000, "cursor_version": 2}, url)
     items = reply.get("items", [])
     # The flip's read half, pinned on every listing read: no plaintext path
     # rides this wire for an ordinary set.
     leaked = [it["path"] for it in items if it.get("path")]
     assert not leaked, f"plaintext paths on the media wire post-flip: {leaked!r}"
-    return {f"{it['folder']}/{bytes(it['path_hash']).hex()}" for it in items}
+    return {f"{bytes(it['folder_hash']).hex()}/{bytes(it['path_hash']).hex()}" for it in items}
 
 
 @pytest.mark.feature("media")
@@ -122,7 +129,7 @@ def test_cross_set_media_seed_lists_and_filters(nest_instance):
                                 device_id=device_id, path=p,
                                 manifest_hash=_manifest(p), size_bytes=1024,
                                 change_type="create", base_url=url)
-            expected.add(f"{set_name}/{_path_hash(p)}")
+            expected.add(_key(set_name, p))
 
     # The aggregate spans BOTH sets (a single-set view would miss one).
     assert _media_hashes(port, url, secret_key) == expected, (
@@ -130,7 +137,7 @@ def test_cross_set_media_seed_lists_and_filters(nest_instance):
     )
 
     # A delete (null manifest) tombstones exactly that path; the rest survive.
-    gone = f"media-seed-photos/{_path_hash('photos/forest.png')}"
+    gone = _key("media-seed-photos", "photos/forest.png")
     sync_changes_record(port, secret_key=secret_key, folder="media-seed-photos",
                         device_id=device_id, path="photos/forest.png",
                         manifest_hash=None, size_bytes=0, change_type="delete",
@@ -205,5 +212,5 @@ def test_sealless_record_is_refused_path_seal_required(nest_instance):
                         manifest_hash=_manifest("photos/sunset.jpg"),
                         size_bytes=1024, change_type="create", base_url=url)
     assert _media_hashes(port, url, secret_key) == {
-        f"media-seed-photos/{_path_hash('photos/sunset.jpg')}"
+        _key("media-seed-photos", "photos/sunset.jpg")
     }

@@ -34,17 +34,17 @@ Stamped 2026-10-01 at e129e78aa0.
 5. [app] When the nest a device was signed in to is gone, that device still offers to recover it, from what the device itself holds — `docs/goal/architecture/nest/box-recovery.md` § The plane-era recovery floor
    - `tests/e2e-unified/tests/test_box_recovery_two_nest.py::test_launch_recover_button_appears_when_the_saved_nest_is_dead`
 6. [app] A nest identity that was rotated away is never offered for recovery — `docs/goal/architecture/nest/box-recovery.md` § Custody after rotation
-   - (none)
+   - `tests/e2e-unified/tests/test_box_recovery_two_nest.py::test_a_rotated_away_identity_is_never_offered_for_recovery`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| linux | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| windows | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| macos | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| web | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
 | ios |  no run recorded | |
 | android |  no run recorded | |
 | tui | ⚠ partial | 0.1.2-dev+7663afa6 standalone |
@@ -62,5 +62,5 @@ Stamped 2026-10-01 at e129e78aa0.
 | 3 | nest | `tests/e2e-unified/tests/api/test_box_recovery.py::test_claim_handoff_seed_derives_to_nest_info_identity` | nest (linux): passed |
 | 4 | app | (none) | — |
 | 5 | app | `tests/e2e-unified/tests/test_box_recovery_two_nest.py::test_launch_recover_button_appears_when_the_saved_nest_is_dead` | linux (linux): passed, macos (macos): passed, tui (linux): passed |
-| 6 | app | (none) | — |
+| 6 | app | `tests/e2e-unified/tests/test_box_recovery_two_nest.py::test_a_rotated_away_identity_is_never_offered_for_recovery` | tui (linux): passed |
 <!-- features-render:end -->

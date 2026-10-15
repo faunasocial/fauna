@@ -67,7 +67,13 @@ def static_dir():
 
 
 def _resolve_linux_binary() -> Path | None:
-    """Return the path to the fauna-linux debug binary, or None."""
+    """Return the path to the fauna-linux debug binary, or None.
+
+    Deliberately takes a found binary without a build or freshness check: this
+    is a skip-only resolver (None → the scenario skips), the same contract as
+    the `linux_app_path` fixture that `_prebuild_binaries` leaves unhoisted so
+    it never builds. A run that wants the linux app built selects `--app linux`,
+    whose `_ensure_app_built` job is the freshness-gated path."""
     cargo_target = os.environ.get("CARGO_TARGET_DIR")
     if cargo_target:
         p = Path(cargo_target) / "debug" / "fauna-desktop"

@@ -651,24 +651,12 @@ class FamilyActions:
     # inside the per-ward editor, so select the ward first.
 
     def require_blocked_peers_supported(self) -> None:
-        """Skip unless this app renders the un-deny list (e2e convention 7 — the
-        platform check lives in the action layer, not the test body).
+        """Every app renders the un-deny list, so nothing skips (e2e convention 7 —
+        the platform check lives in the action layer, not the test body, and this
+        is where a future gap would be declared).
 
         tui led 2026-08-28; macOS and iOS (one shared FaunaKit `FamilyView`),
-        linux, web and android lifted it 2026-09-26. windows carries the ids
-        only as generated constants — no render."""
-        if self.driver.is_windows():
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="the guardian's un-deny list (family-blocked-peer-item "
-                        "rows + their allow buttons)",
-                detail="built on tui, macOS, iOS, linux, web and android; "
-                       "windows has the ids as constants only",
-                tracked="family-safety.md § Implementation status today "
-                        "(the ward-ask / un-deny lifts)",
-            )
+        linux, web and android lifted it 2026-09-26, and windows last."""
 
     def blocked_peer_rows(self) -> list[str]:
         """Every denied peer row's text, in row order. Each CONTAINS its peer id —
@@ -709,8 +697,9 @@ class FamilyActions:
     def require_feature_limits_supported(self) -> None:
         """Skip unless this app renders the guardian's feature-limits rows (e2e
         convention 7). tui is the lead app (2026-10-04); the other six follow in
-        one batched trickle-down."""
-        if not self.driver.is_tui():
+        one batched trickle-down — each arm that lands widens the admitted set
+        below (linux, then web)."""
+        if not (self.driver.is_tui() or self.driver.is_linux() or self.driver.is_web()):
             from helpers.app_surface import skip_unbuilt
 
             skip_unbuilt(
@@ -739,6 +728,11 @@ class FamilyActions:
                 "family-policy-feature-limits-summary", scope=scope
             ),
         }
+
+    def feature_limit_names(self) -> list[str]:
+        """Every painted row's member name, in row order — one bulk read, so a
+        test can tell which registry members the rows carry at all."""
+        return self.driver.get_texts("family-policy-feature-limits-name")
 
     def wait_for_feature_limit_summary(
         self, index: int, expected: str, timeout: float = 20.0

@@ -117,6 +117,18 @@ impl super::AdoptableJournal for MailPlacementKind {
                 .iter()
                 .all(|t| corpus.tombstones.contains(t))
     }
+
+    /// Every filed message of the corpus, still filed exactly so; arrivals
+    /// filed beside them and anything else since are allowed.
+    fn extends_adoption_of(
+        current: &MailPlacementManifest,
+        corpus: &MailPlacementManifest,
+    ) -> bool {
+        corpus
+            .placements
+            .iter()
+            .all(|p| current.placements.contains(p))
+    }
 }
 
 /// Rebuild a `MailPlacementManifest` by replaying every finalized journal

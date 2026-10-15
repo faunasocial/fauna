@@ -381,6 +381,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_mail_checksum_func_verify_inbound_observed()
+		})
+		if checksum != 49227 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_mail: uniffi_fauna_mail_checksum_func_verify_inbound_observed: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_mail_checksum_func_join_sealed_mail_body()
 		})
 		if checksum != 41810 {
@@ -593,15 +602,6 @@ func uniffiCheckChecksums() {
 		if checksum != 30129 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_mail: uniffi_fauna_mail_checksum_func_new_fauna_msgid_local: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_mail_checksum_func_compose_auto_reply()
-		})
-		if checksum != 32852 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_mail: uniffi_fauna_mail_checksum_func_compose_auto_reply: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1056,82 +1056,6 @@ func (c FfiConverterBytes) Read(reader io.Reader) []byte {
 type FfiDestroyerBytes struct{}
 
 func (FfiDestroyerBytes) Destroy(_ []byte) {}
-
-// The inputs for one composed auto-reply. All addresses/dates/ids are formatted
-// by the caller (mirrors `dsn::DsnReport`, where the caller formats dates).
-type AutoReplyMessage struct {
-	// `From:` — the recipient's address (the vacationing user). The reply is
-	// DKIM-signed under this address's domain by the caller.
-	FromAddr string
-	// `To:` — the envelope sender we are replying to.
-	ToAddr string
-	// `Subject:` — user-authored (sanitized to a single header line here).
-	Subject string
-	// The text/plain body — user-authored.
-	Body string
-	// The triggering message's `Message-ID` (with angle brackets) for
-	// `In-Reply-To`/`References`; empty if it had none (those headers are then
-	// omitted).
-	InReplyTo string
-	// A freshly-generated `Message-ID` for this reply (with angle brackets).
-	MessageId string
-	// RFC 5322 date-time for the `Date:` header.
-	Date string
-}
-
-func (r *AutoReplyMessage) Destroy() {
-	FfiDestroyerString{}.Destroy(r.FromAddr)
-	FfiDestroyerString{}.Destroy(r.ToAddr)
-	FfiDestroyerString{}.Destroy(r.Subject)
-	FfiDestroyerString{}.Destroy(r.Body)
-	FfiDestroyerString{}.Destroy(r.InReplyTo)
-	FfiDestroyerString{}.Destroy(r.MessageId)
-	FfiDestroyerString{}.Destroy(r.Date)
-}
-
-type FfiConverterAutoReplyMessage struct{}
-
-var FfiConverterAutoReplyMessageINSTANCE = FfiConverterAutoReplyMessage{}
-
-func (c FfiConverterAutoReplyMessage) Lift(rb RustBufferI) AutoReplyMessage {
-	return LiftFromRustBuffer[AutoReplyMessage](c, rb)
-}
-
-func (c FfiConverterAutoReplyMessage) Read(reader io.Reader) AutoReplyMessage {
-	return AutoReplyMessage{
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterAutoReplyMessage) Lower(value AutoReplyMessage) C.RustBuffer {
-	return LowerIntoRustBuffer[AutoReplyMessage](c, value)
-}
-
-func (c FfiConverterAutoReplyMessage) LowerExternal(value AutoReplyMessage) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[AutoReplyMessage](c, value))
-}
-
-func (c FfiConverterAutoReplyMessage) Write(writer io.Writer, value AutoReplyMessage) {
-	FfiConverterStringINSTANCE.Write(writer, value.FromAddr)
-	FfiConverterStringINSTANCE.Write(writer, value.ToAddr)
-	FfiConverterStringINSTANCE.Write(writer, value.Subject)
-	FfiConverterStringINSTANCE.Write(writer, value.Body)
-	FfiConverterStringINSTANCE.Write(writer, value.InReplyTo)
-	FfiConverterStringINSTANCE.Write(writer, value.MessageId)
-	FfiConverterStringINSTANCE.Write(writer, value.Date)
-}
-
-type FfiDestroyerAutoReplyMessage struct{}
-
-func (_ FfiDestroyerAutoReplyMessage) Destroy(value AutoReplyMessage) {
-	value.Destroy()
-}
 
 // Confidence-ramp + weight knobs for `weighted_bayesian_milli`. The defaults
 // are the § Combined-score formula values (`bayesian_weight = 0.7`,
@@ -3435,11 +3359,11 @@ func (_ FfiDestroyerExportFormat) Destroy(value ExportFormat) {
 // [`FilterAction::Discard`], [`FilterAction::Allow`]) and [`FilterAction::Reject`]
 // are wired at the Go MTA perimeter; [`FilterAction::Forward`] is owned by
 // `mail-forwarding.md`; [`FilterAction::AutoReply`] is wired via the perimeter
-// loop-guard ([`auto_reply_decision`]) + compose
-// ([`crate::outbound::autoreply::compose_auto_reply`]) → sign →
-// `fauna.bridges.send_auto_reply` (atomic rate-limit + null-sender enqueue). The
-// evaluator returns the matched action regardless — composition + side effects
-// are the caller's job (`smtp-server.md` § Email filter rules spells out the
+// loop-guard ([`auto_reply_decision`]) → `fauna.bridges.send_auto_reply`, where
+// the nest rate-limits atomically, composes the reply from the stored rule
+// ([`crate::outbound::autoreply::compose_auto_reply`]), signs it at the outbound
+// hand-out and enqueues it with a null sender. The evaluator returns the matched
+// action regardless — side effects are the caller's job (`smtp-server.md` § Email filter rules spells out the
 // precedence).
 type FilterAction interface {
 	Destroy()
@@ -5959,6 +5883,45 @@ func VerifyInbound(raw []byte, mailFrom string, clientIp string, clientHelo stri
 	return res, err
 }
 
+// Verify SPF, DKIM, DMARC, and ARC for an inbound message, and return the
+// DMARC aggregate-report observation beside the verdicts.
+//
+// The same pipeline and inputs as `verify_inbound`; the observation carries
+// what an RFC 7489 aggregate report needs and the verdicts flatten away (the
+// From and envelope domains, the aligned DKIM and SPF results, each DKIM
+// signature's raw result). The MTA calls this one at the SMTP perimeter.
+func VerifyInboundObserved(raw []byte, mailFrom string, clientIp string, clientHelo string) (fauna_core.InboundAuthOutcome, error) {
+	res, err := uniffiRustCallAsync[*AuthError](
+		FfiConverterAuthErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_fauna_mail_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) fauna_core.InboundAuthOutcome {
+			return fauna_core.FfiConverterInboundAuthOutcomeINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_mail_fn_func_verify_inbound_observed(FfiConverterBytesINSTANCE.Lower(raw), FfiConverterStringINSTANCE.Lower(mailFrom), FfiConverterStringINSTANCE.Lower(clientIp), FfiConverterStringINSTANCE.Lower(clientHelo)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_mail_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_mail_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
 // UniFFI: rejoin chunks fetched back off the byte plane (the Go MDA, on a
 // `FETCH` whose reply carried a reference).
 func JoinSealedMailBody(chunks [][]byte) []byte {
@@ -6384,17 +6347,6 @@ func NewFaunaMsgidLocal() string {
 	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_mail_fn_func_new_fauna_msgid_local(_uniffiStatus),
-		}
-	}))
-}
-
-// Compose the RFC 5322 wire bytes for a vacation auto-reply. `Auto-Submitted:
-// auto-replied` marks it as automated so a conforming peer won't auto-reply back
-// (RFC 3834), closing the reply-to-a-reply loop.
-func ComposeAutoReply(msg AutoReplyMessage) []byte {
-	return FfiConverterBytesINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
-		return GoRustBuffer{
-			inner: C.uniffi_fauna_mail_fn_func_compose_auto_reply(FfiConverterAutoReplyMessageINSTANCE.Lower(msg), _uniffiStatus),
 		}
 	}))
 }

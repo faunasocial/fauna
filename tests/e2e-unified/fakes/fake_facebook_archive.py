@@ -28,6 +28,25 @@ PHOTO_PATH = "your_facebook_activity/posts/media/Timeline_photos/photo_1.jpg"
 PHOTO_TAKEN_TS = PUBLIC_TS - 1_000
 PROFILE_MEMBER = "personal_information/profile_information/profile_information.json"
 POSTS_MEMBER = "your_facebook_activity/posts/your_posts__check_ins__photos_and_videos_1.json"
+HTML_PROFILE_MEMBER = "personal_information/profile_information/profile_information.html"
+# The reason `facebook::posts::parse_post` gives a record with no timestamp —
+# what the skip log names when `bad_record` is on.
+BAD_RECORD_REASON = "post has no timestamp"
+# Members every real export carries that Fauna never imports (§ What each
+# category becomes: ad interests, login history, saved items, liked pages),
+# plus one from a layout newer than the parser knows (§ Parser contract rule
+# 2: an unknown file is ignored, never a refusal). Their text is a marker the
+# journeys can look for and must never find.
+NEVER_IMPORTED_TEXT = "fixture-never-imported"
+NEVER_IMPORTED_MEMBERS = (
+    "ads_information/other_categories_used_to_reach_you.json",
+    "security_and_login_information/login_and_logout.json",
+    "your_facebook_activity/saved_items_and_collections/your_saved_items.json",
+    "your_facebook_activity/pages/pages_you_ve_liked.json",
+    "your_facebook_activity/a_section_from_a_newer_export/whatever_it_holds.json",
+)
+
+PADDING_MEMBER = "your_facebook_activity/a_section_from_a_newer_export/padding.bin"
 
 # A fixed member mtime so two builds are byte-identical.
 _MTIME = (2026, 1, 1, 0, 0, 0)
@@ -45,12 +64,29 @@ def _dumps(value) -> bytes:
     return json.dumps(value, ensure_ascii=True, indent=2).encode("ascii")
 
 
+# `reply_events`' extra events: answer → (title, start). Each lands on a
+# different day so the calendar lists them apart.
+REPLY_EVENTS = {
+    "declined": ("Fixture Concert", 1_631_000_000),
+    "interested": ("Fixture Market", 1_632_000_000),
+    "hosted": ("Fixture Party", 1_633_000_000),
+}
+
+
+def _reply_event(answer: str) -> dict:
+    title, start = REPLY_EVENTS[answer]
+    return {"name": title, "start_timestamp": start, "end_timestamp": start + 3_600}
+
+
 @dataclass(frozen=True)
 class ArchivePostSpec:
     text: str
     timestamp: int
     privacy: str | None
     photo: bytes | None = None
+    # How many times the record names its photo — past the parser's
+    # `MAX_RECORD_MEDIA_REFS` (512) the tail is dropped and reported.
+    photo_refs: int = 1
 
 
 @dataclass
@@ -58,6 +94,17 @@ class FakeFacebookArchive:
     owner: str = "Test Owner"
     tag: str = ""
     posts: list[ArchivePostSpec] = field(default_factory=list)
+    # One post record the parser cannot read (no timestamp) — skipped and
+    # listed, never failing the import (§ Parser contract rule 1).
+    bad_record: bool = False
+    # Bytes for one more member no parser reads (stored, so the zip grows by
+    # exactly this much) — what makes the archive's own size observable.
+    padding: bytes = b""
+    # One more event per other own answer — declined, interested, hosted —
+    # beside the joined picnic (`REPLY_EVENTS`), so the owner's own reply is
+    # observable per answer. Off by default: every event is one more record
+    # the other journeys would count.
+    reply_events: bool = False
 
     def __post_init__(self) -> None:
         if not self.posts:
@@ -100,8 +147,11 @@ class FakeFacebookArchive:
                         "title": "Timeline photos",
                         "description": "Photo caption",
                     }}]},
-                ]
+                ] * spec.photo_refs
             out.append(record)
+        if self.bad_record:
+            out.append({"data": [{"post": "A record with no timestamp"}],
+                        "title": mojibake(f"{self.owner} updated his status.")})
         return out
 
     def _album(self) -> dict:
@@ -137,12 +187,17 @@ class FakeFacebookArchive:
                                {"name": "Friend Two", "timestamp": 1_510_000_000}]}
 
     def _events(self) -> dict:
+        extra = self.reply_events
         return {"event_responses_v2": {
             "events_joined": [{"name": "Fixture Picnic", "start_timestamp": 1_630_000_000,
                                "end_timestamp": 1_630_010_000, "place": {"name": "Fixture Park"},
                                "description": "Bring food"}],
-            "events_interested": [], "events_declined": [],
+            "events_interested": [_reply_event("interested")] if extra else [],
+            "events_declined": [_reply_event("declined")] if extra else [],
         }}
+
+    def _hosted_events(self) -> dict:
+        return {"your_events_v2": [_reply_event("hosted")]}
 
     def _thread(self) -> dict:
         return {
@@ -172,6 +227,12 @@ class FakeFacebookArchive:
         for spec in self.posts:
             if spec.photo is not None:
                 members[PHOTO_PATH] = spec.photo
+        for name in NEVER_IMPORTED_MEMBERS:
+            members[name] = _dumps({"entries": [{"text": NEVER_IMPORTED_TEXT, "timestamp": PUBLIC_TS}]})
+        if self.padding:
+            members[PADDING_MEMBER] = self.padding
+        if self.reply_events:
+            members["your_facebook_activity/events/your_events.json"] = _dumps(self._hosted_events())
         return members
 
     # ── the zip ─────────────────────────────────────────
@@ -192,3 +253,26 @@ class FakeFacebookArchive:
         path = Path(path)
         path.write_bytes(self.build())
         return path
+
+
+def _zip(members: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, data in sorted(members.items()):
+            z.writestr(zipfile.ZipInfo(name, date_time=_MTIME), data)
+    return buf.getvalue()
+
+
+def write_html_export(path: Path) -> Path:
+    """A Facebook export requested in HTML rather than JSON — the Archive step
+    refuses it, naming the format to request (§ Parser contract rule 5)."""
+    path = Path(path)
+    path.write_bytes(_zip({HTML_PROFILE_MEMBER: b"<html><body>Test Owner</body></html>"}))
+    return path
+
+
+def write_unrelated_zip(path: Path) -> Path:
+    """A zip no supported service exported — refused at the Archive step."""
+    path = Path(path)
+    path.write_bytes(_zip({"notes/todo.json": b"[]"}))
+    return path

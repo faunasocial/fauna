@@ -316,7 +316,13 @@
       mediaError = t.common.not_found;
       return;
     }
-    openDetail(JSON.parse(raw) as MediaItemSummary);
+    const item = JSON.parse(raw) as MediaItemSummary;
+    // Land the list in the item's OWN set — its row-addressed value, never the
+    // name, so a same-named set beside it cannot take the browse
+    // (`media.md` § The filter and the upload target address the row, (b)).
+    machine.setFilter(item.filter_value);
+    applySnapshot();
+    openDetail(item);
   }
 
   function closeDetail(): void {
@@ -338,7 +344,7 @@
     detailLoading = true;
     detailError = "";
     try {
-      const raw: string = await machine.fileVersions(item.folder, item.path, showPruned);
+      const raw: string = await machine.fileVersions(item.filter_value, item.path, showPruned);
       if (detailItem !== item) return;
       detailVersions = JSON.parse(raw) as FileVersionSummary[];
     } catch (e: unknown) {
@@ -436,7 +442,10 @@
     deleting = true;
     try {
       const deviceId = getDeviceId(id.actorId);
-      await machine.delete(detailItem.folder, deviceId, detailItem.path);
+      // The item's row-addressed filter value, not its set name: a writer
+      // member's delete of a shared set's file must not tombstone a same-named
+      // own set (`media.md` § The filter and the upload target address the row).
+      await machine.delete(detailItem.filter_value, deviceId, detailItem.path);
       applySnapshot();
       if (!snap?.error) {
         detailItem = null;
@@ -590,8 +599,8 @@
         onchange={(e) => changeFilter(e.currentTarget.value)}
       >
         <option value={FILTER_ALL}>{t.media.filter_all}</option>
-        {#each snap?.folders ?? [] as name}
-          <option value={name}>{name}</option>
+        {#each snap?.folder_options ?? [] as o (o.value)}
+          <option value={o.value}>{o.label}</option>
         {/each}
         <!-- The followed browse scopes, AFTER the own-set options
              (`ui/media.md` § Followed public folders). Both halves are
@@ -767,6 +776,9 @@
         <section data-testid={IDS.SHARE_LINK_CREATE_MODAL} class="share-create" aria-label={t.share_link.button}>
           <h3>{t.share_link.create_title({ name: snap.share_create.name })}</h3>
           <p class="muted">{t.share_link.create_body}</p>
+          {#if snap.share_create.key_in_fragment}
+            <p class="muted" data-testid={IDS.SHARE_LINK_KEY_NOTICE}>{t.share_link.key_notice}</p>
+          {/if}
           {#if snap.share_create.url}
             <div class="share-url-row">
               <code data-testid={IDS.SHARE_LINK_URL} class="share-url">{snap.share_create.url}</code>

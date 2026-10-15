@@ -137,6 +137,47 @@ pub struct CertStatusReply {
     /// `A` record yet still validates fine, and gating it would needlessly
     /// narrow the cert.
     pub desired_sans: Vec<String>,
+    /// The last error of each failing order the nest places itself (HTTP-01:
+    /// the domain order, the IP bridge order) — empty while none is failing
+    /// (`tls-certificates.md` § Keeping the cert alive, *The admin sees why
+    /// issuance is failing*). Deployment-level like `desired_sans`: one order
+    /// covers every SAN, so a per-domain copy would repeat it on every row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issuance_errors: Vec<CertIssuanceError>,
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Which nest-placed ACME order a [`CertIssuanceError`] belongs to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IssuanceOrder {
+    /// The listener cert: one order over the whole desired SAN set.
+    #[default]
+    Domain,
+    /// The IP bridge cert over the box's public addresses
+    /// (`tls-certificates.md` § B-IP).
+    IpBridge,
+    /// An order a newer build added that this build cannot read
+    /// (`transport.md` § Schema and forward-compat discipline, rule 3: open,
+    /// collapsing). The error still shows, unlabelled. Never serialized.
+    #[serde(other, skip_serializing)]
+    Unknown,
+}
+
+/// One nest-placed order's most recent failure, in a `fauna.tls.cert_status`
+/// reply.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CertIssuanceError {
+    pub order: IssuanceOrder,
+    /// The CA-supplied failure (the failing identifier plus the challenge's
+    /// problem type and detail). Untrusted text from a third party: every app
+    /// renders it as data, never as markup or instructions.
+    pub detail: String,
+    /// When the order failed, unix seconds.
+    pub failed_at_unix: i64,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).

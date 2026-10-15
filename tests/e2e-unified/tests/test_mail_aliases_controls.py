@@ -34,7 +34,10 @@ from i18n.strings import S
 # tui leads (the lead app); the other six apps build the same page off the same
 # shared `MailAliasesMachine` and join by adding their marker once their run is
 # green.
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.macos, pytest.mark.ios]
+# android joined parse-only: `MailAliasesScreen.kt` carries every ID the file
+# drives (edit sheet, read-only kind picker, ttl/uses, label, hits, two-click
+# delete, the generate button's `copied` stateDescription).
+pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mark.macos, pytest.mark.ios, pytest.mark.web, pytest.mark.windows, pytest.mark.android]
 
 SEED_DOMAIN = "aliases-controls-e2e.test"
 ROW_LABEL = "mail-aliases-list-item-label"

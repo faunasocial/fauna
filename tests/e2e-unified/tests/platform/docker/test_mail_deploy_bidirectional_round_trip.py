@@ -29,7 +29,7 @@ user:
 
 **Prod-parity posture (Gap 2g — ``docs/goal/architecture/testing.md`` § Gap 2
 Target).** This canonical round-trip runs in the live-box posture, not the relaxed
-opt-out: storage mode **Encrypted** (example.com's default) and the inbound AUTH
+opt-out: storage mode **Encrypted** (the production default) and the inbound AUTH
 perimeter **ENFORCED** (``enforce_dmarc=true``/``log_only=false``) via the shared
 ``enforce_mail_perimeter`` + ``publish_passing_mail_dns`` helpers. The spam gate
 stays relaxed for the synthetic loopback peer (DNSBL/FCrDNS are real-PTR/RBL gates
@@ -172,7 +172,7 @@ def bidi_nest(docker_image, bidi_sidecars):
     the stub MX (outbound), and the resolver (``--dns``) pointed at the fake_dns
     sidecar so the inbound sender domain resolves a PASSING SPF + ``_dmarc`` for the
     enforced perimeter — both directions wired into one deploy. Storage mode
-    committed **Encrypted** — example.com's privacy-respecting default and the
+    committed **Encrypted** — the production privacy-respecting default and the
     goal-doc prod-parity axis (``testing.md`` § Gap 2 Target); certs still provision
     via the self-signed boot bootstrap (same as the Encrypted two-nest + factory-reset
     tests), and the mail seal/store/IMAP-decrypt path is storage-mode-independent

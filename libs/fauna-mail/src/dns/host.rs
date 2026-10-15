@@ -64,6 +64,27 @@ pub struct HostDnsInput<'a> {
     /// knows to publish the record the apex ACME order pre-checks before adding
     /// the SAN (`acme_http01::pds_san_included`).
     pub pds_enabled: bool,
+    /// Whether any actor on this deployment has opted into per-user subdomain
+    /// web hosting (`<handle>.<primary>`, resolved by the caller from the
+    /// nest's `web_subdomain_enabled` table). It, or any claimed
+    /// [`plugin_labels`](Self::plugin_labels) name, emits the wildcard
+    /// `*.<primary>` `A`/`AAAA` row at the **nest** address(es): every such
+    /// name is served by the nest, whose per-name HTTP-01 certificate needs
+    /// the name to resolve there (`docs/goal/behavior/web-content-hosting.md`
+    /// § Routing, Architectural rule 8).
+    pub subdomain_sites: bool,
+    /// The whole-name labels this deployment's hosted plugins claim under
+    /// the apex (each `sni` label of an installed plugin's manifest, resolved
+    /// by the caller from the nest's `hosted_plugins` table). Each emits a
+    /// `<label>.<primary>` `A`/`AAAA` row at the **nest** address(es), like
+    /// `relay.` and `pds.`: the SNI router hands every name it does not
+    /// route to the nest, which terminates the name's TLS and proxies to the
+    /// plugin (`docs/goal/architecture/security.md` § Co-resident process
+    /// trust boundary → *Hosted third-party code*). The deployment's wildcard
+    /// `*.<primary>` row covers the name where it is published; this row is
+    /// what tells an admin without one to make the name resolve, since the
+    /// name's HTTP-01 certificate waits on exactly that.
+    pub plugin_labels: &'a [String],
 }
 
 fn addr_record(record_type: DnsRecordType, name: String, ip: &str) -> DnsRecord {
@@ -91,9 +112,11 @@ fn ptr_record(ip: &str, expected_host: &str) -> Option<DnsRecord> {
 
 /// Build the nest-host record rows for the primary domain: apex + `mail.<primary>`
 /// `A` (and `AAAA` when an IPv6 is set), an `A`/`AAAA` for each **enabled** infra
-/// subdomain (`relay.<primary>`, `pds.<primary>`), plus an advisory `PTR` for the
-/// mail-host IP(s). Emitted in a stable order (apex A/AAAA, mail A/AAAA, relay
-/// A/AAAA, pds A/AAAA, PTR v4, PTR v6).
+/// subdomain (`relay.<primary>`, `pds.<primary>`) and each claimed plugin name,
+/// the wildcard `*.<primary>` once a subdomain site or plugin name exists, plus
+/// an advisory `PTR` for the mail-host IP(s). Emitted in a stable order (apex
+/// A/AAAA, mail A/AAAA, relay A/AAAA, pds A/AAAA, plugin names A/AAAA, wildcard
+/// A/AAAA, PTR v4, PTR v6).
 pub fn build_host_dns_records(input: &HostDnsInput<'_>) -> Vec<DnsRecord> {
     let apex = input.primary_domain;
     let mail_host = format!("mail.{apex}");
@@ -132,14 +155,36 @@ pub fn build_host_dns_records(input: &HostDnsInput<'_>) -> Vec<DnsRecord> {
     // (`acme_http01::relay_san_included` / `pds_san_included`), so surfacing the
     // row here is what tells the admin to publish the A record the order waits for
     // — without it nothing would ever prompt them and the SAN would never appear.
+    // A hosted plugin's claimed whole name `<label>.<primary>` is the same
+    // shape once more: SNI-routed to the nest by default, terminated there,
+    // proxied to the plugin (`HostDnsInput::plugin_labels`).
     for label in [("relay", input.relay_enabled), ("pds", input.pds_enabled)]
         .into_iter()
         .filter_map(|(label, on)| on.then_some(label))
+        .chain(input.plugin_labels.iter().map(String::as_str))
     {
         let host = format!("{label}.{apex}");
         records.push(addr_record(DnsRecordType::A, host.clone(), input.nest_ipv4));
         if let Some(v6) = input.nest_ipv6 {
             records.push(addr_record(DnsRecordType::Aaaa, host, v6));
+        }
+    }
+
+    // The wildcard `*.<primary>` → nest, once the deployment serves any name
+    // under the apex beyond its own hosts: a user's opted-in subdomain site
+    // (`<handle>.<primary>`) or a hosted plugin's claimed name. One steady-state
+    // row covers every such name; the nest answers each name's HTTP-01
+    // challenge, so it must resolve to the nest, never the mail host. Absent
+    // before either exists, like `relay.`/`pds.` before their services.
+    if input.subdomain_sites || !input.plugin_labels.is_empty() {
+        let wildcard = format!("*.{apex}");
+        records.push(addr_record(
+            DnsRecordType::A,
+            wildcard.clone(),
+            input.nest_ipv4,
+        ));
+        if let Some(v6) = input.nest_ipv6 {
+            records.push(addr_record(DnsRecordType::Aaaa, wildcard, v6));
         }
     }
 
@@ -304,6 +349,99 @@ mod tests {
         );
     }
 
+    /// A hosted plugin's claimed whole name gets the `relay.`/`pds.` shape:
+    /// an `A` (and `AAAA`) row at the NEST address, one per label, after the
+    /// infra hosts and before the PTR.
+    #[test]
+    fn plugin_whole_names_point_at_the_nest_address() {
+        let labels = vec!["matrix".to_string(), "synapse".to_string()];
+        let input = HostDnsInput {
+            primary_domain: "dev.fauna.social",
+            nest_ipv4: "203.0.113.7",
+            nest_ipv6: Some("2001:db8::7"),
+            mail_ipv4: "198.51.100.9",
+            mail_ipv6: None,
+            relay_enabled: false,
+            pds_enabled: true,
+            subdomain_sites: false,
+            plugin_labels: &labels,
+        };
+        let records = build_host_dns_records(&input);
+        let names: Vec<(&str, DnsRecordType, &str)> = records
+            .iter()
+            .map(|r| (r.name.as_str(), r.record_type, r.body.as_str()))
+            .collect();
+        let at = |name: &str| {
+            names
+                .iter()
+                .position(|(n, _, _)| *n == name)
+                .unwrap_or_else(|| panic!("{name} row"))
+        };
+        for name in ["matrix.dev.fauna.social", "synapse.dev.fauna.social"] {
+            assert!(
+                names.contains(&(name, DnsRecordType::A, "203.0.113.7")),
+                "{name} A"
+            );
+            assert!(
+                names.contains(&(name, DnsRecordType::Aaaa, "2001:db8::7")),
+                "{name} AAAA"
+            );
+        }
+        assert!(at("pds.dev.fauna.social") < at("matrix.dev.fauna.social"));
+        assert!(at("matrix.dev.fauna.social") < at("synapse.dev.fauna.social"));
+        assert_eq!(
+            names.last().unwrap().1,
+            DnsRecordType::Ptr,
+            "the advisory PTR still comes last"
+        );
+    }
+
+    /// The wildcard `*.<primary>` row: absent until the deployment serves a
+    /// name under the apex, then one `A` (and `AAAA`) at the NEST address —
+    /// whether the name is a user's subdomain site or a plugin's claimed
+    /// name — after the per-name hosts and before the PTR.
+    #[test]
+    fn wildcard_row_is_gated_on_a_subdomain_site_or_plugin_name() {
+        let labels = ["matrix".to_string()];
+        let input = |subdomain_sites, plugin_labels| HostDnsInput {
+            primary_domain: "example.com",
+            nest_ipv4: "203.0.113.7",
+            nest_ipv6: Some("2001:db8::7"),
+            mail_ipv4: "198.51.100.9",
+            mail_ipv6: None,
+            relay_enabled: true,
+            pds_enabled: true,
+            subdomain_sites,
+            plugin_labels,
+        };
+        let wildcard = |records: &[DnsRecord]| -> Vec<(DnsRecordType, String)> {
+            records
+                .iter()
+                .filter(|r| r.name == "*.example.com")
+                .map(|r| (r.record_type, r.body.clone()))
+                .collect()
+        };
+        assert!(
+            wildcard(&build_host_dns_records(&input(false, &[]))).is_empty(),
+            "no wildcard before any subdomain site or plugin name exists"
+        );
+        let expected = vec![
+            (DnsRecordType::A, "203.0.113.7".to_string()),
+            (DnsRecordType::Aaaa, "2001:db8::7".to_string()),
+        ];
+        for (sites, labels) in [(true, &[][..]), (false, &labels[..]), (true, &labels[..])] {
+            let records = build_host_dns_records(&input(sites, labels));
+            assert_eq!(
+                wildcard(&records),
+                expected,
+                "sites={sites} labels={labels:?}"
+            );
+            let at = |name: &str| records.iter().position(|r| r.name == name).unwrap();
+            assert!(at("pds.example.com") < at("*.example.com"));
+            assert_eq!(records.last().unwrap().record_type, DnsRecordType::Ptr);
+        }
+    }
+
     #[test]
     fn mail_tlsa_record_anchors_at_primary_mail_host() {
         // The owner name is always `_25._tcp.mail.<primary>` — additional domains
@@ -394,6 +532,8 @@ mod tests {
             mail_ipv6: None,
             relay_enabled: false,
             pds_enabled: false,
+            subdomain_sites: false,
+            plugin_labels: &[],
         };
         let records = build_host_dns_records(&input);
         // apex A, mail A, PTR(mail v4).
@@ -426,6 +566,8 @@ mod tests {
             mail_ipv6: None,
             relay_enabled: false,
             pds_enabled: false,
+            subdomain_sites: false,
+            plugin_labels: &[],
         };
         let records = build_host_dns_records(&input);
         let apex_a = records
@@ -457,6 +599,8 @@ mod tests {
             mail_ipv6: Some("2001:db8::9"),
             relay_enabled: false,
             pds_enabled: false,
+            subdomain_sites: false,
+            plugin_labels: &[],
         };
         let records = build_host_dns_records(&input);
         // apex A+AAAA, mail A+AAAA, PTR v4, PTR v6 = 6.
@@ -493,6 +637,8 @@ mod tests {
             mail_ipv6: None,
             relay_enabled: true,
             pds_enabled: false,
+            subdomain_sites: false,
+            plugin_labels: &[],
         };
         let records = build_host_dns_records(&input);
         let relay_a = records
@@ -520,6 +666,8 @@ mod tests {
             mail_ipv6: None,
             relay_enabled: true,
             pds_enabled: false,
+            subdomain_sites: false,
+            plugin_labels: &[],
         };
         let records = build_host_dns_records(&input);
         let relay_aaaa = records
@@ -540,6 +688,8 @@ mod tests {
             mail_ipv6: None,
             relay_enabled: false,
             pds_enabled: false,
+            subdomain_sites: false,
+            plugin_labels: &[],
         };
         let records = build_host_dns_records(&input);
         assert!(
@@ -564,6 +714,8 @@ mod tests {
             mail_ipv6: None,
             relay_enabled: false,
             pds_enabled: true,
+            subdomain_sites: false,
+            plugin_labels: &[],
         };
         let records = build_host_dns_records(&input);
         let pds_a = records
@@ -590,6 +742,8 @@ mod tests {
             mail_ipv6: None,
             relay_enabled: false,
             pds_enabled: true,
+            subdomain_sites: false,
+            plugin_labels: &[],
         };
         let records = build_host_dns_records(&input);
         let pds_aaaa = records
@@ -613,6 +767,8 @@ mod tests {
             mail_ipv6: None,
             relay_enabled: false,
             pds_enabled: false,
+            subdomain_sites: false,
+            plugin_labels: &[],
         };
         let records = build_host_dns_records(&input);
         assert!(
@@ -633,6 +789,8 @@ mod tests {
             mail_ipv6: None,
             relay_enabled: true,
             pds_enabled: true,
+            subdomain_sites: false,
+            plugin_labels: &[],
         };
         let records = build_host_dns_records(&input);
         let names: Vec<&str> = records

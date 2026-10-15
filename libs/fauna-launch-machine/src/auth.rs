@@ -34,7 +34,7 @@
 // fauna-launch-machine` Cargo cycle. Re-export it so this crate's public surface
 // (`fauna_launch_machine::SilentChallengeOutcome`, consumed by `fauna-nest-http`
 // + the `AuthConnector` trait below) is unchanged.
-pub use fauna_protocol::auth::SilentChallengeOutcome;
+pub use fauna_protocol::auth::{OutdatedSide, SilentChallengeOutcome};
 
 // ---------------------------------------------------------------------------
 // Outcome types
@@ -123,7 +123,7 @@ pub fn classify_silent_challenge(outcome: SilentChallengeOutcome) -> SilentSignI
         // message rides the swallowed path. A distinct "update required" surface
         // for the *post-auth* case is a separate follow-on; what matters here is
         // that it is not a MITM verdict.
-        SilentChallengeOutcome::NeedsUpdate { message } => {
+        SilentChallengeOutcome::NeedsUpdate { message, .. } => {
             SilentSignInVerdict::Failed { error: message }
         }
         SilentChallengeOutcome::IdentityChanged {
@@ -214,6 +214,17 @@ pub(crate) async fn connect_silent_challenge(
     let client =
         match fauna_anon_client::AnonymousNestClient::connect_resolving(nest_url, resolve).await {
             Ok(c) => c,
+            // The nest refused this app's subprotocol before the upgrade: the
+            // app is too old for it. The nest answered, so this is neither a
+            // blip to retry nor a reason to try the reach hint — it is the
+            // needs-update surface, with the localized "your app is out of
+            // date" text (`version-compatibility.md` § Dimension 4).
+            Err(e @ fauna_anon_client::AnonClientError::SubprotocolMismatch) => {
+                return SilentChallengeOutcome::NeedsUpdate {
+                    message: e.to_string(),
+                    outdated: OutdatedSide::App,
+                };
+            }
             Err(e) => {
                 return SilentChallengeOutcome::Transient {
                     error: e.to_string(),
@@ -405,6 +416,44 @@ pub(crate) async fn connect_silent_challenge(
 mod tests {
     use super::*;
 
+    /// A nest that refuses this app's subprotocol (HTTP 426 at the upgrade —
+    /// the app is too old for it) lands the launch on the needs-update outcome
+    /// with the localized "your app is out of date" text, never the transient
+    /// retry a blip earns (`version-compatibility.md` § Dimension 4).
+    #[tokio::test]
+    async fn a_426_at_the_launch_challenge_is_needs_update() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral listener");
+        let addr = listener.local_addr().expect("listener local_addr");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            stream
+                .write_all(b"HTTP/1.1 426 Upgrade Required\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .expect("write 426");
+        });
+
+        match connect_silent_challenge(&format!("http://{addr}"), None, &[7u8; 32]).await {
+            SilentChallengeOutcome::NeedsUpdate { message, outdated } => {
+                assert_eq!(
+                    message,
+                    fauna_i18n::strings::errors::SUBPROTOCOL_MISMATCH,
+                    "the needs-update surface shows the localized too-old-app text"
+                );
+                assert_eq!(
+                    outdated,
+                    OutdatedSide::App,
+                    "the 426 names the app as the side to update, never the nest"
+                );
+            }
+            other => panic!("expected NeedsUpdate, got {other:?}"),
+        }
+    }
+
     #[test]
     fn superseded_silent_challenge_escalates_like_the_identity_verdict() {
         // The second verdict that must reach the launch surface rather than be
@@ -473,6 +522,7 @@ mod silent_sign_in_classification_tests {
             },
             SilentChallengeOutcome::NeedsUpdate {
                 message: "nest is outdated".into(),
+                outdated: crate::OutdatedSide::Nest,
             },
         ] {
             let label = format!("{outcome:?}");

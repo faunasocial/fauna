@@ -49,7 +49,7 @@ pub const SIDECAR_REQUEST_DEADLINE: Duration = Duration::from_secs(10);
 /// from [`SIDECAR_REQUEST_DEADLINE`] because it bounds a different phase (a
 /// call that never got as far as a request has nothing for that deadline to
 /// apply to; `transport.md` § Request lifecycle, `:274`). Bounding it matters
-/// because [`retry_while_reaching_nest`] / [`serve_while_reaching_nest`] retry
+/// because [`serve_while_reaching_nest`] retries
 /// in-process "for as long as [nest's] failures are ... simply not being
 /// reachable" (`transport.md` § Future directions, `:1387-1389`) — a policy
 /// that can only converge if each attempt is itself bounded, since an
@@ -59,7 +59,7 @@ pub const SIDECAR_CONNECT_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Why a sidecar dial / handshake / one-shot request failed. None are recoverable
 /// in-band — the caller retries the whole dial (the sidecars do, with backoff,
-/// through [`retry_while_reaching_nest`] / [`serve_while_reaching_nest`]).
+/// through [`serve_while_reaching_nest`]).
 #[derive(Debug, thiserror::Error)]
 pub enum SidecarDialError {
     /// The WS/TLS connection to nest could not be **established** — nest is not
@@ -87,7 +87,7 @@ pub enum SidecarDialError {
 /// Implemented by [`SidecarDialError`] and by any richer per-sidecar error that
 /// wraps it (the relay's cert fetch also fails for reasons *after* the handshake,
 /// which prove the credential good), so both share one retry policy —
-/// [`retry_while_reaching_nest`] / [`serve_while_reaching_nest`].
+/// [`serve_while_reaching_nest`].
 pub trait CredentialVerdict {
     /// `true` ⇒ only a restart can refresh what we hold; `false` ⇒ retry in-process.
     fn credential_implicated(&self) -> bool;
@@ -156,50 +156,25 @@ pub const DIAL_BACKOFF_FLOOR: Duration = Duration::from_millis(500);
 /// dials once nest has been unreachable for a while.
 pub const DIAL_BACKOFF_CEILING: Duration = Duration::from_secs(30);
 
-/// Retry `attempt` with capped exponential backoff **for as long as nest is simply
-/// not reachable**, and return its first success.
+/// Hold a sidecar's channel to nest for the process's whole life: run `attempt`
+/// (dial, handshake, serve until the channel closes), and dial again — with
+/// capped exponential backoff **for as long as nest is simply not reachable**,
+/// and with the backoff reset after a channel that served and then closed.
 ///
-/// The retry ends the moment a failure is credential-implicated
+/// The loop ends only on a credential-implicated failure
 /// ([`SidecarDialError::credential_implicated`]): our token is a start-time value,
 /// so retrying it is retrying the same rejected bytes forever. Returning
 /// [`CredentialRefused`] lets the binary exit and the supervisor restart it with
 /// the token file's current contents.
 ///
 /// This is the one shared retry policy for every co-located Rust sidecar — the
-/// same reason the dial+handshake glue itself lives here.
-/// `on_retry` observes each retried failure and the delay before the next attempt
-/// — the seam a sidecar reports the retry on its log plane through
-/// (`apps/observability.md` § The sidecar log plane). Pass `|_, _| {}` for a
-/// sidecar whose catalogue is not written yet.
-pub async fn retry_while_reaching_nest<T, E, F, Fut, R>(
-    mut attempt: F,
-    mut on_retry: R,
-) -> Result<T, CredentialRefused>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, E>>,
-    E: CredentialVerdict + std::fmt::Display,
-    R: FnMut(&E, Duration),
-{
-    let mut backoff = Backoff::new(DIAL_BACKOFF_FLOOR, DIAL_BACKOFF_CEILING);
-    loop {
-        match attempt().await {
-            Ok(value) => return Ok(value),
-            Err(e) if e.credential_implicated() => return Err(CredentialRefused(e.to_string())),
-            Err(e) => {
-                let delay = backoff.ceiling();
-                warn_unreachable(&e, delay);
-                on_retry(&e, delay);
-                tokio::time::sleep(delay).await;
-                backoff.grow();
-            }
-        }
-    }
-}
-
-/// The long-lived twin of [`retry_while_reaching_nest`]: a success means *the
-/// channel served and then closed*, so the sidecar dials again (with the backoff
-/// reset) rather than returning. Only [`CredentialRefused`] ends it.
+/// same reason the dial+handshake glue itself lives here; the relay
+/// (`bins/fauna-iroh-relay`) is its one caller today. (A one-shot twin that
+/// returned its first success served the relay's startup cert fetch and was
+/// deleted once the relay held its channel for life.) `on_retry` observes each
+/// retried failure and the delay before the next attempt — the seam a sidecar
+/// reports the retry on its log plane through (`apps/observability.md` § The
+/// sidecar log plane).
 pub async fn serve_while_reaching_nest<E, F, Fut, R>(
     mut attempt: F,
     mut on_retry: R,
@@ -237,7 +212,7 @@ where
     }
 }
 
-/// The one dial-retry log line, shared by both loops above.
+/// The one dial-retry log line of the loop above.
 fn warn_unreachable(e: &impl std::fmt::Display, backoff: Duration) {
     tracing::warn!(
         error = %e,
@@ -532,60 +507,6 @@ mod tests {
         );
         assert!(SidecarDialError::Transport("hello send failed".into()).credential_implicated());
         assert!(SidecarDialError::Codec("to Value".into()).credential_implicated());
-    }
-
-    /// Nest not listening yet (the relay is enabled in `services.json` before nest
-    /// finished booting): the sidecar keeps dialing and succeeds when nest arrives.
-    /// Deterministic — the paused clock auto-advances the backoff sleeps, so the
-    /// test asserts the *sequence*, never elapsed time.
-    #[tokio::test(start_paused = true)]
-    async fn an_unreachable_nest_is_retried_until_it_answers() {
-        let attempts = std::cell::Cell::new(0u32);
-        let got = retry_while_reaching_nest(
-            || {
-                let n = attempts.get() + 1;
-                attempts.set(n);
-                async move {
-                    if n < 4 {
-                        Err(SidecarDialError::Connect("connection refused".into()))
-                    } else {
-                        Ok(n)
-                    }
-                }
-            },
-            |_, _| {},
-        )
-        .await
-        .expect("an unreachable nest must never end the process");
-        assert_eq!(got, 4);
-        assert_eq!(attempts.get(), 4, "three retries, then the success");
-    }
-
-    /// The bug this policy exists for: nest re-minted its tokens (it restarted),
-    /// so our start-time token is refused. Retrying it re-sends the same rejected
-    /// bytes forever — the loop must END so the supervisor restarts us with the
-    /// token file's current contents.
-    #[tokio::test(start_paused = true)]
-    async fn a_refused_credential_ends_the_retry_on_the_first_refusal() {
-        let attempts = std::cell::Cell::new(0u32);
-        let refused = retry_while_reaching_nest::<(), _, _, _, _>(
-            || {
-                attempts.set(attempts.get() + 1);
-                async {
-                    Err(SidecarDialError::Rejected(
-                        "fauna.protocol.unauthenticated".into(),
-                    ))
-                }
-            },
-            |_, _| unreachable!("a refused credential is never retried"),
-        )
-        .await
-        .expect_err("a refused credential must end the retry");
-        assert_eq!(attempts.get(), 1, "no retry of a token nest has forgotten");
-        assert!(
-            refused.0.contains("unauthenticated"),
-            "the refusal reason is carried to the exit line: {refused}"
-        );
     }
 
     /// The long-lived twin: a clean channel close is a reconnect, a refusal is the

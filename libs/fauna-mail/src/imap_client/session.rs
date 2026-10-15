@@ -24,6 +24,26 @@ pub struct SourceMailbox {
     /// container, for instance). Unselectable mailboxes hold no messages and
     /// must be skipped, not treated as an empty mailbox.
     pub selectable: bool,
+    /// The role the source advertises for this mailbox (RFC 6154's
+    /// special-use attributes, plus Gmail's `\Important`), when it advertises
+    /// one — what lets an importer recognise a localized `[Gmail]/Papierkorb`
+    /// as the Trash its English name would have said.
+    pub special_use: Option<SpecialUse>,
+}
+
+/// A mailbox's advertised role (RFC 6154 § 2, plus Gmail's `\Important`).
+/// Only the first role a `LIST` line names is kept: no real server advertises
+/// two, and the importer asks one question of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SpecialUse {
+    All,
+    Archive,
+    Drafts,
+    Flagged,
+    Important,
+    Junk,
+    Sent,
+    Trash,
 }
 
 /// The state `EXAMINE` reports for the selected mailbox.
@@ -36,6 +56,18 @@ pub struct MailboxStatus {
     pub exists: u32,
 }
 
+/// How much one source mailbox holds for the import, as the Confirm step
+/// summarizes it (`mailbox-migration.md` § Wizard steps step 4) — what
+/// [`ImapSession::estimate_mailbox`] answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MailboxEstimate {
+    /// Messages in the import's scope.
+    pub messages: u32,
+    /// Their total size in bytes; `None` when the source left at least one
+    /// of them unsized, so no honest total exists.
+    pub bytes: Option<u64>,
+}
+
 /// One message the source has, discovered by enumeration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UidEntry {
@@ -44,6 +76,12 @@ pub struct UidEntry {
     /// says to compare it *"when supported by the source"* — a `None` here
     /// means we cannot know the size before fetching the body.
     pub size: Option<u32>,
+    /// `INTERNALDATE` as epoch seconds, when the source reported a readable
+    /// one. What lets a message the user's size limit turns away be placed
+    /// against the import's since date without fetching its body: one the
+    /// date excludes is outside the import's scope and is never counted
+    /// (`mailbox-migration.md` § Wizard steps step 3), too large or not.
+    pub internal_date_epoch: Option<i64>,
 }
 
 impl UidEntry {
@@ -351,8 +389,17 @@ impl<T: ImapTransport> ImapSession<T> {
         let mut out = Vec::new();
         self.conn
             .run_to_completion(&tag, "LIST", |ev| {
-                if let ServerEvent::List { name, selectable } = ev {
-                    out.push(SourceMailbox { name, selectable });
+                if let ServerEvent::List {
+                    name,
+                    selectable,
+                    special_use,
+                } = ev
+                {
+                    out.push(SourceMailbox {
+                        name,
+                        selectable,
+                        special_use,
+                    });
                 }
                 Ok(())
             })
@@ -413,7 +460,7 @@ impl<T: ImapTransport> ImapSession<T> {
         })
     }
 
-    /// `UID FETCH <from_uid>:* (UID RFC822.SIZE)` — the resume-aware
+    /// `UID FETCH <from_uid>:* (UID RFC822.SIZE INTERNALDATE)` — the resume-aware
     /// enumeration of § Resume protocol step 3.
     ///
     /// **RFC 3501 §6.4.8 trap:** a `<n>:*` UID range "always includes the UID
@@ -429,7 +476,9 @@ impl<T: ImapTransport> ImapSession<T> {
         self.require_selected("UID FETCH")?;
         let tag = self.conn.next_tag();
         self.conn
-            .send_line(&format!("{tag} UID FETCH {from_uid}:* (UID RFC822.SIZE)"))
+            .send_line(&format!(
+                "{tag} UID FETCH {from_uid}:* (UID RFC822.SIZE INTERNALDATE)"
+            ))
             .await?;
 
         let mut out = Vec::new();
@@ -442,6 +491,12 @@ impl<T: ImapTransport> ImapSession<T> {
                     out.push(UidEntry {
                         uid,
                         size: a.rfc822_size,
+                        // An unreadable date is no date: the message is then
+                        // never ruled out of scope on it.
+                        internal_date_epoch: a
+                            .internal_date
+                            .as_deref()
+                            .and_then(|d| super::internaldate::parse_internal_date(d).ok()),
                     });
                 }
                 Ok(())
@@ -451,6 +506,92 @@ impl<T: ImapTransport> ImapSession<T> {
         out.sort_unstable_by_key(|e| e.uid);
         out.dedup_by_key(|e| e.uid);
         Ok(out)
+    }
+
+    /// How many messages `mailbox` holds for an import whose since date is
+    /// `since_epoch` (inclusive, epoch seconds; `None` = unbounded), and how
+    /// many bytes they come to — never a body fetched.
+    ///
+    /// Unbounded, against a server advertising RFC 8438's `STATUS=SIZE`, one
+    /// `STATUS (MESSAGES SIZE)` answers both without selecting anything.
+    /// Otherwise it is the import's own enumeration
+    /// ([`Self::enumerate_uids`] after an `EXAMINE`): its `RFC822.SIZE`s
+    /// summed, and under a since date only the messages whose INTERNALDATE
+    /// the range admits — the same rule the import applies, an undated
+    /// message counting as in range — so the count is the import's scope,
+    /// not the whole mailbox's. Leaves `mailbox` `EXAMINE`d on that path.
+    pub async fn estimate_mailbox(
+        &mut self,
+        mailbox: &str,
+        since_epoch: Option<i64>,
+    ) -> Result<MailboxEstimate, ImapClientError> {
+        if since_epoch.is_none() && self.has_capability("STATUS=SIZE") {
+            let (messages, size) = self.status(mailbox, "MESSAGES SIZE").await?;
+            if let (Some(messages), Some(bytes)) = (messages, size) {
+                return Ok(MailboxEstimate {
+                    messages,
+                    bytes: Some(bytes),
+                });
+            }
+        }
+        let status = self.examine(mailbox, None).await?;
+        if status.exists == 0 {
+            // `UID FETCH 1:*` on an empty mailbox is answered BAD by some
+            // servers; there is nothing to ask about.
+            return Ok(MailboxEstimate {
+                messages: 0,
+                bytes: Some(0),
+            });
+        }
+        let mut estimate = MailboxEstimate {
+            messages: 0,
+            bytes: Some(0),
+        };
+        for entry in self.enumerate_uids(1).await? {
+            let in_range = match (since_epoch, entry.internal_date_epoch) {
+                (Some(since), Some(date)) => date >= since,
+                _ => true,
+            };
+            if in_range {
+                estimate.messages = estimate.messages.saturating_add(1);
+                estimate.bytes = estimate
+                    .bytes
+                    .zip(entry.size)
+                    .map(|(sum, size)| sum + u64::from(size));
+            }
+        }
+        Ok(estimate)
+    }
+
+    /// `STATUS <mailbox> (<items>)` — read-only, selects nothing (RFC 3501
+    /// §6.3.10). Answers the `MESSAGES` and `SIZE` items when the reply
+    /// carries them.
+    async fn status(
+        &mut self,
+        mailbox: &str,
+        items: &str,
+    ) -> Result<(Option<u32>, Option<u64>), ImapClientError> {
+        let tag = self.conn.next_tag();
+        let line = format!(
+            "{tag} STATUS {} ({items})",
+            quote_astring(mailbox, "mailbox")?
+        );
+        self.conn.send_line(&line).await?;
+        let (mut messages, mut size) = (None, None);
+        self.conn
+            .run_to_completion(&tag, "STATUS", |ev| {
+                if let ServerEvent::Status {
+                    messages: m,
+                    size: s,
+                } = ev
+                {
+                    messages = m.or(messages);
+                    size = s.or(size);
+                }
+                Ok(())
+            })
+            .await?;
+        Ok((messages, size))
     }
 
     /// Fetch `uids` from the selected mailbox under § Throttling's caps,
@@ -748,7 +889,7 @@ mod tests {
     fn enumerate_keeps_in_range_uids_with_sizes_sorted() {
         let mut s = connected(vec![
             b"* OK [UIDVALIDITY 1] v\r\nA0002 OK done\r\n".to_vec(),
-            b"* 2 FETCH (UID 9 RFC822.SIZE 500)\r\n* 1 FETCH (UID 5 RFC822.SIZE 100)\r\n* 3 FETCH (UID 7)\r\nA0003 OK done\r\n".to_vec(),
+            b"* 2 FETCH (UID 9 RFC822.SIZE 500 INTERNALDATE \"17-Jul-1996 02:44:25 -0700\")\r\n* 1 FETCH (UID 5 RFC822.SIZE 100)\r\n* 3 FETCH (UID 7)\r\nA0003 OK done\r\n".to_vec(),
         ]);
         block_on(s.examine("INBOX", None)).unwrap();
         let e = block_on(s.enumerate_uids(1)).expect("enumerates");
@@ -757,16 +898,136 @@ mod tests {
             vec![
                 UidEntry {
                     uid: 5,
-                    size: Some(100)
+                    size: Some(100),
+                    internal_date_epoch: None,
                 },
                 // No RFC822.SIZE: the source did not report it.
-                UidEntry { uid: 7, size: None },
+                UidEntry {
+                    uid: 7,
+                    size: None,
+                    internal_date_epoch: None,
+                },
                 UidEntry {
                     uid: 9,
-                    size: Some(500)
+                    size: Some(500),
+                    internal_date_epoch: Some(837_596_665),
                 },
             ]
         );
+    }
+
+    fn connected_with_caps(caps: &str, extra: Vec<Vec<u8>>) -> ImapSession<ScriptedTransport> {
+        let mut chunks = vec![
+            GREETING.to_vec(),
+            format!("* CAPABILITY {caps}\r\nA0001 OK done\r\n").into_bytes(),
+        ];
+        chunks.extend(extra);
+        block_on(ImapSession::connect(ScriptedTransport::new(chunks))).expect("connects")
+    }
+
+    #[test]
+    fn a_status_size_server_is_estimated_by_one_status_without_selecting() {
+        let mut s = connected_with_caps(
+            "IMAP4rev1 STATUS=SIZE",
+            vec![b"* STATUS \"Sent\" (MESSAGES 12 SIZE 345678)\r\nA0002 OK done\r\n".to_vec()],
+        );
+        let e = block_on(s.estimate_mailbox("Sent", None)).expect("estimates");
+        assert_eq!(
+            e,
+            MailboxEstimate {
+                messages: 12,
+                bytes: Some(345_678)
+            }
+        );
+        let sent = s.conn_sent();
+        assert!(
+            sent.contains("A0002 STATUS \"Sent\" (MESSAGES SIZE)"),
+            "{sent}"
+        );
+        assert!(
+            !sent.contains("EXAMINE") && !sent.contains("FETCH"),
+            "{sent}"
+        );
+    }
+
+    #[test]
+    fn a_server_without_status_size_is_estimated_from_the_enumeration() {
+        let mut s = connected(vec![
+            b"* 3 EXISTS\r\n* OK [UIDVALIDITY 1] v\r\nA0002 OK done\r\n".to_vec(),
+            b"* 1 FETCH (UID 1 RFC822.SIZE 100)\r\n* 2 FETCH (UID 2 RFC822.SIZE 250)\r\n* 3 FETCH (UID 4 RFC822.SIZE 50)\r\nA0003 OK done\r\n".to_vec(),
+        ]);
+        let e = block_on(s.estimate_mailbox("INBOX", None)).expect("estimates");
+        assert_eq!(
+            e,
+            MailboxEstimate {
+                messages: 3,
+                bytes: Some(400)
+            }
+        );
+        let sent = s.conn_sent();
+        assert!(!sent.contains("STATUS"), "{sent}");
+        assert!(
+            sent.contains("UID FETCH 1:* (UID RFC822.SIZE INTERNALDATE)"),
+            "{sent}"
+        );
+    }
+
+    #[test]
+    fn a_since_date_estimates_only_what_the_range_admits_even_with_status_size() {
+        // 17-Jul-1996 02:44:25 -0700 is 837_596_665; the floor sits between
+        // the two dated messages. The undated one counts, as the import
+        // would take it.
+        let mut s = connected_with_caps(
+            "IMAP4rev1 STATUS=SIZE",
+            vec![
+                b"* 3 EXISTS\r\n* OK [UIDVALIDITY 1] v\r\nA0002 OK done\r\n".to_vec(),
+                b"* 1 FETCH (UID 1 RFC822.SIZE 100 INTERNALDATE \"16-Jul-1996 02:44:25 -0700\")\r\n* 2 FETCH (UID 2 RFC822.SIZE 250 INTERNALDATE \"17-Jul-1996 02:44:25 -0700\")\r\n* 3 FETCH (UID 3 RFC822.SIZE 50)\r\nA0003 OK done\r\n".to_vec(),
+            ],
+        );
+        let e = block_on(s.estimate_mailbox("INBOX", Some(837_596_665))).expect("estimates");
+        assert_eq!(
+            e,
+            MailboxEstimate {
+                messages: 2,
+                bytes: Some(300)
+            }
+        );
+        assert!(
+            !s.conn_sent().contains("STATUS"),
+            "STATUS counts the whole mailbox"
+        );
+    }
+
+    #[test]
+    fn an_unsized_message_leaves_the_estimate_without_a_size_but_counted() {
+        let mut s = connected(vec![
+            b"* 2 EXISTS\r\n* OK [UIDVALIDITY 1] v\r\nA0002 OK done\r\n".to_vec(),
+            b"* 1 FETCH (UID 1 RFC822.SIZE 100)\r\n* 2 FETCH (UID 2)\r\nA0003 OK done\r\n".to_vec(),
+        ]);
+        let e = block_on(s.estimate_mailbox("INBOX", None)).expect("estimates");
+        assert_eq!(
+            e,
+            MailboxEstimate {
+                messages: 2,
+                bytes: None
+            }
+        );
+    }
+
+    #[test]
+    fn an_empty_mailbox_is_estimated_without_a_fetch() {
+        let mut s = connected(vec![
+            b"* 0 EXISTS\r\n* OK [UIDVALIDITY 1] v\r\nA0002 OK done\r\n".to_vec(),
+        ]);
+        let e = block_on(s.estimate_mailbox("Empty", None)).expect("estimates");
+        assert_eq!(
+            e,
+            MailboxEstimate {
+                messages: 0,
+                bytes: Some(0)
+            }
+        );
+        assert!(!s.conn_sent().contains("FETCH"));
     }
 
     #[test]
@@ -774,12 +1035,18 @@ mod tests {
         let big = UidEntry {
             uid: 1,
             size: Some(60 * 1024 * 1024),
+            internal_date_epoch: None,
         };
         let ok = UidEntry {
             uid: 2,
             size: Some(1024),
+            internal_date_epoch: None,
         };
-        let unknown = UidEntry { uid: 3, size: None };
+        let unknown = UidEntry {
+            uid: 3,
+            size: None,
+            internal_date_epoch: None,
+        };
         let limit = crate::imap_client::DEFAULT_MAX_MESSAGE_BYTES;
         assert!(big.is_oversize(limit));
         assert!(!ok.is_oversize(limit));

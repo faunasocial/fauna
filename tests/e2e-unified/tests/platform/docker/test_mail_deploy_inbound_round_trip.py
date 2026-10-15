@@ -43,7 +43,7 @@ Inbound is delivered from *inside* the container over loopback
 checks are loopback-exempt, so a synthetic sender clears them exactly as the
 proven process-level ``test_mail_bridge_mta.py`` round-trip does. But the box runs
 the **live-box posture**, not the relaxed opt-out: storage mode **Encrypted**
-(example.com's default) and the inbound AUTH perimeter **ENFORCED**
+(the production default) and the inbound AUTH perimeter **ENFORCED**
 (``enforce_dmarc=true``/``log_only=false``) via the shared ``enforce_mail_perimeter``
 + ``publish_passing_mail_dns`` helpers. The sender ``external-sender@sender.test``
 publishes a passing SPF (``ip4:127.0.0.1`` — the loopback client IP) + ``_dmarc …
@@ -153,7 +153,7 @@ def round_trip_nest(docker_image, scanners):
     resolver (``--dns``) pointed at the fake_dns sidecar so the inbound sender
     domain resolves a PASSING SPF + ``_dmarc`` for the enforced perimeter (Gap 2g —
     ``testing.md`` § Gap 2 Target). Storage mode committed **Encrypted** —
-    example.com's privacy-respecting default and the goal-doc prod-parity axis; certs
+    the production privacy-respecting default and the goal-doc prod-parity axis; certs
     still provision via the self-signed boot bootstrap (same as the Encrypted
     bidirectional/two-nest/factory-reset tests), and the mail seal/store/IMAP-decrypt
     path is storage-mode-independent (msek-gated, not ``StorageMode``-gated). Cleaned up after."""

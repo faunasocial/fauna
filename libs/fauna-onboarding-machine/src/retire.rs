@@ -31,7 +31,7 @@
 //! and re-running converges, because `find_records` + `delete_record` +
 //! `delete_server` are all idempotent.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use fauna_core::secret::SecretString;
@@ -43,6 +43,9 @@ use fauna_provisioning::dns::DnsProvider;
 use fauna_provisioning::registrar::bundled::AuthCode;
 use fauna_provisioning::retire_dns::{
     LeftoverReason, PlannedRemoval, RetireDnsPlan, plan_dns_cleanup, plan_secondary_dns_cleanup,
+};
+use fauna_provisioning::txt_slots::{
+    ATPROTO_SLOT, DKIM_SLOT, FAUNA_SELF_SLOT, TxtSlot, is_slot_value,
 };
 use fauna_provisioning::vps::{ManagedServer, VpsInstance, VpsProvider};
 use serde::{Deserialize, Serialize};
@@ -286,6 +289,48 @@ impl HeldDnsCredential {
     }
 }
 
+/// The Fauna-published slot names `fauna.state.dns` remembers per domain
+/// (`DnsConfig.{dkim,atproto,fauna_self}_published_names`) — the names the
+/// retire run's remembered-slot pass visits, with an empty desired set
+/// (`nest-retirement.md` § DNS cleanup — scope and order). Values are
+/// fully-qualified names; maps are keyed by domain. **Read-only here:** the
+/// pass discards what the publish-time converge would write back, because
+/// `DnsManagementMachine` is the record's sole writer.
+#[derive(Debug, Clone, Default)]
+pub struct RememberedDnsSlots {
+    pub dkim: BTreeMap<String, BTreeSet<String>>,
+    pub atproto: BTreeMap<String, BTreeSet<String>>,
+    pub fauna_self: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl RememberedDnsSlots {
+    /// The one projection the apps share, beside [`HeldDnsCredential::all_from`].
+    pub fn from_config(dns: &fauna_core::data::DnsConfig) -> Self {
+        Self {
+            dkim: dns.dkim_published_names.clone(),
+            atproto: dns.atproto_published_names.clone(),
+            fauna_self: dns.fauna_self_published_names.clone(),
+        }
+    }
+
+    /// The remembered names to visit for `domain`, each with its slot.
+    fn for_domain(&self, domain: &str) -> Vec<(TxtSlot, String)> {
+        let mut out = Vec::new();
+        for (slot, map) in [
+            (DKIM_SLOT, &self.dkim),
+            (ATPROTO_SLOT, &self.atproto),
+            (FAUNA_SELF_SLOT, &self.fauna_self),
+        ] {
+            for (key, names) in map {
+                if key.trim_end_matches('.').eq_ignore_ascii_case(domain) {
+                    out.extend(names.iter().map(|n| (slot, n.clone())));
+                }
+            }
+        }
+        out
+    }
+}
+
 /// Everything the app knows that the machine cannot find out for itself. All
 /// optional — the view works from a cold launch with none of it.
 #[derive(Debug, Clone, Default)]
@@ -301,13 +346,20 @@ pub struct RetireInputs {
     /// Every held `fauna.state.dns` credential ([`HeldDnsCredential::all_from`]).
     /// Settable afterwards too ([`NestRetireMachine::set_held_dns`]).
     pub held_dns: Vec<HeldDnsCredential>,
+    /// The remembered Fauna slot names the held record carries
+    /// ([`RememberedDnsSlots::from_config`]). Empty ⇒ the remembered-slot arm
+    /// of the DNS step visits nothing. Settable afterwards too
+    /// ([`NestRetireMachine::set_remembered_slots`]).
+    pub remembered_slots: RememberedDnsSlots,
     /// The e2e fake-cloud seam: every provider adapter is pointed here when
     /// set, exactly as the wizard's `set_provider_base_urls` does.
     pub provider_base_url: Option<String>,
-    /// The unit-test seam for the public-DNS attribution read: the DoH
-    /// endpoint is pointed here when set, else Cloudflare's. Deliberately
-    /// **not** on the binding-face constructor — the resolver is a Rust
-    /// constant, not something an app chooses.
+    /// The e2e / unit-test seam for the public-DNS attribution read: the DoH
+    /// endpoint is pointed here when set, else Cloudflare's. The resolver is a
+    /// Rust constant, not something a user chooses — so the binding-face
+    /// constructor carries this only as an e2e-only seam (the harness's `doh`
+    /// entry of `set_provider_base_urls`, the same way `provider_base_url`
+    /// arrives); a release build never sets it and leaves it `None`.
     pub doh_base_url: Option<String>,
 }
 
@@ -331,7 +383,7 @@ struct Inner {
     /// The server the typed-name gate was passed for, set by `confirm` — the
     /// only id `retry` and `force_server` ever act on (§ Confirm shape: the
     /// gate binds the run to the confirmed server). `None` until a confirm
-    /// passes; cleared by `back`, `cancel` and `select_provider`.
+    /// passes; cleared by `back`, `cancel`, `select_provider` and `verify`.
     armed: Option<String>,
     /// Each `hosted-auth` credential field's sign-in state (the bundled
     /// provider's device flow — the same controls `vps_config` renders).
@@ -353,6 +405,9 @@ struct Inner {
     /// and replaceable afterwards (the admin entry's live custody read).
     /// Read at `verify`; dropped on exit with the token.
     held_dns: Vec<HeldDnsCredential>,
+    /// Seeded from [`RetireInputs::remembered_slots`]; replaceable like
+    /// `held_dns`, and cleared with it on exit.
+    remembered_slots: RememberedDnsSlots,
     /// The app has said more inputs are on their way
     /// ([`NestRetireMachine::expect_app_inputs`]); verify waits for them.
     inputs_pending: bool,
@@ -405,12 +460,14 @@ impl NestRetireMachine {
         let current_ipv4 = inputs.current_ipv4.clone();
         let candidate_domains = inputs.candidate_domains.clone();
         let held_dns = inputs.held_dns.clone();
+        let remembered_slots = inputs.remembered_slots.clone();
         Arc::new(Self {
             inputs,
             inner: Mutex::new(Inner {
                 current_ipv4,
                 candidate_domains,
                 held_dns,
+                remembered_slots,
                 inputs_pending: false,
                 provider_id: None,
                 creds: BTreeMap::new(),
@@ -423,6 +480,36 @@ impl NestRetireMachine {
             }),
             http: reqwest::Client::new(),
         })
+    }
+
+    /// Resolve this session's nest host and record its IPv4 for the *current*
+    /// badge ([`NestRetireMachine::set_current_ipv4`]) — for an app with no OS
+    /// resolver of its own (the browser): an IPv4 literal is taken as is, a
+    /// name goes through the public resolver attribution already uses
+    /// (`fauna_provisioning::probe`). Best-effort: an unresolvable host — the
+    /// commonest reason to be on the launch retry surface — badges nothing.
+    /// Returns whether an address was recorded.
+    pub async fn resolve_current_host(&self, host: &str) -> bool {
+        let host = host.trim().trim_end_matches('.');
+        let ipv4 = if host.parse::<std::net::Ipv4Addr>().is_ok() {
+            Some(host.to_string())
+        } else if host.is_empty() || host.parse::<std::net::IpAddr>().is_ok() {
+            None
+        } else {
+            let found = match self.inputs.doh_base_url.as_deref() {
+                Some(base) => {
+                    fauna_provisioning::probe::dns_a_lookup_with_base_url(&self.http, host, base)
+                        .await
+                }
+                None => fauna_provisioning::probe::dns_a_lookup(&self.http, host).await,
+            };
+            found.into_iter().next()
+        };
+        let recorded = ipv4.is_some();
+        if recorded {
+            self.set_current_ipv4(ipv4);
+        }
+        recorded
     }
 }
 
@@ -442,6 +529,7 @@ impl NestRetireMachine {
         held_dns_provider_ids: Vec<String>,
         held_dns_creds_json: Vec<String>,
         provider_base_url: Option<String>,
+        doh_base_url: Option<String>,
     ) -> Arc<Self> {
         let held_dns = held_dns_from_json(held_dns_provider_ids, held_dns_creds_json);
         Self::new_with_inputs(RetireInputs {
@@ -449,7 +537,8 @@ impl NestRetireMachine {
             current_ipv4,
             held_dns,
             provider_base_url,
-            doh_base_url: None,
+            doh_base_url,
+            ..RetireInputs::default()
         })
     }
 
@@ -494,6 +583,7 @@ impl NestRetireMachine {
         inner.hosted_auth.clear();
         inner.hosted_pending.clear();
         inner.held_dns.clear();
+        inner.remembered_slots = RememberedDnsSlots::default();
         inner.snap = RetireSnapshot::initial();
     }
 
@@ -717,6 +807,31 @@ impl NestRetireMachine {
         ));
     }
 
+    /// The binding faces' form of [`NestRetireMachine::set_remembered_slots`]:
+    /// the three `fauna.state.dns` memories as JSON objects of the record's own
+    /// shape — `{"<domain>": ["<fqdn>", …]}` each. A bag that does not parse is
+    /// treated as empty (the arm then visits nothing for that slot).
+    pub fn set_remembered_slots_json(
+        &self,
+        dkim_json: String,
+        atproto_json: String,
+        fauna_self_json: String,
+    ) {
+        let parse = |s: String| serde_json::from_str(&s).unwrap_or_default();
+        self.set_remembered_slots(RememberedDnsSlots {
+            dkim: parse(dkim_json),
+            atproto: parse(atproto_json),
+            fauna_self: parse(fauna_self_json),
+        });
+    }
+
+    /// Show `message` on the page's `error-message` — a live input read the
+    /// page could not use (the held DNS credentials' first-listing refusal, as
+    /// its reason), set by the app that ran the read.
+    pub fn set_input_error(&self, message: String) {
+        self.with_snap(|s| s.error = Some(message));
+    }
+
     /// Record this session's nest's IPv4 once the app has resolved it, and
     /// re-mark any rows already listed. `None` clears the badge.
     pub fn set_current_ipv4(&self, ipv4: Option<String>) {
@@ -907,6 +1022,14 @@ impl StepState {
     }
 }
 
+/// [`StepState::progress_status`] for the binding faces (the Kotlin / Swift
+/// twin of wasm's `stepStatusJson`): the `provisioning-step-row` status a step
+/// state renders as.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn retire_step_status(state: StepState) -> fauna_provisioning::progress::StepStatus {
+    state.progress_status()
+}
+
 // ---------------------------------------------------------------------------
 // Async actions
 // ---------------------------------------------------------------------------
@@ -978,10 +1101,16 @@ impl NestRetireMachine {
 
     /// Verify the entered credential and list the fauna boxes in the account.
     pub async fn verify(&self) {
-        self.with_snap(|s| {
-            s.phase = RetirePhase::Listing;
-            s.error = None;
-        });
+        // A re-list puts the list, not the run, on screen — and leaving the
+        // run disarms it (§ Confirm shape), for every exit, so the offer made
+        // for the armed server goes with it.
+        {
+            let mut inner = self.inner.lock().expect("retire mutex");
+            inner.armed = None;
+            inner.snap.force_server_offered = false;
+            inner.snap.phase = RetirePhase::Listing;
+            inner.snap.error = None;
+        }
 
         let vps = match self.vps() {
             Ok(v) => v,
@@ -1258,6 +1387,12 @@ impl NestRetireMachine {
     /// field bag is not an FFI type).
     pub fn set_held_dns(&self, held: Vec<HeldDnsCredential>) {
         self.inner.lock().expect("retire mutex").held_dns = held;
+    }
+
+    /// Replace the remembered Fauna slot names, typed — the Rust apps' form
+    /// (the binding faces take [`Self::set_remembered_slots_json`]).
+    pub fn set_remembered_slots(&self, slots: RememberedDnsSlots) {
+        self.inner.lock().expect("retire mutex").remembered_slots = slots;
     }
 
     fn with_snap<T>(&self, f: impl FnOnce(&mut RetireSnapshot) -> T) -> T {
@@ -1769,8 +1904,58 @@ impl NestRetireMachine {
                     }
                 });
             }
+            self.withdraw_remembered_slots(&dns, &cover.zone_id, &domain_plan.domain, &cover.zones)
+                .await?;
         }
         Ok(StepState::Done)
+    }
+
+    /// § DNS cleanup — scope and order, the remembered-slot arm: visit the
+    /// DKIM / `_atproto` / `_fauna` names `fauna.state.dns` remembers for this
+    /// domain and withdraw the values carrying each slot's marker
+    /// ([`is_slot_value`]) — the publish-time converge pass run with an empty
+    /// desired set. Scoped to the remembered names only (never a prefix sweep)
+    /// and, at each, to marker-carrying values only, so a sibling value or a
+    /// third party's record survives. The names a failed read leaves
+    /// "remembered" are not written back: the machine is not a writer of
+    /// `fauna.state.dns`, and a re-run converges because the finds are
+    /// idempotent. Nothing passed in ⇒ nothing visited.
+    async fn withdraw_remembered_slots(
+        &self,
+        dns: &DnsDispatch,
+        zone_id: &str,
+        domain: &str,
+        zones: &[(String, String)],
+    ) -> Result<(), String> {
+        let remembered = self
+            .inner
+            .lock()
+            .expect("retire mutex")
+            .remembered_slots
+            .for_domain(domain);
+        for (slot, fqdn) in remembered {
+            let fqdn = fqdn.trim_end_matches('.').to_ascii_lowercase();
+            // A remembered name outside this domain is not this pass's to
+            // touch — the memory is keyed by domain, but it is the zone that
+            // bounds the deletion.
+            if fqdn != domain && !fqdn.ends_with(&format!(".{domain}")) {
+                continue;
+            }
+            let name = relative_name(dns, &fqdn, domain, zones);
+            let found = dns
+                .find_records(&self.http, zone_id, &name, "TXT")
+                .await
+                .map_err(|e| format!("{e}"))?;
+            for record in found {
+                if !is_slot_value(slot, &record.value) {
+                    continue;
+                }
+                dns.delete_record(&self.http, zone_id, &name, "TXT", &record.value)
+                    .await
+                    .map_err(|e| format!("{e}"))?;
+            }
+        }
+        Ok(())
     }
 
     async fn remove_one(

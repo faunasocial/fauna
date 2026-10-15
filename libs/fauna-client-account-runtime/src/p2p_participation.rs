@@ -19,25 +19,35 @@
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use fauna_devices_machine::P2pParticipation;
-use fauna_sync_engine::account_runtime::AccountStoreHandle;
+use fauna_sync_engine::account_runtime::{AccountStoreHandle, HolderWalk};
 
 /// What an absent runtime answers.
 const RUNTIME_ABSENT: &str = "the account runtime is not running";
 
 /// The other process that may hold this account store's engine role — on a
-/// desktop, the co-located sync agent — asked to run one full pass now.
+/// desktop, the co-located sync agent — asked to run one full pass now, or to
+/// walk the fleet scope for this process and say whether it did.
 ///
-/// Best-effort by contract: the row the pass reads already rests in the
-/// store, so a nudge that never arrives costs only the holder's backstop
-/// latency, never correctness; an implementation swallows its own failure.
+/// [`Self::nudge_engine_holder`] is best-effort by contract: the row the pass
+/// reads already rests in the store, so a nudge that never arrives costs only
+/// the holder's backstop latency, never correctness; an implementation
+/// swallows its own failure. [`Self::walk_fleet_for_non_holder`] is awaited:
+/// `Ok` only once the holder's walk landed (`account-runtime.md`
+/// § Multi-instance concurrency → *A non-holder's awaited fleet walk reaches
+/// the holder*), the reach every desktop host seats on its runtime through
+/// [`EngineHolderNudgeSlot`]'s [`HolderWalk`] face.
 #[async_trait::async_trait]
 pub trait EngineHolderNudge: Send + Sync {
     async fn nudge_engine_holder(&self);
+
+    async fn walk_fleet_for_non_holder(&self) -> Result<(), String>;
 }
 
-/// The desktop arm: the app's own control channel to its co-located agent
-/// (`RequestMethod::ReconcileAccountRuntime`, a plain request — never the
-/// ensuring one: the agent's backstop re-drives what a missed nudge left).
+/// The desktop arm: the app's own control channel to its co-located agent —
+/// the nudge is `RequestMethod::ReconcileAccountRuntime`, a plain request,
+/// never the ensuring one (the agent's backstop re-drives what a missed nudge
+/// left); the walk is `RequestMethod::WalkFleetNow`, whose reply carries the
+/// agent's verdict.
 #[async_trait::async_trait]
 impl<R, B> EngineHolderNudge for fauna_client_sync::agent::SyncAgentProvisioner<R, B>
 where
@@ -50,10 +60,22 @@ where
             tracing::debug!(error = %e, "participation: agent pass nudge not delivered");
         }
     }
+
+    async fn walk_fleet_for_non_holder(&self) -> Result<(), String> {
+        let outcome = self.walk_fleet_now().await.map_err(|e| e.to_string())?;
+        if outcome.walked {
+            Ok(())
+        } else {
+            Err(outcome
+                .reason
+                .unwrap_or_else(|| "the sync agent's walk did not land".into()))
+        }
+    }
 }
 
 /// Where a seat publishes the [`EngineHolderNudge`] it drives and its door
-/// reads it — a weak, cloneable slot, so the door never keeps a provisioner
+/// reads it — as does the yield's watch every runtime start spawns
+/// ([`crate::holder_yield`]) — a weak, cloneable slot, so the door never keeps a provisioner
 /// alive past its session and a torn-down one reads absent with no clear
 /// step. [`Self::seat`] is the process's one slot, the one every host
 /// publishes into and wires its door with: a process drives at most one agent
@@ -76,8 +98,23 @@ impl EngineHolderNudgeSlot {
         }
     }
 
-    fn current(&self) -> Option<Arc<dyn EngineHolderNudge>> {
+    pub(crate) fn current(&self) -> Option<Arc<dyn EngineHolderNudge>> {
         self.0.lock().ok()?.as_ref()?.upgrade()
+    }
+}
+
+/// The slot as the runtime's holder reach: a desktop host seats
+/// [`EngineHolderNudgeSlot::seat`] on its runtime at start
+/// ([`AccountStoreHandle::seat_holder_walk`]) and the walk follows whatever
+/// agent channel is published into it later — none published, or the one
+/// published torn down, answers that no holder is reachable.
+#[async_trait::async_trait]
+impl HolderWalk for EngineHolderNudgeSlot {
+    async fn walk_fleet_for_non_holder(&self) -> Result<(), String> {
+        match self.current() {
+            Some(holder) => holder.walk_fleet_for_non_holder().await,
+            None => Err("no engine-role holder is reachable from this process".into()),
+        }
     }
 }
 

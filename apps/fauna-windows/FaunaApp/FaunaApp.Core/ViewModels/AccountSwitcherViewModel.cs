@@ -36,8 +36,9 @@ public partial class AccountSwitcherViewModel : ViewModelBase
     // Erase an account's scoped content stores (MLS, drafts, backup) when it is
     // removed — § Erasure follows scope. Injected so unit tests exercise Remove
     // without touching the real profile / native FFI; production and e2e get the
-    // real AccountStateDir.Erase by default, so a page cannot forget to wire it.
-    private readonly Action<string> _eraseAccountState;
+    // real AccountStateDir.EraseWhenStoppedAsync by default, so a page cannot
+    // forget to wire it — nor the wait for the account's store to stop first.
+    private readonly Func<string, Task> _eraseAccountState;
 
     /// <summary>The accounts held on this client install, in the registry's add order — one
     /// <c>account-switcher-item</c> row each. Reconciled in place (never replaced), so the
@@ -87,11 +88,11 @@ public partial class AccountSwitcherViewModel : ViewModelBase
 
     internal AccountSwitcherViewModel(
         IFfiAccountRegistry registry,
-        Action<string>? eraseAccountState = null,
+        Func<string, Task>? eraseAccountState = null,
         Func<string, FfiEraseRemoveBlocked?>? removeAccountBlocked = null)
     {
         _registry = registry;
-        _eraseAccountState = eraseAccountState ?? Services.AccountStateDir.Erase;
+        _eraseAccountState = eraseAccountState ?? Services.AccountStateDir.EraseWhenStoppedAsync;
         _removeAccountBlocked = removeAccountBlocked ?? Services.AccountStateDir.RemoveAccountBlocked;
     }
 
@@ -159,9 +160,15 @@ public partial class AccountSwitcherViewModel : ViewModelBase
     /// not switch, nothing rebuilds the page — the refresh below is what updates the
     /// already-navigated list. A remove that reaches here anyway is still refused by the
     /// shared door below, which also refuses an account a sibling instance serves.</para>
+    ///
+    /// <para><b>Async because the erase waits.</b> The account being removed may be the
+    /// one this window served a moment ago, and its store stops only after the switch
+    /// away from it has returned; the erase waits for that stop (bounded) rather than
+    /// meeting a store windows cannot delete. The row goes as soon as the registry has
+    /// removed the account, so the wait never leaves a removable row on screen.</para>
     /// </summary>
     [RelayCommand]
-    public void Remove(string actorId)
+    public async Task RemoveAsync(string actorId)
     {
         SetError(null);
         // Ask the shared door BEFORE the registry removal, which drops the account's
@@ -189,13 +196,14 @@ public partial class AccountSwitcherViewModel : ViewModelBase
             ShowError(ex);
             return;
         }
+        Refresh();
         // Erasure follows scope (account-scoping.md § Erasure follows scope):
         // forgetting an account drops its per-actor slots + index entry above, so
         // its content stores (MLS, drafts, backup) must go too — leaving them
         // readable would be the same leak as leaving its secret in the store. Runs
         // only after a SUCCESSFUL registry remove (a rejection returned above).
-        _eraseAccountState(actorId);
-        Refresh();
+        // No ConfigureAwait(false): the caller's continuation is UI-bound.
+        await _eraseAccountState(actorId);
     }
 
     /// <summary>

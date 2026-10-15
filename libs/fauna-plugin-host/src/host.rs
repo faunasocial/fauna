@@ -7,7 +7,10 @@ use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap};
 
 use crate::services::{HostServices, HttpRequest, LogLevel, OutboundPolicy, RpcRefusal};
-use crate::{PLUGIN_FUEL_PER_CALL, PLUGIN_MAX_MEMORY_BYTES, PLUGIN_MODULE_MAX_BYTES};
+use crate::{
+    PLUGIN_FUEL_PER_CALL, PLUGIN_FUEL_YIELD_INTERVAL, PLUGIN_MAX_MEMORY_BYTES,
+    PLUGIN_MODULE_MAX_BYTES,
+};
 
 /// The generated bindings for the `fauna:plugin` world (`wit/plugin.wit`).
 /// Public so an embedder can name the lifted types; the sandbox itself is
@@ -32,7 +35,8 @@ pub struct PluginEngine {
 
 impl PluginEngine {
     /// Fuel metering on, the component model on, async host imports on —
-    /// and nothing else (no cache, no profiling).
+    /// and nothing else (no cache, no profiling). Each store then yields to
+    /// the executor every [`PLUGIN_FUEL_YIELD_INTERVAL`] units of fuel.
     pub fn new() -> anyhow::Result<Self> {
         let mut config = Config::new();
         config.consume_fuel(true).wasm_component_model(true);
@@ -262,6 +266,9 @@ impl PluginInstance {
         );
         store.limiter(|s| &mut s.limits);
         store.set_fuel(PLUGIN_FUEL_PER_CALL)?;
+        // Every call is cooperative: it yields its worker at this interval
+        // instead of holding it for the whole budget.
+        store.fuel_async_yield_interval(Some(PLUGIN_FUEL_YIELD_INTERVAL))?;
         let plugin = Plugin::instantiate_async(&mut store, &compiled.component, &linker).await?;
         Ok(Self {
             store,

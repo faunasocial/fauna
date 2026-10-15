@@ -180,15 +180,36 @@ fn media_item_to_attachment(item: &MediaItem, _actor_url: &str, domain: &str) ->
     {
         origin
     } else {
-        let hash_hex = hex::encode(item.blob_hash.digest());
-        format!("https://{}/blobs/{}", domain, hash_hex)
+        public_blob_url(domain, &item.blob_hash)
     };
     ApMediaAttachment {
         r#type: "Document".into(),
         media_type: item.media_type.clone(),
         url: Some(url),
-        name: None,
+        // The alt text, as AS2's `name` — the field the ingest path reads it
+        // back from (`ap_note_to_fauna_post`).
+        name: item.alt.clone(),
     }
+}
+
+/// The URL a remote server dereferences one of this nest's blobs at: the
+/// unauthenticated hex-addressed blob route (`blob_routes::download_blob`,
+/// mounted at `/api/v1/blob/{id}`). Emitted until 2026-10-09 as
+/// `/blobs/{hex}`, a path no route serves, so every federated photo and
+/// avatar 404'd on the follower's server.
+pub fn public_blob_url(domain: &str, hash: &ContentHash) -> String {
+    format!(
+        "https://{}/api/v1/blob/{}",
+        domain,
+        hex::encode(hash.digest())
+    )
+}
+
+/// An AS2 `Image` naming one of this nest's blobs — the actor's `icon`
+/// (avatar) and `image` (banner). No `mediaType`: a profile rests only the
+/// hash, and peers sniff the fetched bytes.
+fn blob_image(domain: &str, hash: &ContentHash) -> serde_json::Value {
+    serde_json::json!({ "type": "Image", "url": public_blob_url(domain, hash) })
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +457,8 @@ pub fn fauna_profile_to_ap_person(
         name: display_name,
         summary,
         attachment,
+        icon: profile.avatar.as_ref().map(|h| blob_image(domain, h)),
+        image: profile.banner.as_ref().map(|h| blob_image(domain, h)),
         ..ap_person_skeleton(
             username,
             domain,
@@ -1350,6 +1373,66 @@ mod tests {
             person.inbox,
             "https://nest.fauna.social/ap/users/alice/inbox"
         );
+        assert!(person.icon.is_none() && person.image.is_none());
+    }
+
+    /// The profile's avatar and banner federate as the actor's `icon` and
+    /// `image`, each at the blob route that serves it.
+    #[test]
+    fn profile_pictures_become_icon_and_image_at_the_served_blob_route() {
+        let avatar = ContentHash::from_digest_raw([0xaa; 32]);
+        let banner = ContentHash::from_digest_raw([0xbb; 32]);
+        let profile = Profile {
+            actor_id: test_actor_id(),
+            display_name: Some("Alice".into()),
+            bio: None,
+            avatar: Some(avatar),
+            banner: Some(banner),
+            links: vec![],
+            nests: vec![],
+            admin_nests: vec![],
+            load_hint: None,
+            inbox_mode: InboxMode::Open,
+            recovery_head: None,
+            updated_at: Timestamp(0),
+        };
+        let person =
+            fauna_profile_to_ap_person(&profile, "alice", "nest.example", "pem".into(), false);
+        let url_of = |v: &Option<serde_json::Value>| {
+            let v = v.as_ref().expect("picture present");
+            assert_eq!(v["type"], "Image");
+            v["url"].as_str().unwrap().to_string()
+        };
+        assert_eq!(
+            url_of(&person.icon),
+            format!("https://nest.example/api/v1/blob/{}", "aa".repeat(32))
+        );
+        assert_eq!(
+            url_of(&person.image),
+            format!("https://nest.example/api/v1/blob/{}", "bb".repeat(32))
+        );
+    }
+
+    /// A local photo federates at the route that serves it, with its alt text.
+    #[test]
+    fn a_local_media_item_attaches_at_the_served_blob_route_with_its_alt() {
+        let item = MediaItem {
+            blob_hash: ContentHash::from_digest_raw([0x11; 32]),
+            media_type: "image/png".into(),
+            size_bytes: 3,
+            dimensions: None,
+            thumbnail: None,
+            remote_url: None,
+            alt: Some("a heron".into()),
+        };
+        let att = media_item_to_attachment(&item, "", "nest.example");
+        assert_eq!(att.r#type, "Document");
+        assert_eq!(att.media_type, "image/png");
+        assert_eq!(
+            att.url.as_deref(),
+            Some(format!("https://nest.example/api/v1/blob/{}", "11".repeat(32)).as_str())
+        );
+        assert_eq!(att.name.as_deref(), Some("a heron"));
     }
 
     #[test]

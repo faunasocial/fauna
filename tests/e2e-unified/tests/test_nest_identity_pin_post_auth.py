@@ -60,6 +60,7 @@ import pytest
 from common.cred_store import requires_secret_service
 from common.keyring import secret_service_available
 from common.launch_harness import make_launch_harness, reached_authenticated_app
+from helpers.app_launch import app_launch_config
 from conftest import _trust_seeder, get_available_apps
 from helpers.app_log_section import app_text
 from helpers.app_surface import skip_environment, skip_unbuilt
@@ -119,12 +120,11 @@ def pin_env(request, pin_app, tmp_path):
     """A per-app launch harness over ``self_signed_nest`` (real TLS → the Changed
     arm) plus the identity it authenticates with.
 
-    **web is the one WITHDRAWN arm** (same split as the launch-time module): it
-    rides its plain-HTTP ``spa_url`` origin, which serves no ``cert_binding`` at
-    all, so a seeded pin cannot be *confirmed* rather than being contradicted —
-    ``WebIdentityError::Withdrawn`` instead of ``Changed``. Both are the same
-    verdict class and reach the same surface; only the re-TOFU tail differs (a
-    plain-HTTP nest has no binding to re-pin, so the pin is simply forgotten)."""
+    **web rides its plain-HTTP ``spa_url`` origin** and reaches the Changed arm
+    too (same as the launch-time module): its silent challenge reads the nest's
+    cert-optional identity binding (``fauna.auth.nest_handshake``) before signing
+    (``login.md`` § Binding the nest), so a seeded pin *disagrees* with a
+    possession-proven identity. Only the launch shape differs (``web_launch``)."""
     if pin_app == "web":
         spa_url = request.getfixturevalue("spa_url")
         user = request.getfixturevalue("test_user")
@@ -134,7 +134,7 @@ def pin_env(request, pin_app, tmp_path):
             "node_url": spa_url,
             "nest": None,  # a browser reads no environment
             "secret_hex": bytes(user["signing_key"]).hex(),
-            "arm": "withdrawn",
+            "web_launch": True,
         }
         try:
             yield env
@@ -145,27 +145,16 @@ def pin_env(request, pin_app, tmp_path):
                 pass
         return
     nest = request.getfixturevalue("self_signed_nest")
-    if pin_app == "ios":
-        # No bare `ios_app_path` fixture exists — iOS's direct-launch fixture
-        # (`ios_setup`) returns `{"udid", "app_path"}` together, because
-        # `drivers/ios.py`'s `launch()` requires both. Same branch as
-        # `test_nest_identity_pin.py`'s `pin_env`.
-        ios_setup = request.getfixturevalue("ios_setup")
-        harness = make_launch_harness(
-            "ios", tmp_path=tmp_path, app_path=ios_setup["app_path"],
-            udid=ios_setup["udid"], seed_trust=_trust_seeder(request),
-        )
-    else:
-        app_path = request.getfixturevalue(f"{pin_app}_app_path")
-        harness = make_launch_harness(
-            pin_app, tmp_path=tmp_path, app_path=app_path, seed_trust=_trust_seeder(request)
-        )
+    harness = make_launch_harness(
+        pin_app, tmp_path=tmp_path, **app_launch_config(pin_app, request),
+        seed_trust=_trust_seeder(request),
+    )
     env = {
         "harness": harness,
         "node_url": nest["url"],
         "nest": nest,
         "secret_hex": bytes(nest["user"]["signing_key"]).hex(),
-        "arm": "changed",
+        "web_launch": False,
     }
     try:
         yield env
@@ -235,7 +224,7 @@ def _launch_authenticated(env):
     the session must already be live before the pin is poisoned — so web takes
     ``launch_and_route()``, whose reload IS that first (clean, still-unpinned)
     launch."""
-    if env["arm"] == "withdrawn":
+    if env["web_launch"]:
         return env["harness"].launch_and_route(
             secret_hex=env["secret_hex"], node_url=env["node_url"], trust=env["nest"]
         )
@@ -419,24 +408,16 @@ def test_post_auth_identity_change_warns_then_recovers(pin_env):
         "after re-trusting, the warning should be gone and the user in the app"
     )
 
-    # The stale pin was forgotten. The Changed arm re-TOFU'd the nest's genuine
-    # identity over the live TLS binding; the Withdrawn arm's plain-HTTP nest
-    # serves no binding, so there is nothing to re-pin and the origin's pin is
-    # simply cleared. Both must have dropped the bogus one.
+    # The stale pin was forgotten and the re-TOFU re-pinned the nest's genuine
+    # identity over the live binding.
     repinned = _read_pin(driver, env["node_url"])
     assert repinned != BOGUS_PIN, (
         f"the stale pin must be forgotten by the re-trust action, got {repinned!r}"
     )
-    if env["arm"] == "withdrawn":
-        assert repinned is None, (
-            "a plain-HTTP nest serves no binding, so the re-TOFU has nothing to "
-            f"re-pin — the origin's pin should be forgotten, got {repinned!r}"
-        )
-    else:
-        assert repinned is not None, (
-            f"re-TOFU against a real TLS binding must re-pin the nest's genuine "
-            f"identity, got {repinned!r}"
-        )
+    assert repinned is not None, (
+        "re-TOFU against the nest's identity binding must re-pin its genuine "
+        f"identity, got {repinned!r}"
+    )
 
 
 def test_post_auth_valid_refresh_does_not_escalate(pin_env):

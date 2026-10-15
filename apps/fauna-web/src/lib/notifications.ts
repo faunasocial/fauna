@@ -5,8 +5,9 @@
 // `UnifiedNotification` keeps the `type` key, so we rename on the way out.
 
 import * as rpc from './rpc';
-import { notificationText, type NotificationText } from './wasm';
+import { notificationDestination, notificationText, type NotificationDestination, type NotificationText } from './wasm';
 import { resolveLocalized } from './i18n/localized';
+import { withLocalDeadlines } from './notificationDeadlines';
 
 // The Notifications page's per-row icon — the shared `notif_type` → emoji
 // mapping (`fauna_core::notification_glyph`, also used by linux) rather than
@@ -24,6 +25,9 @@ export interface UnifiedNotification {
   summary: string;
   /** What the row paints — decided in shared Rust off the row as it arrived. */
   text: NotificationText;
+  /** Where opening the row leads — decided in shared Rust off the row as it
+   *  arrived (`notifications.md` § Deep-link destinations); `null` = inert. */
+  destination: NotificationDestination | null;
   is_read: boolean;
   created_at: number;
 }
@@ -51,12 +55,25 @@ export async function getNotifications(
       // Decided here, while the row still has its wire shape — the shared
       // decision reads `body` and `summary` off it (`notifications.md`
       // § Localized body).
-      text: notificationText(n),
+      text: withLocalDeadlines(notificationText(n)),
+      destination: notificationDestination(n),
       is_read: n.is_read,
       created_at: n.created_at,
     })),
     cursor: reply.cursor ?? null,
   };
+}
+
+/** The destination a row offers as a control, or `null` when it paints as plain
+ *  text. The shared decision's answer, minus its one app-local subtraction:
+ *  `Family` only while the family tab is gated in (tui's `navigable()` shape) —
+ *  a control into a page the nav hides would be a dead end. */
+export function navigableDestination(
+  n: UnifiedNotification,
+  familyGatedIn: boolean,
+): NotificationDestination | null {
+  if (n.destination === 'Family' && !familyGatedIn) return null;
+  return n.destination;
 }
 
 /** The sentence a row paints: the shared decision's localized arm resolved

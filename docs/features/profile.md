@@ -38,9 +38,9 @@ Stamped 2026-09-19 at 8ac16765e4.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | |
+| web | ✅ full | |
 | linux | ✅ full | 0.1.2-dev+2354a342.dirty standalone |
-| windows | ⚠ partial | 0.1.2-dev+068e152c.dirty standalone |
+| windows | ✅ full | 0.1.2-dev+068e152c.dirty standalone |
 | macos | ✅ full | |
 | ios | ✅ full | |
 | android |  no run recorded | |
@@ -48,13 +48,13 @@ Stamped 2026-09-19 at 8ac16765e4.
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_profile.py::test_profile_edit_publishes_and_renders_display_name` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_profile.py::test_profile_edit_sets_and_clears_avatar_and_banner` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_profile.py::test_other_profile_start_dm_opens_compose` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_profile.py::test_state_protocol_actor_nav_opens_that_actor_then_normalizes_self` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_profile.py::test_other_profile_block` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_contact_overlay.py::test_a_nickname_notes_and_label_paint_on_the_roster_and_profile_and_survive_a_relaunch` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 5 | app | `tests/e2e-unified/tests/test_contact_overlay.py::test_two_seats_of_one_account_converge_on_the_overlay_per_field` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_profile.py::test_profile_edit_publishes_and_renders_display_name` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_profile.py::test_profile_edit_sets_and_clears_avatar_and_banner` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_profile.py::test_other_profile_start_dm_opens_compose` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_profile.py::test_state_protocol_actor_nav_opens_that_actor_then_normalizes_self` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_profile.py::test_other_profile_block` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_contact_overlay.py::test_a_nickname_notes_and_label_paint_on_the_roster_and_profile_and_survive_a_relaunch` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_contact_overlay.py::test_two_seats_of_one_account_converge_on_the_overlay_per_field` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 6 | app | `tests/e2e-unified/tests/test_profile.py::test_profile_copy_button_copies_the_viewed_actors_id` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_profile.py::test_other_profile_request_contact_lands_a_knock` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_profile.py::test_other_profile_request_contact_lands_a_knock` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

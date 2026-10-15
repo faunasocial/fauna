@@ -2,7 +2,7 @@
 
 The predicate this pins — "does this file still carry its placeholder bits?" — is
 the ground truth the installer full-journey e2e asserts hydration on
-(``docs/goal/behavior/file-sync.md`` § *A placeholder is present-but-unreadable*:
+(``docs/goal/behavior/on-demand-files.md`` § *A placeholder is present-but-unreadable*:
 a cloud-only placeholder carries ``FILE_ATTRIBUTE_OFFLINE`` /
 ``FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS``, *"which a hydrated file no longer
 carries"*).

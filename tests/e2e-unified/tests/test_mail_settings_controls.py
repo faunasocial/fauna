@@ -46,7 +46,7 @@ from . import test_mail_enable_then_mua_round_trip as rt
 
 # tui leads (the lead app); the other six apps join by adding their marker once
 # their run is green.
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.macos, pytest.mark.ios]
+pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mark.macos, pytest.mark.ios, pytest.mark.web, pytest.mark.windows]
 
 _UI_S = 20.0
 
@@ -98,7 +98,7 @@ def _enable_on_dedicated_nest(app, handle, request) -> str:
     mail.navigate()
     assert mail.is_page_visible(), "mail-settings page must be reachable"
     mail.enable_mail_plain(_DEFAULT_PASSWORD)
-    assert mail.wait_for_credential_count_at_least(1, timeout=15.0), (
+    assert mail.wait_for_credential_count_at_least(1, timeout=mail.ENABLE_SETTLE_S), (
         f"enabling mail mints the first password; error: {mail.page_error_text(timeout=2.0)!r}"
     )
     assert mail.wait_for_enabled_status(timeout=15.0), (
@@ -220,7 +220,7 @@ def test_an_interrupted_rotation_is_shown_and_one_tap_finishes_it(
 
 # The apps whose rotate-keys form renders the per-password
 # `mail-rotate-keys-exclude-item` checkboxes (and dispatches what is ticked).
-_EXCLUDE_BUILT_APPS = frozenset({"tui", "macos", "ios"})
+_EXCLUDE_BUILT_APPS = frozenset({"tui", "linux", "macos", "ios", "web", "windows"})
 
 
 @pytest.mark.feature("turn-on-mail")
@@ -244,7 +244,7 @@ def test_a_password_marked_compromised_at_rotation_stops_working(
     mail = app.mail_settings
 
     mail.add_credential_plain("Phone", _SECOND_PASSWORD)
-    assert mail.wait_for_credential_count_at_least(2, timeout=15.0)
+    assert mail.wait_for_credential_count_at_least(2, timeout=mail.ENABLE_SETTLE_S)
     phone_addr = f"{ADMIN_LOCAL_PART}+phone@{handle.domain}"
     assert _imap_login(handle, phone_addr, _SECOND_PASSWORD) == "OK", (
         "before the rotation, the Phone password logs in"
@@ -279,10 +279,9 @@ def test_turning_email_off_keeps_the_calendar_signed_in(app, dedicated_mail_nest
     Disable, while the page reads email off. Email is turned on and off from the
     page; the calendar half is the test agent's CalDAV-mailbox command (no app
     switch turns a person's calendar on — the deployment toggle is the admin's)."""
-    from helpers.mail_dedicated_nest import mint_caldav_mailbox, require_caldav_mailbox_mint_supported
+    from helpers.mail_dedicated_nest import mint_caldav_mailbox
     from .test_mail_multi_credential_auth import _caldav_propfind_status
 
-    require_caldav_mailbox_mint_supported(app.driver)
     handle = dedicated_mail_nest
     admin_addr = _enable_on_dedicated_nest(app, handle, request)
     mint_caldav_mailbox(app.driver, password=None)  # calendar on, same password
@@ -416,7 +415,7 @@ def test_a_brief_drop_while_turning_mail_on_is_retried_and_finishes(
     finally:
         release_rpc_hold(port, _WRAP_KIND)
 
-    assert mail.wait_for_credential_count_at_least(1, timeout=15.0), (
+    assert mail.wait_for_credential_count_at_least(1, timeout=mail.ENABLE_SETTLE_S), (
         f"the first password is listed after the retry; {_page_state(app)}"
     )
     assert not app.driver.is_visible("error-message"), (
@@ -426,9 +425,9 @@ def test_a_brief_drop_while_turning_mail_on_is_retried_and_finishes(
 
 # ── outcome 21 ─────────────────────────────────────────────────────────────
 
-# The apps `conftest.py::_alice_extra_seat` can launch a second seat of one
+# The apps `conftest.py::_alice_extra_seat` (web: `_alice_web_twin_seat`) can launch a second seat of one
 # identity on (a fresh, empty state root, a distinct device id).
-_SECOND_SEAT_APPS = frozenset({"tui", "linux", "macos", "windows"})
+_SECOND_SEAT_APPS = frozenset({"tui", "linux", "macos", "windows", "web"})
 
 
 @pytest.mark.feature("turn-on-mail")
@@ -441,7 +440,7 @@ def test_mail_setup_and_passwords_follow_you_to_a_second_device(
     page reading mail on, with both passwords listed under their names
     (mail-credentials.md § Goal; § MSEK lifecycle → *Persistence*: the mail
     custody is synced across every Fauna app the user owns)."""
-    from conftest import _alice_extra_seat
+    from conftest import _alice_extra_seat, _alice_web_twin_seat
 
     app, actor = dedicated_actor_app
     name = app_name(app.driver)
@@ -459,13 +458,18 @@ def test_mail_setup_and_passwords_follow_you_to_a_second_device(
         f"mail must turn on on the first device; {_page_state(app)}"
     )
     mail.add_credential("Phone")
-    assert mail.wait_for_credential_count_at_least(2, timeout=15.0), (
+    assert mail.wait_for_credential_count_at_least(2, timeout=mail.ENABLE_SETTLE_S), (
         f"the second password must be listed on the first device; {_page_state(app)}"
     )
 
-    seat = _alice_extra_seat(
-        name, request, actor, nest_instance, screenshot_tag="mail-second-device",
-    )
+    if name == "web":
+        seat = _alice_web_twin_seat(
+            app.driver, request, actor, screenshot_tag="mail-second-device",
+        )
+    else:
+        seat = _alice_extra_seat(
+            name, request, actor, nest_instance, screenshot_tag="mail-second-device",
+        )
     device_b, _driver_b = next(seat)
     try:
         mail_b = device_b.mail_settings
@@ -541,7 +545,7 @@ def test_revoking_one_password_leaves_the_others_working(app, dedicated_mail_nes
     mail = app.mail_settings
 
     mail.add_credential_plain("Phone", _SECOND_PASSWORD)
-    assert mail.wait_for_credential_count_at_least(2, timeout=15.0)
+    assert mail.wait_for_credential_count_at_least(2, timeout=mail.ENABLE_SETTLE_S)
     phone_addr = f"{ADMIN_LOCAL_PART}+phone@{handle.domain}"
     assert _imap_login(handle, phone_addr, _SECOND_PASSWORD) == "OK", (
         "before the revoke, the second password logs in"

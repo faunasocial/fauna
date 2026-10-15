@@ -30,11 +30,12 @@ Stamped 2026-10-01 at dc4b94e0f1.
 4. [nest] The app address refuses to be framed by another site whatever it answers, including when it sends you on to the central app — `docs/goal/behavior/web-content-hosting.md` § Same-origin security model
    - `tests/e2e-unified/tests/api/test_web_app_origin.py::test_the_admin_choice_flips_app_to_the_central_origin_and_back`
 5. [nest] The app page your nest serves runs only its own scripts, with no inline or outside scripts and no plugins — `docs/goal/behavior/web-content-hosting.md` § Implementation status today
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_spa_serving.py::test_the_served_app_runs_only_its_own_scripts`
 6. [nest] Your nest never gives your browser a sign-in cookie, from the app or from any site it serves — `docs/goal/behavior/web-content-hosting.md` § Invariants this model relies on
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_spa_serving.py::test_the_served_app_never_sets_a_cookie`
+   - `tests/e2e-unified/tests/api/test_web_served_headers.py::test_no_door_of_the_nest_ever_sets_a_cookie`
 7. [nest] A request for one of the app's script or style files that the nest does not have is answered as not found, never with the app's page — `docs/goal/behavior/web-content-hosting.md` § The nest-served `/app/` and the central origin
-   - (none)
+   - `tests/e2e-unified/tests/test_static_serving.py::test_missing_asset_under_the_hashed_tree_is_not_found_not_the_page`
 8. [app] Arriving at the app from a nest that sends visitors to the central app, the sign-in page already names that nest, and a link naming anything that is not a nest address is quietly ignored — `docs/goal/behavior/onboarding.md` § 2. Handle entry (`handle_entry`)
    - `tests/e2e-unified/tests/test_onboarding_nest_hint.py::test_the_nest_hint_prefills_the_domain_part_and_the_check_still_runs`
    - `tests/e2e-unified/tests/test_onboarding_nest_hint.py::test_an_unclassifiable_nest_hint_is_dropped_silently`
@@ -44,7 +45,7 @@ Stamped 2026-10-01 at dc4b94e0f1.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
+| web | ✅ full | 0.1.2-dev+b3cb40c5 docker |
 | linux | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
 | windows | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
 | macos | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
@@ -57,13 +58,14 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | 1 | nest | `tests/e2e-unified/tests/platform/docker/test_spa_serving.py::test_app_path_serves_the_spa_not_the_info_page` | nest (linux): passed |
 | 1 | nest | `tests/e2e-unified/tests/platform/docker/test_spa_serving.py::test_app_and_root_are_not_the_same_page` | nest (linux): passed |
 | 1 | nest | `tests/e2e-unified/tests/platform/docker/test_spa_serving.py::test_spa_origin_security_headers_ride_the_real_mount` | nest (linux): passed |
-| 1 | nest | `tests/e2e-unified/tests/test_static_serving.py::test_spa_js_modules_have_correct_content_type` | nest (linux): failed |
+| 1 | nest | `tests/e2e-unified/tests/test_static_serving.py::test_spa_js_modules_have_correct_content_type` | nest (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/platform/docker/test_spa_serving.py::test_a_box_with_no_static_dir_self_heals_on_restart` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/api/test_web_app_origin.py::test_the_admin_choice_flips_app_to_the_central_origin_and_back` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_web_app_origin.py::test_the_admin_choice_flips_app_to_the_central_origin_and_back` | nest (linux): passed |
-| 5 | nest | (none) | — |
-| 6 | nest | (none) | — |
-| 7 | nest | (none) | — |
+| 5 | nest | `tests/e2e-unified/tests/platform/docker/test_spa_serving.py::test_the_served_app_runs_only_its_own_scripts` | nest (linux): passed |
+| 6 | nest | `tests/e2e-unified/tests/platform/docker/test_spa_serving.py::test_the_served_app_never_sets_a_cookie` | nest (linux): passed |
+| 6 | nest | `tests/e2e-unified/tests/api/test_web_served_headers.py::test_no_door_of_the_nest_ever_sets_a_cookie` | nest (linux): passed |
+| 7 | nest | `tests/e2e-unified/tests/test_static_serving.py::test_missing_asset_under_the_hashed_tree_is_not_found_not_the_page` | nest (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_onboarding_nest_hint.py::test_the_nest_hint_prefills_the_domain_part_and_the_check_still_runs` | web (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_onboarding_nest_hint.py::test_an_unclassifiable_nest_hint_is_dropped_silently` | web (linux): passed |
 <!-- features-render:end -->

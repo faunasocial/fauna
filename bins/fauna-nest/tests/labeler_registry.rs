@@ -94,8 +94,11 @@ async fn publish_list_inspect_subscribe_unsubscribe_registers_model_version() {
     let metadata = signed_labeler(&kp, 1, &wasm);
 
     // ── publish (signature + hash + compile validation + store) ──
+    // A `mail`-kind module: the kind the holder drains under a grant, and so
+    // the one a subscription registers in `model_versions` (a `post`-kind one
+    // runs in the subscriber's app — `subscribe_post_labeler_keeps_the_row_only`).
     let (stored_id, stored_ver) =
-        publish_labeler_core(&db, &TEST_CALLER, &metadata, &wasm, "post", "wasm")
+        publish_labeler_core(&db, &TEST_CALLER, &metadata, &wasm, "mail", "wasm")
             .await
             .expect("publish a valid signed labeler");
     assert_eq!(stored_id, labeler_id);
@@ -108,7 +111,7 @@ async fn publish_list_inspect_subscribe_unsubscribe_registers_model_version() {
     assert_eq!(list[0].version, 1);
     assert_eq!(list[0].factor, factor);
     assert_eq!(list[0].publisher_actor, labeler_id.to_vec());
-    assert_eq!(list[0].content_kind, "post");
+    assert_eq!(list[0].content_kind, "mail");
 
     // ── inspect returns the full record + WASM bytes ──
     let rec = db.get_labeler(&labeler_id).await.unwrap().unwrap();
@@ -395,11 +398,132 @@ async fn subscribe_mail_labeler_seeds_owner_backlog_so_worklist_owes_a_rescore()
     assert_eq!(after[0].scorer_version, 0);
 }
 
-/// A `post`-kind labeler (the default) seeds **nothing** on subscribe —
-/// post-content-at-rest does not exist yet, so there is no item universe to
-/// materialize an obligation over (design: post drains arrive with their holder).
+/// A subscribed `wasm` labeler's **new version** owes a re-score of the mail it
+/// already scored (`content-moderation-and-ranking.md` § Tier-3 → *Re-score
+/// obligation*: a community model's version change drives the per-user
+/// re-score via the watermark against the model-version bus). The republish is
+/// what raises the registered watermark — subscribe registers the version it
+/// saw, and nothing else would ever learn of a later one, so the drained row
+/// would sit at the old version for good.
+///
+/// An unsubscribed labeler's republish registers nothing: the registry entry is
+/// the subscription's (subscribe is what puts it there), and a bus entry with no
+/// subscriber would owe drain work no grant will ever serve.
 #[tokio::test]
-async fn subscribe_post_labeler_seeds_no_backlog() {
+async fn republishing_a_subscribed_wasm_labeler_owes_a_rescore_of_what_it_scored() {
+    use fauna_core::scoring::{ScoreEntry, TIER_COMMUNITY};
+    use fauna_nest::db::bridge_routing::ScanResultRow;
+
+    let db = CacheDb::open_in_memory().unwrap();
+    let kp = ActorKeypair::generate();
+    let labeler_id = kp.actor_id().0;
+    let factor = labeler_factor(&kp.actor_id());
+    let wasm = MINIMAL_LABELER_WAT.as_bytes().to_vec();
+    publish_labeler_core(
+        &db,
+        &TEST_CALLER,
+        &signed_labeler(&kp, 1, &wasm),
+        &wasm,
+        "mail",
+        "wasm",
+    )
+    .await
+    .expect("publish v1");
+
+    let owner = [0x42u8; 32];
+    let content_id = [0xABu8; 32];
+    db.insert_scan_result(&ScanResultRow {
+        message_id: content_id,
+        received_at: 1_700_000_000,
+        scanned_at: 1_700_000_000,
+        clamav_verdict: "clean".into(),
+        clamav_signature: None,
+        rspamd_score_raw: None,
+        rspamd_score_scaled: None,
+        rspamd_flagged_rules: None,
+        rspamd_score_breakdown: None,
+        action_taken: "delivered".into(),
+        delivered_to_actor: Some(owner),
+    })
+    .await
+    .unwrap();
+    subscribe_labeler_core(&db, &owner, &labeler_id, None)
+        .await
+        .expect("subscribe");
+    assert_eq!(db.get_model_version(&factor).await.unwrap(), Some(1));
+
+    // The drain scores the mail under v1 (the holder's `submit_scores` write).
+    db.insert_content_scores(
+        &content_id,
+        "mail",
+        Some(&owner),
+        1_700_000_001,
+        &[ScoreEntry {
+            factor: factor.clone(),
+            score: 900,
+            tier: TIER_COMMUNITY,
+            scorer_version: 1,
+        }],
+    )
+    .await
+    .unwrap();
+    assert!(
+        db.content_scores_behind_for_owner(&factor, &owner, 1, 100)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a mail scored at v1 owes nothing while v1 is current"
+    );
+
+    // The publisher releases v2.
+    publish_labeler_core(
+        &db,
+        &TEST_CALLER,
+        &signed_labeler(&kp, 2, &wasm),
+        &wasm,
+        "mail",
+        "wasm",
+    )
+    .await
+    .expect("publish v2");
+    assert_eq!(
+        db.get_model_version(&factor).await.unwrap(),
+        Some(2),
+        "republishing a subscribed labeler must raise its registered version"
+    );
+    let owed = db
+        .content_scores_behind_for_owner(&factor, &owner, 2, 100)
+        .await
+        .unwrap();
+    assert_eq!(owed.len(), 1, "the mail v1 scored now owes a v2 re-score");
+    assert_eq!(owed[0].content_id, content_id.to_vec());
+    assert_eq!(owed[0].scorer_version, 1);
+
+    // An unsubscribed labeler's republish registers nothing.
+    let other = ActorKeypair::generate();
+    let other_factor = labeler_factor(&other.actor_id());
+    for v in [1, 2] {
+        publish_labeler_core(
+            &db,
+            &TEST_CALLER,
+            &signed_labeler(&other, v, &wasm),
+            &wasm,
+            "mail",
+            "wasm",
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(db.get_model_version(&other_factor).await.unwrap(), None);
+}
+
+/// A `post`-kind `wasm` labeler leaves the nest a `labeler_subscriptions` row
+/// **only** (`content-moderation-and-ranking.md` § Tier-3 → *Where it runs*,
+/// invariant (f)): it runs at the subscriber's app in the feed seam, so no
+/// backlog, no `model_versions` registration, and no grant — the `text-model`
+/// kind's posture.
+#[tokio::test]
+async fn subscribe_post_labeler_keeps_the_row_only() {
     let db = CacheDb::open_in_memory().unwrap();
     let kp = ActorKeypair::generate();
     let labeler_id = kp.actor_id().0;
@@ -413,9 +537,24 @@ async fn subscribe_post_labeler_seeds_no_backlog() {
     assert_eq!(db.list_labelers().await.unwrap()[0].content_kind, "post");
 
     let owner = [0x42u8; 32];
+    let err = subscribe_labeler_core(&db, &owner, &labeler_id, Some(&[0x77u8; 16]))
+        .await
+        .expect_err("a post labeler's subscription carries no grant");
+    assert_eq!(err.code, "fauna.protocol.malformed");
     subscribe_labeler_core(&db, &owner, &labeler_id, None)
         .await
         .expect("subscribe to the post labeler");
+    assert!(
+        db.get_subscription(&owner, &labeler_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        db.get_model_version(&factor).await.unwrap(),
+        None,
+        "a post labeler owes the drain nothing"
+    );
 
     let after = db
         .content_scores_behind_for_owner(&factor, &owner, 1, 100)

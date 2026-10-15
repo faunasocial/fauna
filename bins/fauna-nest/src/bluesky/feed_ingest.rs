@@ -452,6 +452,76 @@ mod tests {
         assert_eq!(matched, vec![stored[0].post_id_hex.clone()]);
     }
 
+    /// The per-viewer pair on a Bluesky row (`feed.md` § Interaction bar →
+    /// *The viewer-state carrier*, the Bluesky exception): the viewer's own
+    /// stored like/repost records — `bluesky_interactions`, keyed by the
+    /// post's AT-URI through the `bluesky_posts` map — project as
+    /// `viewer_liked` and as `viewer_repost_id` naming the TARGET itself,
+    /// which is exactly the bridged `unrepost`'s argument. Another viewer
+    /// sees neither, and removing the record clears both.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bluesky_row_projects_the_viewers_own_like_and_repost() {
+        use fauna_core::scoring::FilterCombination;
+        let state = test_state().await;
+        let uri = "at://did:plc:alice/app.bsky.feed.post/viewer";
+        let stored = ingest_feed_posts(
+            &state.db,
+            &state.post_segments,
+            &[ingestable(uri, "did:plc:alice", "toggle me")],
+        )
+        .await
+        .unwrap();
+        let (viewer, other) = ([7u8; 32], [8u8; 32]);
+        let like_uri = "at://did:plc:me/app.bsky.feed.like/l1";
+        let repost_uri = "at://did:plc:me/app.bsky.feed.repost/r1";
+        {
+            let conn = state.db.conn().await;
+            let me = hex::encode(viewer);
+            db_helpers::store_interaction(&conn, &me, uri, "like", like_uri).unwrap();
+            db_helpers::store_interaction(&conn, &me, uri, "repost", repost_uri).unwrap();
+        }
+        let rows = |viewer: [u8; 32]| {
+            let state = state.clone();
+            async move {
+                let mut rows = state
+                    .db
+                    .query_feed(&[], FilterCombination::All, &[], None, 50)
+                    .await
+                    .unwrap();
+                state
+                    .db
+                    .augment_viewer_state(&viewer, &mut rows)
+                    .await
+                    .unwrap();
+                rows
+            }
+        };
+        let target = hex::decode(&stored[0].post_id_hex).unwrap();
+
+        let mine = rows(viewer).await;
+        assert_eq!(mine.len(), 1);
+        assert!(mine[0].viewer_liked, "the stored like record projects");
+        assert_eq!(
+            mine[0].viewer_repost_id.as_deref(),
+            Some(target.as_slice()),
+            "a bridged repost names the target — the bridged unrepost's argument"
+        );
+
+        let theirs = rows(other).await;
+        assert!(!theirs[0].viewer_liked, "another viewer has not liked it");
+        assert_eq!(theirs[0].viewer_repost_id, None);
+
+        {
+            let conn = state.db.conn().await;
+            let me = hex::encode(viewer);
+            db_helpers::remove_interaction(&conn, &me, like_uri).unwrap();
+            db_helpers::remove_interaction(&conn, &me, repost_uri).unwrap();
+        }
+        let undone = rows(viewer).await;
+        assert!(!undone[0].viewer_liked, "unlike clears the projection");
+        assert_eq!(undone[0].viewer_repost_id, None, "unrepost clears it too");
+    }
+
     /// Ruling 3: a parent the page carries (listed first by the shared
     /// translator) threads the reply; a parent the nest never saw leaves the
     /// reply top-level — never a synthetic id.

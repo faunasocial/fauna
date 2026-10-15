@@ -8,7 +8,7 @@ use fauna_client_folders::engine_binding::folder_ref_for_row;
 use fauna_client_folders::folders::{
     self as folders_wire, FolderActorMember, FolderMember, PlaceRow,
 };
-use fauna_devices_machine::{DevicesMachine, FolderSummary};
+use fauna_devices_machine::{DeviceSummary, DevicesMachine, FolderSummary};
 
 use super::location_binding;
 use crate::async_helper;
@@ -52,6 +52,77 @@ const DEVICE_ACTIVITY_BOX: &str = "folder-device-activity-box";
 /// cannot work (no destination enrolled at all) must not paint, so the two
 /// toggle visibility as one unit.
 const DESTINATION_PLACES_BOX: &str = "folder-destination-places-box";
+
+/// The nest's last `fauna.backup.destination.list` answer per set, so a row
+/// [`update_folder_list`] rebuilds repaints its destination places from nest
+/// truth AT ONCE instead of standing empty until its expand-time re-read
+/// returns — the widget-tree twin of tui's `destination_places` state, which
+/// a snapshot tick never blanks.
+///
+/// Without it a rebuild that lands after the reply (any write's snapshot
+/// tick) replaced the painted section with a fresh, empty one: the attached
+/// row vanished for a round trip, and a reader of the rebuilt row saw a
+/// folder with no places at all. Keyed by name AND id, so a set recreated
+/// under the same name never inherits the old one's places.
+#[derive(Default)]
+struct DestinationPlacesCache {
+    by_name:
+        std::collections::HashMap<String, (i64, Vec<fauna_client_config::FolderDestinationPlace>)>,
+}
+
+impl DestinationPlacesCache {
+    /// Record the nest's answer for `name` / `folder_id`, replacing any older one.
+    fn record(
+        &mut self,
+        name: &str,
+        folder_id: i64,
+        places: &[fauna_client_config::FolderDestinationPlace],
+    ) {
+        self.by_name
+            .insert(name.to_string(), (folder_id, places.to_vec()));
+    }
+
+    /// The last answer for the row `name` / `folder_id`, if it was for this very set.
+    fn for_row(
+        &self,
+        name: &str,
+        folder_id: i64,
+    ) -> Option<&[fauna_client_config::FolderDestinationPlace]> {
+        self.by_name
+            .get(name)
+            .filter(|(id, _)| *id == folder_id)
+            .map(|(_, places)| places.as_slice())
+    }
+
+    /// Drop every answer whose set the fresh snapshot no longer lists.
+    fn retain_listed(&mut self, folders: &[FolderSummary]) {
+        self.by_name
+            .retain(|name, (id, _)| folders.iter().any(|fs| fs.name == *name && fs.id == *id));
+    }
+}
+
+thread_local! {
+    /// The page's [`DestinationPlacesCache`], tied to the folder list it was
+    /// filled for: a settings shell rebuilt on sign-out or an actor switch has
+    /// a new `gtk::ListBox`, and the outgoing actor's places must not follow.
+    static DESTINATION_PLACES: RefCell<(gtk::glib::WeakRef<gtk::ListBox>, DestinationPlacesCache)> =
+        RefCell::new((gtk::glib::WeakRef::new(), DestinationPlacesCache::default()));
+}
+
+/// Run `f` over `list_box`'s cache, starting it afresh when the list is a new one.
+fn with_destination_places<R>(
+    list_box: &gtk::ListBox,
+    f: impl FnOnce(&mut DestinationPlacesCache) -> R,
+) -> R {
+    DESTINATION_PLACES.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.0.upgrade().as_ref() != Some(list_box) {
+            slot.0.set(Some(list_box));
+            slot.1 = DestinationPlacesCache::default();
+        }
+        f(&mut slot.1)
+    })
+}
 
 /// Build the folders section: a PreferencesGroup with an Add button suffix and a ListBox.
 ///
@@ -107,6 +178,7 @@ pub fn update_folder_list(
     can_serve_webdav: bool,
     own_tiers: &[String],
     website_address_enabled: Option<bool>,
+    lease: LeaseCtx,
     #[cfg(feature = "p2p-share")] group_scopes: &[crate::offline_share::GroupScopeView],
 ) {
     // Which rows the user had OPEN, so the rebuild below can put them back.
@@ -123,10 +195,13 @@ pub fn update_folder_list(
     // also re-fires `connect_expanded_notify`, so a restored row re-reads its
     // rosters — which is exactly the re-read those repaints want.
     let expanded_titles = expanded_folder_titles(list_box);
+    // And what the user had typed into each nest-place editor but not saved —
+    // the rebuild seeds every box from the snapshot, so without this carry a
+    // refresh between the typing and the save sent the old policy.
+    let staged_nest_place = staged_nest_place(list_box);
+    with_destination_places(list_box, |cache| cache.retain_listed(folders));
 
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(list_box);
 
     for fs in folders {
         // B3 member-list-visibility: a set shared *with* this client (a
@@ -153,11 +228,12 @@ pub fn update_folder_list(
                 crate::sync_agent::is_access_revoked(&fs.name),
             );
             if section.shown {
-                let row = build_writer_member_folder_row(fs, machine, fauna_client, location_map);
+                let row =
+                    build_writer_member_folder_row(fs, machine, fauna_client, location_map, lease);
                 list_box.append(&row);
                 restore_expansion(&row, &expanded_titles);
             } else {
-                list_box.append(&build_member_folder_row(fs, machine, fauna_client));
+                list_box.append(&build_member_folder_row(fs, machine, fauna_client, lease));
             }
             continue;
         }
@@ -169,8 +245,19 @@ pub fn update_folder_list(
             can_serve_webdav,
             own_tiers,
             website_address_enabled,
+            lease,
         );
+        carry_nest_place(&row, &staged_nest_place);
         list_box.append(&row);
+        // Repaint the rebuilt row's destination places from the nest's last
+        // answer before re-opening it (the re-open's re-read then refreshes
+        // it) — see `DestinationPlacesCache`.
+        let cached = with_destination_places(list_box, |cache| {
+            cache.for_row(&fs.name, fs.id).map(<[_]>::to_vec)
+        });
+        if let Some(places) = cached {
+            populate_folder_destinations(list_box, &fs.name, fs.id, &places, fauna_client);
+        }
         restore_expansion(&row, &expanded_titles);
     }
 
@@ -240,6 +327,7 @@ fn build_member_folder_row(
     fs: &FolderSummary,
     machine: &Arc<DevicesMachine>,
     fauna_client: &Rc<FaunaClient>,
+    lease: LeaseCtx,
 ) -> adw::ActionRow {
     let row = adw::ActionRow::builder().title(&fs.name).build();
     set_test_id(&row, ids::FOLDER_ROW);
@@ -267,6 +355,7 @@ fn build_member_folder_row(
         .build();
     set_test_id(&shared_badge, SHARED_BADGE_ID);
     row.add_suffix(&shared_badge);
+    add_lease_status(&row, fs, lease);
 
     // `folder-leave-button` — remove yourself from a set shared with you. The
     // shared `DevicesMachine` join-filter (via `LinuxMlsQuery`) only lets a
@@ -315,6 +404,7 @@ fn build_writer_member_folder_row(
     machine: &Arc<DevicesMachine>,
     fauna_client: &Rc<FaunaClient>,
     location_map: &Rc<RefCell<Vec<LocationBinding>>>,
+    lease: LeaseCtx,
 ) -> adw::ExpanderRow {
     let row = adw::ExpanderRow::builder().title(&fs.name).build();
     set_test_id(&row, ids::FOLDER_ROW);
@@ -337,6 +427,7 @@ fn build_writer_member_folder_row(
         .build();
     set_test_id(&shared_badge, SHARED_BADGE_ID);
     row.add_suffix(&shared_badge);
+    add_lease_status(&row, fs, lease);
 
     // `folder-leave-button` — remove yourself from the share (the same
     // self-scoped member-leave primitive the reader row uses).
@@ -445,6 +536,7 @@ fn foreign_bind_for(fs: &FolderSummary) -> Option<location_binding::ForeignBind>
 /// `can_serve_webdav` is the per-actor MSEK capability the page cached (it is not
 /// a snapshot field — the `DevicesMachine` holds no key material); it gates the
 /// `folder-webdav-toggle`.
+#[allow(clippy::too_many_arguments)]
 fn build_folder_row(
     fs: &FolderSummary,
     machine: &Arc<DevicesMachine>,
@@ -453,6 +545,7 @@ fn build_folder_row(
     can_serve_webdav: bool,
     own_tiers: &[String],
     website_address_enabled: Option<bool>,
+    lease: LeaseCtx,
 ) -> adw::ExpanderRow {
     let row = adw::ExpanderRow::builder().title(&fs.name).build();
     set_test_id(&row, ids::FOLDER_ROW);
@@ -474,6 +567,7 @@ fn build_folder_row(
     set_test_id(&shared_badge, SHARED_BADGE_ID);
     shared_badge.set_visible(false);
     row.add_suffix(&shared_badge);
+    add_lease_status(&row, fs, lease);
 
     // Rosters. The enrolled-*device* roster loads lazily on first expand. The
     // cross-user *actor* roster (the "Shared with" list + the badge) loads EAGERLY
@@ -568,6 +662,9 @@ fn build_folder_row(
             fs.include_paths.as_deref(),
         ))
         .build();
+    if fs.include_paths_unreadable {
+        mark_paths_unavailable(&include_entry);
+    }
     set_test_id(&include_entry, ids::FOLDER_INCLUDE_PATHS);
     row.add_row(&entry_row(strings::devices::INCLUDE_PATHS, &include_entry));
 
@@ -578,6 +675,9 @@ fn build_folder_row(
             fs.exclude_paths.as_deref(),
         ))
         .build();
+    if fs.exclude_paths_unreadable {
+        mark_paths_unavailable(&exclude_entry);
+    }
     set_test_id(&exclude_entry, ids::FOLDER_EXCLUDE_PATHS);
     row.add_row(&entry_row(strings::devices::EXCLUDE_PATHS, &exclude_entry));
 
@@ -697,9 +797,44 @@ fn build_folder_row(
     // copy and the picker cannot disagree: a bound folder explains that sharing
     // is edited below, and a bound folder currently public explains the one exit
     // its picker does offer.
-    row.add_row(&hint_label(
+    let audience_hint_label = hint_label(
         &fauna_folders_machine::audience_hint(bound, &audience).resolve(strings::lookup),
-    ));
+    );
+    set_test_id(&audience_hint_label, ids::FOLDER_AUDIENCE_HINT);
+    row.add_row(&audience_hint_label);
+    // A folder public on the nest's say-so whose owner attestation this seat
+    // cannot verify (one made public before attestations existed) is sealed
+    // here until the owner re-confirms: say so, and offer the one gesture that
+    // re-mints it. The verdict is the shared predicate (`ui/folders.md` §
+    // Audience and website serving → *Re-confirming a public folder this seat
+    // cannot verify*) — never re-derived. The button ARMS the same declassify
+    // confirm as picking `public` on the select and commits nothing itself.
+    if fauna_client
+        .actor_id()
+        .is_some_and(|own| fauna_devices_machine::folder_is_public_unverified(fs, &own))
+    {
+        let unattested = hint_label(strings::devices::FOLDER_AUDIENCE_UNATTESTED);
+        set_test_id(&unattested, ids::FOLDER_AUDIENCE_UNATTESTED);
+        row.add_row(&unattested);
+        let reconfirm = gtk::Button::builder()
+            .label(strings::devices::FOLDER_AUDIENCE_RECONFIRM)
+            .halign(gtk::Align::Start)
+            .margin_start(12)
+            .margin_end(12)
+            .margin_bottom(4)
+            .build();
+        set_test_id(&reconfirm, ids::FOLDER_AUDIENCE_RECONFIRM_BUTTON);
+        crate::offline_gate::declare_wire_kind(&reconfirm, "fauna.folders.update");
+        {
+            let fauna_client = Rc::clone(fauna_client);
+            let machine = Arc::clone(machine);
+            let name = fs.name.clone();
+            reconfirm.connect_clicked(move |btn| {
+                confirm_public_audience(btn, &name, &machine, &fauna_client);
+            });
+        }
+        row.add_row(&reconfirm);
+    }
     {
         let fauna_client = Rc::clone(fauna_client);
         let machine = Arc::clone(machine);
@@ -790,7 +925,39 @@ fn build_folder_row(
     // A switch's tooltip is not discoverable on a control the user never
     // hovers, so the hint ALSO paints inline — the same placement intent as
     // tui's adjacent chrome, web's hint span, and the WebDAV needs-mail label.
-    row.add_row(&hint_label(&website_hint));
+    let website_hint_label = hint_label(&website_hint);
+    set_test_id(&website_hint_label, ids::FOLDER_WEBSITE_HINT);
+    row.add_row(&website_hint_label);
+
+    // Exclusive editing (`folder-exclusive-editing-toggle`, owner row only,
+    // default off — `ui/folders.md` § Exclusive editing). NON-optimistic: the
+    // switch paints the nest's `exclusive_editing`, and the write's refresh
+    // rebuilds this row from the snapshot, so a refused write never leaves the
+    // switch showing a state the folder does not have. Keyless, its own
+    // `folders.update` field, behind the shared machine setter.
+    let exclusive_switch = gtk::Switch::builder()
+        .valign(gtk::Align::Center)
+        .active(fs.exclusive_editing)
+        .build();
+    set_test_id(&exclusive_switch, ids::FOLDER_EXCLUSIVE_EDITING_TOGGLE);
+    crate::offline_gate::declare_wire_kind(&exclusive_switch, "fauna.folders.update");
+    {
+        let machine = Arc::clone(machine);
+        let name = fs.name.clone();
+        exclusive_switch.connect_active_notify(move |sw| {
+            let machine = Arc::clone(&machine);
+            let name = name.clone();
+            let on = sw.is_active();
+            async_helper::run_on_tokio(
+                async move { machine.set_folder_exclusive_editing(name, on).await },
+                |_| {},
+            );
+        });
+    }
+    row.add_row(&entry_row(
+        strings::devices::FOLDER_EXCLUSIVE_EDITING,
+        &exclusive_switch,
+    ));
 
     // Per-set "serve over WebDAV" opt-in (`folder-webdav-toggle`, every owner row
     // — a folder has no type) — webdav-server.md § Independent enablement point 2. NOT a
@@ -874,8 +1041,8 @@ fn build_folder_row(
     // sentinel for the "Not paywalled (public)" placeholder — and a display
     // expression maps each to its label. v1 is SET-ONLY (ratified 2026-07-13): the
     // placeholder is offered only while the set is still public; once paywalled it
-    // is gone (no clear affordance — the nest-side revoke/rotation leg is not
-    // shipped). No tiers ⇒ nothing to paywall to: the select is insensitive with a
+    // is gone (no clear affordance in v1 — the shared unpaywall/rotation legs are
+    // built, the app control that binds them is not). No tiers ⇒ nothing to paywall to: the select is insensitive with a
     // "create a tier first" hint, mirroring the webdav "set up mail first" gate.
     // Website-enabled rows only — keyed on the toggle, never on the retired
     // `mode = "web"` spelling.
@@ -1017,116 +1184,16 @@ fn build_folder_row(
     // siblings with it, committing half-typed values the user had not saved.
     row.add_row(&section_heading(strings::devices::NEST_PLACE_SECTION));
 
-    // Same value/label DropDown split as the conflict select: the
-    // MODEL strings are the wire values ("default" / "on" / "off") the cross-app
-    // `select(id, value)` contract drives, and the display expression maps each
-    // to its localized label — both from the shared catalog.
-    let nest_snapshot_opts = fauna_folders_machine::nest_snapshots_options();
-    let nest_snapshot_values: Vec<String> =
-        nest_snapshot_opts.iter().map(|o| o.value.clone()).collect();
-    let nest_snapshot_refs: Vec<&str> = nest_snapshot_values.iter().map(String::as_str).collect();
-    let nest_snapshots_dropdown = gtk::DropDown::builder()
-        .model(&gtk::StringList::new(&nest_snapshot_refs))
-        .build();
-    let nest_snapshots_label_expr = gtk::ClosureExpression::new::<String>(
-        &[] as &[gtk::Expression],
-        gtk::glib::closure!(|item: gtk::StringObject| {
-            fauna_folders_machine::nest_snapshots_label(item.string().as_str())
-                .resolve(strings::lookup)
-        }),
+    let nest_place = add_nest_place_controls(
+        &row,
+        fauna_folders_machine::nest_place_form_from_row(
+            fs.nest_snapshots,
+            fs.nest_snapshot_quiet_secs,
+            fs.retention_policy.clone(),
+            fs.version_retention_max_versions,
+            fs.version_retention_max_age_days,
+        ),
     );
-    nest_snapshots_dropdown.set_expression(Some(&nest_snapshots_label_expr));
-    set_test_id(&nest_snapshots_dropdown, ids::FOLDER_NEST_SNAPSHOTS_SELECT);
-
-    // Seed all four controls from the row through the shared prefill, which owns
-    // the rules an app must not re-derive: an unset knob shows BLANK, and so
-    // does a ZERO retention bound — zero is the nest's own spelling of unset, so
-    // rendering it would turn "nothing chosen" into a bound the owner appears to
-    // have picked. Seeded BEFORE any handler is connected, like the two selects
-    // above, so the initial programmatic selection never re-fires as a write.
-    let seed = fauna_folders_machine::nest_place_edit_from_row(
-        fs.nest_snapshots,
-        fs.nest_snapshot_quiet_secs,
-        fs.retention_policy.clone(),
-    );
-    if let Some(idx) = nest_snapshot_values
-        .iter()
-        .position(|v| *v == seed.snapshots)
-    {
-        nest_snapshots_dropdown.set_selected(idx as u32);
-    }
-    row.add_row(&entry_row(
-        strings::devices::NEST_SNAPSHOTS,
-        &nest_snapshots_dropdown,
-    ));
-
-    let nest_quiet_entry = gtk::Entry::builder()
-        .hexpand(true)
-        .placeholder_text(strings::devices::NEST_QUIET)
-        .text(&seed.quiet_secs)
-        .build();
-    set_test_id(&nest_quiet_entry, ids::FOLDER_NEST_QUIET_INPUT);
-    row.add_row(&entry_row(strings::devices::NEST_QUIET, &nest_quiet_entry));
-
-    let nest_retention_snapshots_entry = gtk::Entry::builder()
-        .hexpand(true)
-        .placeholder_text(strings::devices::NEST_RETENTION_SNAPSHOTS)
-        .text(&seed.retention_snapshots)
-        .build();
-    set_test_id(
-        &nest_retention_snapshots_entry,
-        ids::FOLDER_NEST_RETENTION_SNAPSHOTS,
-    );
-    row.add_row(&entry_row(
-        strings::devices::NEST_RETENTION_SNAPSHOTS,
-        &nest_retention_snapshots_entry,
-    ));
-
-    let nest_retention_days_entry = gtk::Entry::builder()
-        .hexpand(true)
-        .placeholder_text(strings::devices::NEST_RETENTION_DAYS)
-        .text(&seed.retention_days)
-        .build();
-    set_test_id(&nest_retention_days_entry, ids::FOLDER_NEST_RETENTION_DAYS);
-    row.add_row(&entry_row(
-        strings::devices::NEST_RETENTION_DAYS,
-        &nest_retention_days_entry,
-    ));
-
-    // The version-retention SIBLING pair (file-versions.md § Retention ruling
-    // 1): bounds file-version history, never snapshots — its own
-    // `folders.version_retention` column, riding the same save.
-    let version_retention_seed = fauna_folders_machine::version_retention_edit_from_bounds(
-        fs.version_retention_max_versions,
-        fs.version_retention_max_age_days,
-    );
-    let version_retention_count_entry = gtk::Entry::builder()
-        .hexpand(true)
-        .placeholder_text(strings::devices::VERSION_RETENTION_COUNT)
-        .text(&version_retention_seed.count)
-        .build();
-    set_test_id(
-        &version_retention_count_entry,
-        ids::FOLDER_VERSION_RETENTION_COUNT,
-    );
-    row.add_row(&entry_row(
-        strings::devices::VERSION_RETENTION_COUNT,
-        &version_retention_count_entry,
-    ));
-
-    let version_retention_days_entry = gtk::Entry::builder()
-        .hexpand(true)
-        .placeholder_text(strings::devices::VERSION_RETENTION_DAYS)
-        .text(&version_retention_seed.days)
-        .build();
-    set_test_id(
-        &version_retention_days_entry,
-        ids::FOLDER_VERSION_RETENTION_DAYS,
-    );
-    row.add_row(&entry_row(
-        strings::devices::VERSION_RETENTION_DAYS,
-        &version_retention_days_entry,
-    ));
 
     // Not decoration: the only on-screen statement that emptying a box is a real
     // choice rather than a no-op.
@@ -1149,13 +1216,15 @@ fn build_folder_row(
     {
         let name = fs.name.clone();
         let machine = Arc::clone(machine);
-        let snapshots_dd = nest_snapshots_dropdown.clone();
-        let quiet_entry = nest_quiet_entry.clone();
-        let retention_snapshots_entry = nest_retention_snapshots_entry.clone();
-        let retention_days_entry = nest_retention_days_entry.clone();
-        let version_retention_count_entry = version_retention_count_entry.clone();
-        let version_retention_days_entry = version_retention_days_entry.clone();
+        let row = row.downgrade();
         nest_save_btn.connect_clicked(move |_| {
+            let form = nest_place.read();
+            // The six boxes leave with this click, so they are no longer the
+            // user's: the refresh the write triggers re-seeds them from what the
+            // nest stored (`fauna_folders_machine::nest_place_reseed`).
+            if let Some(row) = row.upgrade() {
+                release_nest_place(&row);
+            }
             // The four controls' raw values go through the shared
             // `nest_place_write`, which owns both traps: every knob rides on
             // every save (the nest applies the policy whole, so an emptied box
@@ -1163,27 +1232,13 @@ fn build_folder_row(
             // canonical binds-nothing policy — never `None`, which the wire
             // reads as "leave unchanged" and would let a user set retention and
             // never take it back.
-            let write =
-                fauna_folders_machine::nest_place_write(&fauna_folders_machine::NestPlaceEdit {
-                    snapshots: snapshots_dd
-                        .selected_item()
-                        .and_then(|i| i.downcast::<gtk::StringObject>().ok())
-                        .map(|s| s.string().to_string())
-                        .unwrap_or_default(),
-                    quiet_secs: quiet_entry.text().to_string(),
-                    retention_snapshots: retention_snapshots_entry.text().to_string(),
-                    retention_days: retention_days_entry.text().to_string(),
-                });
+            let write = fauna_folders_machine::nest_place_write(&form.policy);
             // The version-retention sibling rides the same save, its own
             // family sent whole: both boxes blank ⇒ the binds-nothing write
             // that clears the policy (never the wire's leave-unchanged None —
             // the knobs are on screen, so what they say is what the user said).
-            let version_retention = fauna_folders_machine::version_retention_write(
-                &fauna_folders_machine::VersionRetentionEdit {
-                    count: version_retention_count_entry.text().to_string(),
-                    days: version_retention_days_entry.text().to_string(),
-                },
-            );
+            let version_retention =
+                fauna_folders_machine::version_retention_write(&form.version_retention);
             let machine = Arc::clone(&machine);
             let name = name.clone();
             async_helper::run_on_tokio(
@@ -1320,6 +1375,8 @@ fn build_folder_row(
         let machine = Arc::clone(machine);
         let include_entry = include_entry.clone();
         let exclude_entry = exclude_entry.clone();
+        let include_unreadable = fs.include_paths_unreadable;
+        let exclude_unreadable = fs.exclude_paths_unreadable;
         let row_weak = row.downgrade();
         save_btn.connect_clicked(move |_| {
             // Safety net for a real user-reported mistake (2026-07-20 manual-test
@@ -1349,16 +1406,16 @@ fn build_folder_row(
 
             let machine = Arc::clone(&machine);
             let name = name.clone();
-            let include = fauna_folders_machine::parse_paths_field(&include_entry.text());
-            let exclude = fauna_folders_machine::parse_paths_field(&exclude_entry.text());
+            // A list this device could not open is sent as `None` ("leave
+            // unchanged"), never as the unavailable text the entry shows.
+            let include = (!include_unreadable)
+                .then(|| fauna_folders_machine::parse_paths_field(&include_entry.text()));
+            let exclude = (!exclude_unreadable)
+                .then(|| fauna_folders_machine::parse_paths_field(&exclude_entry.text()));
             // `set_folder_paths` sends only the path fields then self-refreshes
             // (observer tick) so the row re-renders from authoritative state.
             async_helper::run_on_tokio(
-                async move {
-                    machine
-                        .set_folder_paths(name, Some(include), Some(exclude))
-                        .await
-                },
+                async move { machine.set_folder_paths(name, include, exclude).await },
                 |_| {},
             );
         });
@@ -1386,6 +1443,43 @@ fn build_folder_row(
 
 /// A section heading inside the expander body — the same inset as [`entry_row`],
 /// bolder, so a group of related controls reads as one thing.
+/// What the `folder-lease-status` line needs beyond the folder row: the
+/// roster that names a holder and the row `device-this-mark-badge` marks.
+#[derive(Clone, Copy)]
+pub struct LeaseCtx<'a> {
+    pub devices: &'a [DeviceSummary],
+    pub this_device_row: Option<&'a str>,
+}
+
+/// Paint `folder-lease-status` on a folder row's HEADER (owner and member rows
+/// alike — a reader has no body and must see the lock too), only while the
+/// folder is governed. The reading is `fauna_devices_machine::folder_lease_status`'s
+/// — read off the snapshot, never probed by calling the lease acquire kind
+/// (`ui/folders.md` § Exclusive editing).
+fn add_lease_status(row: &impl IsA<adw::PreferencesRow>, fs: &FolderSummary, lease: LeaseCtx) {
+    let Some(text) = fauna_devices_machine::folder_lease_status(
+        fs,
+        lease.devices,
+        lease.this_device_row,
+        fauna_core::data::Timestamp::now_secs(),
+    ) else {
+        return;
+    };
+    let label = gtk::Label::builder()
+        .label(text.resolve(strings::lookup))
+        .css_classes(["dim-label", "caption"])
+        .wrap(true)
+        .max_width_chars(40)
+        .valign(gtk::Align::Center)
+        .build();
+    set_test_id(&label, ids::FOLDER_LEASE_STATUS);
+    if let Some(r) = row.dynamic_cast_ref::<adw::ExpanderRow>() {
+        r.add_suffix(&label);
+    } else if let Some(r) = row.dynamic_cast_ref::<adw::ActionRow>() {
+        r.add_suffix(&label);
+    }
+}
+
 fn section_heading(label: &str) -> gtk::Label {
     gtk::Label::builder()
         .label(label)
@@ -1410,6 +1504,15 @@ fn hint_label(label: &str) -> gtk::Label {
         .margin_end(12)
         .css_classes(["fauna-muted"])
         .build()
+}
+
+/// Paints a path entry whose sealed list this device could not open as the
+/// read-only "Unavailable on this device" text (same id, no new one) — never a
+/// blank editable field; the save handler sends `None` for it.
+fn mark_paths_unavailable(entry: &gtk::Entry) {
+    entry.set_text(strings::devices::PATHS_UNAVAILABLE);
+    entry.set_editable(false);
+    entry.set_sensitive(false);
 }
 
 /// A captioned text-entry row for the expander body: a small caption above the
@@ -1483,7 +1586,7 @@ fn confirm_delete(btn: &gtk::Button, name: &str, machine: &Arc<DevicesMachine>) 
 /// because the dialog needs an anchor widget, and the picker is the widget
 /// that has one.
 fn confirm_public_audience(
-    dropdown: &gtk::DropDown,
+    dropdown: &impl IsA<gtk::Widget>,
     name: &str,
     machine: &Arc<DevicesMachine>,
     fauna_client: &Rc<FaunaClient>,
@@ -1491,15 +1594,30 @@ fn confirm_public_audience(
     let machine = Arc::clone(machine);
     let fauna_client = Rc::clone(fauna_client);
     let name_owned = name.to_string();
+    // The two consequences are separate lines so each carries its own id: they
+    // exist exactly while the confirm does.
+    let consequences = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    for (text, id) in [
+        (
+            strings::devices::DECLASSIFY_BODY,
+            ids::FOLDER_AUDIENCE_PUBLIC_NAMES_WARNING,
+        ),
+        (
+            strings::devices::DECLASSIFY_IRREVERSIBLE,
+            ids::FOLDER_AUDIENCE_PUBLIC_RESEAL_WARNING,
+        ),
+    ] {
+        let line = gtk::Label::new(Some(text));
+        line.set_wrap(true);
+        line.set_xalign(0.0);
+        set_test_id(&line, id);
+        consequences.append(&line);
+    }
     crate::confirm_dialog::present_confirm(
         dropdown,
         crate::confirm_dialog::ConfirmSpec::new(
             strings::devices::DECLASSIFY_TITLE,
-            crate::confirm_dialog::ConfirmBody::Text(&format!(
-                "{}\n\n{}",
-                strings::devices::DECLASSIFY_BODY,
-                strings::devices::DECLASSIFY_IRREVERSIBLE,
-            )),
+            crate::confirm_dialog::ConfirmBody::Child(consequences.upcast_ref::<gtk::Widget>()),
             "confirm",
             strings::devices::DECLASSIFY_CONFIRM,
             crate::confirm_dialog::CANCEL,
@@ -1909,6 +2027,8 @@ pub fn populate_folder_destinations(
     places: &[fauna_client_config::FolderDestinationPlace],
     client: &Rc<FaunaClient>,
 ) {
+    // Kept even when the row is not painted right now: the next rebuild paints it.
+    with_destination_places(list_box, |cache| cache.record(name, folder_id, places));
     let Some(section) = find_tagged_widget(list_box, name, DESTINATION_PLACES_BOX)
         .and_then(|w| w.downcast::<gtk::Box>().ok())
     else {
@@ -2579,6 +2699,11 @@ pub fn build_sync_defaults_section(client: Option<&Rc<FaunaClient>>) -> adw::Pre
     // never echoes a load back as a save (the conflict select's
     // connect-after-preselect rule can't apply here — the load is async).
     let updating = Rc::new(Cell::new(false));
+    // Bumped by every user pick. A load that began before a pick must not paint
+    // over it when it lands: the pick is newer than what the load read, and its
+    // save is already on the way (a 2026-10-12 sweep red read "auto" straight
+    // after picking "latest wins", the map's load having landed second).
+    let picks = Rc::new(Cell::new(0u64));
 
     // Load the persisted preference on every map (page nav). Absent (None — no
     // preference) renders as "auto", the equivalent outcome for new sets.
@@ -2586,16 +2711,40 @@ pub fn build_sync_defaults_section(client: Option<&Rc<FaunaClient>>) -> adw::Pre
         let rt = client.runtime_handle();
         let dropdown = dropdown.clone();
         let updating = Rc::clone(&updating);
+        let picks = Rc::clone(&picks);
         let policy_values = policy_values.clone();
-        group.connect_map(move |_| {
+        group.connect_map(move |g| {
             let store = crate::account_runtime::handle_source();
             let dropdown = dropdown.clone();
             let updating = Rc::clone(&updating);
+            let picks = Rc::clone(&picks);
+            let picks_at_start = picks.get();
             let policy_values = policy_values.clone();
+            let group = g.clone();
             async_helper::spawn_with_snapshot(
                 &rt,
                 move || async move { load_default_conflict_policy(store).await },
                 move |loaded| {
+                    if picks.get() != picks_at_start {
+                        return;
+                    }
+                    // A load the first-listing gate refused says why on the
+                    // section subtitle (the page `error-message` is the
+                    // `DevicesMachine`'s) — and the select shows nothing as
+                    // loaded: it is not "auto" until the account's value is
+                    // known (`account-client-lifecycle.md` § The first listing,
+                    // clause (4)).
+                    match &loaded {
+                        Err(reason)
+                            if fauna_sync_engine::preference_surfaces::refused_as_not_ready(
+                                reason,
+                            ) =>
+                        {
+                            group.set_description(Some(reason));
+                            return;
+                        }
+                        _ => group.set_description(None),
+                    }
                     let value = loaded.unwrap_or(None).unwrap_or_else(|| "auto".into());
                     if let Some(idx) = policy_values.iter().position(|v| *v == value) {
                         updating.set(true);
@@ -2615,6 +2764,7 @@ pub fn build_sync_defaults_section(client: Option<&Rc<FaunaClient>>) -> adw::Pre
             if updating.get() {
                 return;
             }
+            picks.set(picks.get() + 1);
             let Some(value) = policy_values.get(dd.selected() as usize) else {
                 return;
             };
@@ -2775,17 +2925,53 @@ fn unfollow_error_text(e: fauna_client_folders::follow_ops::FollowOpError) -> St
     strings::devices::error_unfollow_failed(&e.to_string())
 }
 
-/// Paint a follow-family outcome onto the page's `error-message`: clear it on
-/// success, set the mapped wording on failure. A failure NEVER passes silently
-/// (e2e convention 11 / convention 2 — the page must diagnose itself).
-fn report_follow_outcome(
-    outcome: Result<(), fauna_client_folders::follow_ops::FollowOpError>,
-    error_label: &gtk::Label,
-    to_text: fn(fauna_client_folders::follow_ops::FollowOpError) -> String,
-) {
-    match outcome {
-        Ok(()) => crate::settings::render_error_label(error_label, None),
-        Err(e) => crate::settings::render_error_label(error_label, Some(&to_text(e))),
+/// The Folders page's `error-message` plus the follow-family failure it holds —
+/// the page's own slot for a gesture the devices machine never sees.
+///
+/// A follow or unfollow runs outside [`DevicesMachine`] (the shared `follow_ops`
+/// recipe), so its failure is not in `snapshot().error`, and every snapshot
+/// render repaints the label from that field. Painted on the label alone, the
+/// failure lasted only until the next render — the refresh the gesture itself
+/// awaits, or any other — and nobody saw a message (the 2026-10-12 sweep's
+/// follow-outcomes red). Held here, the render paints it beneath any machine
+/// error until a visit or the next follow gesture replaces it: the lifetime
+/// tui's page slot gives the same failure (`Outcome::FolderAuthorGestureFailed`).
+#[derive(Clone)]
+pub struct FollowErrorSlot {
+    label: gtk::Label,
+    held: Rc<RefCell<Option<String>>>,
+}
+
+impl FollowErrorSlot {
+    pub fn new(label: &gtk::Label) -> Self {
+        Self {
+            label: label.clone(),
+            held: Rc::new(RefCell::new(None)),
+        }
+    }
+
+    /// The failure a render paints when the machine reports none.
+    pub fn held(&self) -> Option<String> {
+        self.held.borrow().clone()
+    }
+
+    /// Drop the held failure — a visit or a new follow gesture replaces it.
+    pub fn clear(&self) {
+        self.held.borrow_mut().take();
+    }
+
+    /// Paint a follow-family outcome onto the page's `error-message`: clear it
+    /// on success, set and HOLD the mapped wording on failure. A failure NEVER
+    /// passes silently (e2e convention 11 / convention 2 — the page must
+    /// diagnose itself).
+    fn report(
+        &self,
+        outcome: Result<(), fauna_client_folders::follow_ops::FollowOpError>,
+        to_text: fn(fauna_client_folders::follow_ops::FollowOpError) -> String,
+    ) {
+        let text = outcome.err().map(to_text);
+        self.held.borrow_mut().clone_from(&text);
+        crate::settings::render_error_label(&self.label, text.as_deref());
     }
 }
 
@@ -2794,13 +2980,14 @@ fn report_follow_outcome(
 /// page's `error-message`.
 pub fn unfollow_handler(
     machine: &Arc<DevicesMachine>,
-    error_label: &gtk::Label,
+    error_slot: &FollowErrorSlot,
 ) -> impl Fn(String, i64) + Clone + 'static {
     let machine = Arc::clone(machine);
-    let error_label = error_label.clone();
+    let error_slot = error_slot.clone();
     move |home: String, folder_id: i64| {
         let machine = Arc::clone(&machine);
-        let error_label = error_label.clone();
+        let error_slot = error_slot.clone();
+        error_slot.clear();
         async_helper::run_on_tokio(
             async move {
                 let store = crate::account_runtime::follows_seam();
@@ -2815,7 +3002,7 @@ pub fn unfollow_handler(
                 outcome
             },
             move |outcome| {
-                report_follow_outcome(outcome, &error_label, unfollow_error_text);
+                error_slot.report(outcome, unfollow_error_text);
             },
         );
     }
@@ -2831,7 +3018,7 @@ pub fn wire_followed_section(
     section: &FollowedSection,
     machine: &Arc<DevicesMachine>,
     client: &Rc<FaunaClient>,
-    error_label: &gtk::Label,
+    error_slot: &FollowErrorSlot,
 ) {
     {
         let form = section.form.clone();
@@ -2847,7 +3034,7 @@ pub fn wire_followed_section(
 
     let machine = Arc::clone(machine);
     let nest = Arc::clone(client.nest_rpc());
-    let error_label = error_label.clone();
+    let error_slot = error_slot.clone();
     let form = section.form.clone();
     let handle_entry = section.handle_entry.clone();
     let name_entry = section.name_entry.clone();
@@ -2863,7 +3050,8 @@ pub fn wire_followed_section(
         }
         let nest = Arc::clone(&nest);
         let machine = Arc::clone(&machine);
-        let error_label = error_label.clone();
+        let error_slot = error_slot.clone();
+        error_slot.clear();
         let form = form.clone();
         let handle_entry = handle_entry.clone();
         let name_entry = name_entry.clone();
@@ -2885,9 +3073,8 @@ pub fn wire_followed_section(
             },
             move |outcome| {
                 let ok = outcome.is_ok();
-                report_follow_outcome(
+                error_slot.report(
                     outcome.map(|_| ()),
-                    &error_label,
                     fauna_client_folders::follow_ops::follow_error_text,
                 );
                 // Close the form only on success — a failed follow keeps what
@@ -2920,9 +3107,7 @@ pub fn update_followed_list(
     followed: &[fauna_devices_machine::FollowedFolderSummary],
     on_unfollow: impl Fn(String, i64) + Clone + 'static,
 ) {
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(list_box);
     for f in followed {
         list_box.append(&build_followed_row(f, on_unfollow.clone()));
     }
@@ -3532,9 +3717,7 @@ pub fn populate_pending_shares(
     shares: &[crate::client::PendingShareView],
     client: &Rc<FaunaClient>,
 ) {
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(list_box);
     for s in shares {
         list_box.append(&build_pending_share_row(s, client));
     }
@@ -3740,6 +3923,242 @@ fn restore_expansion(row: &adw::ExpanderRow, expanded_titles: &[String]) {
     }
 }
 
+// ── The nest-place editor's six boxes, and why a rebuild keeps them ─────────
+//
+// `update_folder_list` rebuilds every row from the new snapshot, so without a
+// carry each refresh re-seeded the six boxes from the nest — and a busy account
+// refreshes between the typing and the save, which then sent the OLD policy
+// with no error (the red tui hit live on 2026-10-06). Whether a rebuild may move
+// them is the shared rule's call (`fauna_folders_machine::nest_place_reseed`);
+// what this file owns is carrying the old row's values and seed across.
+
+/// What a row's editor last painted, stored on the row itself so it dies with
+/// it. Absent = released: nothing seeded yet, or the save sent the boxes.
+const NEST_PLACE_SEEDED_KEY: &str = "fauna-nest-place-seeded";
+
+/// The editor's six controls.
+struct NestPlaceControls {
+    snapshots: gtk::DropDown,
+    quiet: gtk::Entry,
+    retention_snapshots: gtk::Entry,
+    retention_days: gtk::Entry,
+    version_count: gtk::Entry,
+    version_days: gtk::Entry,
+}
+
+impl NestPlaceControls {
+    /// The six as they stand on screen — the select's value is its wire value.
+    fn read(&self) -> fauna_folders_machine::NestPlaceForm {
+        fauna_folders_machine::NestPlaceForm {
+            policy: fauna_folders_machine::NestPlaceEdit {
+                snapshots: self
+                    .snapshots
+                    .selected_item()
+                    .and_then(|i| i.downcast::<gtk::StringObject>().ok())
+                    .map(|s| s.string().to_string())
+                    .unwrap_or_default(),
+                quiet_secs: self.quiet.text().to_string(),
+                retention_snapshots: self.retention_snapshots.text().to_string(),
+                retention_days: self.retention_days.text().to_string(),
+            },
+            version_retention: fauna_folders_machine::VersionRetentionEdit {
+                count: self.version_count.text().to_string(),
+                days: self.version_days.text().to_string(),
+            },
+        }
+    }
+
+    fn paint(&self, form: &fauna_folders_machine::NestPlaceForm) {
+        if let Some(model) = self.snapshots.model()
+            && let Some(idx) = (0..model.n_items()).find(|&i| {
+                model
+                    .item(i)
+                    .and_then(|o| o.downcast::<gtk::StringObject>().ok())
+                    .is_some_and(|s| s.string() == form.policy.snapshots.as_str())
+            })
+        {
+            self.snapshots.set_selected(idx);
+        }
+        self.quiet.set_text(&form.policy.quiet_secs);
+        self.retention_snapshots
+            .set_text(&form.policy.retention_snapshots);
+        self.retention_days.set_text(&form.policy.retention_days);
+        self.version_count.set_text(&form.version_retention.count);
+        self.version_days.set_text(&form.version_retention.days);
+    }
+
+    /// The controls inside an already-built row, found by their test IDs.
+    fn find(row: &adw::ExpanderRow) -> Option<Self> {
+        let root = row.upcast_ref::<gtk::Widget>();
+        let entry = |id: &str| {
+            crate::testid::find_by_test_id(root, id).and_then(|w| w.downcast::<gtk::Entry>().ok())
+        };
+        Some(Self {
+            snapshots: crate::testid::find_by_test_id(root, ids::FOLDER_NEST_SNAPSHOTS_SELECT)
+                .and_then(|w| w.downcast::<gtk::DropDown>().ok())?,
+            quiet: entry(ids::FOLDER_NEST_QUIET_INPUT)?,
+            retention_snapshots: entry(ids::FOLDER_NEST_RETENTION_SNAPSHOTS)?,
+            retention_days: entry(ids::FOLDER_NEST_RETENTION_DAYS)?,
+            version_count: entry(ids::FOLDER_VERSION_RETENTION_COUNT)?,
+            version_days: entry(ids::FOLDER_VERSION_RETENTION_DAYS)?,
+        })
+    }
+}
+
+/// Build the six nest-place controls into `row`, painted with `seed` and
+/// recorded as its seed. No handler is connected: the boxes are staged, and
+/// only `folder-nest-save-button` reaches the nest.
+fn add_nest_place_controls(
+    row: &adw::ExpanderRow,
+    seed: fauna_folders_machine::NestPlaceForm,
+) -> NestPlaceControls {
+    // Same value/label DropDown split as the conflict select: the MODEL strings
+    // are the wire values ("default" / "on" / "off") the cross-app
+    // `select(id, value)` contract drives, and the display expression maps each
+    // to its localized label — both from the shared catalog.
+    let values: Vec<String> = fauna_folders_machine::nest_snapshots_options()
+        .into_iter()
+        .map(|o| o.value)
+        .collect();
+    let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+    let snapshots = gtk::DropDown::builder()
+        .model(&gtk::StringList::new(&refs))
+        .build();
+    let label_expr = gtk::ClosureExpression::new::<String>(
+        &[] as &[gtk::Expression],
+        gtk::glib::closure!(|item: gtk::StringObject| {
+            fauna_folders_machine::nest_snapshots_label(item.string().as_str())
+                .resolve(strings::lookup)
+        }),
+    );
+    snapshots.set_expression(Some(&label_expr));
+    set_test_id(&snapshots, ids::FOLDER_NEST_SNAPSHOTS_SELECT);
+    row.add_row(&entry_row(strings::devices::NEST_SNAPSHOTS, &snapshots));
+
+    let entry = |placeholder: &str, id: &str| {
+        let e = gtk::Entry::builder()
+            .hexpand(true)
+            .placeholder_text(placeholder)
+            .build();
+        set_test_id(&e, id);
+        row.add_row(&entry_row(placeholder, &e));
+        e
+    };
+    let quiet = entry(strings::devices::NEST_QUIET, ids::FOLDER_NEST_QUIET_INPUT);
+    let retention_snapshots = entry(
+        strings::devices::NEST_RETENTION_SNAPSHOTS,
+        ids::FOLDER_NEST_RETENTION_SNAPSHOTS,
+    );
+    let retention_days = entry(
+        strings::devices::NEST_RETENTION_DAYS,
+        ids::FOLDER_NEST_RETENTION_DAYS,
+    );
+    // The version-retention SIBLING pair (file-versions.md § Retention ruling
+    // 1): bounds file-version history, never snapshots — its own
+    // `folders.version_retention` column, riding the same save.
+    let version_count = entry(
+        strings::devices::VERSION_RETENTION_COUNT,
+        ids::FOLDER_VERSION_RETENTION_COUNT,
+    );
+    let version_days = entry(
+        strings::devices::VERSION_RETENTION_DAYS,
+        ids::FOLDER_VERSION_RETENTION_DAYS,
+    );
+
+    let controls = NestPlaceControls {
+        snapshots,
+        quiet,
+        retention_snapshots,
+        retention_days,
+        version_count,
+        version_days,
+    };
+    // The seed went through the shared prefill, which owns the rules an app must
+    // not re-derive: an unset knob shows BLANK, and so does a ZERO retention
+    // bound — zero is the nest's own spelling of unset.
+    controls.paint(&seed);
+    set_nest_place_seeded(row, seed);
+    controls
+}
+
+fn set_nest_place_seeded(row: &adw::ExpanderRow, seed: fauna_folders_machine::NestPlaceForm) {
+    // SAFETY: as `testid::set_test_text` — `NestPlaceForm` is the only type
+    // stored under this key, read back only by `nest_place_seeded`, and the
+    // value is dropped with the row.
+    unsafe {
+        row.set_data::<fauna_folders_machine::NestPlaceForm>(NEST_PLACE_SEEDED_KEY, seed);
+    }
+}
+
+fn nest_place_seeded(row: &adw::ExpanderRow) -> Option<fauna_folders_machine::NestPlaceForm> {
+    // SAFETY: see `set_nest_place_seeded`.
+    unsafe {
+        row.data::<fauna_folders_machine::NestPlaceForm>(NEST_PLACE_SEEDED_KEY)
+            .map(|p| p.as_ref().clone())
+    }
+}
+
+/// `folder-nest-save-button` sent the boxes: drop the seed, so the next rebuild
+/// re-seeds them from what the nest stored.
+fn release_nest_place(row: &adw::ExpanderRow) {
+    // SAFETY: see `set_nest_place_seeded`.
+    unsafe {
+        let _ = row.steal_data::<fauna_folders_machine::NestPlaceForm>(NEST_PLACE_SEEDED_KEY);
+    }
+}
+
+/// Each folder row's editor as the rebuild found it: by title, the seed on
+/// record (`None` = released) and the six values on screen.
+type StagedNestPlace = std::collections::HashMap<
+    String,
+    (
+        Option<fauna_folders_machine::NestPlaceForm>,
+        fauna_folders_machine::NestPlaceForm,
+    ),
+>;
+
+/// Read every row's nest-place editor before [`update_folder_list`] clears the
+/// list. By title, like [`expanded_folder_titles`], and for collapsed rows too:
+/// a collapsed `ExpanderRow` keeps its body, staged values included.
+fn staged_nest_place(list_box: &gtk::ListBox) -> StagedNestPlace {
+    let mut staged = StagedNestPlace::new();
+    let mut child = list_box.first_child();
+    while let Some(w) = child {
+        if let Some(row) = w.downcast_ref::<adw::ExpanderRow>()
+            && let Some(controls) = NestPlaceControls::find(row)
+        {
+            staged.insert(
+                row.title().to_string(),
+                (nest_place_seeded(row), controls.read()),
+            );
+        }
+        child = w.next_sibling();
+    }
+    staged
+}
+
+/// Put a rebuilt row's editor back to what the user had staged in it, unless
+/// the shared rule says the fresh seed it was just built with stands.
+fn carry_nest_place(row: &adw::ExpanderRow, staged: &StagedNestPlace) {
+    let Some((seeded, on_screen)) = staged.get(row.title().as_str()) else {
+        return;
+    };
+    let Some(controls) = NestPlaceControls::find(row) else {
+        return;
+    };
+    if fauna_folders_machine::nest_place_reseed(seeded.as_ref(), on_screen, controls.read())
+        .is_none()
+    {
+        // Staged: put the user's values back, and keep the ORIGINAL seed so the
+        // boxes still read as touched at the next rebuild.
+        controls.paint(on_screen);
+        match seeded {
+            Some(seed) => set_nest_place_seeded(row, seed.clone()),
+            None => release_nest_place(row),
+        }
+    }
+}
+
 /// The title of the currently EXPANDED `adw::ExpanderRow` whose title satisfies
 /// `names` — the gate `app.rs`'s `PushEvent::SyncChanged` arm uses before
 /// re-fetching device activity for a pushed set, matching by the push's hash
@@ -3752,8 +4171,10 @@ fn restore_expansion(row: &adw::ExpanderRow, expanded_titles: &[String]) {
 /// `mls_group_id.is_some()` decides because the badge IS visible collapsed;
 /// here nothing is, so the row's live expanded state decides instead (mirrors
 /// web's `if (expandedFs) void loadDeviceActivity(...)`). `None` when no
-/// expanded `ExpanderRow` matches (a read-only shared-with-me row, or the set
-/// isn't rendered yet) — the fail-safe direction, since there is nothing to
+/// expanded `ExpanderRow` that carries the device-activity section matches (a
+/// read-only shared-with-me row, a writer-member row — expanded for its binding
+/// widget, and the nest serves `fauna.folders.devices` to the owner only — or a
+/// set not rendered yet) — the fail-safe direction, since there is nothing to
 /// refresh either way.
 pub fn expanded_folder_row_where(
     list_box: &gtk::ListBox,
@@ -3764,6 +4185,8 @@ pub fn expanded_folder_row_where(
         if let Some(row) = w.downcast_ref::<adw::ExpanderRow>()
             && row.is_expanded()
             && names(row.title().as_str())
+            && crate::testid::find_by_test_id(row.upcast_ref::<gtk::Widget>(), DEVICE_ACTIVITY_BOX)
+                .is_some()
         {
             return Some(row.title().to_string());
         }
@@ -3794,6 +4217,88 @@ fn find_tagged_widget(list_box: &gtk::ListBox, name: &str, tag: &str) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Destination places across a list rebuild (`backup-destinations.md`
+    // § Ordinary-folder coverage) ──
+    // The reply lands, THEN a snapshot tick rebuilds the list: the rebuilt
+    // row must find the nest's answer, or it stands empty for a round trip.
+
+    fn place(id: &str, attached: bool) -> fauna_client_config::FolderDestinationPlace {
+        fauna_client_config::FolderDestinationPlace {
+            destination_id: id.into(),
+            label: format!("{id} label"),
+            attached,
+            folder_set: attached.then(|| format!("__folder/ab/{id}")),
+        }
+    }
+
+    fn listed(name: &str, id: i64) -> FolderSummary {
+        FolderSummary {
+            name: name.into(),
+            id,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_rebuild_after_the_reply_still_finds_the_nests_answer() {
+        let mut cache = DestinationPlacesCache::default();
+        cache.record("docs", 7, &[place("offsite", true), place("spare", false)]);
+
+        // The rebuild that follows the reply: same set, still listed.
+        cache.retain_listed(&[listed("docs", 7), listed("photos", 9)]);
+
+        assert_eq!(
+            cache.for_row("docs", 7),
+            Some(&[place("offsite", true), place("spare", false)][..])
+        );
+        assert_eq!(
+            cache.for_row("photos", 9),
+            None,
+            "never read, never painted"
+        );
+    }
+
+    #[test]
+    fn a_newer_answer_replaces_the_older_one() {
+        let mut cache = DestinationPlacesCache::default();
+        cache.record("docs", 7, &[place("offsite", false)]);
+        cache.record("docs", 7, &[place("offsite", true)]);
+        assert_eq!(
+            cache.for_row("docs", 7),
+            Some(&[place("offsite", true)][..])
+        );
+    }
+
+    #[test]
+    fn a_set_recreated_under_the_same_name_does_not_inherit_places() {
+        let mut cache = DestinationPlacesCache::default();
+        cache.record("docs", 7, &[place("offsite", true)]);
+        assert_eq!(cache.for_row("docs", 8), None);
+
+        cache.retain_listed(&[listed("docs", 8)]);
+        assert_eq!(cache.for_row("docs", 7), None, "the old set is gone");
+    }
+
+    /// A new folder list (a settings shell rebuilt on sign-out or an actor
+    /// switch) starts with no places: the outgoing actor's must not follow.
+    #[test]
+    fn a_new_folder_list_starts_without_the_old_ones_places() {
+        crate::testid::run_on_gtk_thread(|| {
+            let outgoing = gtk::ListBox::new();
+            with_destination_places(&outgoing, |c| {
+                c.record("docs", 7, &[place("offsite", true)])
+            });
+            assert!(with_destination_places(&outgoing, |c| c
+                .for_row("docs", 7)
+                .is_some()));
+
+            let incoming = gtk::ListBox::new();
+            assert!(with_destination_places(&incoming, |c| c
+                .for_row("docs", 7)
+                .is_none()));
+        });
+    }
 
     fn summary(home: Option<&str>, gid: Option<&str>) -> FolderSummary {
         FolderSummary {
@@ -3971,6 +4476,99 @@ mod tests {
             let survivor = adw::ExpanderRow::builder().title("docs").build();
             restore_expansion(&survivor, &open);
             assert!(!survivor.is_expanded());
+        });
+    }
+
+    // ── The rebuild must not wipe what the user staged in the nest place ──
+    //
+    // Same rebuild, second casualty: every box was re-seeded from the snapshot,
+    // so a refresh between the typing and `folder-nest-save-button` put the
+    // nest's old values back and the save sent them (tui's live red, 2026-10-06).
+    // Each test runs the rebuild's own three steps: read the old list, build the
+    // row afresh through the production constructor, carry.
+
+    fn nest_form(quiet: &str) -> fauna_folders_machine::NestPlaceForm {
+        fauna_folders_machine::nest_place_form_from_row(None, quiet.parse().ok(), None, 0, 0)
+    }
+
+    fn editor_row(
+        seed: &fauna_folders_machine::NestPlaceForm,
+    ) -> (adw::ExpanderRow, NestPlaceControls) {
+        let row = adw::ExpanderRow::builder().title("docs").build();
+        let controls = add_nest_place_controls(&row, seed.clone());
+        (row, controls)
+    }
+
+    /// Rebuild `old` as `update_folder_list` does, from a snapshot whose row
+    /// now carries `fresh`; returns what the new row shows.
+    fn rebuild(
+        old: &adw::ExpanderRow,
+        fresh: &fauna_folders_machine::NestPlaceForm,
+    ) -> (adw::ExpanderRow, fauna_folders_machine::NestPlaceForm) {
+        let list = gtk::ListBox::new();
+        list.append(old);
+        let staged = staged_nest_place(&list);
+        let (row, controls) = editor_row(fresh);
+        carry_nest_place(&row, &staged);
+        (row, controls.read())
+    }
+
+    #[test]
+    fn a_rebuild_keeps_a_staged_nest_place_edit() {
+        crate::testid::run_on_gtk_thread(|| {
+            let seed = nest_form("60");
+            let (row, controls) = editor_row(&seed);
+            controls.quiet.set_text("300");
+            controls.version_count.set_text("5");
+
+            let (_, shown) = rebuild(&row, &seed);
+            assert_eq!(
+                shown.policy.quiet_secs, "300",
+                "a same-policy tick kept the edit"
+            );
+            assert_eq!(shown.version_retention.count, "5");
+
+            let (_, shown) = rebuild(&row, &nest_form("900"));
+            assert_eq!(
+                shown.policy.quiet_secs, "300",
+                "a policy that moved meanwhile does not override the staged edit"
+            );
+        });
+    }
+
+    /// A staged edit survives any number of rebuilds — the carried row keeps
+    /// the ORIGINAL seed, so its boxes still read as touched next time.
+    #[test]
+    fn a_staged_edit_survives_successive_rebuilds() {
+        crate::testid::run_on_gtk_thread(|| {
+            let seed = nest_form("60");
+            let (row, controls) = editor_row(&seed);
+            controls.quiet.set_text("300");
+            let (row, _) = rebuild(&row, &seed);
+            let (_, shown) = rebuild(&row, &seed);
+            assert_eq!(shown.policy.quiet_secs, "300");
+        });
+    }
+
+    #[test]
+    fn untouched_boxes_follow_the_nest() {
+        crate::testid::run_on_gtk_thread(|| {
+            let (row, _) = editor_row(&nest_form("60"));
+            let (_, shown) = rebuild(&row, &nest_form("120"));
+            assert_eq!(shown.policy.quiet_secs, "120");
+        });
+    }
+
+    /// The save releases the boxes, so its own refresh shows what the nest
+    /// STORED — not what was typed.
+    #[test]
+    fn a_saved_editor_reseeds_from_the_nest() {
+        crate::testid::run_on_gtk_thread(|| {
+            let (row, controls) = editor_row(&nest_form("60"));
+            controls.quiet.set_text("300");
+            release_nest_place(&row);
+            let (_, shown) = rebuild(&row, &nest_form("240"));
+            assert_eq!(shown.policy.quiet_secs, "240");
         });
     }
 }

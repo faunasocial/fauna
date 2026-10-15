@@ -100,3 +100,27 @@ def test_macos_launch_root_derives_a_bindable_sync_agent_socket():
         )
     finally:
         Path(probe).rmdir()
+
+
+def test_linux_driver_publishes_the_sync_agent_socket_its_launch_env_makes(tmp_path):
+    """The linux driver names the agent socket its own launch made private.
+
+    The app direct-spawns the sync agent under e2e with the private
+    ``XDG_RUNTIME_DIR`` ``build_launch_env`` set, so the agent binds
+    ``$XDG_RUNTIME_DIR/fauna/sync-agent.sock``
+    (``fauna_ipc::unix_transport::linux_socket_path``). A seat reads the agent
+    through this property (``helpers/sync_seats.py::AppSeatDriver``), so it must
+    derive from the SAME runtime dir the launch env carries — and be ``None``
+    before a launch, as tui's twin is.
+    """
+    from drivers import linux
+
+    driver = linux.LinuxBridgeDriver()
+    assert driver.sync_agent_socket is None
+
+    xdg_base = str(tmp_path / "xdg")
+    env = linux.build_launch_env({}, 13, xdg_base)
+    driver._resolved_xdg_base = xdg_base
+    assert driver.sync_agent_socket == os.path.join(
+        env["XDG_RUNTIME_DIR"], "fauna", "sync-agent.sock"
+    )

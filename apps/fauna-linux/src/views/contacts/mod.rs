@@ -21,7 +21,8 @@ use crate::testid::set_test_id;
 /// it (web parity: `showAddressBook` fetches on first entry).
 ///
 /// Returns `(outer_box, knocks_list_box, contacts_list_box, find_results_list_box,
-/// contacts_filter_index, address_book_handles, switch_to_addressbook_segment)`
+/// contacts_filter_index, address_book_handles, switch_to_addressbook_segment,
+/// switch_to_people_segment)`
 /// so the caller can update all lists when data arrives (the filter index is
 /// threaded into `list::update_contacts_list`; the address-book handles into
 /// the `AddressbooksLoaded` / `CardsLoaded` handlers), and can switch to the
@@ -38,6 +39,7 @@ pub fn build_contacts_view(
     gtk::ListBox,
     list::ContactFilterIndex,
     address_book::AddressBookHandles,
+    Rc<dyn Fn()>,
     Rc<dyn Fn()>,
 ) {
     let (
@@ -144,6 +146,14 @@ pub fn build_contacts_view(
         })
     };
 
+    // Switch back to the People segment — the Notifications tap-through's
+    // `Knock` door (the pending knocks list there). The people toggle has no
+    // fetch side effect, so this is a plain `set_active`.
+    let switch_to_people_segment: Rc<dyn Fn()> = {
+        let people_btn = people_btn.clone();
+        Rc::new(move || people_btn.set_active(true))
+    };
+
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
     outer.set_vexpand(true);
     outer.set_hexpand(true);
@@ -158,5 +168,6 @@ pub fn build_contacts_view(
         contacts_filter_index,
         address_book_handles,
         switch_to_addressbook_segment,
+        switch_to_people_segment,
     )
 }

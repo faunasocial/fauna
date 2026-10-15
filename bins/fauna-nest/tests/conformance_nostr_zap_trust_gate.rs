@@ -39,7 +39,7 @@
 mod common;
 use common::dispatch;
 use common::encode;
-use common::zap::{designate_zap_signer as designate, link_payee, zap_receipt};
+use common::zap::{anon_sender, designate_zap_signer as designate, link_payee, zap_receipt};
 
 use std::sync::Arc;
 
@@ -148,7 +148,7 @@ async fn ingress_a_believes_a_designated_signer_and_records_the_zap() {
         &payee.public_key_hex(),
         &payee.public_key_hex(),
         &note,
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );
@@ -179,7 +179,7 @@ async fn ingress_a_is_inert_for_an_undesignated_signer() {
         &payee.public_key_hex(),
         &payee.public_key_hex(),
         "post-1",
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );
@@ -213,7 +213,7 @@ async fn a_payee_who_designated_nobody_believes_nobody() {
         &payee.public_key_hex(),
         &payee.public_key_hex(),
         "post-1",
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );
@@ -242,7 +242,7 @@ async fn a_receipt_for_a_non_local_payee_fails_closed() {
         &stranger_payee.public_key_hex(),
         &stranger_payee.public_key_hex(),
         "post-1",
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );
@@ -283,7 +283,7 @@ async fn a_designation_is_scoped_to_the_payee_who_made_it() {
         &bob_key.public_key_hex(),
         &bob_key.public_key_hex(),
         "post-1",
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );
@@ -318,7 +318,7 @@ async fn a_designated_signer_still_cannot_staple_a_request_onto_another_recipien
         &payee.public_key_hex(),
         &someone_else.public_key_hex(), // request names a different recipient
         "post-1",
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );
@@ -360,7 +360,7 @@ async fn ingress_a_refuses_a_cross_attributed_receipt() {
         &attacker_payee.public_key_hex(),
         &attacker_payee.public_key_hex(),
         &victim_note,
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );
@@ -391,7 +391,7 @@ async fn ingress_b_accepts_stores_and_counts_a_designated_signers_receipt() {
         &payee.public_key_hex(),
         &payee.public_key_hex(),
         &note,
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );
@@ -438,7 +438,7 @@ async fn a_designated_signer_cannot_attribute_a_zap_to_another_users_post() {
         &attacker_payee.public_key_hex(),
         &attacker_payee.public_key_hex(),
         &victim_note,
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );
@@ -481,7 +481,7 @@ async fn a_receipt_for_an_event_this_box_has_never_seen_is_refused() {
         &payee.public_key_hex(),
         &payee.public_key_hex(),
         &unseen,
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );
@@ -511,7 +511,7 @@ async fn ingress_b_refuses_an_undesignated_signer_and_stores_nothing() {
         &payee.public_key_hex(),
         &payee.public_key_hex(),
         "post-1",
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );
@@ -547,7 +547,7 @@ async fn ingress_b_refuses_a_bad_signature_before_asking_the_trust_question() {
         &payee.public_key_hex(),
         &payee.public_key_hex(),
         "post-1",
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );
@@ -579,7 +579,7 @@ async fn every_untrusted_verdict_is_one_indistinguishable_wire_message() {
         &payee.public_key_hex(),
         &payee.public_key_hex(),
         "post-1",
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );
@@ -589,7 +589,7 @@ async fn every_untrusted_verdict_is_one_indistinguishable_wire_message() {
         &non_local_payee.public_key_hex(),
         &non_local_payee.public_key_hex(),
         "post-2",
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );
@@ -604,7 +604,7 @@ async fn every_untrusted_verdict_is_one_indistinguishable_wire_message() {
         &payee.public_key_hex(),
         &payee.public_key_hex(),
         &victim_note,
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );
@@ -647,7 +647,7 @@ async fn ingress_b_is_idempotent_on_a_resent_receipt() {
         &payee.public_key_hex(),
         &payee.public_key_hex(),
         &note,
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );
@@ -900,7 +900,7 @@ async fn a_designation_added_in_any_case_matches_a_real_receipt() {
         &payee.public_key_hex(),
         &payee.public_key_hex(),
         &note,
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );
@@ -927,7 +927,7 @@ async fn undesignating_stops_belief_at_the_next_receipt() {
         &payee.public_key_hex(),
         &payee.public_key_hex(),
         &note_1,
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );
@@ -944,7 +944,7 @@ async fn undesignating_stops_belief_at_the_next_receipt() {
         &payee.public_key_hex(),
         &payee.public_key_hex(),
         &note_2,
-        &"d".repeat(64),
+        &anon_sender(),
         Some("lnbc210n1pjfake"),
         1_700_000_000,
     );

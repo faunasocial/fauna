@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.settings
 
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import com.fauna.app.testing.FaunaRobolectricTestRunner
@@ -101,6 +102,7 @@ class AtprotoSettingsContentTest {
         onOpenDeleteConfirm: () -> Unit = {},
         onCancelDelete: () -> Unit = {},
         onConfirmDelete: () -> Unit = {},
+        onSetDeleteRetireIdentity: (Boolean) -> Unit = {},
         onSelectLevel: (String) -> Unit = {},
         onConfirmTransition: () -> Unit = {},
         onCancelTransition: () -> Unit = {},
@@ -130,6 +132,7 @@ class AtprotoSettingsContentTest {
                 onOpenDeleteConfirm = onOpenDeleteConfirm,
                 onCancelDelete = onCancelDelete,
                 onConfirmDelete = onConfirmDelete,
+                onSetDeleteRetireIdentity = onSetDeleteRetireIdentity,
                 onSelectLevel = onSelectLevel,
                 onConfirmTransition = onConfirmTransition,
                 onCancelTransition = onCancelTransition,
@@ -191,6 +194,7 @@ class AtprotoSettingsContentTest {
                     targetLevel = "hosted_visible",
                     lines = listOf(LocalizedText("atproto_settings.card_mint", emptyMap())),
                     showHistoryBackfill = true,
+                    historyBackfillLabel = LocalizedText("atproto_settings.history_backfill_count_label", mapOf("count" to "3")),
                     inProgress = false,
                 ),
             ),
@@ -213,6 +217,7 @@ class AtprotoSettingsContentTest {
                     targetLevel = "hosted_visible",
                     lines = listOf(LocalizedText("atproto_settings.card_mint", emptyMap())),
                     showHistoryBackfill = false,
+                    historyBackfillLabel = LocalizedText("atproto_settings.history_backfill_count_label", mapOf("count" to "3")),
                     inProgress = true,
                 ),
             ),
@@ -443,6 +448,52 @@ class AtprotoSettingsContentTest {
         assertEquals(true, confirmed)
         composeTestRule.onNodeWithTag("atproto-delete-cancel").performScrollTo().performClick()
         assertEquals(true, cancelled)
+    }
+
+    @Test
+    fun retireIdentityOptInForwardsTheTickAndReportsItsState() {
+        var ticked: Boolean? = null
+        render(
+            snapshot = emptySnapshot.copy(
+                level = "hosted_visible",
+                showDeletePresence = true,
+                deleteConfirm = DeleteConfirmCardModel(
+                    lines = listOf(LocalizedText("atproto_settings.delete_confirm_sweeps", emptyMap())),
+                    inProgress = false,
+                    retireIdentity = RetireIdentityOptIn(available = true, selected = false, unavailableReason = null),
+                ),
+            ),
+            onSetDeleteRetireIdentity = { ticked = it },
+        )
+        composeTestRule.onNodeWithTag("atproto-delete-tombstone").performScrollTo().assertIsEnabled()
+        composeTestRule.onNodeWithTag("atproto-delete-tombstone").assert(
+            SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "off"),
+        )
+        composeTestRule.onNodeWithTag("atproto-delete-tombstone").performClick()
+        assertEquals(true, ticked)
+    }
+
+    @Test
+    fun retireIdentityOptInGreyedWithItsReasonWhereTheIdentityCannotBeRetired() {
+        render(
+            snapshot = emptySnapshot.copy(
+                level = "hosted_visible",
+                showDeletePresence = true,
+                deleteConfirm = DeleteConfirmCardModel(
+                    lines = listOf(LocalizedText("atproto_settings.delete_confirm_sweeps", emptyMap())),
+                    inProgress = false,
+                    retireIdentity = RetireIdentityOptIn(
+                        available = false,
+                        selected = false,
+                        unavailableReason = LocalizedText("atproto_settings.delete_confirm_sweeps", emptyMap()),
+                    ),
+                ),
+            ),
+        )
+        composeTestRule.onNodeWithTag("atproto-delete-tombstone").performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("atproto-delete-tombstone").assert(
+            SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "unavailable"),
+        )
     }
 
     @Test

@@ -16,7 +16,9 @@
 //! holding an `Arc<NestClient>`, one async method per kind, no state
 //! machine. Higher-level mail state machines (credential rotation,
 //! sync, …) live in `fauna-client-mail-settings`; this crate is the
-//! typed RPC seam.
+//! typed RPC seam, plus the one facade over it: the per-account
+//! auto-respond toggle and message (`autorespond`), stored as a
+//! match-all `AutoReply` filter rule.
 
 use fauna_protocol::RpcRequester;
 use fauna_protocol::email::{
@@ -28,6 +30,11 @@ use fauna_protocol::email::{
     UpdateEmailFilterReply, UpdateEmailFilterRequest,
 };
 
+mod autorespond;
+pub use autorespond::{
+    AUTORESPOND_INTERVAL_HOURS, AUTORESPOND_PRIORITY, AUTORESPOND_RULE_NAME, AUTORESPOND_SUBJECT,
+    AutoRespond, autorespond_from_filters, is_autorespond_rule,
+};
 pub use fauna_protocol::email;
 
 /// Typed `fauna.email.*` call surface, generic over the WS-RPC transport

@@ -183,8 +183,17 @@ def _build_via_just_windows_ffi_test(root: Path) -> Path:
 # ordinary run keeps the build-at-import the stale-dll fixes rely on.
 _NO_BUILD_ENV = "FAUNA_E2E_FFI_NO_BUILD"
 
+# A process the test itself starts where no build tool is reachable — a
+# docker box a `tests/platform/docker/` witness runs this module in, the
+# host's interpreter borrowed through its loader — loads the library the
+# host test already built, at the path this names, and builds nothing. The
+# host test passes `LIBRARY_PATH` below, the library it loaded itself.
+_LIBRARY_ENV = "FAUNA_E2E_FFI_LIBRARY"
+
 
 def _find_cdylib() -> Path:
+    if os.environ.get(_LIBRARY_ENV):
+        return Path(os.environ[_LIBRARY_ENV])
     if os.environ.get(_NO_BUILD_ENV) == "1":
         raise RuntimeError(
             f"the fauna_ffi cdylib build is skipped ({_NO_BUILD_ENV}=1, a "
@@ -250,14 +259,22 @@ def _load_lib() -> "ctypes.CDLL | _UnavailableLib":
     STALE library into one actionable error in the one test needing the
     missing symbol; this turns an ABSENT one into the same, in each test that
     actually calls a builder. The auto-build stays at import time, where a
-    build and its machine-wide slot wait belong (testing.md § point 9's
-    bound-inversion rule) — only its failure stops being fatal to collection.
+    build and its machine-wide slot wait belong (e2e-conventions.md § The
+    conventions, point 9's bound-inversion rule) — only its failure stops being fatal to collection.
     """
+    global LIBRARY_PATH
     try:
-        return ctypes.CDLL(str(_find_cdylib()))
+        path = _find_cdylib()
+        lib = ctypes.CDLL(str(path))
     except Exception as exc:  # absent, unbuildable, or unloadable
         return _UnavailableLib(exc)
+    LIBRARY_PATH = path
+    return lib
 
+
+#: The library this process loaded — what a box this test starts is handed
+#: (`_LIBRARY_ENV`) — or None when none loaded.
+LIBRARY_PATH: Path | None = None
 
 _lib = _load_lib()
 
@@ -334,6 +351,80 @@ _lib.fauna_post_build_gated.argtypes = [
     ctypes.POINTER(_FfiBuffer),                        # out_blob
 ]
 _lib.fauna_post_build_gated.restype = ctypes.c_int32
+
+# The community-room fixtures (room birth, generation mint, room post, labeler
+# set) — deferred like the bindings above, so a library built before they
+# landed still loads for every other test.
+_HAS_ROOM_FIXTURES = all(
+    hasattr(_lib, name)
+    for name in (
+        "fauna_room_build_birth",
+        "fauna_room_build_generation_mint",
+        "fauna_post_build_room",
+        "fauna_room_sign_labelers",
+    )
+)
+if _HAS_ROOM_FIXTURES:
+    _lib.fauna_room_build_birth.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # secret, secret_len
+        ctypes.c_char_p,                                   # name
+        ctypes.POINTER(ctypes.c_uint8),                    # out_salt (32)
+        ctypes.POINTER(_FfiBuffer),                        # out_policy
+        ctypes.POINTER(_FfiBuffer),                        # out_reception_pubkey
+    ]
+    _lib.fauna_room_build_birth.restype = ctypes.c_int32
+    _lib.fauna_room_build_generation_mint.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # secret, secret_len
+        ctypes.c_uint32,                                   # count
+        ctypes.POINTER(ctypes.c_uint8),                    # entry_ids (count*32)
+        ctypes.POINTER(ctypes.c_uint8),                    # actors (count*32)
+        ctypes.POINTER(ctypes.c_uint32),                   # reception_lens (count)
+        ctypes.POINTER(ctypes.c_uint8),                    # reception_pubkeys
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # parents, parents_count
+        ctypes.c_int64,                                    # minted_at_ms
+        ctypes.POINTER(_FfiBuffer),                        # out_mint
+        ctypes.POINTER(ctypes.c_uint8),                    # out_gen_key (32)
+        ctypes.POINTER(ctypes.c_uint8),                    # out_generation_id (32)
+    ]
+    _lib.fauna_room_build_generation_mint.restype = ctypes.c_int32
+    _lib.fauna_post_build_room.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # secret, secret_len
+        ctypes.c_char_p,                                   # preview
+        ctypes.c_char_p,                                   # full_body
+        ctypes.POINTER(ctypes.c_uint8),                    # room (32)
+        ctypes.POINTER(ctypes.c_uint8),                    # generation (32)
+        ctypes.POINTER(ctypes.c_uint8),                    # gen_key (32)
+        ctypes.POINTER(_FfiBuffer),                        # out_post
+        ctypes.POINTER(_FfiBuffer),                        # out_blob
+    ]
+    _lib.fauna_post_build_room.restype = ctypes.c_int32
+    _lib.fauna_room_sign_labelers.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # secret, secret_len
+        ctypes.POINTER(ctypes.c_uint8),                    # room (32)
+        ctypes.c_uint64,                                   # version
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # labelers, count
+        ctypes.POINTER(_FfiBuffer),                        # out
+    ]
+    _lib.fauna_room_sign_labelers.restype = ctypes.c_int32
+
+# The joiner's half of the room fixtures (a signed member invitation, a fresh
+# wrap target) — deferred on their own, so a library built before they landed
+# still serves the founder's half.
+_HAS_ROOM_JOIN_FIXTURES = all(
+    hasattr(_lib, name)
+    for name in ("fauna_room_sign_member_invite", "fauna_room_mint_reception_pubkey")
+)
+if _HAS_ROOM_JOIN_FIXTURES:
+    _lib.fauna_room_sign_member_invite.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # secret, secret_len
+        ctypes.POINTER(ctypes.c_uint8),                    # room (32)
+        ctypes.POINTER(ctypes.c_uint8),                    # invitee (32)
+        ctypes.c_uint64,                                   # policy_version
+        ctypes.POINTER(_FfiBuffer),                        # out
+    ]
+    _lib.fauna_room_sign_member_invite.restype = ctypes.c_int32
+    _lib.fauna_room_mint_reception_pubkey.argtypes = [ctypes.POINTER(_FfiBuffer)]
+    _lib.fauna_room_mint_reception_pubkey.restype = ctypes.c_int32
 
 _lib.fauna_capability_build_post_grant.argtypes = [
     ctypes.POINTER(ctypes.c_uint8),                    # owner (32)
@@ -415,18 +506,32 @@ if hasattr(_lib, "fauna_capability_build_ext_kinds_grant"):
     ]
     _lib.fauna_capability_build_ext_kinds_grant.restype = ctypes.c_int32
 # The third-party folder deposit grant (`file-sync.md` § Third-party deposit
-# ingress) — keyless, one folder.
-if hasattr(_lib, "fauna_capability_build_folder_deposit_grant"):
-    _lib.fauna_capability_build_folder_deposit_grant.argtypes = [
+# ingress) — keyless, one tuple per folder the consent's scopes name.
+if hasattr(_lib, "fauna_capability_build_consent_deposit_grant"):
+    _lib.fauna_capability_build_consent_deposit_grant.argtypes = [
         ctypes.POINTER(ctypes.c_uint8),                # identity_seed (32)
         ctypes.POINTER(ctypes.c_uint8),                # grant_id (16)
         ctypes.POINTER(ctypes.c_uint8),                # holder_x25519 (32)
         ctypes.c_uint64,                               # epoch_start
         ctypes.c_uint64,                               # epoch_end
-        ctypes.c_int64,                                # folder_id
+        ctypes.c_char_p,                               # scopes, newline-separated
+        ctypes.c_int64,                                # folder (0 = no choice)
         ctypes.POINTER(_FfiBuffer),                    # out
     ]
-    _lib.fauna_capability_build_folder_deposit_grant.restype = ctypes.c_int32
+    _lib.fauna_capability_build_consent_deposit_grant.restype = ctypes.c_int32
+# The oracle's keyless `identity.op` grant (`key-material-hierarchy.md` § The
+# oracle) — one operation class, no key.
+if hasattr(_lib, "fauna_capability_build_identity_op_grant"):
+    _lib.fauna_capability_build_identity_op_grant.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8),                # identity_seed (32)
+        ctypes.POINTER(ctypes.c_uint8),                # grant_id (16)
+        ctypes.POINTER(ctypes.c_uint8),                # holder_x25519 (32)
+        ctypes.c_uint64,                               # epoch_start
+        ctypes.c_uint64,                               # epoch_end
+        ctypes.c_char_p,                               # class_name
+        ctypes.POINTER(_FfiBuffer),                    # out
+    ]
+    _lib.fauna_capability_build_identity_op_grant.restype = ctypes.c_int32
 if hasattr(_lib, "fauna_ext_kind_seal_row"):
     _lib.fauna_ext_kind_seal_row.argtypes = [
         ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # grant_blob, len
@@ -441,6 +546,48 @@ if hasattr(_lib, "fauna_ext_kind_seal_row"):
         ctypes.POINTER(_FfiBuffer),                        # out
     ]
     _lib.fauna_ext_kind_seal_row.restype = ctypes.c_int32
+# The `fauna:personalization:rw` twin (`authorization-server.md` § Scope
+# grammar → *The fifth arm*): the owner's grant and `state` row, the
+# principal's open.
+if hasattr(_lib, "fauna_capability_build_personalization_grant"):
+    _lib.fauna_capability_build_personalization_grant.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8),                # identity_seed (32)
+        ctypes.POINTER(ctypes.c_uint8),                # grant_id (16)
+        ctypes.POINTER(ctypes.c_uint8),                # holder_x25519 (32)
+        ctypes.c_uint64,                               # epoch_start
+        ctypes.c_uint64,                               # epoch_end
+        ctypes.POINTER(_FfiBuffer),                    # out
+    ]
+    _lib.fauna_capability_build_personalization_grant.restype = ctypes.c_int32
+    _lib.fauna_account_state_seal_delegable_row.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8),                    # identity_seed (32)
+        ctypes.POINTER(ctypes.c_uint8),                    # writer_secret (32)
+        ctypes.c_char_p,                                   # kind
+        ctypes.c_char_p,                                   # key
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # value, len
+        ctypes.c_uint64,                                   # writer_seq
+        ctypes.POINTER(_FfiBuffer),                        # out
+    ]
+    _lib.fauna_account_state_seal_delegable_row.restype = ctypes.c_int32
+    _lib.fauna_personalization_open_state_row.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # grant_blob, len
+        ctypes.POINTER(ctypes.c_uint8),                    # holder_secret (32)
+        ctypes.POINTER(ctypes.c_uint8),                    # writer_id (32)
+        ctypes.c_uint64,                                   # writer_seq
+        ctypes.POINTER(ctypes.c_uint8),                    # item_key (32)
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # envelope, len
+        ctypes.POINTER(_FfiBuffer),                        # out
+    ]
+    _lib.fauna_personalization_open_state_row.restype = ctypes.c_int32
+for _name in ("fauna_personalization_open_topic_model", "fauna_personalization_open_cue_rollup"):
+    if hasattr(_lib, _name):
+        _fn = getattr(_lib, _name)
+        _fn.argtypes = [
+            ctypes.POINTER(ctypes.c_uint8),                    # owner secret (32-byte seed)
+            ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # sealed blob, len
+            ctypes.POINTER(_FfiBuffer),                        # out
+        ]
+        _fn.restype = ctypes.c_int32
 if hasattr(_lib, "fauna_bridged_seal_for_user"):
     _lib.fauna_bridged_seal_for_user.argtypes = [
         ctypes.POINTER(ctypes.c_uint8),                    # recipient_x25519 (32)
@@ -520,6 +667,42 @@ if _HAS_BIRTH_UPLOAD:
         ctypes.POINTER(_FfiBuffer),                        # out: dag-cbor EncryptedKeyBlobUpload
     ]
     _lib.fauna_subscriptions_build_birth_upload.restype = ctypes.c_int32
+
+# Same deferred binding as above, for the same reason.
+_HAS_ROSTER_UPLOAD = hasattr(_lib, "fauna_subscriptions_build_roster_upload")
+if _HAS_ROSTER_UPLOAD:
+    _lib.fauna_subscriptions_build_roster_upload.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # author secret (32-byte seed), len
+        ctypes.c_char_p,                                   # tier name
+        ctypes.POINTER(ctypes.c_uint8),                    # period key (32 bytes)
+        ctypes.c_uint64,                                   # rotated_at (microseconds)
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # packed 32-byte actor ids, count
+        ctypes.POINTER(ctypes.c_uint8),                    # packed 1184-byte ML-KEM eks (or null)
+        ctypes.POINTER(ctypes.c_uint8),                    # per-entry ek present flags (or null)
+        ctypes.POINTER(_FfiBuffer),                        # out: dag-cbor EncryptedKeyBlobUpload
+    ]
+    _lib.fauna_subscriptions_build_roster_upload.restype = ctypes.c_int32
+
+# Same deferred binding as above, for the same reason.
+_HAS_ENCAPS_KEY_PUBLISH = hasattr(_lib, "fauna_subscriptions_build_encaps_key_publish")
+if _HAS_ENCAPS_KEY_PUBLISH:
+    _lib.fauna_subscriptions_build_encaps_key_publish.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # account secret (32-byte seed), len
+        ctypes.POINTER(_FfiBuffer),                        # out: dag-cbor EncapsKeyPublishRequest
+    ]
+    _lib.fauna_subscriptions_build_encaps_key_publish.restype = ctypes.c_int32
+
+_HAS_TLS_PUBLISH_CERT = hasattr(_lib, "fauna_tls_build_publish_cert")
+if _HAS_TLS_PUBLISH_CERT:
+    _lib.fauna_tls_build_publish_cert.argtypes = [
+        ctypes.c_char_p,                                   # cert chain PEM
+        ctypes.c_char_p,                                   # private key PEM
+        ctypes.c_char_p,                                   # domain
+        ctypes.POINTER(ctypes.c_uint8),                    # target nest id (32 bytes)
+        ctypes.POINTER(ctypes.c_uint8),                    # signer secret (32-byte seed)
+        ctypes.POINTER(_FfiBuffer),                        # out: dag-cbor PublishCertRequest
+    ]
+    _lib.fauna_tls_build_publish_cert.restype = ctypes.c_int32
 
 _lib.fauna_ffi_last_error.argtypes = []
 _lib.fauna_ffi_last_error.restype = ctypes.c_char_p
@@ -715,6 +898,49 @@ def open_device_label(secret: bytes, device_id: bytes,
     return rendered.decode("utf-8") if rendered else None
 
 
+def build_encaps_key_publish(secret: bytes) -> dict:
+    """The ``fauna.subscriptions.encaps_key.publish`` request an account's app
+    sends at session start — its identity-seed-derived ML-KEM-768 encapsulation
+    key (``post-quantum.md`` § surface B) — built by the one shared
+    ``encaps_key_publish_request`` every app's publish rides, for
+    :func:`build_tier_birth_upload`'s stated reason."""
+    if not _HAS_ENCAPS_KEY_PUBLISH:
+        raise RuntimeError(
+            "libfauna_ffi is stale: it has no `fauna_subscriptions_build_encaps_key_publish`. "
+            "Run `just e2e-ffi` to rebuild it."
+        )
+    if len(secret) != 32:
+        raise ValueError("secret must be 32 bytes")
+    sec_arr = (ctypes.c_uint8 * 32)(*secret)
+    out = _FfiBuffer()
+    rc = _lib.fauna_subscriptions_build_encaps_key_publish(sec_arr, 32, ctypes.byref(out))
+    return cbor2.loads(_take_buffer(rc, out, "fauna_subscriptions_build_encaps_key_publish"))
+
+
+def build_publish_cert(cert_chain_pem: str, privkey_pem: str, domain: str,
+                       target_nest_id: bytes, signer_secret: bytes) -> dict:
+    """The ``fauna.tls.publish_cert`` request an admin's app sends once a DNS-01
+    order finishes: the issued cert sealed to ``target_nest_id`` (the installing
+    nest's Ed25519 node id) and signed by the 32-byte seed ``signer_secret`` —
+    built by the one shared ``seal_issued_cert_for_nest`` the admin-dns
+    machine's delivery calls, for :func:`build_tier_birth_upload`'s stated
+    reason. Returns the decoded request map to send as the kind's payload."""
+    if not _HAS_TLS_PUBLISH_CERT:
+        raise RuntimeError(
+            "libfauna_ffi is stale: it has no `fauna_tls_build_publish_cert`. "
+            "Run `just e2e-ffi` to rebuild it."
+        )
+    if len(target_nest_id) != 32 or len(signer_secret) != 32:
+        raise ValueError("target_nest_id and signer_secret must be 32 bytes")
+    nest_arr = (ctypes.c_uint8 * 32)(*target_nest_id)
+    sec_arr = (ctypes.c_uint8 * 32)(*signer_secret)
+    out = _FfiBuffer()
+    rc = _lib.fauna_tls_build_publish_cert(
+        cert_chain_pem.encode(), privkey_pem.encode(), domain.encode(),
+        nest_arr, sec_arr, ctypes.byref(out))
+    return cbor2.loads(_take_buffer(rc, out, "fauna_tls_build_publish_cert"))
+
+
 def build_tier_birth_upload(secret: bytes, tier: str, period_key: bytes) -> dict:
     """The birth ``KeyBlob`` envelope ``fauna.subscriptions.tiers.create``
     requires, as the decoded ``encrypted_upload`` map to drop into the request
@@ -743,6 +969,63 @@ def build_tier_birth_upload(secret: bytes, tier: str, period_key: bytes) -> dict
         ctypes.byref(out),
     )
     return cbor2.loads(_take_buffer(rc, out, "fauna_subscriptions_build_birth_upload"))
+
+
+def build_tier_roster_upload(
+    secret: bytes, tier: str, period_key: bytes, rotated_at: int,
+    roster: list[bytes], mlkem_eks: dict[bytes, bytes] | None = None,
+) -> dict:
+    """The ``encrypted_upload`` an author's ``fauna.subscriptions.requests.approve``
+    carries: a ``KeyBlob`` for ``tier`` under ``period_key`` covering exactly
+    ``roster`` (32-byte actor ids — the tier's current subscribers plus the one
+    being approved), at ``rotated_at`` microseconds, which must exceed every
+    blob the tier already published.
+
+    The roster-bearing sibling of :func:`build_tier_birth_upload`, riding the
+    same shared ``mint_self_delegated_upload``: a witness that KEEPS the period
+    key it created the tier under (see
+    :meth:`ApiActor.subscription_create_tier_with_key`) completes a grant
+    through the real approve door exactly as an app's drain pump does, with no
+    app — the nest only ever enqueues one (``monetization.md`` § Pillar 1 → the
+    headless-author corollary).
+
+    ``mlkem_eks`` maps a roster actor id to the 1184-byte ML-KEM encapsulation
+    key that subscriber published (the ``mlkem_encaps_key`` a pending request
+    or roster row carries): its entry is wrapped hybrid (X-Wing), as an app's
+    drain pump wraps; every other entry is classical.
+    """
+    if not _HAS_ROSTER_UPLOAD:
+        raise RuntimeError(
+            "libfauna_ffi is stale: it has no `fauna_subscriptions_build_roster_upload`. "
+            "Run `just e2e-ffi` to rebuild it."
+        )
+    if len(secret) != 32 or len(period_key) != 32:
+        raise ValueError("secret and period_key must be 32 bytes")
+    ids = [bytes(a) for a in roster]
+    if any(len(a) != 32 for a in ids):
+        raise ValueError("every roster entry must be a 32-byte actor id")
+    packed = b"".join(ids)
+    eks = {bytes(k): bytes(v) for k, v in (mlkem_eks or {}).items()}
+    if any(len(v) != 1184 for v in eks.values()):
+        raise ValueError("every ML-KEM encapsulation key must be 1184 bytes")
+    packed_eks = b"".join(eks.get(a, bytes(1184)) for a in ids)
+    present = bytes(1 if a in eks else 0 for a in ids)
+    sec_arr = (ctypes.c_uint8 * 32)(*secret)
+    pk_arr = (ctypes.c_uint8 * 32)(*period_key)
+    ids_arr = (ctypes.c_uint8 * max(len(packed), 1))(*packed)
+    eks_arr = (ctypes.c_uint8 * max(len(packed_eks), 1))(*packed_eks)
+    present_arr = (ctypes.c_uint8 * max(len(present), 1))(*present)
+    out = _FfiBuffer()
+    rc = _lib.fauna_subscriptions_build_roster_upload(
+        sec_arr, 32,
+        tier.encode("utf-8"),
+        pk_arr,
+        rotated_at,
+        ids_arr, len(ids),
+        eks_arr, present_arr,
+        ctypes.byref(out),
+    )
+    return cbor2.loads(_take_buffer(rc, out, "fauna_subscriptions_build_roster_upload"))
 
 
 def open_key_blob(secret: bytes, blob_data: bytes) -> tuple[bytes, bytes]:
@@ -1085,6 +1368,146 @@ def build_gated_post(
     return post_bytes, blob_bytes
 
 
+def _require_room_fixtures() -> None:
+    if not _HAS_ROOM_FIXTURES:
+        raise RuntimeError(
+            "libfauna_ffi is stale: it has no community-room fixtures "
+            "(`fauna_room_build_birth` and siblings). Run `just e2e-ffi` to rebuild it."
+        )
+
+
+def _u8(data: bytes):
+    return (ctypes.c_uint8 * max(len(data), 1))(*data)
+
+
+def build_room_birth(secret: bytes, name: str) -> tuple[bytes, bytes, bytes]:
+    """A community room's birth record for its founder: ``(salt, policy,
+    reception_pubkey)`` — a fresh binding birth salt, the signed initial
+    ``RoomPolicy`` and a fresh group-reception public key, everything
+    ``fauna.conversations.room.create`` carries. Wraps
+    ``fauna_mls::room_policy``."""
+    _require_room_fixtures()
+    if len(secret) != 32:
+        raise ValueError("secret must be 32 bytes")
+    salt = (ctypes.c_uint8 * 32)()
+    out_policy = _FfiBuffer()
+    out_key = _FfiBuffer()
+    rc = _lib.fauna_room_build_birth(
+        _u8(secret), 32, name.encode("utf-8"),
+        salt, ctypes.byref(out_policy), ctypes.byref(out_key),
+    )
+    policy = _take_buffer(rc, out_policy, "fauna_room_build_birth")
+    key = _take_buffer(rc, out_key, "fauna_room_build_birth")
+    return bytes(salt), policy, key
+
+
+def build_room_generation_mint(
+    secret: bytes,
+    targets: list[tuple[bytes, bytes, bytes]],
+    parents: list[bytes],
+    minted_at_ms: int,
+) -> tuple[bytes, bytes, bytes]:
+    """One community-room generation mint over ``targets`` — each
+    ``(entry_id, actor, reception_pubkey)`` as ``room.list_roster`` reads them
+    back — parented on ``parents`` (empty for the first mint). Returns
+    ``(mint, gen_key, generation_id)``: the ``room.publish_generation`` record,
+    the 32-byte key the room's posts seal under, and its id. Wraps the shared
+    ``build_group_mint``."""
+    _require_room_fixtures()
+    if len(secret) != 32:
+        raise ValueError("secret must be 32 bytes")
+    entry_ids = b"".join(t[0] for t in targets)
+    actors = b"".join(t[1] for t in targets)
+    keys = b"".join(t[2] for t in targets)
+    lens = (ctypes.c_uint32 * max(len(targets), 1))(*[len(t[2]) for t in targets])
+    parent_bytes = b"".join(parents)
+    out_mint = _FfiBuffer()
+    gen_key = (ctypes.c_uint8 * 32)()
+    gen_id = (ctypes.c_uint8 * 32)()
+    rc = _lib.fauna_room_build_generation_mint(
+        _u8(secret), 32,
+        len(targets), _u8(entry_ids), _u8(actors), lens, _u8(keys),
+        _u8(parent_bytes), len(parents),
+        minted_at_ms,
+        ctypes.byref(out_mint), gen_key, gen_id,
+    )
+    mint = _take_buffer(rc, out_mint, "fauna_room_build_generation_mint")
+    return mint, bytes(gen_key), bytes(gen_id)
+
+
+def build_room_post(
+    secret: bytes,
+    preview: str,
+    full_body: str,
+    room: bytes,
+    generation: bytes,
+    gen_key: bytes,
+) -> tuple[bytes, bytes]:
+    """Build + sign a room-restricted Post addressed to a community room:
+    ``(post_bytes, encrypted_blob)``, as :func:`build_gated_post` returns them
+    — the teaser in the clear, ``full_body`` sealed under the room's generation
+    key. Wraps ``fauna_client_core::post::build_room_post_at``."""
+    _require_room_fixtures()
+    if len(secret) != 32 or len(room) != 32 or len(generation) != 32 or len(gen_key) != 32:
+        raise ValueError("secret, room, generation and gen_key must be 32 bytes")
+    out_post = _FfiBuffer()
+    out_blob = _FfiBuffer()
+    rc = _lib.fauna_post_build_room(
+        _u8(secret), 32,
+        preview.encode("utf-8"), full_body.encode("utf-8"),
+        _u8(room), _u8(generation), _u8(gen_key),
+        ctypes.byref(out_post), ctypes.byref(out_blob),
+    )
+    post = _take_buffer(rc, out_post, "fauna_post_build_room")
+    blob = _take_buffer(rc, out_blob, "fauna_post_build_room")
+    return post, blob
+
+
+def sign_room_labelers(secret: bytes, room: bytes, version: int, labelers: list[bytes]) -> bytes:
+    """The owner's signed labeler set for ``room`` at ``version`` — the
+    ``labelers`` bytes of ``fauna.conversations.room.set_labelers``."""
+    _require_room_fixtures()
+    if len(secret) != 32 or len(room) != 32:
+        raise ValueError("secret and room must be 32 bytes")
+    out = _FfiBuffer()
+    ids = b"".join(labelers)
+    rc = _lib.fauna_room_sign_labelers(
+        _u8(secret), 32, _u8(room), version, _u8(ids), len(labelers), ctypes.byref(out),
+    )
+    return _take_buffer(rc, out, "fauna_room_sign_labelers")
+
+
+def _require_room_join_fixtures() -> None:
+    if not _HAS_ROOM_JOIN_FIXTURES:
+        raise RuntimeError(
+            "libfauna_ffi is stale: it has no room-join fixtures "
+            "(`fauna_room_sign_member_invite` and its sibling). Run `just e2e-ffi` to rebuild it."
+        )
+
+
+def sign_room_member_invite(secret: bytes, room: bytes, invitee: bytes, policy_version: int) -> bytes:
+    """The inviter's signed invitation of ``invitee`` into ``room`` as a member,
+    read under policy ``policy_version`` — the ``invite`` bytes of
+    ``fauna.conversations.room.invite``. Wraps ``fauna_mls::room_policy::RoomInvite``."""
+    _require_room_join_fixtures()
+    if len(secret) != 32 or len(room) != 32 or len(invitee) != 32:
+        raise ValueError("secret, room and invitee must be 32 bytes")
+    out = _FfiBuffer()
+    rc = _lib.fauna_room_sign_member_invite(
+        _u8(secret), 32, _u8(room), _u8(invitee), policy_version, ctypes.byref(out),
+    )
+    return _take_buffer(rc, out, "fauna_room_sign_member_invite")
+
+
+def mint_room_reception_pubkey() -> bytes:
+    """A fresh group-reception public key — the wrap target a joiner names in
+    ``fauna.conversations.room.accept_invite`` (its secret half is dropped)."""
+    _require_room_join_fixtures()
+    out = _FfiBuffer()
+    rc = _lib.fauna_room_mint_reception_pubkey(ctypes.byref(out))
+    return _take_buffer(rc, out, "fauna_room_mint_reception_pubkey")
+
+
 def build_post_grant(
     owner: bytes,
     grant_id: bytes,
@@ -1302,31 +1725,66 @@ def build_ext_kinds_grant(
     return _take_buffer(rc, out, "fauna_capability_build_ext_kinds_grant")
 
 
-def build_folder_deposit_grant(
+def build_consent_deposit_grant(
     identity_seed: bytes,
     grant_id: bytes,
     holder_x25519: bytes,
     epoch_start: int,
     epoch_end: int,
-    folder_id: int,
+    scopes: list[str],
+    folder: int | None,
 ) -> bytes:
     """The owner's consent-time keyless ``deposit`` grant to a third-party
-    principal over one folder — the production ``mint_folder_deposit_grant``,
-    owned by the actor ``identity_seed`` (the owner's 32-byte Ed25519 seed)
-    derives. Returns the ``fauna.capabilities.mint`` grant_blob."""
+    principal — the deposit arm of the production consent-time mint
+    (``ext_consent::prepare_ext_consent_grant``) over the consent row's own
+    ``scopes``, its bare folder-plane scopes qualified by the card's
+    ``folder`` choice (``None`` for a qualified row), owned by the actor
+    ``identity_seed`` (the owner's 32-byte Ed25519 seed) derives. Returns the
+    ``fauna.capabilities.mint`` grant_blob."""
     if len(identity_seed) != 32 or len(grant_id) != 16 or len(holder_x25519) != 32:
         raise ValueError("identity_seed/holder_x25519 must be 32 bytes; grant_id 16")
+    if folder is not None and folder <= 0:
+        raise ValueError("folder must be a positive row id")
     out = _FfiBuffer()
-    rc = _lib.fauna_capability_build_folder_deposit_grant(
+    rc = _lib.fauna_capability_build_consent_deposit_grant(
         _u8(identity_seed),
         _u8(grant_id),
         _u8(holder_x25519),
         epoch_start,
         epoch_end,
-        folder_id,
+        "\n".join(scopes).encode("utf-8"),
+        folder or 0,
         ctypes.byref(out),
     )
-    return _take_buffer(rc, out, "fauna_capability_build_folder_deposit_grant")
+    return _take_buffer(rc, out, "fauna_capability_build_consent_deposit_grant")
+
+
+def build_identity_op_grant(
+    identity_seed: bytes,
+    grant_id: bytes,
+    holder_x25519: bytes,
+    epoch_start: int,
+    epoch_end: int,
+    class_name: str,
+) -> bytes:
+    """The owner's keyless ``identity.op`` grant to a third-party principal
+    naming one oracle operation class (``atproto.service_auth``, …), owned by
+    the actor ``identity_seed`` (the owner's 32-byte Ed25519 seed) derives. A
+    sovereign or unknown class is refused. Returns the
+    ``fauna.capabilities.mint`` grant_blob."""
+    if len(identity_seed) != 32 or len(grant_id) != 16 or len(holder_x25519) != 32:
+        raise ValueError("identity_seed/holder_x25519 must be 32 bytes; grant_id 16")
+    out = _FfiBuffer()
+    rc = _lib.fauna_capability_build_identity_op_grant(
+        _u8(identity_seed),
+        _u8(grant_id),
+        _u8(holder_x25519),
+        epoch_start,
+        epoch_end,
+        class_name.encode("utf-8"),
+        ctypes.byref(out),
+    )
+    return _take_buffer(rc, out, "fauna_capability_build_identity_op_grant")
 
 
 def ext_kind_seal_row(
@@ -1365,6 +1823,125 @@ def ext_kind_seal_row(
     )
     sealed = cbor2.loads(_take_buffer(rc, out, "fauna_ext_kind_seal_row"))
     return bytes(sealed["item_key"]), bytes(sealed["envelope"])
+
+
+def build_personalization_grant(
+    identity_seed: bytes,
+    grant_id: bytes,
+    holder_x25519: bytes,
+    epoch_start: int,
+    epoch_end: int,
+) -> bytes:
+    """The owner's ``fauna:personalization:rw`` grant twin to a third-party
+    principal — the production ``mint_personalization_grant`` over the
+    delegable branch of ``identity_seed`` (the owner's 32-byte Ed25519 seed):
+    the registry kind's and the model kind's pairs. Returns the
+    ``fauna.capabilities.mint`` grant_blob."""
+    if len(identity_seed) != 32 or len(grant_id) != 16 or len(holder_x25519) != 32:
+        raise ValueError("identity_seed/holder_x25519 must be 32 bytes; grant_id 16")
+    out = _FfiBuffer()
+    rc = _lib.fauna_capability_build_personalization_grant(
+        _u8(identity_seed),
+        _u8(grant_id),
+        _u8(holder_x25519),
+        epoch_start,
+        epoch_end,
+        ctypes.byref(out),
+    )
+    return _take_buffer(rc, out, "fauna_capability_build_personalization_grant")
+
+
+def account_state_seal_delegable_row(
+    identity_seed: bytes,
+    writer_secret: bytes,
+    kind: str,
+    key: str,
+    value: bytes,
+    writer_seq: int,
+) -> tuple[bytes, bytes]:
+    """Seal one row of a delegable ``kind`` under ``state`` as the owner: the
+    pair of the owner's delegable branch, signed by ``writer_secret``.
+    Returns ``(item_key, envelope)`` — the sealed fields of the owner's
+    ``fauna.account.state.put``."""
+    if len(identity_seed) != 32 or len(writer_secret) != 32:
+        raise ValueError("identity_seed/writer_secret must be 32 bytes")
+    out = _FfiBuffer()
+    rc = _lib.fauna_account_state_seal_delegable_row(
+        _u8(identity_seed),
+        _u8(writer_secret),
+        kind.encode("utf-8"),
+        key.encode("utf-8"),
+        _u8(value),
+        len(value),
+        writer_seq,
+        ctypes.byref(out),
+    )
+    sealed = cbor2.loads(_take_buffer(rc, out, "fauna_account_state_seal_delegable_row"))
+    return bytes(sealed["item_key"]), bytes(sealed["envelope"])
+
+
+def personalization_open_state_row(
+    grant_blob: bytes,
+    holder_secret: bytes,
+    writer_id: bytes,
+    writer_seq: int,
+    item_key: bytes,
+    envelope: bytes,
+) -> dict:
+    """Open one listed ``state`` row as a ``fauna:personalization:rw``
+    principal, with the pairs its grant twin wraps to ``holder_secret``.
+    Returns ``{"kind", "key", "value"}``; raises when no granted pair opens
+    it — the delegable scope is kind-blinded, so every other kind's row."""
+    if len(holder_secret) != 32 or len(writer_id) != 32 or len(item_key) != 32:
+        raise ValueError("holder_secret/writer_id/item_key must be 32 bytes")
+    out = _FfiBuffer()
+    rc = _lib.fauna_personalization_open_state_row(
+        _u8(grant_blob),
+        len(grant_blob),
+        _u8(holder_secret),
+        _u8(writer_id),
+        writer_seq,
+        _u8(item_key),
+        _u8(envelope),
+        len(envelope),
+        ctypes.byref(out),
+    )
+    opened = cbor2.loads(_take_buffer(rc, out, "fauna_personalization_open_state_row"))
+    return {
+        "kind": bytes(opened["kind"]).decode("utf-8"),
+        "key": bytes(opened["key"]).decode("utf-8"),
+        "value": bytes(opened["value"]),
+    }
+
+
+def _open_owner_blob(fn_name: str, secret: bytes, blob: bytes):
+    if not hasattr(_lib, fn_name):
+        raise RuntimeError(
+            f"libfauna_ffi has no `{fn_name}` — it is stale, or not the "
+            "`e2e-harness` flavor. Run `just e2e-ffi` to rebuild it."
+        )
+    if len(secret) != 32:
+        raise ValueError("secret must be 32 bytes")
+    out = _FfiBuffer()
+    rc = getattr(_lib, fn_name)(_u8(secret), _u8(blob), len(blob), ctypes.byref(out))
+    return cbor2.loads(_take_buffer(rc, out, fn_name))
+
+
+def personalization_open_topic_model(secret: bytes, blob: bytes) -> dict:
+    """Open a sealed trained-topic model blob as its owner (seed ``secret``),
+    through the production ``unseal_topic_model`` under the keys
+    ``FeedManager`` seals with. Returns ``{"markers": {post_id_hex: verb},
+    "example_count": n, "engagement_count": m}`` (explicit, then
+    engagement-taught documents), ``verb`` ``"more-like-this"`` / ``"less-like-this"``;
+    raises when the seed does not open it."""
+    return _open_owner_blob("fauna_personalization_open_topic_model", secret, blob)
+
+
+def personalization_open_cue_rollup(secret: bytes, blob: bytes) -> dict:
+    """Open a sealed ``cues:v1`` engagement rollup as its owner (seed
+    ``secret``), through the production ``unseal_cue_rollup``. Returns
+    ``{content_id: verdict}``, ``verdict`` ``"watch-complete"`` / ``"skip"``."""
+    return _open_owner_blob("fauna_personalization_open_cue_rollup", secret, blob)
 
 
 def bridged_seal_for_user(
@@ -1457,6 +2034,7 @@ _HARNESS_EXPORTS = (
     "fauna_harness_record_change",
     "fauna_harness_report_conflict",
     "fauna_harness_create_private_link",
+    "fauna_harness_create_link",
 )
 _HAS_HARNESS = all(hasattr(_lib, name) for name in _HARNESS_EXPORTS)
 if _HAS_HARNESS:
@@ -1529,7 +2107,13 @@ def harness_record_change(nest_url: str, secret: bytes, request: dict) -> dict:
 
 
 def harness_create_private_link(
-    nest_url: str, secret: bytes, manifest: bytes, filename: str, lifetime_secs: int
+    nest_url: str,
+    secret: bytes,
+    manifest: bytes,
+    filename: str,
+    lifetime_secs: int,
+    *,
+    names: bytes | None = None,
 ) -> tuple[dict, str]:
     """Make a **private (fragment-keyed) share link** to a file, as the actor
     whose seed is ``secret``, through the shared
@@ -1538,12 +2122,34 @@ def harness_create_private_link(
     key, ``fauna.share.create`` sent, and the URL — ``<nest>/share/<token>#<key>``
     — revealed only against the nest's reply. ``manifest`` is the sealed wire
     manifest ``seal_owner_file`` returned (already uploaded). Returns
-    ``(ShareRecord, url)``; the key exists only in that url."""
+    ``(ShareRecord, url)``; the key exists only in that url.
+
+    ``names`` (a 32-byte manifest hash) makes the token name a different
+    manifest than the envelope was built over — the non-conforming shape a
+    witness of the nest's own refusal needs; never set it otherwise."""
     record, url = _harness_call(
         "fauna_harness_create_private_link",
         nest_url,
         secret,
-        [manifest, filename, lifetime_secs],
+        [manifest, filename, lifetime_secs, None if names is None else bytes(names)],
+    )
+    return record, url
+
+
+def harness_create_link(
+    nest_url: str, secret: bytes, manifest_hash: bytes, filename: str, lifetime_secs: int
+) -> tuple[dict, str]:
+    """Make an ordinary (not fragment-keyed) **share link** to a file, as the
+    actor whose seed is ``secret``, through the shared
+    ``ShareClient::create_link``: the token minted, ``fauna.share.create``
+    sent, and the URL revealed only against the nest's reply.
+    ``manifest_hash`` is the 32-byte hash of the uploaded manifest. Returns
+    ``(ShareRecord, url)``; a refusal raises the nest's ``RpcCallError``."""
+    record, url = _harness_call(
+        "fauna_harness_create_link",
+        nest_url,
+        secret,
+        [bytes(manifest_hash), filename, lifetime_secs],
     )
     return record, url
 
@@ -1630,6 +2236,410 @@ def nostr_gift_wrap_dm(sender_secret: bytes, recipient: str, content: str) -> di
     return json.loads(_take_buffer(rc, out, "fauna_harness_nostr_gift_wrap_dm"))
 
 
+# The outside-held Nostr key: sign, verify and the NIP-19 faces, all through
+# the in-tree `fauna_bridge_nostr` (`src/cabi/harness.rs`). One availability
+# flag for the four, since one `just e2e-ffi` build ships them together.
+_HAS_NOSTR_KEYS = hasattr(_lib, "fauna_harness_nostr_sign_event")
+if _HAS_NOSTR_KEYS:
+    _lib.fauna_harness_nostr_sign_event.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8),                    # secret (32, secp256k1)
+        ctypes.c_char_p,                                   # template (NIP-01 JSON, unsigned)
+        ctypes.POINTER(_FfiBuffer),                        # out
+    ]
+    _lib.fauna_harness_nostr_sign_event.restype = ctypes.c_int32
+    _lib.fauna_harness_nostr_verify_event.argtypes = [
+        ctypes.c_char_p,                                   # event (NIP-01 JSON)
+        ctypes.POINTER(_FfiBuffer),                        # out: true | false
+    ]
+    _lib.fauna_harness_nostr_verify_event.restype = ctypes.c_int32
+    _lib.fauna_harness_nostr_keys.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8),                    # secret (32, secp256k1)
+        ctypes.POINTER(_FfiBuffer),                        # out: {pubkey, npub, nsec}
+    ]
+    _lib.fauna_harness_nostr_keys.restype = ctypes.c_int32
+    _lib.fauna_harness_nostr_npub_to_hex.argtypes = [
+        ctypes.c_char_p,                                   # npub1…
+        ctypes.POINTER(_FfiBuffer),                        # out: "<64 hex>"
+    ]
+    _lib.fauna_harness_nostr_npub_to_hex.restype = ctypes.c_int32
+
+
+def _require_nostr_keys(name: str) -> None:
+    if not _HAS_NOSTR_KEYS:
+        raise RuntimeError(
+            f"libfauna_ffi has no `{name}` — it is stale, or not built with the "
+            "`e2e-harness` feature (`just e2e-ffi`)"
+        )
+
+
+def nostr_sign_event(secret: bytes, template: dict) -> dict:
+    """Sign ``template`` (``kind``, ``created_at``, ``tags``, ``content`` — the
+    shape NIP-07's ``signEvent`` takes and ``fauna.bridges.link_challenge``
+    hands out) as the holder of ``secret``, a key held outside any nest. Returns
+    the signed NIP-01 event dict."""
+    _require_nostr_keys("fauna_harness_nostr_sign_event")
+    if len(secret) != 32:
+        raise ValueError("secret must be 32 bytes")
+    out = _FfiBuffer()
+    rc = _lib.fauna_harness_nostr_sign_event(
+        _u8(secret), json.dumps(template).encode(), ctypes.byref(out)
+    )
+    return json.loads(_take_buffer(rc, out, "fauna_harness_nostr_sign_event"))
+
+
+def nostr_verify_event(event: dict) -> bool:
+    """Whether ``event``'s id and schnorr signature check out, as any Nostr
+    client checks an event before trusting it."""
+    _require_nostr_keys("fauna_harness_nostr_verify_event")
+    out = _FfiBuffer()
+    rc = _lib.fauna_harness_nostr_verify_event(json.dumps(event).encode(), ctypes.byref(out))
+    return json.loads(_take_buffer(rc, out, "fauna_harness_nostr_verify_event"))
+
+
+def nostr_keys(secret: bytes) -> dict:
+    """The NIP-19 faces of ``secret``'s key: ``{"pubkey": <64 hex>, "npub",
+    "nsec"}``."""
+    _require_nostr_keys("fauna_harness_nostr_keys")
+    if len(secret) != 32:
+        raise ValueError("secret must be 32 bytes")
+    out = _FfiBuffer()
+    rc = _lib.fauna_harness_nostr_keys(_u8(secret), ctypes.byref(out))
+    return json.loads(_take_buffer(rc, out, "fauna_harness_nostr_keys"))
+
+
+def nostr_npub_to_hex(npub: str) -> str:
+    """The 64-hex public key ``npub`` names — a linked identity, as
+    ``fauna.bridges.list`` shows it, turned into a relay filter's ``authors``."""
+    _require_nostr_keys("fauna_harness_nostr_npub_to_hex")
+    out = _FfiBuffer()
+    rc = _lib.fauna_harness_nostr_npub_to_hex(npub.encode(), ctypes.byref(out))
+    return json.loads(_take_buffer(rc, out, "fauna_harness_nostr_npub_to_hex"))
+
+
+# The user's held ATProto rotation key and the PLC tombstone it signs, through
+# the in-tree `fauna_client_atproto` (`src/cabi/harness.rs`).
+_HAS_ATPROTO_ROTATION = hasattr(_lib, "fauna_harness_atproto_retire")
+if _HAS_ATPROTO_ROTATION:
+    _lib.fauna_harness_atproto_rotation_key.argtypes = [
+        ctypes.POINTER(_FfiBuffer),                        # out: {secret, did_key}
+    ]
+    _lib.fauna_harness_atproto_rotation_key.restype = ctypes.c_int32
+    _lib.fauna_harness_atproto_retire.argtypes = [
+        ctypes.c_char_p,                                   # directory base URL
+        ctypes.c_char_p,                                   # did:plc:…
+        ctypes.POINTER(ctypes.c_uint8),                    # secret (32, P-256 scalar)
+        ctypes.c_char_p,                                   # its did:key:zDn…
+        ctypes.POINTER(_FfiBuffer),                        # out: {prev_cid}
+    ]
+    _lib.fauna_harness_atproto_retire.restype = ctypes.c_int32
+
+
+def _require_atproto_rotation(name: str) -> None:
+    if not _HAS_ATPROTO_ROTATION:
+        raise RuntimeError(
+            f"libfauna_ffi has no `{name}` — it is stale, or not built with the "
+            "`e2e-harness` feature (`just e2e-ffi`)"
+        )
+
+
+def atproto_rotation_key() -> dict:
+    """A fresh ATProto user rotation key the caller HOLDS, generated by the
+    apps' own keygen: ``{"secret": <64 hex>, "did_key": "did:key:zDn…"}``."""
+    _require_atproto_rotation("fauna_harness_atproto_rotation_key")
+    out = _FfiBuffer()
+    rc = _lib.fauna_harness_atproto_rotation_key(ctypes.byref(out))
+    return json.loads(_take_buffer(rc, out, "fauna_harness_atproto_rotation_key"))
+
+
+def atproto_retire(directory_url: str, did: str, key: dict) -> str:
+    """Publish ``did``'s PLC tombstone at ``directory_url``, signed with the
+    held ``key`` (an :func:`atproto_rotation_key` dict) through the apps' own
+    retirement steps — never a Python re-derivation of the signed op. Returns
+    the CID the tombstone chained to (``""`` if the log was already retired):
+    what ``fauna.bridges.atproto.record_tombstone`` reports. The caller owns
+    the sweep-finished ordering (the export's doc says why)."""
+    _require_atproto_rotation("fauna_harness_atproto_retire")
+    secret = bytes.fromhex(key["secret"])
+    out = _FfiBuffer()
+    rc = _lib.fauna_harness_atproto_retire(
+        directory_url.encode(), did.encode(), _u8(secret), key["did_key"].encode(),
+        ctypes.byref(out),
+    )
+    return json.loads(_take_buffer(rc, out, "fauna_harness_atproto_retire"))["prev_cid"]
+
+
+_HAS_CUSTODY_WITNESS = hasattr(_lib, "fauna_harness_sign_custody_witness")
+if _HAS_CUSTODY_WITNESS:
+    _lib.fauna_harness_sign_custody_witness.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8),                    # owner secret (32-byte Ed25519 seed)
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # grant_id, len
+        ctypes.POINTER(ctypes.c_uint8),                    # custodian_key (32 bytes)
+        ctypes.c_uint64,                                   # expires_at (microseconds)
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # removed device keys (32 each), len
+        ctypes.POINTER(_FfiBuffer),                        # out: the witness bytes
+    ]
+    _lib.fauna_harness_sign_custody_witness.restype = ctypes.c_int32
+
+
+def sign_custody_witness(
+    owner_secret: bytes, grant_id: bytes, custodian_key: bytes, expires_at_us: int,
+    removed_devices: tuple[bytes, ...] | list[bytes] = (),
+) -> bytes:
+    """The owner's custody witness for ``grant_id`` naming ``custodian_key``,
+    signed by the account whose seed is ``owner_secret`` through the shared
+    ``fauna_core::custody_grant::sign_custody_grant`` — never a Python
+    re-derivation of the signed statement. Whole-account scope, expiring at
+    ``expires_at_us`` (microseconds), naming each 32-byte key in
+    ``removed_devices`` as a removed device (the re-minted grant a device
+    removal deposits). Returns the canonical bytes a host deposits as
+    ``fauna.custody.hosting.register``'s ``witness``."""
+    if not _HAS_CUSTODY_WITNESS:
+        raise RuntimeError(
+            "libfauna_ffi has no `fauna_harness_sign_custody_witness` — it is "
+            "stale, or not the `e2e-harness` flavor. Run `just e2e-ffi` to rebuild it."
+        )
+    if len(owner_secret) != 32 or len(custodian_key) != 32:
+        raise ValueError("owner_secret and custodian_key must be 32 bytes")
+    if any(len(k) != 32 for k in removed_devices):
+        raise ValueError("every removed device key must be 32 bytes")
+    removed = b"".join(bytes(k) for k in removed_devices)
+    out = _FfiBuffer()
+    rc = _lib.fauna_harness_sign_custody_witness(
+        _u8(owner_secret), _u8(grant_id), len(grant_id), _u8(custodian_key),
+        expires_at_us, _u8(removed), len(removed), ctypes.byref(out),
+    )
+    return _take_buffer(rc, out, "fauna_harness_sign_custody_witness")
+
+
+_SEAT_EXPORTS = (
+    "fauna_harness_mint_custody",
+    "fauna_harness_revoke_custody",
+    "fauna_harness_custodied_fleet_handshake",
+    "fauna_harness_serve_set",
+    "fauna_harness_answer_consent",
+    "fauna_harness_topic_create",
+    "fauna_harness_topic_train",
+    "fauna_harness_cues_record_and_flush",
+    "fauna_harness_topic_set_engagement",
+    "fauna_harness_topic_train_engagement",
+    "fauna_harness_topic_publish_model",
+)
+for _name in _SEAT_EXPORTS:
+    if hasattr(_lib, _name):
+        _fn = getattr(_lib, _name)
+        _fn.argtypes = [
+            ctypes.c_char_p,                                   # owner's nest base URL
+            ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # owner secret (32-byte seed), len
+            ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # dag-cbor request, len
+            ctypes.POINTER(_FfiBuffer),                        # out: {"ok": reply} | {"err": RpcError}
+        ]
+        _fn.restype = ctypes.c_int32
+
+
+def _seat_call(fn_name: str, nest_url: str, secret: bytes, request: list):
+    if not hasattr(_lib, fn_name):
+        raise RuntimeError(
+            f"libfauna_ffi has no `{fn_name}` — it is stale, or not the "
+            "`e2e-harness` flavor. Run `just e2e-ffi` to rebuild it."
+        )
+    if len(secret) != 32:
+        raise ValueError("secret must be 32 bytes")
+    body = cbor2.dumps(request, canonical=True)
+    sec_arr = (ctypes.c_uint8 * 32)(*secret)
+    req_arr = (ctypes.c_uint8 * len(body)).from_buffer_copy(body)
+    out = _FfiBuffer()
+    rc = getattr(_lib, fn_name)(
+        nest_url.encode("utf-8"), sec_arr, 32, req_arr, len(body), ctypes.byref(out),
+    )
+    reply = cbor2.loads(_take_buffer(rc, out, fn_name))
+    if "err" in reply:
+        from clients._ws_rpc_core import _build_rpc_call_error
+
+        raise _build_rpc_call_error(reply["err"])
+    return reply["ok"]
+
+
+def harness_mint_custody(
+    nest_url: str, owner_secret: bytes, grant_id: bytes, custodian_key: bytes,
+    window_start: int, window_end: int,
+) -> dict:
+    """Mint the owner's **custody capability row** on the owner's nest at
+    ``nest_url`` — the half a custodian's handshake redeems the witness
+    against — in the ceremony's own order: the signed Mint event recorded and
+    published through the account runtime, the keyless blob released only
+    against that published log, then ``fauna.capabilities.mint``. Whole-account
+    scope, custodian ``custodian_key``, window in seconds. Returns the
+    ``MintGrantReply``. Like ``harness_create_set``, the call hosts the account
+    store for its length, so the account gains one fleet enrollment."""
+    return _seat_call(
+        "fauna_harness_mint_custody", nest_url, owner_secret,
+        [grant_id, custodian_key, window_start, window_end])
+
+
+def harness_revoke_custody(
+    nest_url: str, owner_secret: bytes, grant_id: bytes, holder: bytes
+) -> None:
+    """Revoke that custody through the shared ``custody_acts::revoke_custody``:
+    ``fauna.capabilities.revoke`` on the owner's nest, then the signed Revoke
+    event recorded — the order every app's revoke control takes. Raises on any
+    refusal."""
+    _seat_call(
+        "fauna_harness_revoke_custody", nest_url, owner_secret, [grant_id, holder])
+
+
+def harness_custodied_fleet_handshake(
+    nest_url: str, owner_secret: bytes, device_secret: bytes,
+    cert_signer_secret: bytes | None = None,
+) -> str:
+    """One owner-fleet device's handshake at the CUSTODIAN nest at ``nest_url``
+    — the shared ``mint_bearer_over_custodied_fleet_handshake``, claiming the
+    account whose seed is ``owner_secret`` as its owner, its root-signed
+    ``DeviceAuthorization`` signed by the owner (or by ``cert_signer_secret``,
+    another account vouching for the device). Returns the bearer token; raises
+    ``RpcCallError`` carrying the nest's code on a refusal."""
+    if len(device_secret) != 32 or (cert_signer_secret is not None
+                                    and len(cert_signer_secret) != 32):
+        raise ValueError("device_secret and cert_signer_secret must be 32 bytes")
+    return _seat_call(
+        "fauna_harness_custodied_fleet_handshake", nest_url, owner_secret,
+        [device_secret, cert_signer_secret])
+
+
+def harness_serve_set(nest_url: str, owner_secret: bytes, set_name: str, enable: bool) -> None:
+    """Serve (``enable``) or unserve one of the owner's **unshared** sets over
+    WebDAV, as the owner's per-set toggle does, app-less: the shared
+    ``FoldersAuthor::serve_enable`` — a genesis content key and the serve-on
+    stamp in custody, then the nest's ``webdav_enabled`` flag — or
+    ``serve_disable`` — the flag off, every principal's folder read twin over
+    the set revoked, the key rotated, the serve-off stamped. The MSEK-sealed
+    ``WebdavKeysBlob`` a face re-provisions afterwards is not (an app-less seat
+    holds no MSEK), so a MUA's Basic mount does not see the flip; a principal's
+    bearer read lends its own keys and does. Like ``harness_create_set``, the
+    call hosts the account store for its length (one fleet enrollment). Raises
+    the nest's refusal as ``RpcCallError``."""
+    _seat_call("fauna_harness_serve_set", nest_url, owner_secret, [set_name, enable])
+
+
+def harness_topic_create(nest_url: str, secret: bytes, name: str) -> str:
+    """Mint a trained topic named ``name`` as the actor whose seed is
+    ``secret``, through the shared ``create_trained_topic`` every app's *New
+    topic* runs — the registry entry written to the account store and
+    published as the sealed ``fauna.state.personalization`` row. Fails unless a
+    second, fresh seat reads the entry back off the nest. Returns the factor's
+    composition key (``topic:<hex>``). Like ``harness_create_set``, the call
+    hosts the account store (twice), so the account gains fleet enrollments."""
+    return _seat_call("fauna_harness_topic_create", nest_url, secret, [name])
+
+
+def harness_topic_train(
+    nest_url: str, secret: bytes, factor_key: str, post_id_hex: str, verb: str
+) -> str:
+    """Mark the post ``post_id_hex`` ``verb`` (``"more-like-this"`` /
+    ``"less-like-this"``) for the topic ``factor_key``, through the shared
+    ``FeedManager::train_post``: full text fetched, model unsealed, trained,
+    re-sealed and put. Returns ``"trained"``, ``"flipped"`` or
+    ``"duplicate-signal"``."""
+    return _seat_call(
+        "fauna_harness_topic_train", nest_url, secret, [factor_key, post_id_hex, verb])
+
+
+def harness_cues_record_and_flush(
+    nest_url: str, secret: bytes, items: list[tuple[str, str]]
+) -> int:
+    """Fold one engagement verdict per ``(content_id, verdict)`` item
+    (``"watch-complete"`` / ``"skip"``) through the ``FeedManager``'s own cue
+    path — hydrate the ``cues:v1`` rollup, record an exposure that derives the
+    verdict under the engine's thresholds, flush — sealed and put under
+    ``cues:v1``. Returns the number of items recorded."""
+    return _seat_call(
+        "fauna_harness_cues_record_and_flush", nest_url, secret,
+        [[cid, verdict] for cid, verdict in items])
+
+
+def harness_topic_set_engagement(
+    nest_url: str, secret: bytes, factor_key: str, on: bool
+) -> bool:
+    """Turn the topic ``factor_key``'s *learn from my activity* opt-in on or
+    off, through the shared ``set_trained_topic_engagement`` every app's topic
+    row runs, over a hosted account store; fails unless a second, fresh seat
+    reads the flag back off the nest. Returns ``on``. Two fleet enrollments,
+    as ``harness_topic_create``."""
+    return _seat_call(
+        "fauna_harness_topic_set_engagement", nest_url, secret, [factor_key, on])
+
+
+def harness_topic_train_engagement(
+    nest_url: str, secret: bytes, factor_key: str, post_id_hex: str, verdict: str
+) -> int:
+    """Teach the topic ``factor_key`` one engagement example: the post's verdict
+    moving from none to ``verdict`` (``"watch-complete"`` / ``"skip"``), applied
+    by the production ``TopicModel::train_engagement`` to the model fetched off
+    the nest, re-sealed and put. Refused for a topic not learning from activity
+    or with no model yet. Returns the model's engagement document count after.
+    (The manager's cue path teaches no model headlessly — see the export's doc.)"""
+    return _seat_call(
+        "fauna_harness_topic_train_engagement", nest_url, secret,
+        [factor_key, post_id_hex, verdict])
+
+
+def harness_topic_publish_model(
+    nest_url: str, secret: bytes, factor_key: str, public_name: str
+) -> dict:
+    """Publish the topic ``factor_key`` as a ``text-model`` labeler named
+    ``public_name`` — the app's publish gesture with every reviewed n-gram
+    kept: the shared ``FeedManager::scrub_corpus_for_factor`` rebuild, then
+    ``publish_trained_factor_model``. Returns ``{labeler_id (hex), version,
+    ngram_count, more_docs, less_docs, included_examples, marked_examples}``;
+    the artifact bytes are the nest's to show (``fauna.labelers.inspect``)."""
+    return _seat_call(
+        "fauna_harness_topic_publish_model", nest_url, secret, [factor_key, public_name])
+
+
+def harness_answer_consent(
+    nest_url: str, owner_secret: bytes, consent_id: bytes, folder: int | None = None
+) -> dict:
+    """Approve one pending consent request through the **production approving
+    path**, app-less: the consent machine's shared ``answer_consent`` over the
+    seams the apps wire (the owner's grant log, kind-manifest rows and folder
+    custody, hosted for the call) — every consent-time grant planned, recorded
+    and deposited, then ``resolve_consent``. ``folder`` is the card's choice
+    for a bare folder-plane scope. Returns ``{"resolved": bool}`` (the
+    resolve's own answer) or ``{"refused": "<reason>"}`` when the approve
+    refused before depositing anything — the card's error line."""
+    return _seat_call(
+        "fauna_harness_answer_consent", nest_url, owner_secret, [consent_id, folder])
+
+
+if hasattr(_lib, "fauna_folder_read_keys_header"):
+    _lib.fauna_folder_read_keys_header.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # grant_blob, len
+        ctypes.POINTER(ctypes.c_uint8),                    # holder_secret (32)
+        ctypes.POINTER(_FfiBuffer),                        # out: the header value
+    ]
+    _lib.fauna_folder_read_keys_header.restype = ctypes.c_int32
+
+
+def folder_read_keys_header(grant_blob: bytes, holder_secret: bytes) -> str:
+    """The value of the ``Fauna-Folder-Keys`` header a principal's WebDAV bearer
+    request carries: its folder read twin (a ``fauna.capabilities.fetch`` blob)
+    opened with its X25519 ``holder_secret`` by the production
+    ``open_folder_read_keys``, encoded by ``FolderContentKeys::to_header_value``
+    (``webdav-server.md`` § Key model → *A principal's read* (3)). Raises on a
+    blob that is no folder twin or does not open under the key."""
+    if not hasattr(_lib, "fauna_folder_read_keys_header"):
+        raise RuntimeError(
+            "libfauna_ffi has no `fauna_folder_read_keys_header` — it is stale. "
+            "Run `just e2e-ffi` to rebuild it."
+        )
+    if len(holder_secret) != 32:
+        raise ValueError("holder_secret must be 32 bytes")
+    out = _FfiBuffer()
+    rc = _lib.fauna_folder_read_keys_header(
+        _u8(grant_blob), len(grant_blob), _u8(holder_secret), ctypes.byref(out),
+    )
+    return _take_buffer(rc, out, "fauna_folder_read_keys_header").decode("ascii")
+
+
 _HAS_SYNC_PASS = hasattr(_lib, "fauna_harness_sync_pass")
 if _HAS_SYNC_PASS:
     _lib.fauna_harness_sync_pass.argtypes = [
@@ -1689,3 +2699,229 @@ def harness_sync_pass(
     )
     recorded, pending = cbor2.loads(_take_buffer(rc, out, "fauna_harness_sync_pass"))["ok"]
     return list(recorded), int(pending)
+
+
+_HAS_PEER_SEAT = hasattr(_lib, "fauna_harness_peer_seat_hold")
+if _HAS_PEER_SEAT:
+    _lib.fauna_harness_peer_seat_hold.argtypes = [
+        ctypes.c_char_p,                                   # nest base URL
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # secret (32-byte Ed25519 seed), len
+        ctypes.c_char_p,                                   # seat label (names its device row)
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # relay root (one DER certificate), len
+        ctypes.c_char_p,                                   # report path (JSON, rewritten every pass)
+        ctypes.c_char_p,                                   # release path (the seat stops once it exists)
+        ctypes.c_uint32,                                   # budget, seconds
+        ctypes.POINTER(_FfiBuffer),                        # out: {"ok": <the last report>}
+    ]
+    _lib.fauna_harness_peer_seat_hold.restype = ctypes.c_int32
+
+
+def harness_peer_seat_hold(
+    nest_url: str,
+    secret: bytes,
+    label: str,
+    relay_root_der: bytes,
+    report_path,
+    release_path,
+    budget_secs: int,
+) -> dict:
+    """Host one **peer seat** of the account whose seed is ``secret`` until
+    ``release_path`` exists (or ``budget_secs`` runs out) — the production
+    account runtime as a seed holder on a device row of its own (named by
+    ``label``), its peer leg bound by the factory body the native apps hand it,
+    trusting ``relay_root_der`` for the relay's TLS. The relay URL is the
+    nest's own advertisement.
+
+    After every pass the seat rewrites ``report_path`` with a JSON report:
+    ``bound``, and over its dial passes the most ``targets``, ``admitted``,
+    ``admitted_relayed`` (siblings admitted while the connection ran over the
+    relay) and ``blocks_relay_deferred`` (wanted blocks left to the nest
+    because it did — ``p2p.md`` § The relay, ruling 4), plus ``applied`` and
+    the last pass's ``errors``. Returns the last report. Blocks for the seat's
+    whole life, so a test runs it in a process of its own."""
+    if not _HAS_PEER_SEAT:
+        raise RuntimeError(
+            "libfauna_ffi has no `fauna_harness_peer_seat_hold` — it is stale, or "
+            "not the `e2e-harness` flavor. Run `just e2e-ffi` to rebuild it."
+        )
+    if len(secret) != 32 or not relay_root_der:
+        raise ValueError("secret must be 32 bytes and relay_root_der one certificate")
+    sec_arr = (ctypes.c_uint8 * 32)(*secret)
+    root_arr = (ctypes.c_uint8 * len(relay_root_der)).from_buffer_copy(relay_root_der)
+    out = _FfiBuffer()
+    rc = _lib.fauna_harness_peer_seat_hold(
+        nest_url.encode("utf-8"), sec_arr, 32,
+        label.encode("utf-8"),
+        root_arr, len(relay_root_der),
+        os.fspath(report_path).encode("utf-8"),
+        os.fspath(release_path).encode("utf-8"),
+        int(budget_secs),
+        ctypes.byref(out),
+    )
+    return cbor2.loads(_take_buffer(rc, out, "fauna_harness_peer_seat_hold"))["ok"]
+
+
+_HAS_MAIL_IMPORT = hasattr(_lib, "fauna_harness_mail_import")
+if _HAS_MAIL_IMPORT:
+    _lib.fauna_harness_mail_import.argtypes = [
+        ctypes.c_char_p,                                   # nest base URL
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # secret (32-byte Ed25519 seed), len
+        ctypes.c_char_p,                                   # source host
+        ctypes.c_uint16,                                   # source port (implicit TLS)
+        ctypes.c_char_p,                                   # source username
+        ctypes.c_char_p,                                   # source password
+        ctypes.POINTER(_FfiBuffer),                        # out: {"ok": [step, imported, skipped, errored, error, log]}
+    ]
+    _lib.fauna_harness_mail_import.restype = ctypes.c_int32
+
+#: The source-IMAP trust seed's variable — the same spelling the app launch
+#: environment carries (`conftest._apply_mail_import_source_trust_env`), read by
+#: `NativeImapConnector::new` in this process when the import connects.
+_IMAP_EXTRA_CA_ENV = "FAUNA_E2E_IMAP_EXTRA_CA_PEM"
+
+
+def harness_mail_import(
+    nest_url: str,
+    secret: bytes,
+    *,
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    ca_pem: str,
+) -> dict:
+    """One whole mailbox import as the actor whose seed is ``secret``, with NO
+    app: the shared ``MailImportMachine`` the apps run, built the way they build
+    it, walked Source → Scope → Confirm → Start over a Generic IMAP source
+    (implicit TLS, every mailbox, no since date) and its drive loop run to the
+    end — so a ``[nest]`` witness of a client claim (`mailbox-migration.md`
+    § Credential handling) observes a real client import, not a hand-built
+    request.
+
+    ``ca_pem`` is the CA the source's certificate chains to; it is seeded into
+    this process's environment, where the native connector reads it.
+
+    Returns the machine's final snapshot as ``{"step", "imported", "skipped",
+    "errored", "error", "log"}`` — ``step`` is ``"Done"`` for a finished import,
+    else the wizard step the walk stopped on with ``error`` saying why."""
+    if not _HAS_MAIL_IMPORT:
+        raise RuntimeError(
+            "libfauna_ffi has no `fauna_harness_mail_import` — it is stale, or not "
+            "the `e2e-harness` flavor. Run `just e2e-ffi` to rebuild it."
+        )
+    if len(secret) != 32:
+        raise ValueError("secret must be 32 bytes")
+    os.environ[_IMAP_EXTRA_CA_ENV] = ca_pem
+    sec_arr = (ctypes.c_uint8 * 32)(*secret)
+    out = _FfiBuffer()
+    rc = _lib.fauna_harness_mail_import(
+        nest_url.encode("utf-8"), sec_arr, 32,
+        host.encode("utf-8"), port,
+        username.encode("utf-8"), password.encode("utf-8"),
+        ctypes.byref(out),
+    )
+    step, imported, skipped, errored, error, log = cbor2.loads(
+        _take_buffer(rc, out, "fauna_harness_mail_import"))["ok"]
+    return {
+        "step": step, "imported": imported, "skipped": skipped,
+        "errored": errored, "error": error, "log": list(log),
+    }
+
+
+_HAS_DNS_DISPATCH = hasattr(_lib, "fauna_harness_dns_dispatch")
+if _HAS_DNS_DISPATCH:
+    _lib.fauna_harness_dns_dispatch.argtypes = [
+        ctypes.c_char_p,                                   # nest base URL
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # secret (32-byte Ed25519 seed), len
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # dag-cbor [DnsAction], len
+        ctypes.POINTER(_FfiBuffer),                        # out: {"ok": [dispatched, error]}
+    ]
+    _lib.fauna_harness_dns_dispatch.restype = ctypes.c_int32
+
+#: The e2e fake DNS provider's switch — the same spelling the app launch
+#: environment carries (`driver.enable_dns_fake_provider()`), read by the
+#: shared DNS machine builder in this process.
+_DNS_PROVIDER_FAKE_ENV = "FAUNA_DNS_PROVIDER_FAKE"
+
+
+def harness_dns_dispatch(
+    nest_url: str, secret: bytes, actions: list, *, launch_env: dict[str, str]
+) -> tuple[int, str]:
+    """Drive the admin DNS page's machine as the actor whose seed is
+    ``secret``, with NO app: the shared ``DnsManagementMachine`` built the way
+    the apps build it, hydrated, then ``actions`` dispatched in order — so a
+    ``[nest]`` witness of a claim the issuing CLIENT keeps
+    (`tls-certificates.md` § B) observes a real client issue.
+
+    ``actions`` are ``DnsAction`` values in serde's external tagging
+    (``{"PutCredentials": {...}}``, ``{"SetMode": {...}}``,
+    ``{"IssueCert": {"domain": d, "target_nest_id": []}}``); an empty
+    ``target_nest_id`` is aimed at the bound nest, as the apps' glue aims it.
+    ``launch_env`` is what an app launch would carry for the walk — the e2e
+    ACME directory seed (``acme_pebble.env()``) — and is set in this process's
+    environment together with the fake DNS provider's switch, where the shared
+    builder reads them.
+
+    Returns ``(dispatched, error)``: how many actions succeeded, and the first
+    refusal's text ("" when every action did)."""
+    if not _HAS_DNS_DISPATCH:
+        raise RuntimeError(
+            "libfauna_ffi has no `fauna_harness_dns_dispatch` — it is stale, or not "
+            "the `e2e-harness` flavor. Run `just e2e-ffi` to rebuild it."
+        )
+    if len(secret) != 32:
+        raise ValueError("secret must be 32 bytes")
+    os.environ.update(launch_env)
+    os.environ[_DNS_PROVIDER_FAKE_ENV] = "1"
+    body = cbor2.dumps(actions, canonical=True)
+    sec_arr = (ctypes.c_uint8 * 32)(*secret)
+    req_arr = (ctypes.c_uint8 * len(body)).from_buffer_copy(body)
+    out = _FfiBuffer()
+    rc = _lib.fauna_harness_dns_dispatch(
+        nest_url.encode("utf-8"), sec_arr, 32, req_arr, len(body), ctypes.byref(out),
+    )
+    dispatched, error = cbor2.loads(_take_buffer(rc, out, "fauna_harness_dns_dispatch"))["ok"]
+    return dispatched, error
+
+
+_HAS_ARCHIVE_IMPORT = hasattr(_lib, "fauna_harness_archive_import")
+if _HAS_ARCHIVE_IMPORT:
+    _lib.fauna_harness_archive_import.argtypes = [
+        ctypes.c_char_p,                                   # nest base URL
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # secret (32-byte Ed25519 seed), len
+        ctypes.c_char_p,                                   # the export archive's path (a zip)
+        ctypes.POINTER(_FfiBuffer),                        # out: {"ok": [step, imported, skipped, errored, error, skip_log, folder]}
+    ]
+    _lib.fauna_harness_archive_import.restype = ctypes.c_int32
+
+
+def harness_archive_import(nest_url: str, secret: bytes, zip_path: str) -> dict:
+    """One whole archive import as the actor whose seed is ``secret``, with NO
+    app: the shared ``ArchiveImportMachine`` the apps run, built the way they
+    build it, walked Source (Facebook) → Archive → Scope (the defaults) →
+    Confirm → Start and its run driven to the end — so a ``[nest]`` witness of
+    a client claim (``archive-import.md`` § Architectural rules) observes a real
+    client import, not a hand-built request.
+
+    Returns the machine's final snapshot as ``{"step", "imported", "skipped",
+    "errored", "error", "skip_log", "folder"}`` — ``step`` is ``"Done"`` for a
+    finished import, else the wizard step the walk stopped on with ``error``
+    saying why."""
+    if not _HAS_ARCHIVE_IMPORT:
+        raise RuntimeError(
+            "libfauna_ffi has no `fauna_harness_archive_import` — it is stale, or not "
+            "the `e2e-harness` flavor. Run `just e2e-ffi` to rebuild it."
+        )
+    if len(secret) != 32:
+        raise ValueError("secret must be 32 bytes")
+    sec_arr = (ctypes.c_uint8 * 32)(*secret)
+    out = _FfiBuffer()
+    rc = _lib.fauna_harness_archive_import(
+        nest_url.encode("utf-8"), sec_arr, 32, zip_path.encode("utf-8"), ctypes.byref(out),
+    )
+    step, imported, skipped, errored, error, skip_log, folder = cbor2.loads(
+        _take_buffer(rc, out, "fauna_harness_archive_import"))["ok"]
+    return {
+        "step": step, "imported": imported, "skipped": skipped, "errored": errored,
+        "error": error, "skip_log": list(skip_log), "folder": folder,
+    }

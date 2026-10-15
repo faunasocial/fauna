@@ -19,7 +19,7 @@
 use std::net::{IpAddr, SocketAddr};
 
 use crate::lan::should_attempt_lan_probe;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use fauna_account_store::backend::StoreBackend;
 use fauna_account_store::store::AccountStore;
 use fauna_core::device_endpoints::DeviceEndpoints;
@@ -90,8 +90,13 @@ pub async fn sibling_dial_targets<B: StoreBackend>(
         if entry.key == own_writer_hex {
             continue;
         }
-        let value: DeviceEndpoints = canonical_decode(&entry.value)
-            .with_context(|| format!("device-endpoints entry {:?}", entry.key))?;
+        // Canonical-or-skip (`fleet_removal`'s rule for the same rows):
+        // latest-wins adoption never decodes a value, so one key-holder's
+        // undecodable row must cost its own dial, never the whole pass.
+        let Ok(value) = canonical_decode::<DeviceEndpoints>(&entry.value) else {
+            tracing::warn!(key = %entry.key, "undecodable device-endpoints entry — skipped");
+            continue;
+        };
 
         // Cross-check the value's node id against the entry's logical key
         // (one entry per device, keyed by its writer id hex — the redundancy
@@ -197,25 +202,75 @@ pub fn bind_carried_endpoints(
 }
 
 /// The owner-fleet side's custodian dial targets (W8.5 P5): one per
-/// `fauna.state.custodian-endpoints` row — dialed BESIDE the sibling
-/// targets, admitted with the same own-fleet `DeviceAuthorization`, walked
-/// with the ordinary pull-only walks (a custodied store serves the same
-/// relay plane a sibling does).
+/// DEVICE-form `fauna.state.custodian-endpoints` row — dialed BESIDE the
+/// sibling targets, admitted with the same own-fleet `DeviceAuthorization`,
+/// walked with the ordinary pull-only walks (a custodied store serves the
+/// same relay plane a sibling does).
+///
+/// A NEST-form row (`custodian_nest_url` set) is not a peer target: it has
+/// zero candidates and the nest runs no peer endpoint, so it is
+/// [`custodian_nest_targets`]'s, dialed over the nest wire and only when the
+/// owner's own nest did not answer (`account-replica-posture.md` § Replica
+/// posture → *The custody grant + ceremony*, the custodian-NEST serve door
+/// bullet, ruling 6).
 pub async fn custodian_dial_targets<B: StoreBackend>(
     store: &AccountStore<B>,
     our_lan_ips: &[std::net::Ipv4Addr],
 ) -> Result<Vec<PeerDialTarget>> {
-    let mut targets = Vec::new();
+    Ok(custodian_rows(store)
+        .await?
+        .into_iter()
+        .filter(|value| value.custodian_nest_url.is_none())
+        .map(|value| dial_target_from(value.endpoints, our_lan_ips))
+        .collect())
+}
+
+/// One NEST-form custodian the owner's fleet may restore from: the custody
+/// grant it holds (checked against the dialer's revocation view before any
+/// dial) and the URL the host's accept bound to its key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustodianNestTarget {
+    pub grant_id: Vec<u8>,
+    /// The counterparty's string, as the row carries it — unvalidated here;
+    /// the dial site applies the counterparty URL policy.
+    pub url: String,
+}
+
+/// The owner-fleet side's NEST-form custodians: one per
+/// `fauna.state.custodian-endpoints` row carrying `custodian_nest_url` — the
+/// complement of [`custodian_dial_targets`].
+pub async fn custodian_nest_targets<B: StoreBackend>(
+    store: &AccountStore<B>,
+) -> Result<Vec<CustodianNestTarget>> {
+    Ok(custodian_rows(store)
+        .await?
+        .into_iter()
+        .filter_map(|value| {
+            value.custodian_nest_url.map(|url| CustodianNestTarget {
+                grant_id: value.grant_id,
+                url,
+            })
+        })
+        .collect())
+}
+
+async fn custodian_rows<B: StoreBackend>(
+    store: &AccountStore<B>,
+) -> Result<Vec<fauna_core::custodian_endpoints::CustodianEndpoints>> {
+    let mut rows = Vec::new();
     for entry in store
         .states_of_kind(fauna_protocol::merge_policy::KIND_CUSTODIAN_ENDPOINTS)
         .await?
     {
-        let value: fauna_core::custodian_endpoints::CustodianEndpoints =
-            canonical_decode(&entry.value)
-                .with_context(|| format!("custodian-endpoints entry {:?}", entry.key))?;
-        targets.push(dial_target_from(value.endpoints, our_lan_ips));
+        // Canonical-or-skip, as in `sibling_dial_targets`.
+        match canonical_decode(&entry.value) {
+            Ok(value) => rows.push(value),
+            Err(_) => {
+                tracing::warn!(key = %entry.key, "undecodable custodian-endpoints entry — skipped")
+            }
+        }
     }
-    Ok(targets)
+    Ok(rows)
 }
 
 /// The **share leg's** dial targets for one shared file set — one per
@@ -245,15 +300,30 @@ pub async fn custodian_dial_targets<B: StoreBackend>(
 /// [`sibling_dial_targets`] runs, for the same reason: the redundancy exists
 /// precisely so a tampered row cannot point a consumer's dials at a node the
 /// advertiser does not control.
+///
+/// `own_relay_url` is the relay the dialing seat was bound with: a target's
+/// relay is attached only when the member advertises that same one
+/// ([`share_relay_attaches`]).
 pub async fn share_dial_targets<B: StoreBackend>(
     store: &AccountStore<B>,
     channel_id: &[u8; 32],
     our_lan_ips: &[std::net::Ipv4Addr],
+    own_relay_url: Option<&str>,
 ) -> Result<Vec<PeerDialTarget>> {
     let rows = store
         .states_of_kind(fauna_protocol::merge_policy::KIND_SHARE_ENDPOINTS)
         .await?;
-    share_dial_targets_from_rows(&rows, channel_id, our_lan_ips)
+    share_dial_targets_from_rows(&rows, channel_id, our_lan_ips, own_relay_url)
+}
+
+/// Whether a share dial attaches a relay: only toward a member advertising
+/// the relay this seat was bound with — a member of this nest
+/// (`p2p.md` § The relay → *The cross-user seat and the relay*, ruling 3). A
+/// different relay is a member of another nest, whose relay refuses this
+/// key; no relay on either side is a direct-only dial. Either way the dial
+/// keeps its direct candidates, and the nest path carries the set.
+pub fn share_relay_attaches(advertised: Option<&str>, own_seat: Option<&str>) -> bool {
+    matches!((advertised, own_seat), (Some(theirs), Some(ours)) if theirs == ours)
 }
 
 /// [`share_dial_targets`] over rows already read — the live
@@ -265,6 +335,7 @@ pub fn share_dial_targets_from_rows(
     rows: &[fauna_account_store::types::StateEntry],
     channel_id: &[u8; 32],
     our_lan_ips: &[std::net::Ipv4Addr],
+    own_relay_url: Option<&str>,
 ) -> Result<Vec<PeerDialTarget>> {
     let prefix = format!("{}:", fauna_core::hex32::encode(channel_id));
     let mut targets = Vec::new();
@@ -272,8 +343,13 @@ pub fn share_dial_targets_from_rows(
         let Some(actor_hex) = entry.key.strip_prefix(&prefix) else {
             continue; // another set's row
         };
-        let value: fauna_core::share_endpoints::ShareEndpoints = canonical_decode(&entry.value)
-            .with_context(|| format!("share-endpoints entry {:?}", entry.key))?;
+        // Canonical-or-skip, as in `sibling_dial_targets`.
+        let Ok(value) =
+            canonical_decode::<fauna_core::share_endpoints::ShareEndpoints>(&entry.value)
+        else {
+            tracing::warn!(key = %entry.key, "undecodable share-endpoints entry — skipped");
+            continue;
+        };
 
         // Both halves of the key are carried in the value on purpose — check
         // both, and check the advertised NodeId against the member the key
@@ -289,7 +365,10 @@ pub fn share_dial_targets_from_rows(
             continue;
         }
 
-        targets.push(dial_target_from(value.endpoints, our_lan_ips));
+        let mut target = dial_target_from(value.endpoints, our_lan_ips);
+        target.candidates.relay_available =
+            share_relay_attaches(target.relay_url.as_deref(), own_relay_url);
+        targets.push(target);
     }
     Ok(targets)
 }
@@ -498,7 +577,9 @@ mod tests {
         let store = store_with_share_rows(&[share_row(SET, MEMBER, MEMBER)]).await;
         let ours = ["192.168.1.7".parse().unwrap()];
 
-        let targets = share_dial_targets(&store, &SET, &ours).await.unwrap();
+        let targets = share_dial_targets(&store, &SET, &ours, Some("https://relay.example/"))
+            .await
+            .unwrap();
 
         assert_eq!(targets.len(), 1);
         let t = &targets[0];
@@ -512,7 +593,59 @@ mod tests {
             t.candidates.wan_endpoint,
             Some("203.0.113.9:4433".parse().unwrap())
         );
-        assert!(t.candidates.relay_available);
+        assert!(
+            t.candidates.relay_available,
+            "a member advertising this seat's own relay is dialed through it"
+        );
+    }
+
+    /// A share dial attaches a relay only toward a member of this nest — one
+    /// advertising the relay this seat was bound with (`p2p.md` § The relay →
+    /// *The cross-user seat and the relay*, ruling 3). A different relay, or
+    /// none on either side, leaves the direct candidates alone.
+    #[tokio::test]
+    async fn a_share_dial_attaches_a_relay_only_toward_the_same_relay() {
+        let store = store_with_share_rows(&[share_row(SET, MEMBER, MEMBER)]).await;
+        let ours = ["192.168.1.7".parse().unwrap()];
+        for (own, attaches) in [
+            (Some("https://relay.example/"), true),
+            (Some("https://relay.other.example/"), false),
+            (None, false),
+        ] {
+            let targets = share_dial_targets(&store, &SET, &ours, own).await.unwrap();
+            let t = &targets[0];
+            assert_eq!(
+                t.candidates.relay_available, attaches,
+                "own seat relay {own:?}"
+            );
+            assert_eq!(
+                t.candidates.lan_endpoints,
+                vec!["192.168.1.9:4433".parse::<SocketAddr>().unwrap()],
+                "the direct candidates stand whatever the relay verdict"
+            );
+        }
+
+        let (key, mut value) = share_row(SET, MEMBER, MEMBER);
+        value.endpoints.relay_url = None;
+        let relayless = store_with_share_rows(&[(key, value)]).await;
+        let targets = share_dial_targets(&relayless, &SET, &ours, Some("https://relay.example/"))
+            .await
+            .unwrap();
+        assert!(
+            !targets[0].candidates.relay_available,
+            "a member advertising no relay is dialed direct-only"
+        );
+    }
+
+    #[test]
+    fn the_relay_attaches_only_when_both_sides_name_the_same_one() {
+        let a = Some("https://relay.a.example/");
+        let b = Some("https://relay.b.example/");
+        assert!(share_relay_attaches(a, a));
+        assert!(!share_relay_attaches(a, b));
+        assert!(!share_relay_attaches(a, None));
+        assert!(!share_relay_attaches(None, a));
+        assert!(!share_relay_attaches(None, None));
     }
 
     /// Dial lists never widen across sets: a member of ANOTHER set is not
@@ -525,7 +658,7 @@ mod tests {
         ])
         .await;
 
-        let targets = share_dial_targets(&store, &SET, &[]).await.unwrap();
+        let targets = share_dial_targets(&store, &SET, &[], None).await.unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].node_id, MEMBER);
     }
@@ -537,7 +670,7 @@ mod tests {
     #[tokio::test]
     async fn a_row_naming_a_third_node_is_skipped() {
         let store = store_with_share_rows(&[share_row(SET, MEMBER, [0x99; 32])]).await;
-        let targets = share_dial_targets(&store, &SET, &[]).await.unwrap();
+        let targets = share_dial_targets(&store, &SET, &[], None).await.unwrap();
         assert!(targets.is_empty());
     }
 
@@ -548,8 +681,119 @@ mod tests {
         let (key, mut value) = share_row(SET, MEMBER, MEMBER);
         value.channel_id = OTHER_SET.to_vec();
         let store = store_with_share_rows(&[(key, value)]).await;
-        let targets = share_dial_targets(&store, &SET, &[]).await.unwrap();
+        let targets = share_dial_targets(&store, &SET, &[], None).await.unwrap();
         assert!(targets.is_empty());
+    }
+
+    /// Stage one row of `kind` whose value is not canonical CBOR of anything —
+    /// what a key-holding writer can merge in, since latest-wins adoption
+    /// checks the stamp and never decodes the value.
+    async fn put_undecodable(store: &AccountStore<SqliteBackend>, kind: &str, key: String) {
+        store
+            .put_state(StateEntry {
+                kind: kind.to_string(),
+                key,
+                scope: ACCOUNT_STATE_SCOPE.to_string(),
+                value: vec![0xFF, 0x00, 0x13],
+                merge_meta: None,
+                entry_version: 0,
+                tombstone: false,
+            })
+            .await
+            .unwrap();
+    }
+
+    /// One undecodable device-endpoints row is skipped, never fatal: the
+    /// honest siblings beside it stay dial targets. Before, the `?` aborted
+    /// the whole pass — every sibling AND every custodian dial — for as long
+    /// as the merged row stood. Rows are read in key order, so the bad row
+    /// sits between two honest ones: a reader that stopped at it instead of
+    /// skipping it would lose the later sibling.
+    #[tokio::test]
+    async fn an_undecodable_device_endpoints_row_is_skipped_not_fatal() {
+        const LATER: [u8; 32] = [0xAA; 32];
+        let store = store_with(&[(SIBLING, endpoints(SIBLING)), (LATER, endpoints(LATER))]).await;
+        put_undecodable(&store, KIND_DEVICE_ENDPOINTS, hex::encode([0x0Eu8; 32])).await;
+        let targets = sibling_dial_targets(&store, &hex::encode(OWN), |_| true, &[])
+            .await
+            .unwrap();
+        let dialed: Vec<[u8; 32]> = targets.iter().map(|t| t.node_id).collect();
+        assert_eq!(dialed, vec![SIBLING, LATER]);
+    }
+
+    /// The same rule on the custodian rows both custodian readers share: an
+    /// honest DEVICE-form and NEST-form row on either side of the bad one
+    /// stay targets of their readers.
+    #[tokio::test]
+    async fn an_undecodable_custodian_endpoints_row_is_skipped_not_fatal() {
+        use fauna_core::custodian_endpoints::CustodianEndpoints;
+        let store = store_with(&[]).await;
+        let device_form = CustodianEndpoints {
+            grant_id: vec![0xB0; 16],
+            endpoints: endpoints(SIBLING),
+            ..Default::default()
+        };
+        let nest_form = CustodianEndpoints {
+            grant_id: vec![0xD0; 16],
+            custodian_nest_url: Some("https://custodian.example/".into()),
+            ..Default::default()
+        };
+        for row in [&device_form, &nest_form] {
+            store
+                .put_state(StateEntry {
+                    kind: fauna_protocol::merge_policy::KIND_CUSTODIAN_ENDPOINTS.to_string(),
+                    key: fauna_core::custody_grant::custody_entry_key(&row.grant_id),
+                    scope: ACCOUNT_STATE_SCOPE.to_string(),
+                    value: canonical_encode(row).unwrap(),
+                    merge_meta: None,
+                    entry_version: 0,
+                    tombstone: false,
+                })
+                .await
+                .unwrap();
+        }
+        put_undecodable(
+            &store,
+            fauna_protocol::merge_policy::KIND_CUSTODIAN_ENDPOINTS,
+            "c0ffee".into(),
+        )
+        .await;
+        let dialed: Vec<[u8; 32]> = custodian_dial_targets(&store, &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|t| t.node_id)
+            .collect();
+        assert_eq!(dialed, vec![SIBLING]);
+        let nests = custodian_nest_targets(&store).await.unwrap();
+        assert_eq!(
+            nests,
+            vec![CustodianNestTarget {
+                grant_id: nest_form.grant_id.clone(),
+                url: "https://custodian.example/".into(),
+            }]
+        );
+    }
+
+    /// And on the share leg: one bad row of a set does not hide its members,
+    /// before or after it in key order.
+    #[tokio::test]
+    async fn an_undecodable_share_endpoints_row_is_skipped_not_fatal() {
+        const LATER_MEMBER: [u8; 32] = [0x7A; 32];
+        let store = store_with_share_rows(&[
+            share_row(SET, MEMBER, MEMBER),
+            share_row(SET, LATER_MEMBER, LATER_MEMBER),
+        ])
+        .await;
+        put_undecodable(
+            &store,
+            fauna_protocol::merge_policy::KIND_SHARE_ENDPOINTS,
+            fauna_core::share_endpoints::share_entry_key(&SET, &[0x4D; 32]),
+        )
+        .await;
+        let targets = share_dial_targets(&store, &SET, &[], None).await.unwrap();
+        let dialed: Vec<[u8; 32]> = targets.iter().map(|t| t.node_id).collect();
+        assert_eq!(dialed, vec![MEMBER, LATER_MEMBER]);
     }
 
     /// The rule-7 gate reads the capability list exactly as every other

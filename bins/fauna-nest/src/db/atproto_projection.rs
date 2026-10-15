@@ -154,6 +154,30 @@ impl CacheDb {
         Ok(rows)
     }
 
+    /// How many posts a history backfill of `author` would publish: the post
+    /// arm of [`Self::list_public_projection_page`]'s filter at the genesis
+    /// floor — the same shared servability predicate, so the number the
+    /// enable panel shows is the number the stream would serve. Tombstone
+    /// journal rows are retractions, not posts, and are not counted.
+    pub async fn count_public_projection_posts(&self, author: &[u8; 32]) -> Result<u64> {
+        let author = author.to_vec();
+        let conn = self.conn.lock().await;
+        let count: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*)
+                       FROM content c
+                       LEFT JOIN content_meta cm ON cm.content_id = c.id
+                      WHERE c.author = ?1 AND ({servable})",
+                    servable = super::public_servability::PUBLIC_POST_SERVABLE.as_str(),
+                ),
+                rusqlite::params![author],
+                |row| row.get(0),
+            )
+            .context("count public projection posts")?;
+        Ok(count as u64)
+    }
+
     /// The author's latest stored profile payload (the `fauna.profile.set`
     /// at-rest bytes) — the same read `profile_handlers::profile_get_handler`
     /// performs, exposed for the bridge-class `fetch_profile` kind.

@@ -168,15 +168,17 @@ relied on — nothing in the ratified posture depends on it.
 
 ## Implementation status today
 
-- **Effective-date stamp: PENDING.** The public repository was not yet live when
-  this doc was ratified; the session that observes the publication go live stamps
-  the date here, turning the posture from chosen to perfected.
-- **Binary-correspondence check: PENDING** — to be run at the first release after
-  publication (condition 2 above; the vendored-dependency review is tracked
-  internally). For the macOS `.dmg` the check is satisfied by construction: it is
-  built from the public tree by the public repository's own workflow and attested to
-  it (decided 2026-08-25 — `installers/macos.md` § Build Pipeline → *The `.dmg`
-  release pipeline*), so its crypto source is exactly the published source.
+- **Effective-date stamp: 2026-10-06.** The public repository went live that day,
+  so the posture is perfected (condition 1) from 2026-10-06.
+- **Binary-correspondence check: HOLDING by construction (recorded 2026-10-14)** —
+  condition 2: every distributed binary is built from a recorded commit of the public
+  repository (`release-integrity.md` § A store upload is built from a recorded public
+  commit, ruled 2026-10-07; first confirmed by the Play 0.1.3 internal-testing release
+  of 2026-10-09), so its crypto source is exactly the published source. The macOS
+  `.dmg` and the nest image are public-built by their own workflows (decided
+  2026-08-25 — `installers/macos.md` § Build Pipeline → *The `.dmg` release
+  pipeline*). No crypto-relevant source in any shipped binary is unpublished; the
+  vendored-dependency review is tracked internally.
 - **Apple leg — Info.plist half wired 2026-08-23:** `ITSAppUsesNonExemptEncryption`
   = `true` is set on both app-target Info.plists (`Fauna-macOS/Resources/`,
   `Fauna-iOS/Resources/`), citing this doc, and pinned by

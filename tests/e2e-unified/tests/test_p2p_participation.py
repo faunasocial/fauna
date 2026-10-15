@@ -35,6 +35,10 @@ pytestmark = [
     # no plane, no `share-serve-status` (the `test_share_pump_two_actor.py`
     # precedent). A no-op for tui/linux, which direct-spawn their agent.
     pytest.mark.real_sync_agent,
+    # windows spawns its agent DETACHED: without this pairing it rides the
+    # installed product's per-user pipe (convention 10 reserves that for the
+    # installer journey). A no-op on the other apps.
+    pytest.mark.isolated_sync_agent,
     # The share plane waits for the REAL conversations session
     # (`fauna-ffi/src/share_plane.rs` — its durable sink rides it), and a
     # native app (macOS) launches its deterministic mock backend unless this
@@ -77,10 +81,11 @@ def _require_participation_toggle(driver) -> None:
 
 def _require_share_plane(driver) -> None:
     """The plane-reading half needs the app to host the share plane and paint
-    its ``share-serve-status``. windows and iOS render the toggle, and their
-    own row flips the device-local row through the door (the toggle-only
-    journey below runs there), but neither wires ``start_share_plane``, so
-    there is no reading to wait for. android likewise renders the toggle but
+    its ``share-serve-status``. iOS renders the toggle, and its own row
+    flips the device-local row through the door (the toggle-only journey below
+    runs there), but it does not wire ``start_share_plane``, so there is no
+    reading to wait for. windows wires it (2026-10-10) and runs the whole
+    journey. android likewise renders the toggle but
     starts no share plane, so it paints no ``share-serve-status``; linux runs
     the plane (``share_glue.rs``) and runs the whole journey."""
     app = app_name(driver)
@@ -90,14 +95,6 @@ def _require_share_plane(driver) -> None:
             surface="share-serve-status (the share plane) on the folders page",
             detail="android renders device-p2p-participation-toggle (2026-10-06) but "
                    "never starts the share plane, so no share-serve-status paints",
-            tracked="p2p.md § Implementation status today",
-        )
-    if app == "windows":
-        skip_unbuilt(
-            driver,
-            surface="share-serve-status (the share plane) on the folders page",
-            detail="windows renders device-p2p-participation-toggle (2026-09-26) but "
-                   "never wires start_share_plane, so no share-serve-status paints",
             tracked="p2p.md § Implementation status today",
         )
     if app == "ios":
@@ -223,7 +220,7 @@ def test_this_devices_peer_transfer_switch_flips_and_rests(
     app, request, nest_instance, test_user
 ):
     """The toggle half alone — every app that renders the toggle, including
-    the ones that host no share plane yet (windows, iOS): the own row's toggle
+    the ones that host no share plane yet (iOS): the own row's toggle
     unchecks, stays unchecked across a fresh hydrate (the device-local row
     behind the door, not a paint), and checks again. `test_user` is requested
     for its device-cap lift on the shared tier."""

@@ -660,8 +660,8 @@ impl AdminInviteRequest {
     pub const STATUS_PENDING: &'static str = "pending";
 
     /// `true` while this request is still awaiting a decision — the single
-    /// typed read of the stringly-typed wire `status`. Approve/deny/tier
-    /// controls fire only for pending rows; decided rows display for context.
+    /// typed read of the stringly-typed wire `status`. The admin Pending
+    /// requests section lists only rows for which this holds.
     pub fn is_pending(&self) -> bool {
         self.status == Self::STATUS_PENDING
     }

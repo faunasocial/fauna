@@ -60,6 +60,7 @@ use fauna_client_family::family::{
 use crate::async_helper::{hydrate_with_retry, spawn_with_snapshot};
 use crate::client::FaunaClient;
 use crate::i18n::strings::family as S;
+use crate::i18n::strings::features;
 use crate::testid::{set_test_attr, set_test_id};
 
 type Nest = Arc<fauna_client::NestClient>;
@@ -235,6 +236,12 @@ struct FamilyView {
     /// section's `family-age-band-summary` (`family-safety.md` § App surface →
     /// *Age-band surfaces*). `None` paints nothing (never a placeholder).
     own_age_band: Option<fauna_client_family::family::FamilyAgeBandInfo>,
+    /// The nest's advertised capability set, read beside the status whenever the
+    /// caller guards someone — what hides a gated feature this nest build does
+    /// not carry from the guardian host's rows. `None` when unread (or the read
+    /// failed): the section then paints no rows rather than rows for planes it
+    /// cannot vouch for.
+    capabilities: Option<Vec<String>>,
 }
 
 /// One async round-trip's result: the refreshed page view, or an error string
@@ -327,6 +334,9 @@ struct Ctx {
     /// The incoming transfer proposals from the last successful load,
     /// index-aligned with the `family-incoming-transfer-item` rows.
     incoming: RefCell<Vec<FamilyIncomingTransferInfo>>,
+    /// The capability set from the last successful load (see
+    /// [`FamilyView::capabilities`]) — what the guardian host's rows fold over.
+    capabilities: RefCell<Option<Vec<String>>>,
     /// The ward currently loaded into the shared policy editor. Re-selected
     /// after a refresh if still present, else the first ward.
     selected_ward: RefCell<Option<Vec<u8>>>,
@@ -353,6 +363,9 @@ thread_local! {
     /// [`refresh_page`] unconditionally — the same "refetch on every nav patch"
     /// contract the admin shell's nav arm honours. GTK-main-thread only.
     static REFRESH: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
+    /// The box [`paint_feature_limits`] clears and rebuilds — the guardian
+    /// host's rows (`family-policy-feature-limits-row`).
+    static FEATURE_LIMITS_ROWS: RefCell<Option<gtk::Box>> = const { RefCell::new(None) };
 }
 
 /// Re-read `fauna.family.status` + the approvals queue for the live `family`
@@ -610,6 +623,33 @@ fn build_page_widgets() -> (adw::PreferencesPage, Widgets) {
     crate::offline_gate::declare_wire_kind(&save_button, "fauna.family.policy.update");
     policy_group.add(&save_button);
 
+    // ── Feature limits — the guardian host of the shared `feature-policy-editor`
+    // (family-safety.md § App surface → *Feature limits*), directly after the
+    // policy save button: the same document's fourth pillar, saved by the
+    // shared editor's own button rather than the form's. The rows live in one
+    // box `paint_feature_limits` clears and rebuilds.
+    let feature_limits_section = gtk::Label::new(Some(features::GUARDIAN_SECTION_TITLE));
+    feature_limits_section.add_css_class("heading");
+    feature_limits_section.set_halign(gtk::Align::Start);
+    feature_limits_section.set_margin_top(8);
+    set_test_id(
+        &feature_limits_section,
+        ids::FAMILY_POLICY_FEATURE_LIMITS_SECTION,
+    );
+    policy_group.add(&feature_limits_section);
+
+    let feature_limits_desc = gtk::Label::new(Some(features::GUARDIAN_SECTION_DESC));
+    feature_limits_desc.add_css_class("dim-label");
+    feature_limits_desc.add_css_class("caption");
+    feature_limits_desc.set_halign(gtk::Align::Start);
+    feature_limits_desc.set_wrap(true);
+    feature_limits_desc.set_xalign(0.0);
+    policy_group.add(&feature_limits_desc);
+
+    let feature_limits_rows = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    policy_group.add(&feature_limits_rows);
+    FEATURE_LIMITS_ROWS.with_borrow_mut(|slot| *slot = Some(feature_limits_rows));
+
     // ── The guardian-enrolled-device marker (family-safety.md § Full visibility
     // for young children, Slice F) ──
     // One `family-device-mark-item` per device of the SELECTED ward, each with a
@@ -840,6 +880,7 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets, page: &adw::PreferencesPage)
         wards: RefCell::new(Vec::new()),
         approvals: RefCell::new(Vec::new()),
         incoming: RefCell::new(Vec::new()),
+        capabilities: RefCell::new(None),
         selected_ward: RefCell::new(None),
         syncing: std::cell::Cell::new(false),
         unknown_peer_dm_edited: std::cell::Cell::new(false),
@@ -1276,7 +1317,7 @@ async fn run_mutation(nest: Nest, mutation: Mutation) -> LoadResult {
 /// The one read that fills BOTH sections: `fauna.family.status` (guardian +
 /// supervised sides) plus the guardian's `fauna.family.approvals.list`.
 async fn load(nest: Nest) -> LoadResult {
-    let client = FamilyClient::new(nest);
+    let client = FamilyClient::new(nest.clone());
     let status = client.status().await.map_err(|e| e.to_string())?;
     // The approvals queue is guardian-side only; a supervised-only account gets
     // an empty list, so one unconditional read keeps a single code path.
@@ -1285,7 +1326,20 @@ async fn load(nest: Nest) -> LoadResult {
         .await
         .map_err(|e| e.to_string())?
         .approvals;
+    // The guardian host's feature-limits rows hide a member this nest build does
+    // not carry, which only the capability set can say. Read it only for a
+    // caller who guards someone; a failure leaves the rows unpainted rather
+    // than failing the page the reach knobs live on.
+    let capabilities = if status.wards.is_empty() {
+        None
+    } else {
+        fauna_client_features::FeaturesClient::new(nest.clone())
+            .node_capabilities()
+            .await
+            .ok()
+    };
     Ok(FamilyView {
+        capabilities,
         guardian_handle: status.supervised_by.map(|g| g.handle),
         policy: status.policy,
         wards: status.wards,
@@ -1384,6 +1438,7 @@ fn render(ctx: &Rc<Ctx>, view: FamilyView) {
     *ctx.wards.borrow_mut() = view.wards;
     *ctx.approvals.borrow_mut() = view.approvals;
     *ctx.incoming.borrow_mut() = view.incoming;
+    *ctx.capabilities.borrow_mut() = view.capabilities;
 
     // Re-select the previously-selected ward if it's still present, else the
     // first one (the windows `LoadAsync` rule).
@@ -1404,6 +1459,7 @@ fn render(ctx: &Rc<Ctx>, view: FamilyView) {
         }
         None => {
             *ctx.selected_ward.borrow_mut() = None;
+            crate::feature_editor::clear_ward();
             ctx.w.policy_group.set_visible(false);
             ctx.w.graduate_confirm_button.set_visible(false);
         }
@@ -1509,6 +1565,18 @@ fn render_approvals(ctx: &Rc<Ctx>, approvals: &[FamilyApprovalEntry]) {
     ctx.w.approvals_empty.set_visible(approvals.is_empty());
 }
 
+/// A `family-approval-item` row's text: the shared sender-then-time join
+/// (`fauna_client_family::row_text::approval_item_text`, as tui), with linux's
+/// own short date for a hold older than a week.
+fn approval_row_text(entry: &FamilyApprovalEntry, now_ms: i64, utc_offset_seconds: i32) -> String {
+    fauna_client_family::row_text::approval_item_text(
+        entry,
+        now_ms,
+        utc_offset_seconds,
+        crate::i18n::local_short_date,
+    )
+}
+
 fn build_approval_row(ctx: &Rc<Ctx>, index: usize, entry: &FamilyApprovalEntry) -> gtk::Box {
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -1517,12 +1585,14 @@ fn build_approval_row(ctx: &Rc<Ctx>, index: usize, entry: &FamilyApprovalEntry) 
         .build();
     set_test_id(&row, ids::FAMILY_APPROVAL_ITEM);
 
-    let text = gtk::Label::new(Some(
-        entry
-            .display_text()
-            .as_deref()
-            .unwrap_or(S::APPROVAL_NO_SENDER),
-    ));
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    let text = gtk::Label::new(Some(&approval_row_text(
+        entry,
+        now_ms,
+        crate::logs_view::local_offset_secs(),
+    )));
     text.set_hexpand(true);
     text.set_halign(gtk::Align::Start);
     text.set_wrap(true);
@@ -1911,9 +1981,83 @@ fn load_editor(ctx: &Rc<Ctx>, ward: &FamilyWardInfo) {
         }
     }
 
+    // The guardian host of the feature-limits editor, pointed at THIS ward: an
+    // editor is one ward's, so `set_ward` closes it when the selection moves.
+    if let Ok(ward_id) = <[u8; 32]>::try_from(ward.actor_id.as_slice()) {
+        let surface = ctx
+            .capabilities
+            .borrow()
+            .as_ref()
+            .map(|capabilities| fauna_client_features::ward_surface(ward, capabilities));
+        crate::feature_editor::set_ward(ward_id, surface);
+        paint_feature_limits();
+    }
+
     w.policy_group.set_visible(true);
 
     ctx.syncing.set(false);
+}
+
+/// Repaint the guardian host's rows (`family-policy-feature-limits-row`) from
+/// `crate::feature_editor`'s guardian state. **Paints; decides nothing** — every
+/// word is `fauna_client_features`' (`ward_surface`, the editor's view-model).
+/// One row per gated feature the nest carries: its name, the guardian's AUTHORED
+/// document for this ward in words, the edit button, and — while open for this
+/// member — the shared `feature-policy-editor`, in place under its row.
+pub fn paint_feature_limits() {
+    use crate::feature_editor::{Host, build_editor, open, with_state};
+
+    let Some(rows_box) = FEATURE_LIMITS_ROWS.with_borrow(|slot| slot.clone()) else {
+        return;
+    };
+    let (rows, editing) = with_state(Host::Guardian, |s| {
+        (
+            s.surface.as_ref().map(|surface| surface.rows()),
+            s.editor.as_ref().map(|e| e.feature_key().to_string()),
+        )
+    });
+    while let Some(child) = rows_box.first_child() {
+        rows_box.remove(&child);
+    }
+    // Capability set not read: no rows, never rows for a plane this nest build
+    // may not carry.
+    let lookup = crate::i18n::strings::lookup;
+    for row in rows.unwrap_or_default() {
+        let row_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        row_box.set_margin_top(6);
+        row_box.set_margin_bottom(6);
+        set_test_id(&row_box, ids::FAMILY_POLICY_FEATURE_LIMITS_ROW);
+
+        let name = gtk::Label::new(Some(&row.name.resolve(lookup)));
+        name.set_halign(gtk::Align::Start);
+        name.add_css_class("heading");
+        set_test_id(&name, ids::FAMILY_POLICY_FEATURE_LIMITS_NAME);
+        row_box.append(&name);
+
+        let summary = gtk::Label::new(Some(&row.summary.resolve(lookup)));
+        summary.set_halign(gtk::Align::Start);
+        summary.set_wrap(true);
+        set_test_id(&summary, ids::FAMILY_POLICY_FEATURE_LIMITS_SUMMARY);
+        row_box.append(&summary);
+
+        let edit = gtk::Button::with_label(features::ADMIN_EDIT);
+        edit.set_halign(gtk::Align::Start);
+        set_test_id(&edit, ids::FAMILY_POLICY_FEATURE_LIMITS_EDIT_BUTTON);
+        let feature = row.feature.clone();
+        edit.connect_clicked(move |_| {
+            open(Host::Guardian, &feature);
+            // The button is rebuilt by the repaint: do it off its own handler.
+            gtk::glib::idle_add_local_once(paint_feature_limits);
+        });
+        row_box.append(&edit);
+
+        if editing.as_deref() == Some(row.feature.as_str())
+            && let Some(editor) = build_editor(Host::Guardian, Rc::new(paint_feature_limits))
+        {
+            row_box.append(&editor);
+        }
+        rows_box.append(&row_box);
+    }
 }
 
 /// The editor's current knobs as a `ReachPolicy` (the label ↔ wire mapping,
@@ -2357,37 +2501,41 @@ mod tests {
 
     /// The single most important row-rendering rule: a `mail_hold` renders its
     /// `peer_address` (its `summary` is deliberately always empty — a subject
-    /// line is content), every other kind its `summary`. The rule itself is
-    /// `fauna_core::format::approval_display_text` (pinned there); this test
-    /// confirms linux's call site — `entry.display_text().as_deref().unwrap_or(...)` —
-    /// wires it correctly.
+    /// line is content), every other kind its `summary`, and a held mail with a
+    /// stamp reads "sender · HH:MM" (the shared bucket over `created_at`). The
+    /// rules are `fauna_core::format::approval_display_text` /
+    /// `approval_timestamp_display` (pinned there); this confirms linux's call.
     #[test]
-    fn mail_hold_row_renders_peer_address_not_the_empty_summary() {
+    fn mail_hold_row_renders_peer_address_and_time_not_the_empty_summary() {
+        let held_at = 1_700_000_000; // 22:13:20 UTC
+        let now_ms = held_at * 1_000 + 60_000;
         let hold = FamilyApprovalEntry {
             kind: "mail_hold".into(),
             peer_address: "stranger@example.com".into(),
             summary: String::new(),
+            created_at: held_at,
             ..Default::default()
+        };
+        let unstamped = FamilyApprovalEntry {
+            created_at: 0,
+            ..hold.clone()
         };
         let contact = FamilyApprovalEntry {
             kind: "contact".into(),
             peer_address: String::new(),
             summary: "hi from bob".into(),
+            created_at: held_at,
             ..Default::default()
         };
         assert_eq!(
-            hold.display_text()
-                .as_deref()
-                .unwrap_or(S::APPROVAL_NO_SENDER),
-            "stranger@example.com"
+            approval_row_text(&hold, now_ms, 0),
+            "stranger@example.com · 22:13"
         );
         assert_eq!(
-            contact
-                .display_text()
-                .as_deref()
-                .unwrap_or(S::APPROVAL_NO_SENDER),
-            "hi from bob"
+            approval_row_text(&unstamped, now_ms, 0),
+            "stranger@example.com"
         );
+        assert_eq!(approval_row_text(&contact, now_ms, 0), "hi from bob");
     }
 
     /// A held null-path message (`MAIL FROM:<>`) truthfully carries an empty
@@ -2402,10 +2550,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            null_path_hold
-                .display_text()
-                .as_deref()
-                .unwrap_or(S::APPROVAL_NO_SENDER),
+            approval_row_text(&null_path_hold, 1_000, 0),
             S::APPROVAL_NO_SENDER
         );
     }

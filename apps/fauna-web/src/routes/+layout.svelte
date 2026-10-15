@@ -3,16 +3,17 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
-  import { identity, contacts, connectionStatus, onActorChange } from '$lib/store';
+  import { identity, contacts, connectionStatus, onSignedInActorChange, familyTabGated } from '$lib/store';
   import { t } from '$lib/i18n/strings';
   import {
     selfHealDeploymentSeedCustody,
-    type DeploymentSeedCustodyWarning,
     reportHostAddress,
     refreshMailEpochSchedule,
+    publishSubscriberEncapsKey,
     runCriticalAlertSweep,
     runSealBackfillSweep,
     familyStatus,
+    spamGetPreferences,
     type FamilyStatus,
   } from '$lib/rpc';
   import MessageBanner from '$lib/components/MessageBanner.svelte';
@@ -21,9 +22,10 @@
   import { checkIsAdmin } from '$lib/api';
   import { accountsAutoEnableRequireConfirm, accountsTabSessionMaterial } from '$lib/accounts';
   import { tabPin } from '$lib/tabPin';
+  import { createConnectEdge } from '$lib/connectEdge';
   import { loadPendingFactoryReset } from '$lib/onboarding/pending-factory-reset-store';
   import { ensureLogging, ensureWasm, connectionStateLabel } from '$lib/wasm';
-  import { resolveLocalized } from '$lib/i18n/localized';
+  import { resolveLocalized, type LocalizedText } from '$lib/i18n/localized';
   import { startReceivePoll, flushDraftsNow as flushConversationsDraftsNow } from '$lib/conversations';
   import { flushDraftsNow as flushFeedDraftsNow } from '$lib/feed';
   import { flushCuesNow } from '$lib/feed-cues';
@@ -40,7 +42,7 @@
     restoredGuardian,
     clearRestoredSupervision,
   } from '$lib/supervision.svelte';
-  import { setGuardianHalf } from '$lib/contentPolicy.svelte';
+  import { setGuardianHalf, setSpamPreferences } from '$lib/contentPolicy.svelte';
   import { openRegion, refreshRegion } from '$lib/region.svelte';
   import { setWardAsksFromStatus } from '$lib/wardAsks.svelte';
   import {
@@ -96,10 +98,17 @@
     void startSubscriptionsAuthorPump();
     // Keep this browser's push subscription pointed at whoever is signed in
     // now (succession-aftermath.md § Implementation status today — "a
-    // successor's own device does not re-subscribe to push"). `onActorChange`
+    // successor's own device does not re-subscribe to push"). The handler
     // fires on every identity settle, first load included, so a reload after
     // a succession lands here with no Settings visit required; the handler
     // itself no-ops unless this browser already holds a push subscription.
+    //
+    // All three handlers here are `onSignedInActorChange`, not `onActorChange`:
+    // each dials the home nest, and an identity the wizard committed before its
+    // account exists has none — its dial would reach the box about to be
+    // claimed and stop the WS-RPC client for good on `not_registered`. They are
+    // held back until the `LoggedIn` terminal records the nest and delivers
+    // them.
     // Run the post-succession aftermath — the ordered pass
     // a successor's first authenticated session owes (`succession-aftermath.md`
     // § Re-key scope → the `BackupKey` corpus row; `succession-aftermath.md`
@@ -126,7 +135,7 @@
     // gated on detecting a succession. Idempotent, so a reload after a
     // completed pass costs one `get` per plane. Log-only: a failure here must
     // not break launch, and the next actor settle retries.
-    onActorChange(async (id) => {
+    onSignedInActorChange(async (id) => {
       try {
         // Logged UNCONDITIONALLY, including the boring `not-a-successor`. The
         // browser console ring is bridge-captured and readable from a test
@@ -156,7 +165,7 @@
       const id = $identity;
       if (settled > 0 && id) void refreshMemberReviewRoster();
     });
-    onActorChange((id) => void rearmPush(id));
+    onSignedInActorChange((id) => void rearmPush(id));
 
     // Leave-flush (`reserved-folders.md` § The leave-flush promise, row 481):
     // web's leave door is the tab-leave events the browser actually
@@ -199,7 +208,7 @@
     // claimant performs. Fires at most once per succession: `successionKitOwed`
     // is false on every ordinary sign-in, so this costs one sessionStorage read
     // at boot and navigates nobody who is not a fresh successor.
-    onActorChange(async (id) => {
+    onSignedInActorChange(async (id) => {
       try {
         if (await successionKitOwed(id.actorId)) {
           console.info('[succession] the successor owes itself a kit — landing on Account');
@@ -326,6 +335,19 @@
         // Clause 1: no information — keep whatever the last successful read
         // (or the launch restore) established.
       });
+    // The viewer's own spam thresholds ride the same moment (family-client-
+    // enforcement.md § Content policy: re-read on every WS reconnect), so a
+    // read that lost the socket cannot leave the own-threshold collapse off for
+    // the session. A failed read keeps the loaded thresholds; a reply fired
+    // under a previous actor is dropped — the actor-scoped reset clears the
+    // state but cannot stop a late reply.
+    const firedFor = $identity?.actorId ?? null;
+    spamGetPreferences(secret)
+      .then((prefs) => {
+        if (($identity?.actorId ?? null) !== firedFor) return;
+        setSpamPreferences(prefs.spam_threshold, prefs.phishing_threshold);
+      })
+      .catch(() => {});
   });
   // Widened for the transfer handshake (family-safety.md § Graduation &
   // transfer → Visibility): a PROPOSED guardian may have no other family
@@ -342,6 +364,9 @@
         (famStatus.incoming_transfers?.length ?? 0) > 0)) ||
       restoredGuardian() !== null,
   );
+  // Published for the Notifications tap-through, which routes into the Family
+  // page only while this same gate is open.
+  $effect(() => { familyTabGated.set(hasFamilyRelationship); });
   // The supervised indicator's guardian: the live read when one has landed,
   // else the restored last-known supervision (transparency invariant 4 —
   // supervision is never silent, a cold offline launch included).
@@ -415,11 +440,8 @@
   // already holds this box) makes no round trip. A run that ends with custody
   // unconfirmed for an admin of this nest warns on the shell's message banner —
   // from either edge, through the sink handed over here.
-  function surfaceRecoveryCustodyWarning(warning: DeploymentSeedCustodyWarning): void {
-    const message =
-      warning === 'mismatch'
-        ? t.launch.recovery_custody_mismatch
-        : t.launch.recovery_custody_failed;
+  function surfaceRecoveryCustodyWarning(warning: LocalizedText): void {
+    const message = resolveLocalized(warning);
     window.dispatchEvent(new CustomEvent('fauna-message-update', { detail: { warning: message } }));
   }
   let seedCustodyEdgeFor: string | null = null;
@@ -439,23 +461,36 @@
     });
   });
 
-  // Opportunistically refresh the published mail content-sealing epoch
-  // schedule once per session at the same universal post-auth point
-  // (`encryption-at-rest.md` § Capability tiering → Content-sealing epochs),
-  // mirroring linux's `refresh_mail_epoch_schedule` posture exactly. A no-op
-  // when mail isn't enabled; without it a schedule published at enable-mail
-  // time slides stale past the publish horizon for a user who never re-runs
-  // enable/rotate — the design's degradation (seal under the newest
-  // published epoch) covers that gap safely in the meantime, so a failure
-  // here is never surfaced to the user.
-  let didRefreshEpochSchedule = false;
+  // Refresh the published mail content-sealing epoch schedule at EVERY
+  // post-auth edge — each transition into `connected`, so a reconnect of the
+  // SPA's socket re-runs it (`mail-credentials.md` § Hard revoke → *Published
+  // before the nest moves*, rule (4); `encryption-at-rest.md` § Capability
+  // tiering → Content-sealing epochs). A no-op when mail isn't enabled;
+  // without it a schedule published at enable-mail time slides stale past the
+  // publish horizon, and a sibling that listed before a rotation keeps
+  // sealing under the old epoch until its next launch. The design's
+  // degradation (seal under the newest published epoch) covers any gap
+  // safely, so a failure here is never surfaced to the user.
+  const mailEpochEdge = createConnectEdge();
   $effect(() => {
     const secret = $identity?.secretHex;
-    if (didRefreshEpochSchedule || !secret || $connectionStatus !== 'connected') return;
-    didRefreshEpochSchedule = true;
+    if (!mailEpochEdge(secret, $connectionStatus) || !secret) return;
     void refreshMailEpochSchedule(secret).catch((e) => {
       // Best-effort — re-converges on the next connect.
       console.warn('mail epoch schedule refresh failed (best-effort):', e);
+    });
+  });
+
+  // Publish the subscriber encapsulation-key registry entry at the same
+  // post-auth edge (`post-quantum.md` § surface B): idempotent, best-effort,
+  // mirroring linux's `publish_subscriber_encaps_key`.
+  let didPublishEncapsKey = false;
+  $effect(() => {
+    const secret = $identity?.secretHex;
+    if (didPublishEncapsKey || !secret || $connectionStatus !== 'connected') return;
+    didPublishEncapsKey = true;
+    void publishSubscriberEncapsKey(secret).catch((e) => {
+      console.warn('subscriber encaps key publish failed (best-effort):', e);
     });
   });
 
@@ -562,9 +597,10 @@
   //     lands here with credentials still present and, without this, is stranded
   //     on the feed unable to re-claim its wiped box — a client-unrecoverable
   //     state the invariant forbids (nest/common.md § Client-state
-  //     recoverability, CR-1/CR-2). The slot is the active account's per-actor
-  //     row, read through the SAME registry accessor the launch machine routes
-  //     on (`loadPendingFactoryReset`), so the gate and the machine can never
+  //     recoverability, CR-1/CR-2). The slot is this tab's account's per-actor
+  //     row (a tab pinned to a non-active account reads its own, CR-3), read
+  //     through the SAME registry accessor the launch machine routes on
+  //     (`loadPendingFactoryReset`), so the gate and the machine can never
   //     disagree.
   //  2. Authenticated and sitting on the bare index ⇒ the default landing page
   //     (Conversations) — the role the removed `+page.svelte` redirect filled.

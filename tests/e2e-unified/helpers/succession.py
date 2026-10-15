@@ -297,13 +297,22 @@ def veto_pending_replacement(
     return bool(reply["cancelled"])
 
 
-def emergency_lockout(nest_url: str, *, actor_id_hex: str, identity_seed_hex: str) -> None:
+def emergency_lockout(
+    nest_url: str,
+    *,
+    actor_id_hex: str,
+    identity_seed_hex: str,
+    timestamp: Optional[int] = None,
+) -> int:
     """Drive the seed-signed emergency lockout, as a thief holding the seed would.
 
     Pre-identity and signed by the identity seed over the domain-tagged
     ``account_lockout_signed_message`` (``common.sig_domain``, the Python twin
     of the Rust builder) — no bearer, because the honest use is an owner locked
     out of their own sessions.
+
+    ``timestamp`` (Unix seconds) defaults to now; pass an old one to present a
+    captured request late. Returns the ``locked_until`` the nest applied.
     """
     import time
 
@@ -312,12 +321,13 @@ def emergency_lockout(nest_url: str, *, actor_id_hex: str, identity_seed_hex: st
     from common.sig_domain import account_lockout_signed_message
 
     actor_id = bytes.fromhex(actor_id_hex)
-    timestamp = int(time.time())
+    if timestamp is None:
+        timestamp = int(time.time())
     signature = SigningKey(bytes.fromhex(identity_seed_hex)).sign(
         account_lockout_signed_message(actor_id, timestamp)
     ).signature
     with WsRpcAnonClient(nest_url) as anon:
-        anon.call(
+        reply = anon.call(
             _LOCKOUT_KIND,
             {
                 "actor_id": actor_id_hex,
@@ -325,6 +335,7 @@ def emergency_lockout(nest_url: str, *, actor_id_hex: str, identity_seed_hex: st
                 "signature": signature.hex(),
             },
         )
+    return int(reply["locked_until"])
 
 
 def mint_statement(

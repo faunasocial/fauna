@@ -186,7 +186,7 @@ def test_a_port_named_twice_is_reversed_once():
 
 
 def test_a_url_without_a_port_contributes_nothing():
-    assert nest_ports_from_config({"url": "https://example.com"}) == []
+    assert nest_ports_from_config({"url": "https://example.net"}) == []
 
 
 def test_string_ports_and_junk_are_handled_not_crashed():

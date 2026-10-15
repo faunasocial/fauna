@@ -38,27 +38,27 @@ Stamped 2026-10-01 at 308c995169.
 7. [app] The admin rejects a pending helper from its card, after confirming that it will not be able to connect again, and it leaves the list — `docs/goal/behavior/mail-bridge-lifecycle.md` § Pending approval
    - (none)
 8. [nest] A helper the admin rejected stays rejected: it never returns as pending or approves itself, even once mail is on — `docs/goal/behavior/mail-bridge-lifecycle.md` § Onboarding auto-approval
-   - (none)
+   - `tests/e2e-unified/tests/api/test_bridge_auto_approval_rules.py::test_a_rejected_helper_stays_rejected_once_mail_is_on`
 9. [app] Cancelling a key rotation leaves the helper approved with its key unchanged — `docs/goal/behavior/admin.md` § Approved-bridges roster
-   - (none)
+   - `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_cancelling_a_rotation_leaves_the_helper_approved`
 10. [nest] With only calendar, contacts or files switched on and mail off, the mail-and-calendar helper still approves itself, and the mail-sending helper waits for mail — `docs/goal/behavior/mail-bridge-lifecycle.md` § Onboarding auto-approval
-    - (none)
+    - `tests/e2e-unified/tests/api/test_bridge_auto_approval_rules.py::test_a_dav_only_nest_approves_the_mda_and_holds_the_mta`
 11. [nest] The Bluesky helper, and any helper other than the two mail ones, always waits for the admin's approval, whatever is switched on — `docs/goal/behavior/mail-bridge-lifecycle.md` § Onboarding auto-approval
-    - (none)
+    - `tests/e2e-unified/tests/api/test_bridge_auto_approval_rules.py::test_non_mail_helpers_always_wait_for_the_admin`
 12. [nest] The moment a helper's key is rotated or revoked, the old key loses its connection and its access to the nest — `docs/goal/behavior/mail-bridge-lifecycle.md` § Service-user re-keying
-    - (none)
-13. [app] After the mail-sending helper's key is rotated, each domain's signing record shows as out of date on the DNS page until it is republished — `docs/goal/behavior/mail-bridge-lifecycle.md` § Service-user re-keying
-    - (none)
+    - `tests/e2e-unified/tests/api/test_bridge_service_user_authority.py::test_revoking_a_helper_closes_its_connection_and_refuses_its_key`
+13. [app] After the mail-sending helper's key is rotated, each domain's signing record on the DNS page reads as before: a re-key touches no signing key, so nothing needs republishing — `docs/goal/behavior/mail-bridge-lifecycle.md` § Service-user re-keying
+    - `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_mta_rotation_leaves_the_dns_page_signing_record_unchanged`
 14. [nest] A helper still waiting for approval serves no mail — `docs/goal/behavior/mail-bridge-lifecycle.md` § Don't do these
-    - (none)
+    - `tests/e2e-unified/tests/api/test_bridge_service_user_authority.py::test_a_pending_helper_is_given_nothing_to_serve_until_approved`
 15. [nest] On a nest with mail off, a re-keyed helper comes back as a new pending card and waits for the admin instead of approving itself — `docs/goal/behavior/mail-bridge-lifecycle.md` § Service-user re-keying
-    - (none)
+    - `tests/e2e-unified/tests/test_mail_bridge_rekey.py::test_mail_off_re_key_comes_back_pending`
 16. [app] Each approved helper's row also shows its name and when it was approved — `docs/goal/behavior/admin.md` § Approved-bridges roster
-    - (none)
+    - `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_approved_row_shows_name_and_when_approved`
 17. [app] A pending helper's card also shows when it first asked to join — `docs/goal/behavior/mail-bridge-lifecycle.md` § Pending approval
-    - (none)
+    - `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_pending_card_shows_when_it_first_asked`
 18. [nest] After a mail helper's key is rotated, mail flows again: a message arrives and a message leaves — `docs/goal/behavior/mail-bridge-lifecycle.md` § Service-user re-keying
-    - (none)
+    - `tests/e2e-unified/tests/test_mail_bridge_rekey.py::test_mail_flows_after_the_mta_is_re_keyed`
 
 ## Status
 
@@ -66,7 +66,7 @@ Stamped 2026-10-01 at 308c995169.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | 0.1.2-dev+cdb1bad0 standalone |
-| linux | ⚠ partial | 0.1.2-dev+78e73031 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | 0.1.2-dev+a704dbe4.dirty standalone |
 | macos | ⚠ partial | 0.1.2-dev+8b423269 standalone |
 | ios |  no run recorded | |
@@ -88,15 +88,15 @@ Stamped 2026-10-01 at 308c995169.
 | 5 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_admin_rotates_approved_mta_service_user_key` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_admin_bridges_pending_lists_and_approves` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
 | 7 | app | (none) | — |
-| 8 | nest | (none) | — |
-| 9 | app | (none) | — |
-| 10 | nest | (none) | — |
-| 11 | nest | (none) | — |
-| 12 | nest | (none) | — |
-| 13 | app | (none) | — |
-| 14 | nest | (none) | — |
-| 15 | nest | (none) | — |
-| 16 | app | (none) | — |
-| 17 | app | (none) | — |
-| 18 | nest | (none) | — |
+| 8 | nest | `tests/e2e-unified/tests/api/test_bridge_auto_approval_rules.py::test_a_rejected_helper_stays_rejected_once_mail_is_on` | nest (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_cancelling_a_rotation_leaves_the_helper_approved` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 10 | nest | `tests/e2e-unified/tests/api/test_bridge_auto_approval_rules.py::test_a_dav_only_nest_approves_the_mda_and_holds_the_mta` | nest (linux): passed |
+| 11 | nest | `tests/e2e-unified/tests/api/test_bridge_auto_approval_rules.py::test_non_mail_helpers_always_wait_for_the_admin` | nest (linux): passed |
+| 12 | nest | `tests/e2e-unified/tests/api/test_bridge_service_user_authority.py::test_revoking_a_helper_closes_its_connection_and_refuses_its_key` | nest (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_mta_rotation_leaves_the_dns_page_signing_record_unchanged` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 14 | nest | `tests/e2e-unified/tests/api/test_bridge_service_user_authority.py::test_a_pending_helper_is_given_nothing_to_serve_until_approved` | nest (linux): passed |
+| 15 | nest | `tests/e2e-unified/tests/test_mail_bridge_rekey.py::test_mail_off_re_key_comes_back_pending` | nest (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_approved_row_shows_name_and_when_approved` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_pending_card_shows_when_it_first_asked` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 18 | nest | `tests/e2e-unified/tests/test_mail_bridge_rekey.py::test_mail_flows_after_the_mta_is_re_keyed` | nest (linux): passed |
 <!-- features-render:end -->

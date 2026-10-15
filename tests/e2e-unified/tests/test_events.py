@@ -217,11 +217,14 @@ def test_event_create_and_delete(logged_in_app):
 
 # Calendar-level `.ics` import/export (events.md § Import / Export; ids
 # user-approved 2026-09-25). tui leads, macos and ios followed through one shared
-# FaunaKit `CalendarFileControls`; each remaining app gains its mark here as it
-# wires `calendar-import-file` / `calendar-import-button` / `calendar-export-button`.
+# FaunaKit `CalendarFileControls`, then linux, web and android; windows gains its
+# mark here as it wires `calendar-import-file` / `calendar-import-button` / `calendar-export-button`.
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.android
 @pytest.mark.feature("calendar-and-events")
 def test_calendar_exported_to_a_file_imports_into_another_calendar(logged_in_app):
     """Export a calendar as one `.ics` file, import that file into a second,
@@ -262,6 +265,9 @@ def test_calendar_exported_to_a_file_imports_into_another_calendar(logged_in_app
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.android
 @pytest.mark.feature("calendar-and-events")
 def test_calendar_import_with_no_file_chosen_says_so(logged_in_app):
     """`calendar-import-button` pressed with no file chosen answers on

@@ -31,10 +31,13 @@ pub enum MediaNestCall {
     MediaSnapshot,
     /// `list_folders()` — the control-plane option list read.
     ListFolders,
-    /// `record_member(folder, device_id, path, manifest_hash, size_bytes,
+    /// `record_member(folder, folder_id, device_id, path, manifest_hash, size_bytes,
     /// content_key_version, thumbnail_hash, path_sealed)`.
     RecordMember {
         folder: String,
+        /// The target's row (`SyncChangeRecordRequest::folder_id`) — recorded
+        /// so a test can assert an upload names the row it sealed for.
+        folder_id: Option<i64>,
         device_id: String,
         path: String,
         manifest_hash: String,
@@ -48,9 +51,12 @@ pub enum MediaNestCall {
         /// (`docs/goal/behavior/file-sync.md` § Sealed names & paths).
         path_sealed: Option<Vec<u8>>,
     },
-    /// `delete_member(folder, device_id, path, path_sealed)`.
+    /// `delete_member(folder, folder_id, device_id, path, path_sealed)`.
     DeleteMember {
         folder: String,
+        /// The row the tombstone names (`set-addressing.md` § The row form);
+        /// `None` sends the name forms alone.
+        folder_id: Option<i64>,
         device_id: String,
         path: String,
         /// The machine-minted tombstone seal (S8 D2) — recorded so a test can
@@ -58,9 +64,12 @@ pub enum MediaNestCall {
         /// `None`, the best-effort degrade).
         path_sealed: Option<Vec<u8>>,
     },
-    /// `file_versions(folder, path)`.
+    /// `file_versions(folder, folder_id, path, include_pruned)`.
     FileVersions {
         folder: String,
+        /// The row the list narrows to (`set-addressing.md` § The row form);
+        /// `None` sends the name forms alone.
+        folder_id: Option<i64>,
         path: String,
         include_pruned: bool,
     },
@@ -70,10 +79,13 @@ pub enum MediaNestCall {
         path: String,
         version_num: i64,
     },
-    /// `restore_member(folder, device_id, path, manifest_hash, size_bytes,
-    /// content_key_version, path_sealed)`.
+    /// `restore_member(folder, folder_id, device_id, path, manifest_hash,
+    /// size_bytes, content_key_version, path_sealed)`.
     RestoreMember {
         folder: String,
+        /// The restored version's own row — recorded so a test can assert the
+        /// re-point lands in the set the version belongs to.
+        folder_id: Option<i64>,
         device_id: String,
         path: String,
         manifest_hash: String,
@@ -184,8 +196,10 @@ impl FakeMediaNestApi {
     }
 
     /// Mark fixture rows as signed under a RETIRED identity
-    /// ([`FAKE_PREDECESSOR_ID`]): each entry is a Media item's `path`, or the
-    /// hex `manifest_hash` of an item or version.
+    /// ([`FAKE_PREDECESSOR_ID`]): each entry is a Media item's `path`, the
+    /// hex `manifest_hash` of an item or version, or `version:<version_num>`
+    /// for one version row alone (a same-named pair may list the same
+    /// manifest under different signers).
     pub fn set_predecessor_signed(&self, rows: Vec<String>) {
         self.set_signed_as(rows, FAKE_PREDECESSOR_ID);
     }
@@ -262,6 +276,7 @@ impl MediaNestApi for FakeMediaNestApi {
     async fn record_member(
         &self,
         folder: &str,
+        folder_id: Option<i64>,
         device_id: &str,
         path: &str,
         manifest_hash: String,
@@ -275,6 +290,7 @@ impl MediaNestApi for FakeMediaNestApi {
             .unwrap()
             .push(MediaNestCall::RecordMember {
                 folder: folder.to_string(),
+                folder_id,
                 device_id: device_id.to_string(),
                 path: path.to_string(),
                 manifest_hash,
@@ -292,6 +308,7 @@ impl MediaNestApi for FakeMediaNestApi {
     async fn delete_member(
         &self,
         folder: &str,
+        folder_id: Option<i64>,
         device_id: &str,
         path: &str,
         path_sealed: Option<Vec<u8>>,
@@ -301,6 +318,7 @@ impl MediaNestApi for FakeMediaNestApi {
             .unwrap()
             .push(MediaNestCall::DeleteMember {
                 folder: folder.to_string(),
+                folder_id,
                 device_id: device_id.to_string(),
                 path: path.to_string(),
                 path_sealed,
@@ -314,6 +332,7 @@ impl MediaNestApi for FakeMediaNestApi {
     async fn file_versions(
         &self,
         folder: &str,
+        folder_id: Option<i64>,
         path: &str,
         include_pruned: bool,
     ) -> Result<Vec<ListedVersion>, MediaApiError> {
@@ -322,6 +341,7 @@ impl MediaNestApi for FakeMediaNestApi {
             .unwrap()
             .push(MediaNestCall::FileVersions {
                 folder: folder.to_string(),
+                folder_id,
                 path: path.to_string(),
                 include_pruned,
             });
@@ -339,7 +359,10 @@ impl MediaNestApi for FakeMediaNestApi {
                     .filter(|v| include_pruned || !v.pruned)
                     .cloned()
                     .map(|summary| {
-                        let signer = predecessor_signed.get(&summary.manifest_hash).copied();
+                        let signer = predecessor_signed
+                            .get(&format!("version:{}", summary.version_num))
+                            .or_else(|| predecessor_signed.get(&summary.manifest_hash))
+                            .copied();
                         ListedVersion {
                             signed_as_current: signer.is_none(),
                             signed_as: Some(signer.unwrap_or(FAKE_CURRENT_ID)),
@@ -447,6 +470,7 @@ impl MediaNestApi for FakeMediaNestApi {
     async fn restore_member(
         &self,
         folder: &str,
+        folder_id: Option<i64>,
         device_id: &str,
         path: &str,
         manifest_hash: String,
@@ -459,6 +483,7 @@ impl MediaNestApi for FakeMediaNestApi {
             .unwrap()
             .push(MediaNestCall::RestoreMember {
                 folder: folder.to_string(),
+                folder_id,
                 device_id: device_id.to_string(),
                 path: path.to_string(),
                 manifest_hash,

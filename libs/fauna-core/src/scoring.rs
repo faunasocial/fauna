@@ -270,6 +270,25 @@ pub struct LabelerInputWithAttachments {
 }
 
 impl LabelerPostInput {
+    /// The `label()` input for an item the app holds as rendered parts rather
+    /// than as a `Post` — a feed card or a conversation bubble, post-decrypt:
+    /// its text, its tag names, whether it carries media, its author. The same
+    /// fields [`Self::from_post`] maps, so a module reads a card exactly as it
+    /// reads the post behind it — the one card mapping every app position
+    /// shares (a region document's bundled scorers, a subscribed labeler in the
+    /// feed seam; `content-moderation-and-ranking.md` § Tier-3 → *Where it
+    /// runs*, invariant (b)).
+    pub fn from_card(author: ActorId, text: &str, hashtags: &[String], has_media: bool) -> Self {
+        Self {
+            text: (!text.is_empty()).then(|| text.to_string()),
+            hashtags: hashtags.to_vec(),
+            has_media,
+            media_type: None,
+            duration_ms: None,
+            author,
+        }
+    }
+
     /// The `label()` input for one post, read off what the post itself says —
     /// its body text, its tag names, its first attachment's type, a video's
     /// length, its author.
@@ -1166,10 +1185,12 @@ pub fn perimeter_mail_score_rows(
         // Error tempfails at the perimeter (forensic-only); an oversize bypass
         // or a door that never invokes the gate (the submission twin, a
         // disabled scanner) means the message was never scanned. None is a
-        // verdict: a scorer that did not run emits no row.
+        // verdict: a scorer that did not run emits no row. A kind this build
+        // does not know claims nothing it can score, so it emits none either.
         ClamavVerdict::Error { .. }
         | ClamavVerdict::BypassedOversize
-        | ClamavVerdict::NotScanned => {}
+        | ClamavVerdict::NotScanned
+        | ClamavVerdict::Unknown => {}
     }
     if let Some(r) = rspamd {
         rows.push(ScoreEntry {
@@ -1423,6 +1444,52 @@ pub mod cues {
     /// human never chooses it, and a model with zero engagement counts scores
     /// **bit-identically** to a pre-v2 model regardless of its value.
     pub const CUE_ENGAGEMENT_WEIGHT_PM: u32 = 200;
+
+    /// How far a player has got through its media, per-mille — the reading a
+    /// capture shell hands the tracker as a row's `media_played_pm`
+    /// (`engagement-cues.md` § Cue vocabulary & derivation, the media arm of
+    /// `watch-complete`). `position` and `duration` are in any one unit (GTK's
+    /// microseconds, a `<video>`'s seconds, `MediaPlayer`'s milliseconds).
+    /// Truncated toward zero and clamped to `0..=1000`, so a position a player
+    /// reports past its own duration reads as played to the end, never more.
+    /// `None` when the duration is not yet known (a stream still preparing
+    /// reports 0, a live or unbounded one reports none) or either reading is
+    /// not finite: no reading, never a fabricated 0 or 1000.
+    pub fn played_per_mille(position: f64, duration: f64) -> Option<u32> {
+        if !position.is_finite() || !duration.is_finite() || duration <= 0.0 {
+            return None;
+        }
+        let pm = (position.max(0.0) / duration * 1000.0).min(1000.0);
+        Some(pm as u32)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn played_per_mille_truncates_in_any_unit() {
+            assert_eq!(played_per_mille(0.0, 5.0), Some(0));
+            assert_eq!(played_per_mille(4.25, 5.0), Some(850));
+            assert_eq!(played_per_mille(4_249.0, 5_000.0), Some(849));
+            assert_eq!(played_per_mille(5_000_000.0, 5_000_000.0), Some(1000));
+        }
+
+        #[test]
+        fn played_per_mille_clamps_to_the_ends() {
+            assert_eq!(played_per_mille(5.2, 5.0), Some(1000));
+            assert_eq!(played_per_mille(-1.0, 5.0), Some(0));
+        }
+
+        #[test]
+        fn played_per_mille_without_a_duration_is_no_reading() {
+            assert_eq!(played_per_mille(1.0, 0.0), None);
+            assert_eq!(played_per_mille(1.0, -3.0), None);
+            assert_eq!(played_per_mille(1.0, f64::NAN), None);
+            assert_eq!(played_per_mille(1.0, f64::INFINITY), None);
+            assert_eq!(played_per_mille(f64::NAN, 5.0), None);
+        }
+    }
 }
 
 /// Map a labeler's `label()` output ([`Label`]s) to its single bus

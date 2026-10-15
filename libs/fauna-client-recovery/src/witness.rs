@@ -189,33 +189,20 @@ pub trait SuccessionAnchors: MaybeSendSync {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait SuccessionChainSource: MaybeSendSync {
-    /// Resolve + dial the nest serving `handle_domain`, then return
-    /// [`walk`]'s verdict for `old`. `None` for unreachable, unresolvable,
-    /// never-succeeded, or a chain that fails the rule — every one of which
-    /// leaves the statement a claim.
-    async fn walk_from_domain(
-        &self,
-        handle_domain: &str,
-        old: ActorId,
-        known_head: Option<ChainHead>,
-    ) -> Option<VerifiedSuccession>;
-
-    /// [`Self::walk_from_domain`] with every verified hop returned, oldest
-    /// first ([`walk_line`]) — for [`ChainWitness::resolve_line`]. `Some` of an
+    /// Resolve + dial the nest serving `handle_domain`, then return every
+    /// verified hop of `old`'s succession line, oldest first ([`walk_line`]) —
+    /// for [`ChainWitness::resolve_line`] and [`ChainWitness::verify_statement`]
+    /// (head from `first()`, destination from `last()`). `Some` of an
     /// **empty** line is the home nest's verified "never succeeded"; `None` is
     /// everything that establishes nothing (unreachable, unresolvable, a chain
-    /// that fails the rule). Same bound-the-dial duty. Default `None` —
-    /// additive, so a source that walks no lines resolves none and its
-    /// consumers fail closed.
+    /// that fails the rule) and leaves the statement a claim. Same
+    /// bound-the-dial duty.
     async fn walk_line_from_domain(
         &self,
         handle_domain: &str,
         old: ActorId,
         known_head: Option<ChainHead>,
-    ) -> Option<Vec<VerifiedSuccession>> {
-        let _ = (handle_domain, old, known_head);
-        None
-    }
+    ) -> Option<Vec<VerifiedSuccession>>;
 }
 
 /// [`walk`] with every verified hop returned — the shared body of
@@ -437,12 +424,25 @@ pub struct WitnessObservation {
     /// never delivered a statement at all, which is a different bug entirely
     /// from any verdict below.
     pub statements_seen: u64,
+    /// Statements that named an identity first seen after [`MAX_REPORTED_PEERS`]
+    /// rows were already held, so they are counted in `statements_seen` but
+    /// have no row in `peers`. Non-zero means the report is truncated —
+    /// usually a group member naming made-up identities.
+    pub unreported_statements: u64,
     /// The durable anchor store as of the last time the rule ran — what
     /// separates "nothing was seeded for this peer" from "the store is
     /// unreadable", both of which surface as [`WitnessOutcome::NoAnchor`].
     pub anchor_store: AnchorStoreState,
     pub peers: Vec<PeerWitnessObservation>,
 }
+
+/// How many identities [`ChainWitness`]'s report keeps a row for. The witness
+/// runs before the roster gate, so the `old_actor_id`s it is handed are chosen
+/// by whoever posts the statement; this bound — not the sender — sizes the
+/// report (`identity-succession.md` § The succession statement → *What a
+/// statement may cost the member who receives it*). Far above the identities
+/// an honest session ever sees succeed.
+pub const MAX_REPORTED_PEERS: usize = 256;
 
 /// The shared [`SuccessionWitness`] implementation: cached head first, then the
 /// anchored walk to the old identity's home nest.
@@ -458,8 +458,10 @@ pub struct ChainWitness<A, C> {
     lines: Mutex<HashMap<ActorId, LineResolution>>,
     /// Convention-6 report, session-scoped like the memo beside it. Never read
     /// by the policy — a witness whose behaviour depended on its own report
-    /// could not be trusted as evidence about itself.
-    observed: Mutex<HashMap<ActorId, PeerWitnessObservation>>,
+    /// could not be trusted as evidence about itself. Bounded at
+    /// [`MAX_REPORTED_PEERS`] rows, because the ids it is keyed on are the
+    /// sender's choice.
+    observed: Mutex<Report>,
     /// The anchors' own last-read report, sampled where the rule consults them
     /// (no I/O of its own — see [`SuccessionAnchors::anchor_store_state`]).
     anchor_store: Mutex<AnchorStoreState>,
@@ -468,6 +470,14 @@ pub struct ChainWitness<A, C> {
     /// here, and written only by the sweep — never by a statement — so it is
     /// bounded by the member's rosters, not by what a peer sends.
     harvest_wait: Mutex<HarvestWait>,
+}
+
+/// [`ChainWitness`]'s report: one row per identity, up to
+/// [`MAX_REPORTED_PEERS`], and a count of the statements that found no room.
+#[derive(Default)]
+struct Report {
+    peers: HashMap<ActorId, PeerWitnessObservation>,
+    unreported_statements: u64,
 }
 
 /// Which peers this session's harvest sweep has settled — what a held head
@@ -500,7 +510,7 @@ impl<A, C> ChainWitness<A, C> {
             chain_source,
             verdicts: Mutex::new(HashMap::new()),
             lines: Mutex::new(HashMap::new()),
-            observed: Mutex::new(HashMap::new()),
+            observed: Mutex::new(Report::default()),
             anchor_store: Mutex::new(AnchorStoreState::NotRead),
             harvest_wait: Mutex::new(HarvestWait::default()),
         }
@@ -530,10 +540,12 @@ impl<A, C> ChainWitness<A, C> {
     /// diagnosis surface every app renders into its state contract.
     pub fn observation(&self) -> WitnessObservation {
         let observed = self.observed.lock().expect("lock poisoned");
-        let mut peers: Vec<PeerWitnessObservation> = observed.values().cloned().collect();
+        let mut peers: Vec<PeerWitnessObservation> = observed.peers.values().cloned().collect();
         peers.sort_by_key(|p| p.actor.to_hex());
         WitnessObservation {
-            statements_seen: peers.iter().map(|p| p.statements_seen).sum(),
+            statements_seen: peers.iter().map(|p| p.statements_seen).sum::<u64>()
+                + observed.unreported_statements,
+            unreported_statements: observed.unreported_statements,
             anchor_store: *self.anchor_store.lock().expect("lock poisoned"),
             peers,
         }
@@ -672,32 +684,40 @@ where
         // worst case to buy an anchor that was already unreachable once. An
         // empty lookup (never succeeded), an unreachable nest and a chain that
         // fails the rule are the same answer here: the statement stays a claim.
-        let Some(walked) = self.chain_source.walk_from_domain(domain, old, known).await else {
+        // The whole line, as `resolve_line` walks it, so one rule serves both
+        // callers: `first()` is `old`'s own hop, `last()` is where the chain
+        // ends. An empty line (a verified "never succeeded") establishes no
+        // successor, so it is the same answer as a failed walk.
+        let line = self
+            .chain_source
+            .walk_line_from_domain(domain, old, known)
+            .await;
+        let (Some(first), Some(terminal)) = (
+            line.as_ref().and_then(|hops| hops.first()),
+            line.as_ref().and_then(|hops| hops.last()),
+        ) else {
             self.record(old, Verdict::Unproven);
             self.observe(old, |o| o.outcome = WitnessOutcome::WalkFailed);
             return None;
         };
 
-        // `resolve_successor` returns the **terminal** hop of the path, so on a
-        // twice-succeeded identity `walked.old_actor_id` is the *second* hop's
-        // old id — which no participant row bears. The pair the consumer must
-        // act on is therefore (the identity we asked about) → (where the chain
-        // ends), never the terminal step verbatim; the walk's own contiguity
-        // check is what makes the first half exact.
+        // On a twice-succeeded identity the terminal hop's `old_actor_id` is
+        // the *second* hop's old id — which no participant row bears. The pair
+        // the consumer must act on is therefore (the identity we asked about)
+        // → (where the chain ends), never the terminal step verbatim; the
+        // walk's own contiguity check is what makes the first half exact.
         let verified = VerifiedSuccession {
             old_actor_id: old,
-            new_actor_id: walked.new_actor_id,
-            seq: walked.seq,
-            chain_head: walked.chain_head,
+            new_actor_id: terminal.new_actor_id,
+            seq: terminal.seq,
+            chain_head: terminal.chain_head,
         };
-        // The terminal hop's head is the head of the chain *it* was authorized
-        // under — `old`'s own only on a one-hop path. On a longer one it is the
-        // middle identity's, and remembering it under `old` would hand the next
-        // walk a rewrite guard from another identity's chain, which refuses
-        // `old`'s true chain for good. Such a peer stays TOFU-grade instead.
-        if walked.old_actor_id == old {
-            self.anchors.remember_head(&old, walked.chain_head).await;
-        }
+        // The head held for `old` is the FIRST hop's — the head of `old`'s own
+        // chain, the rewrite/truncation guard the verification rule asks of a
+        // consumer that has verified it. The terminal hop's head belongs to
+        // the middle identity on a longer path, and remembering it under `old`
+        // would refuse `old`'s true chain for good.
+        self.anchors.remember_head(&old, first.chain_head).await;
         self.record(old, Verdict::Verified(verified));
         self.observe(old, |o| o.outcome = WitnessOutcome::SettledByWalk);
         Some(verified)
@@ -824,9 +844,17 @@ where
     /// the state a statement is in before any arm has claimed it, so a row that
     /// never reached an arm — a panic, an await that never returned — reads as
     /// "nothing anchored it" rather than as a verdict it never earned.
-    fn observe(&self, actor: ActorId, f: impl FnOnce(&mut PeerWitnessObservation)) {
+    ///
+    /// Once [`MAX_REPORTED_PEERS`] rows are held a new identity gets none and
+    /// `f` is dropped; [`Self::saw_statement`] still counts its statement.
+    /// Returns whether `actor` has a row.
+    fn observe(&self, actor: ActorId, f: impl FnOnce(&mut PeerWitnessObservation)) -> bool {
         let mut observed = self.observed.lock().expect("lock poisoned");
-        let row = observed
+        let peers = &mut observed.peers;
+        if !peers.contains_key(&actor) && peers.len() >= MAX_REPORTED_PEERS {
+            return false;
+        }
+        let row = peers
             .entry(actor)
             .or_insert_with(|| PeerWitnessObservation {
                 actor,
@@ -839,10 +867,16 @@ where
                 outcome: WitnessOutcome::NoAnchor,
             });
         f(row);
+        true
     }
 
     fn saw_statement(&self, actor: ActorId) {
-        self.observe(actor, |o| o.statements_seen += 1);
+        if !self.observe(actor, |o| o.statements_seen += 1) {
+            self.observed
+                .lock()
+                .expect("lock poisoned")
+                .unreported_statements += 1;
+        }
     }
 
     fn saw_memo_hit(&self, actor: ActorId) {
@@ -1443,25 +1477,6 @@ pub async fn walk_at_nest_url(
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
 impl SuccessionChainSource for NativeSuccessionChainSource {
-    async fn walk_from_domain(
-        &self,
-        handle_domain: &str,
-        old: ActorId,
-        known_head: Option<ChainHead>,
-    ) -> Option<VerifiedSuccession> {
-        let domain = handle_domain.to_string();
-        tokio::time::timeout(WITNESS_ROUND_TRIP_BUDGET, async move {
-            // SRV-aware, so a peer nest on a non-standard port stays reachable
-            // without the port ever being typed anywhere (the same
-            // `resolve_full_url` semantics onboarding's handle probe uses).
-            let url = fauna_core::resolve::resolve_full_url(&format!("https://{domain}")).await;
-            dial_and_walk(&url, old, known_head).await
-        })
-        .await
-        .ok()
-        .and_then(AnchoredWalk::successor)
-    }
-
     async fn walk_line_from_domain(
         &self,
         handle_domain: &str,
@@ -1469,9 +1484,10 @@ impl SuccessionChainSource for NativeSuccessionChainSource {
         known_head: Option<ChainHead>,
     ) -> Option<Vec<VerifiedSuccession>> {
         let domain = handle_domain.to_string();
-        // The same route and the same budget as the terminal walk above: only
-        // what the shared body returns differs.
         tokio::time::timeout(WITNESS_ROUND_TRIP_BUDGET, async move {
+            // SRV-aware, so a peer nest on a non-standard port stays reachable
+            // without the port ever being typed anywhere (the same
+            // `resolve_full_url` semantics onboarding's handle probe uses).
             let url = fauna_core::resolve::resolve_full_url(&format!("https://{domain}")).await;
             let anon = fauna_anon_client::AnonymousNestClient::connect(&url)
                 .await
@@ -1551,8 +1567,15 @@ pub fn state_json(
             // climbing while `parked` stays up is a set's commit rail
             // waiting on the sweep to settle its owner.
             "held_commits": counts.held_commits,
+            // Statements a full park slot refused (`identity-succession.md`
+            // § The succession statement (wire) → *The slot's replacement
+            // policy*): non-zero reads as a member pre-filling a slot.
+            "park_full": counts.park_full,
         },
         "verified_statements": observation.statements_seen,
+        // Non-zero: the `peers` rows below are truncated at the report's
+        // bound — the statements are in the total above, without a row.
+        "unreported_statements": observation.unreported_statements,
         "peers": observation.peers.iter().map(|p| serde_json::json!({
             "actor_id": p.actor.to_hex(),
             "statements_seen": p.statements_seen,

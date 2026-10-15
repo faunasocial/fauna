@@ -12,44 +12,53 @@ shared actor's mailbox down and re-enabled it, so UID 1 of the session actor's
 INBOX was sealed to a key the account no longer held, and every later receive
 test waited forever for mail the drain never reached.
 
-The journey reproduces that shape through the app UI alone (convention 8):
+The journey reproduces that shape with every binary real:
 
   enable mail → a real inbound email A is delivered through the real MTA and
-  surfaces decrypted in Conversations → the user **rotates the mail keys three
-  times** (each a fresh MSEK; the grace window keeps the current key and two
-  priors — `SNAPSHOT_GRACE_KEYPAIRS` — so the third rotation drops A's
-  generation and A's seal is addressed to no key this account holds any more)
-  → **the app process is restarted**
-  (a fresh receive loop re-drains the mailbox from UID 0, so it MEETS record A
-  again under the new keys — exactly the sweep's per-module cold relaunch) →
-  a second inbound email B is delivered → B surfaces decrypted in
+  surfaces decrypted in Conversations → **A's sealed body is damaged where it
+  rests on nest disk** (`helpers.segment_at_rest.unopenable_mail_record`, one
+  ciphertext byte flipped in its finalized `__mail` segment) → **the app
+  process is restarted** (a fresh receive loop re-drains the mailbox from
+  UID 0, so it MEETS record A again — exactly the sweep's per-module cold
+  relaunch) → a second inbound email B is delivered → B surfaces decrypted in
   Conversations (the drain moved past A) → the page reports the skipped
   record on `error-message` (`conversations.errors.mail_unopenable`, the
   floor of the page-error stack — `ui/conversations.md` § Errors & edge
   cases).
 
-Why rotation and not disable → re-enable (the journey's shape until
-2026-09-30): since `fauna.state.mail`'s cut, an email-only disable leaves the
-MSEK dormant on the account's mail custody (its state row is present-wins, the
-MSEK being irrecoverable) and a re-enable mints a fresh credential under that
-SAME key, so A stays openable — the no-data-loss direction
-(`mail-credentials.md` § MSEK lifecycle, *Disable mail*). Rotating past the
-grace window is how a record honestly becomes unopenable now.
+Why a tampered envelope: the goal names two causes of an unopenable record —
+a seal addressed to no generation the account holds, or a malformed or
+tampered envelope — and states that neither a rotation nor a disable →
+re-enable produces the first (every MSEK generation is carried, and a
+disable keeps the MSEK dormant; `mail-app-surface.md` § *Unopenable
+records*). This test's earlier shapes relied on exactly those two and went
+red once the product stopped losing keys; a foreign recipient seal key does
+not reach the seal path either, because the MTA seals to the account's
+published per-epoch key schedule, which a standing-key write leaves intact.
+The tamper is a fault at rest the user cannot cause through the UI, so it
+stands in for no user mutation (convention 8's fixture carve-out). The nest
+checks the record's CID header but never re-hashes the block, so it still
+serves the record, and only the client's open fails — the real
+fetch → open → skip path, never a test seam inside it.
 
 Why the restart is load-bearing: within one process the cursor is already
-past A when the keys rotate, so A is never re-read and nothing is skipped.
-The unopenable case is a RE-DRAIN under changed keys — a relaunch, the sweep's
-own shape — so the test restarts the app rather than pretending.
+past A when it is damaged, so A is never re-read and nothing is skipped.
+The unopenable case is a RE-DRAIN — a relaunch, the sweep's own shape — so
+the test restarts the app rather than pretending. The skip ledger is per app
+run, so the restart also proves the fresh process re-meets A and counts it
+again.
 
 ⚠ A DEDICATED actor (``dedicated_actor_app``), never the shared session
 ``test_user``. Record A stays unopenable in its owner's INBOX for good, by
-design, and the rotations also strand every record delivered before it; on
-``test_user`` the floor would stand on the conversations page for the rest of
-the run. On its own actor the count is also EXACT: A is the one record this
+design; on ``test_user`` the floor would stand on the conversations page for
+the rest of the run. On its own actor the count is also EXACT: A is the one record this
 mailbox cannot open.
 
 Not `inject_inbound_for_test` (that injects plaintext past the crypto). Every
 binary is real, the seal / fetch / open / skip / ingest all run for real.
+Where the harness cannot write the nest's data dir (a nest mode whose data
+dir it does not own), the test declares `skip_environment` — no record can be
+damaged at rest there.
 
 Test taxonomy:
 - `tier_3` (mocking depth): every binary real, real SMTP wire, a real client
@@ -66,11 +75,13 @@ import time
 
 import pytest
 
+from helpers.app_surface import skip_environment
 from helpers.budgets import MLS_HANDSHAKE_S
 from helpers.mail_wire import _connect_smtp_starttls
 from helpers.waiting import wait_until
 from i18n.strings import S
 from helpers.mail_aliases import add_exact_alias
+from helpers.segment_at_rest import unopenable_mail_record
 
 pytestmark = [
     pytest.mark.tier_3,
@@ -157,34 +168,31 @@ def test_mailbox_keeps_receiving_past_a_record_the_reenabled_keys_cannot_open(
     recipient_addr = f"{local_part}@{domain}"
     add_exact_alias(nest_instance["url"], actor["signing_key"], domain, local_part)
 
-    # ── 2. Email A arrives under the FIRST key generation and renders — the
-    # sanity half: the receive path works before anything is torn down.
+    # ── 2. Email A arrives and renders — the sanity half: the receive path
+    # works before anything is damaged. Surfacing it is also the one read
+    # that finalizes its segment on disk, which the tamper below needs.
     nonce_a = f"reenablea{int(time.time() * 1000)}qx"
     _deliver_inbound(
         mail_bridge_mta.mx_port, domain, recipient_addr, _message(recipient_addr, nonce_a),
         time.monotonic() + 40.0,
     )
     app.conversations.navigate()
-    _wait_for_nonce(app, nonce_a, what="before the re-enable", mail_bridge_mta=mail_bridge_mta)
+    _wait_for_nonce(app, nonce_a, what="before the tamper", mail_bridge_mta=mail_bridge_mta)
 
-    # ── 3. Rotate the mail keys three times, through the app. The grace
-    # window holds the current MSEK and two priors (`SNAPSHOT_GRACE_KEYPAIRS`
-    # = 3), so the third rotation retires A's generation: A's seal is now
-    # addressed to no key this account holds.
-    app.mail_settings.navigate()
-    for n in range(1, 4):
-        app.mail_settings.rotate_keys()
-        assert app.mail_settings.wait_for_rotation_to_finish(timeout=60.0), (
-            f"rotation {n} of 3 never finished (the confirm form stayed open); "
-            f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
+    # ── 3. Damage A's sealed body at rest — a tampered envelope, the goal's
+    # cause the product can still reach. A is this mailbox's newest (and only)
+    # record, which is the one the helper damages.
+    try:
+        _, uid_a = unopenable_mail_record(nest_instance, bytes.fromhex(actor["actor_id_hex"]))
+    except PermissionError:
+        skip_environment(
+            "the nest's data dir is not writable by the harness in this nest mode, "
+            "so no record can be damaged at rest"
         )
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=15.0), (
-        "a rotation re-wraps every live credential, so one must remain; "
-        f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
-    )
+    assert uid_a == 1, f"record A must be the mailbox's first record; the tamper hit uid {uid_a}"
 
     # ── 4. RESTART the app: the fresh receive loop re-drains the mailbox from
-    # UID 0 under the NEW keys and meets record A — the sweep's per-module
+    # UID 0 and meets the damaged record A — the sweep's per-module
     # cold-relaunch shape. `hard_reload` relaunches and replays the login, so
     # the same actor reconnects. The mailbox needs no re-confirm: its keys are
     # the account's mail custody, which the fresh process reads back.
@@ -192,7 +200,7 @@ def test_mailbox_keeps_receiving_past_a_record_the_reenabled_keys_cannot_open(
     app.mail_settings.navigate()
     app.mail_settings.ensure_mail_enabled()
 
-    # ── 5. Email B arrives under the NEW keys. Its surfacing proves the drain
+    # ── 5. Email B arrives. Its surfacing proves the drain
     # moved PAST the unopenable record A: before the fix the cursor stuck at
     # A forever and B was never ingested.
     nonce_b = f"reenableb{int(time.time() * 1000)}qx"
@@ -202,16 +210,16 @@ def test_mailbox_keeps_receiving_past_a_record_the_reenabled_keys_cannot_open(
     )
     app.conversations.navigate()
     found_b = _wait_for_nonce(
-        app, nonce_b, what="after the re-enable + restart", mail_bridge_mta=mail_bridge_mta
+        app, nonce_b, what="after the tamper + restart", mail_bridge_mta=mail_bridge_mta
     )
     assert found_b.rail == "Smtp", f"received mail must land on the Smtp rail; got {found_b.rail!r}"
 
-    # A itself is gone for good — sealed to a key rotated out of the window —
+    # A itself is gone for good — its sealed body no longer authenticates —
     # and the fresh process could not have ingested it. (Its pre-restart
     # rendering lived only in that process's memory.)
     assert _thread_with_nonce(app, nonce_a) is None, (
-        f"record A ({nonce_a!r}) is sealed to a rotated-out key and cannot have "
-        "opened after the restart; its presence means the drain never re-met it "
+        f"record A ({nonce_a!r}) was damaged at rest and cannot have opened "
+        "after the restart; its presence means the drain never re-met it "
         "(the restart did not re-drain from UID 0) — the containment property "
         "is then untested here"
     )

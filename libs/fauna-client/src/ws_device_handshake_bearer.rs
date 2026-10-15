@@ -52,7 +52,7 @@ use crate::ws_challenge_bearer::{LockedLatch, SupersededLatch, map_anon_err};
 pub struct WsDeviceHandshakeBearer {
     nest_url: String,
     actor_id: [u8; 32],
-    device_signing_key: ed25519_dalek::SigningKey,
+    device_signing_key: PrincipalKeySource,
     token_cache: TokenCache,
     superseded: SupersededLatch,
     /// The lock's twin of `superseded` — the device handshake enforces the
@@ -70,16 +70,59 @@ pub struct WsDeviceHandshakeBearer {
 /// loops for ever against a nest that will never answer otherwise.
 pub type NotRegisteredHook = Arc<dyn Fn() + Send + Sync>;
 
+/// Where a device-principal client reads the key it signs each handshake with
+/// — resolved at every mint, never captured at construction.
+///
+/// **The writer key can change under a running client.** An assembly that
+/// finds the slot's key loaded over a store with no stamped writer, a
+/// lost-slot re-mint, a burnt journal and principal succession all rotate the
+/// machine's writer inside one runtime worker (`account-replica-posture.md`
+/// § The store device principal), and the enrollment pass then registers the
+/// successor's grant. A client holding the key it was built with would keep
+/// signing the retired one, which the nest answers `not_registered` for the
+/// life of the process: the data path never comes up, and every first
+/// custody write's escrow deposit fails until the app is relaunched
+/// (`transport-connection.md` § The principal session). So a production host
+/// passes [`Self::reading`] over the machine's slot — the read the agent's
+/// renewal loop already makes at every renewal — and the client follows
+/// whatever key the slot holds now. A fixed key ([`From<SigningKey>`]) is for
+/// a host that holds no slot (the conformance fixtures).
+///
+/// [`From<SigningKey>`]: #impl-From%3CSigningKey%3E-for-PrincipalKeySource
+#[derive(Clone)]
+pub struct PrincipalKeySource(Arc<dyn Fn() -> Option<ed25519_dalek::SigningKey> + Send + Sync>);
+
+impl PrincipalKeySource {
+    /// Read the key from `read` at every mint. `None` = no key to sign with
+    /// (a slot emptied by a sign-out): the mint fails as a transport fault and
+    /// the connect retry tries again, exactly as for an offline nest.
+    pub fn reading(
+        read: impl Fn() -> Option<ed25519_dalek::SigningKey> + Send + Sync + 'static,
+    ) -> Self {
+        Self(Arc::new(read))
+    }
+
+    fn current(&self) -> Option<ed25519_dalek::SigningKey> {
+        (self.0)()
+    }
+}
+
+impl From<ed25519_dalek::SigningKey> for PrincipalKeySource {
+    fn from(key: ed25519_dalek::SigningKey) -> Self {
+        Self::reading(move || Some(key.clone()))
+    }
+}
+
 impl WsDeviceHandshakeBearer {
     pub fn new(
         nest_url: impl Into<String>,
         actor_id: [u8; 32],
-        device_signing_key: ed25519_dalek::SigningKey,
+        device_signing_key: impl Into<PrincipalKeySource>,
     ) -> Self {
         Self {
             nest_url: nest_url.into().trim_end_matches('/').to_string(),
             actor_id,
-            device_signing_key,
+            device_signing_key: device_signing_key.into(),
             token_cache: TokenCache::default(),
             superseded: SupersededLatch::default(),
             locked: LockedLatch::default(),
@@ -125,25 +168,29 @@ impl WsDeviceHandshakeBearer {
                 &self.nest_url,
             ));
         }
-        fauna_anon_client::mint_bearer_over_device_handshake(
-            &self.nest_url,
-            self.actor_id,
-            &self.device_signing_key,
-        )
-        .await
-        .inspect(|_| self.locked.clear())
-        .map_err(|e| {
-            if let fauna_anon_client::AnonClientError::Rpc(err) = &e {
-                self.superseded.observe(err);
-                self.locked.observe(err);
-                if err.code == fauna_protocol::RpcError::CODE_NOT_REGISTERED
-                    && let Some(hook) = &self.on_not_registered
-                {
-                    hook();
+        // The key the slot holds NOW ([`PrincipalKeySource`]) — a writer
+        // rotated since the last mint signs this one.
+        let Some(key) = self.device_signing_key.current() else {
+            return Err(ApiError::Transport(
+                "device-principal client: no store writer key to sign the device handshake with"
+                    .into(),
+            ));
+        };
+        fauna_anon_client::mint_bearer_over_device_handshake(&self.nest_url, self.actor_id, &key)
+            .await
+            .inspect(|_| self.locked.clear())
+            .map_err(|e| {
+                if let fauna_anon_client::AnonClientError::Rpc(err) = &e {
+                    self.superseded.observe(err);
+                    self.locked.observe(err);
+                    if err.code == fauna_protocol::RpcError::CODE_NOT_REGISTERED
+                        && let Some(hook) = &self.on_not_registered
+                    {
+                        hook();
+                    }
                 }
-            }
-            map_anon_err(e, &self.nest_url)
-        })
+                map_anon_err(e, &self.nest_url)
+            })
     }
 }
 
@@ -183,12 +230,15 @@ impl BearerSource for WsDeviceHandshakeBearer {
 /// `AccountRuntimeParams::process_rpc`, and the client W5.5's agent will run
 /// everything on.
 ///
-/// `on_not_registered` is the host's [`NotRegisteredHook`] — every production
-/// host passes one that voids the machine's registration latch.
+/// `writer_key` is resolved at every mint ([`PrincipalKeySource`]) — every
+/// production host passes a read of the machine's slot, so a writer rotated
+/// under the runtime signs the next handshake. `on_not_registered` is the
+/// host's [`NotRegisteredHook`] — every production host passes one that voids
+/// the machine's registration latch.
 pub fn device_principal_nest_client(
     nest_url: &str,
     actor_id: [u8; 32],
-    writer_key: ed25519_dalek::SigningKey,
+    writer_key: impl Into<PrincipalKeySource>,
     on_not_registered: Option<NotRegisteredHook>,
 ) -> Arc<NestClient> {
     let mut bearer = WsDeviceHandshakeBearer::new(nest_url, actor_id, writer_key);
@@ -412,6 +462,49 @@ mod tests {
         assert!(
             retry.is_finished(),
             "the retry outlived every owner of its client — a dialler nothing can stop"
+        );
+    }
+
+    /// The signing key is resolved at every mint, never at construction: a
+    /// writer rotated under the client signs the next handshake
+    /// ([`PrincipalKeySource`]). Nothing listens here, so each mint fails —
+    /// what is pinned is that each one asked the source afresh, and that an
+    /// emptied slot fails the mint without a dial.
+    #[tokio::test]
+    async fn the_signing_key_is_read_at_every_mint() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let slot = Arc::new(std::sync::Mutex::new(Some(
+            ed25519_dalek::SigningKey::from_bytes(&[4u8; 32]),
+        )));
+        let source = {
+            let (reads, slot) = (Arc::clone(&reads), Arc::clone(&slot));
+            PrincipalKeySource::reading(move || {
+                reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                slot.lock().unwrap().clone()
+            })
+        };
+        let bearer = WsDeviceHandshakeBearer::new(&url, [3u8; 32], source);
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "construction reads no key"
+        );
+        bearer.bearer().await.expect_err("nothing listens");
+        bearer.bearer().await.expect_err("nothing listens");
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "every mint reads the key the slot holds now"
+        );
+
+        *slot.lock().unwrap() = None;
+        let err = bearer.bearer().await.expect_err("no key, no mint");
+        assert!(
+            matches!(&err, ApiError::Transport(m) if m.contains("no store writer key")),
+            "an emptied slot fails the mint as a retryable fault; got {err:?}"
         );
     }
 

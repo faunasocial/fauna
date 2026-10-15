@@ -31,7 +31,7 @@ use fauna_ui_ids as ids;
 
 use super::{
     Action, AdminField, AdminState, GUARDIAN_NONE_VALUE, USERS_PAGE_SIZE, UsersSnapshot,
-    UsersState, guardian_draft_names_someone,
+    UsersState, guardian_draft_names_someone, next_users_offset, prev_users_offset,
 };
 use crate::element::{Element, Field, Gesture, SelectTarget};
 use crate::pages::Page;
@@ -354,6 +354,12 @@ fn admit_section(state: &UsersState, snapshot: &UsersSnapshot) -> Vec<Element> {
             SelectTarget::AdmitTier,
             snapshot.tiers.clone(),
         ),
+        guardian_picker(
+            "admin-users-admit-guardian-select",
+            &state.admit_guardian_draft,
+            SelectTarget::AdmitGuardian,
+            snapshot,
+        ),
         Element::gesture_button(
             ids::ADMIN_USERS_ADMIT_BUTTON,
             t::users_page::ADMIT_BUTTON,
@@ -636,8 +642,9 @@ fn user_list_section(state: &UsersState, snapshot: &UsersSnapshot) -> Vec<Elemen
     }
 
     // Pagination — always present (`view` anchor → a page-indicator label; the e2e
-    // gates on `count("admin-users-pagination") > 0`). Prev/next are guarded no-ops
-    // at the bounds (`apply_local`), so a click at page 1/last leaves the list put.
+    // gates on `count("admin-users-pagination") > 0`). Prev/next paint DISABLED at
+    // the bounds (admin.md § Users pagination; linux's `set_sensitive`), read off
+    // the same steppers `apply_local` guards the click with, so the two never part.
     let pages = fauna_core::format::total_pages(snapshot.total, USERS_PAGE_SIZE);
     let current = fauna_core::format::current_page(state.offset, USERS_PAGE_SIZE);
     els.push(Element::label(
@@ -647,13 +654,13 @@ fn user_list_section(state: &UsersState, snapshot: &UsersSnapshot) -> Vec<Elemen
     els.push(Element::gesture_button(
         ids::ADMIN_USERS_PREV_PAGE,
         t::users_page::PREV_PAGE,
-        true,
+        prev_users_offset(state).is_some(),
         Gesture::Admin(Action::UsersPrevPage),
     ));
     els.push(Element::gesture_button(
         ids::ADMIN_USERS_NEXT_PAGE,
         t::users_page::NEXT_PAGE,
-        true,
+        next_users_offset(state).is_some(),
         Gesture::Admin(Action::UsersNextPage),
     ));
 
@@ -823,6 +830,7 @@ mod tests {
                 "admin-users-admit-actor-input",
                 "admin-users-admit-handle-input",
                 "admin-users-admit-tier-select",
+                "admin-users-admit-guardian-select",
                 "admin-users-admit-button",
                 // Section — invite (form closed → the reveal button).
                 "admin-users-invite-section",
@@ -1030,12 +1038,41 @@ mod tests {
         assert_eq!(label, "bob", "the unchanged label rides through");
 
         // Pagination: `apply_local` moves the offset, guarded at both bounds (total
-        // 120 → three pages: [0,50), [50,100), [100,120)).
+        // 120 → three pages: [0,50), [50,100), [100,120)) — and the controls paint
+        // that bound as their enabled state (admin.md § Users pagination: the e2e
+        // asserts `prev` disabled at offset 0 rather than clicking through it).
+        let enabled = |app: &crate::app::App, id: &str| {
+            users_elements(&app.admin)
+                .iter()
+                .find(|e| e.id == id)
+                .unwrap_or_else(|| panic!("{id} rendered"))
+                .enabled
+        };
         assert_eq!(app.admin.users.offset, 0);
+        assert!(
+            !enabled(&app, ids::ADMIN_USERS_PREV_PAGE),
+            "prev disabled on page 1"
+        );
+        assert!(
+            enabled(&app, ids::ADMIN_USERS_NEXT_PAGE),
+            "next live on page 1 of 3"
+        );
         apply_local(&mut app, Action::UsersNextPage);
         assert_eq!(app.admin.users.offset, 50);
+        assert!(
+            enabled(&app, ids::ADMIN_USERS_PREV_PAGE),
+            "prev live past page 1"
+        );
+        assert!(
+            enabled(&app, ids::ADMIN_USERS_NEXT_PAGE),
+            "next live on page 2 of 3"
+        );
         apply_local(&mut app, Action::UsersNextPage);
         assert_eq!(app.admin.users.offset, 100);
+        assert!(
+            !enabled(&app, ids::ADMIN_USERS_NEXT_PAGE),
+            "next disabled on the last page"
+        );
         apply_local(&mut app, Action::UsersNextPage); // last page (100 + 50 >= 120)
         assert_eq!(
             app.admin.users.offset, 100,
@@ -1496,6 +1533,53 @@ mod tests {
     /// option list never matched the handle the driver sent, so the draft stayed
     /// on the sentinel and every ward was admitted UNSUPERVISED — a green select
     /// that did nothing (`test_family.py`).
+    /// The Admit section's picker (`admin-users-admit-guardian-select`) offers the
+    /// same handle-keyed options as the two admission pickers and resolves the
+    /// committed label to the guardian's actor id on the admit call — a ward is
+    /// admitted supervised, never silently ordinary. No band travels from it yet.
+    #[test]
+    fn admit_guardian_picker_round_trips_into_the_admit_call() {
+        let users = vec![user(0x11, "free", "alice"), user(0x22, "free", "bob")];
+        let mut app = app_on_users(snapshot(users, 2));
+        let id = "admin-users-admit-guardian-select";
+
+        let els = users_elements(&app.admin);
+        let picker = els.iter().find(|e| e.id == id).expect("picker painted");
+        match &picker.role {
+            crate::element::Role::Select { options, .. } => assert_eq!(
+                options,
+                &vec!["None".to_string(), "alice".to_string(), "bob".to_string()]
+            ),
+            _ => panic!("{id} must be a Select"),
+        }
+        assert_eq!(picker.text, "None");
+
+        app.admin.users.admit_actor_input = "55".repeat(32);
+        let admit_guardian = |app: &crate::app::App| {
+            let super::super::UsersMutation::AdmitUser { guardian, .. } =
+                super::super::admit_mutation(&app.admin.users).expect("valid actor id")
+            else {
+                panic!("expected AdmitUser");
+            };
+            guardian
+        };
+        assert_eq!(
+            admit_guardian(&app),
+            None,
+            "the sentinel admits an ordinary account"
+        );
+
+        apply_local(&mut app, Action::SetAdmitGuardian("bob".to_string()));
+        assert_eq!(admit_guardian(&app), Some(vec![0x22; 32]));
+
+        apply_local(&mut app, Action::SetAdmitGuardian("ghost".to_string()));
+        assert_eq!(
+            admit_guardian(&app),
+            None,
+            "an unlisted label is no guardian"
+        );
+    }
+
     #[test]
     fn guardian_pickers_round_trip_labels() {
         let mut users = vec![

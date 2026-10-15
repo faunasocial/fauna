@@ -43,6 +43,14 @@
                 <TextBlock x:Name="SubdomainUrl"
                            AutomationProperties.AutomationId="{x:Bind ids:Ids.WebSettingsSubdomainUrl}"
                            TextWrapping="Wrap" />
+                <!-- A blanked site tells its author (web-content-hosting.md § Routing,
+                     render, serving): information only, no button; the copy
+                     affordances below stay enabled. Shown only while publish.list
+                     answers rendered_pages_down. -->
+                <TextBlock x:Name="RenderStatus"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.WebSettingsRenderStatus}"
+                           Visibility="Collapsed" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=web_settings/render_status_down}" />
             </StackPanel>
 
             <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.WebSettingsContentInfo}"

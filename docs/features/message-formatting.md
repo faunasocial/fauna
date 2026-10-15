@@ -39,7 +39,7 @@ Stamped 2026-09-19 at e9152e3330.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | |
-| linux | ✅ full | 0.1.2-dev+c4a95c20 standalone |
+| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
 | windows | ✅ full | 0.1.3-dev+862c7d57 standalone |
 | macos | ⚠ partial | |
 | ios | ⚠ partial | |

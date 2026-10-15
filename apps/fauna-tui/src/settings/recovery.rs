@@ -198,8 +198,8 @@ impl MemberReviewPass<'_> {
 }
 
 /// The let-go of a dead generation, beside the four actions
-/// (`settings.md` § Recovery kit; `account-data-taxonomy.md` § The generation
-/// machinery → *Fleet-scope reclamation*, clause (3)(j)): the line, its
+/// (`settings.md` § Recovery kit; `fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (3)(j)): the line, its
 /// type-to-confirm field and its button — all three ONLY while the runtime's
 /// dead read answers non-empty, the veto's shape, which is why ui.yaml has
 /// them in `optional_elements`. The line's copy is the shared projection's
@@ -685,11 +685,10 @@ fn now_secs() -> i64 {
 /// Split out of [`recovery_elements`] so the wording stays unit-testable
 /// without building a whole settings state.
 fn sweep_elements(sweep: Option<&crate::settings::SweepStatus>) -> Vec<Element> {
-    use fauna_client_recovery::ceremony::SweepRetryAffordance;
     let Some(sweep) = sweep else {
         return Vec::new();
     };
-    let copy = sweep.render_copy(SweepRetryAffordance::Rendered);
+    let copy = sweep.render_copy();
     [
         (ids::RECOVERY_KIT_SWEEP_STATUS, copy.outcome),
         (ids::RECOVERY_KIT_SWEEP_UNVOUCHED_STATUS, copy.unattested),

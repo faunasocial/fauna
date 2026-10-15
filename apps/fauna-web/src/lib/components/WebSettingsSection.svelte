@@ -34,7 +34,14 @@
     type SiteLinkDisabledReason,
     type SubdomainView,
   } from '$lib/wasm';
-  import { bestEffortCopyToClipboard, webPage, siteLink, type PublishedPost } from '$lib/web-publish';
+  import { sameActorSince } from '$lib/actorScope';
+  import {
+    bestEffortCopyToClipboard,
+    patchWebPage,
+    setWebPage,
+    siteLink,
+    type PublishedPost,
+  } from '$lib/web-publish';
   import { onMount } from 'svelte';
   import { afterNavigate } from '$app/navigation';
   import { t } from '$lib/i18n/strings';
@@ -96,6 +103,10 @@
   // same-route re-navigation. Mirrors linux's `set_visible_child_forced` fix
   // for the identical GTK-side gap (`views/nav_rail.rs`).
   async function hydrate(): Promise<void> {
+    // The identity seam (`$lib/actorScope`): captured before the first await,
+    // handed to `setWebPage` so a read begun as A cannot repopulate the shared
+    // store after an in-heap actor change.
+    const stillThisActor = sameActorSince();
     try {
       await ensureWasm();
       const secretHex = $identity?.secretHex ?? '';
@@ -110,13 +121,16 @@
       posts = site.posts;
       renderedPagesDown = site.rendered_pages_down;
       hydrated = true;
-      webPage.set({
-        enabled: subEnabled,
-        servingDomain,
-        domains: domainRows,
-        posts: site.posts,
-        renderedPagesDown: site.rendered_pages_down,
-      });
+      setWebPage(
+        {
+          enabled: subEnabled,
+          servingDomain,
+          domains: domainRows,
+          posts: site.posts,
+          renderedPagesDown: site.rendered_pages_down,
+        },
+        stillThisActor,
+      );
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
@@ -132,9 +146,10 @@
   // Flip the opt-in, then re-render from the nest's echoed state (non-optimistic).
   async function onToggle(): Promise<void> {
     error = '';
+    const stillThisActor = sameActorSince();
     try {
       applyView(await webSetSubdomainEnabled($identity?.secretHex ?? '', !enabled));
-      webPage.update((p) => (p ? { ...p, enabled } : p));
+      patchWebPage((p) => ({ ...p, enabled }), stillThisActor);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
@@ -196,6 +211,7 @@
   // disagrees with (mirrors linux's `unpublish`).
   async function unpublish(post: PublishedPost): Promise<void> {
     error = '';
+    const stillThisActor = sameActorSince();
     try {
       const secretHex = $identity?.secretHex ?? '';
       await webPublishUnset(secretHex, post.post_id);
@@ -203,8 +219,9 @@
       posts = site.posts;
       renderedPagesDown = site.rendered_pages_down;
       if (copied && samePost(copied.postId, post.post_id)) copied = null;
-      webPage.update((p) =>
-        p ? { ...p, posts: site.posts, renderedPagesDown: site.rendered_pages_down } : p,
+      patchWebPage(
+        (p) => ({ ...p, posts: site.posts, renderedPagesDown: site.rendered_pages_down }),
+        stillThisActor,
       );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

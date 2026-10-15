@@ -37,6 +37,11 @@ public sealed partial class MailAliasesPanel : UserControl
     private ServiceClients? _clients;
     private MailAliasesViewModel? _vm;
 
+    /// <summary>The kind picker's three-way selection (the picker's `kind` attr).</summary>
+    private enum SheetKind { Exact, Wildcard, Disposable }
+
+    private SheetKind _kind = SheetKind.Exact;
+
     private FormMode _formMode = FormMode.Add;
     // Some(hex) while the sheet is editing that row (Edit mode).
     private string? _editingId;
@@ -195,8 +200,11 @@ public sealed partial class MailAliasesPanel : UserControl
     {
         _formMode = mode;
         _editingId = row?.AliasIdHex;
-        KindPicker.IsChecked = row?.IsWildcard ?? false;
+        _kind = row?.IsWildcard == true ? SheetKind.Wildcard : SheetKind.Exact;
         KindPicker.IsEnabled = mode == FormMode.Add;
+        TtlInput.Text = string.Empty;
+        UsesInput.Text = string.Empty;
+        ApplyKind();
         PatternInput.Text = row?.Pattern ?? string.Empty;
         LabelInput.Text = row?.Label ?? string.Empty;
         SpamThresholdInput.Text = row?.SpamThresholdOverride?.ToString() ?? string.Empty;
@@ -205,6 +213,40 @@ public sealed partial class MailAliasesPanel : UserControl
         SubmitButton.Content = S.Get("mail_aliases/submit");
         ErrorChanged?.Invoke(null);
         AddSheet.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>Step the add sheet's kind: Exact → Wildcard → Disposable → Exact.</summary>
+    private void KindPicker_Click(object sender, RoutedEventArgs e)
+    {
+        _kind = _kind switch
+        {
+            SheetKind.Exact => SheetKind.Wildcard,
+            SheetKind.Wildcard => SheetKind.Disposable,
+            _ => SheetKind.Exact,
+        };
+        ApplyKind();
+    }
+
+    /// <summary>Paint the picker (label + the `kind` attr as HelpText) and show only the
+    /// inputs the selected kind takes: Disposable is minted, not typed, so the pattern and
+    /// the spam-threshold / hourly-limit controls (the mint does not take them) give way to
+    /// the ttl / uses pair.</summary>
+    private void ApplyKind()
+    {
+        var (key, attr) = _kind switch
+        {
+            SheetKind.Wildcard => ("mail_aliases/kind_wildcard_label", "wildcard"),
+            SheetKind.Disposable => ("mail_aliases/kind_disposable", "disposable"),
+            _ => ("mail_aliases/kind_exact", "exact"),
+        };
+        KindPicker.Content = S.Get(key);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(KindPicker, attr);
+        var disposable = _kind == SheetKind.Disposable;
+        PatternInput.Visibility = disposable ? Visibility.Collapsed : Visibility.Visible;
+        SpamThresholdInput.Visibility = disposable ? Visibility.Collapsed : Visibility.Visible;
+        RatePerHourInput.Visibility = disposable ? Visibility.Collapsed : Visibility.Visible;
+        TtlInput.Visibility = disposable ? Visibility.Visible : Visibility.Collapsed;
+        UsesInput.Visibility = disposable ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private async void GenerateDisposable_Click(object sender, RoutedEventArgs e)
@@ -223,9 +265,17 @@ public sealed partial class MailAliasesPanel : UserControl
         var spam = FaunaFfiMethods.ParseCount(SpamThresholdInput.Text);
         var rate = FaunaFfiMethods.ParseCountI64(RatePerHourInput.Text);
 
-        if (_formMode == FormMode.Add)
+        if (_formMode == FormMode.Add && _kind == SheetKind.Disposable)
         {
-            await _vm.CreateAsync(KindPicker.IsChecked == true, pattern, label, spam, rate);
+            // An empty field means the per-user default (null).
+            await _vm.GenerateDisposableAsync(
+                FaunaFfiMethods.ParseCount(TtlInput.Text),
+                FaunaFfiMethods.ParseCount(UsesInput.Text),
+                label);
+        }
+        else if (_formMode == FormMode.Add)
+        {
+            await _vm.CreateAsync(_kind == SheetKind.Wildcard, pattern, label, spam, rate);
         }
         else
         {
@@ -331,7 +381,7 @@ public sealed partial class MailAliasesPanel : UserControl
         await ArmOrConfirm(sender, "delete");
 
     /// <summary>Arm-then-confirm a destructive per-row button (no modal, no separate
-    /// confirm ID): the first click arms (relabels "Confirm?") and auto-disarms after 4 s;
+    /// confirm ID): the first click arms (relabels to <c>common.confirm_q</c>) and auto-disarms after 4 s;
     /// the second click within the window dispatches. Mirrors the linux <c>wire_two_click</c>
     /// and MailSettingsPanel's revoke confirm.</summary>
     private async Task ArmOrConfirm(object sender, string kind)
@@ -342,7 +392,7 @@ public sealed partial class MailAliasesPanel : UserControl
         {
             _armed = (aliasId, kind);
             var baseLabel = btn.Content;
-            btn.Content = "Confirm?";
+            btn.Content = S.Get("common/confirm_q");
             await Task.Delay(4000);
             if (_armed == (aliasId, kind))
             {

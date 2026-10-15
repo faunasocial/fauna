@@ -75,6 +75,10 @@ public sealed partial class EventsPage : Page
         EventEndBox.PlaceholderText = "YYYY-MM-DDTHH:MM";
         EventLocationBox.PlaceholderText = S.Get("events/location_placeholder");
         CreateEventButton.Content = S.Get("common/create");
+        CalendarImportFileBox.PlaceholderText = S.Get("media/choose_file");
+        CalendarImportBrowseButton.Content = S.Get("devices/sync_locations/browse");
+        CalendarImportButton.Content = S.Get("events/import_ics");
+        CalendarExportButton.Content = S.Get("events/export_ics");
 
         // Draft-persistence v2, events leg (reserved-folders.md § Drafts Sync;
         // events.md § Persistence). Wired once here (the constructor runs once per
@@ -246,6 +250,7 @@ public sealed partial class EventsPage : Page
         CalendarList.ItemsSource = _viewModel.CalendarRows;
         if (_viewModel.CalendarRows.Count > 0)
             CalendarList.Visibility = Visibility.Visible;
+        RenderCalendarFileControls();
         AppDataSnapshot.SetEvents(_viewModel.Events.Select(e =>
             new AppDataSnapshot.EventSnapshot(e.Id, e.Summary,
                 e.Start.ToString("o"), e.End.ToString("o"), e.RsvpStatus)));
@@ -348,6 +353,12 @@ public sealed partial class EventsPage : Page
                     App.CurrentErrorMessage = _viewModel.ErrorMessage;
                 }
                 else { ErrorBar.IsOpen = false; App.CurrentErrorMessage = null; }
+                break;
+            case nameof(EventsViewModel.SelectedCalendar):
+                RenderCalendarFileControls();
+                break;
+            case nameof(EventsViewModel.NoticeMessage):
+                RenderCalendarFileControls();
                 break;
             case nameof(EventsViewModel.MonthYearDisplay):
                 MonthYearText.Text = _viewModel.MonthYearDisplay;
@@ -464,6 +475,61 @@ public sealed partial class EventsPage : Page
             ShellLog.Debug("EventsPage",
                 $"selection reload failed: {ex.Message}");
         }
+    }
+
+    // ── Calendar-level .ics import / export (events.md § Import / Export) ──────
+    // The shared FfiCaldavClient does the parse/seal/PUT (import) and the .ics text
+    // (export); the view-model owns the no-file guard, the counts and the file write.
+    // This page only paints the trio while a calendar is selected and forwards
+    // gestures. Mirrors MediaPage's file-upload box + Browse picker.
+
+    private void RenderCalendarFileControls()
+    {
+        if (_viewModel is null) return;
+        // Absent (Collapsed), never inert, without a selected calendar.
+        CalendarFilePanel.Visibility = _viewModel.SelectedCalendar is null
+            ? Visibility.Collapsed : Visibility.Visible;
+        var notice = _viewModel.NoticeMessage;
+        CalendarFileNotice.Text = notice ?? string.Empty;
+        CalendarFileNotice.Visibility = string.IsNullOrEmpty(notice)
+            ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private async void CalendarImportBrowse_Click(object sender, RoutedEventArgs e)
+    {
+        if (App.MainWindow is null) return;
+        try
+        {
+            var picker = new Windows.Storage.Pickers.FileOpenPicker();
+            picker.SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.Downloads;
+            picker.FileTypeFilter.Add(".ics");
+
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(App.MainWindow);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+
+            var file = await picker.PickSingleFileAsync();
+            if (file is not null)
+                CalendarImportFileBox.Text = file.Path;
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("EventsPage", $"ics file pick failed: {ex.Message}");
+        }
+    }
+
+    private async void CalendarImport_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null) return;
+        await _viewModel.ImportCalendarFileAsync(CalendarImportFileBox.Text);
+        // The imported events list once the VM's re-read lands; rebind like the
+        // selection-change reload does.
+        AgendaPanel.ItemsSource = _viewModel.Events;
+    }
+
+    private async void CalendarExport_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null) return;
+        await _viewModel.ExportSelectedCalendarAsync();
     }
 
     private void NewCalendar_Click(object sender, RoutedEventArgs e)

@@ -669,7 +669,7 @@ pub struct SeatResolution {
     pub exclusive_editing: ExclusiveEditingResolution,
     /// The content-key binding basis of every row the SAME `fauna.folders.list`
     /// read carried, by row id — decision 2's refresh edge
-    /// (`on-demand-files.md` § Shared sets on a capability host): a resident
+    /// (`on-demand-files-shared-sets.md` § Shared sets on a capability host): a resident
     /// engine finds its own set's row by identity here, re-installs its pre-seal
     /// floor, and asks its host to re-resolve when the row moved
     /// ([`crate::engine::SyncEngine::refresh_sync_mode`]). `None` = the list was

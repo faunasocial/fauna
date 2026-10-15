@@ -84,7 +84,8 @@ use fauna_protocol::{
 use fauna_sync_engine::account_runtime::{
     AccountRuntimeParams, AccountStoreHandle, AccountStoreRuntime, AgentPresenceLock,
     AgentPresenceLockOutcome, CRED_NAMESPACE, EnrollmentPass, PeerLegBinding, PeerLegPass,
-    PeerTransportFactory, RuntimePrincipal, StoreRoot, resolve_writer_key_serialized,
+    PeerTransportFactory, RefusedChangeWrite, RuntimePrincipal, StoreRoot,
+    resolve_writer_key_serialized,
 };
 use fauna_sync_engine::device_endpoints_writer::{EndpointFacts, EndpointsPass};
 
@@ -1491,8 +1492,8 @@ async fn endpoint_rows(handle: &AccountStoreHandle) -> Vec<(String, DeviceEndpoi
 }
 
 /// **The pump publishes this device's registration-latch row as its
-/// device-endpoints row statement** (`account-data-taxonomy.md` § The
-/// generation machinery → *Fleet-scope reclamation*, clause (4), *The removal
+/// device-endpoints row statement** (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (4), *The removal
 /// target*, arm (b): the member stating the row is the target, whatever the
 /// nest claims). That arm rests on one argument — the pump passes the latch
 /// row into `ensure_published` — and every other pin either feeds the
@@ -2731,6 +2732,120 @@ async fn own_pump_a_gestures_own_write_and_its_publish_move_nothing() {
         a.change_generation(),
         g0,
         "a gesture served beside or inside a pass moves nothing"
+    );
+
+    a.shutdown().await;
+}
+
+/// A refused inbound scheduling change as the sinks record it — one row per
+/// `uid`, so two records never collapse onto one row.
+fn refused_row(uid: u8, method: &str) -> fauna_core::data::RefusedSchedulingChange {
+    fauna_core::data::RefusedSchedulingChange {
+        uid_hash: fauna_core::hex32::encode(&[uid; 32]),
+        author: Some(fauna_core::hex32::encode(&[0xba; 32])),
+        author_home_nest_url: String::new(),
+        sender_address: String::new(),
+        method: method.into(),
+        reason: "not_the_organizer".into(),
+        summary: "Kickoff".into(),
+        first_refused_at: 100,
+        last_refused_at: 200,
+        occurrences: 1,
+        dismissed_through: 0,
+        extra: std::collections::BTreeMap::new(),
+    }
+}
+
+/// Pin (f): a **background write** — the runtime's own machinery writing with
+/// no surface waiting on the answer, here the refused-change door's `Record`
+/// — moves the generation once, at the command, served between passes or
+/// raced into one (where the run must not count it a second time at its
+/// end); the owner's `Dismiss` through the same door is a gesture and moves
+/// nothing (`account-runtime.md` § Multi-instance concurrency → *A runtime's
+/// own pump is a source of the notice too*, part 2). Red-verified: with
+/// `Cmd::is_background_write` answering `false` for `Record`, the first
+/// waiter hangs; with the run's subtraction dropped for a background write,
+/// the raced record counts twice.
+#[tokio::test]
+async fn own_pump_a_background_write_moves_the_generation_and_a_dismiss_does_not() {
+    // The refused-change kind is `GenerationTip`-sealed, so the door needs
+    // the escrow doors and a trusted holder; the throwaway record below runs
+    // the first-need mint, and the passes after it settle everything the
+    // mint publishes, so the generation measured from `g0` is steady state.
+    let (rpc, _state, tmp) = nest_with_escrow().await;
+    let a = AccountStoreRuntime::start(params_trusting_deployment(tmp.path(), "a", &rpc))
+        .await
+        .expect("start A");
+    a.reconcile_now().await.expect("A's barrier");
+    a.write_refused_scheduling_changes(RefusedChangeWrite::Record(Box::new(refused_row(
+        0, "REPLY",
+    ))))
+    .await
+    .expect("the minting record");
+    a.settled().await;
+    a.reconcile_now().await.expect("a pass after the mint");
+    a.reconcile_now().await.expect("and the echo's");
+    let g0 = a.change_generation();
+
+    // Between passes: the record moves the generation at once — the waiter
+    // wakes on the command, not on a run's end.
+    let waiter = tokio::spawn({
+        let a = a.clone();
+        async move { a.changed_after(g0).await }
+    });
+    let first = refused_row(1, "CANCEL");
+    let key = first.key();
+    assert!(
+        a.write_refused_scheduling_changes(RefusedChangeWrite::Record(Box::new(first)))
+            .await
+            .expect("record"),
+        "the first refusal changes the list"
+    );
+    let g1 = waiter.await.expect("join");
+    assert_eq!(
+        g1,
+        g0 + 1,
+        "a background write served between passes moves the generation once"
+    );
+    a.settled().await; // the publish step the write armed has run
+    assert_eq!(a.change_generation(), g1, "its publish step moves nothing");
+
+    // The owner's dismiss is the Events page's own gesture: nothing moves.
+    assert!(
+        a.write_refused_scheduling_changes(RefusedChangeWrite::Dismiss(key))
+            .await
+            .expect("dismiss"),
+        "the row was open"
+    );
+    a.settled().await;
+    assert_eq!(
+        a.change_generation(),
+        g1,
+        "a dismiss is a gesture — never a source"
+    );
+
+    // Raced into a pass: served inside it or beside it, the record is counted
+    // once, by the command — the run it landed in does not count it again
+    // at its end, and the pass that meets the row's own echo counts nothing.
+    let (report, wrote) = tokio::join!(
+        a.reconcile_now(),
+        a.write_refused_scheduling_changes(RefusedChangeWrite::Record(Box::new(refused_row(
+            2, "REQUEST"
+        ))))
+    );
+    report.expect("pass");
+    assert!(
+        wrote.expect("record"),
+        "the second refusal changes the list"
+    );
+    a.settled().await;
+    a.reconcile_now()
+        .await
+        .expect("a pass that meets the row's echo");
+    assert_eq!(
+        a.change_generation(),
+        g1 + 1,
+        "a background write raced into a pass is counted once, by the command"
     );
 
     a.shutdown().await;
@@ -4059,4 +4174,110 @@ async fn a_full_delegable_scope_parks_a_new_item_and_lands_the_rest() {
     );
     fresh.shutdown().await;
     a.shutdown().await;
+}
+
+/// The holder in the other process, as a non-holder's seated reach sees it:
+/// the agent's `WalkFleetNow` runs the mounted handle's own `walk_fleet` on
+/// the far side of the socket; here it is that handle, in-process.
+struct HolderWalks(AccountStoreHandle);
+
+#[async_trait::async_trait]
+impl fauna_sync_engine::account_runtime::HolderWalk for HolderWalks {
+    async fn walk_fleet_for_non_holder(&self) -> Result<(), String> {
+        self.0.walk_fleet().await.map_err(|e| format!("{e:#}"))
+    }
+}
+
+/// A seated reach whose holder answers that its walk did not land.
+struct HolderRefuses;
+
+#[async_trait::async_trait]
+impl fauna_sync_engine::account_runtime::HolderWalk for HolderRefuses {
+    async fn walk_fleet_for_non_holder(&self) -> Result<(), String> {
+        Err("the holder's walk failed in this test".into())
+    }
+}
+
+/// A non-holder's awaited fleet walk reaches the holder (`account-runtime.md`
+/// § Multi-instance concurrency → *A non-holder's awaited fleet walk reaches
+/// the holder*): beside no seated reach `walk_fleet` answers the role refusal
+/// as before and the non-holder reads no walked row; beside a reach that
+/// walks, the holder walks on its behalf, `walk_fleet` answers `Ok`, and the
+/// non-holder reads the walked rows from the store the two share — no
+/// process-local cache lags the holder's write; a reach whose walk failed
+/// leaves `walk_fleet` an `Err` naming why.
+#[tokio::test]
+async fn a_non_holders_walk_fleet_is_walked_by_the_seated_holder() {
+    let (rpc, _state, tmp) = nest().await;
+    let base: PathBuf = tmp.path().to_path_buf();
+    let holder = AccountStoreRuntime::start(params(&base, "shared", &rpc))
+        .await
+        .expect("start the holder");
+    let sibling = AccountStoreRuntime::start(params(&base, "shared", &rpc))
+        .await
+        .expect("start the sibling");
+    holder.reconcile_now().await.expect("the holder's barrier");
+    assert!(holder.is_engine_holder() && !sibling.is_engine_holder());
+
+    // Another device joins the fleet — its device-set row, a fleet-plane
+    // row its own pass publishes to the nest: only a walk of this device's
+    // fleet scope brings it into the shared store.
+    let me = account().actor_id();
+    let fleet_before = sibling
+        .fleet_device_ids(me)
+        .await
+        .expect("read the fleet")
+        .len();
+    let other = AccountStoreRuntime::start(params(&base, "other", &rpc))
+        .await
+        .expect("start the other device");
+    other
+        .reconcile_now()
+        .await
+        .expect("the other device's pass publishes its row");
+    let fleet_len = || async { sibling.fleet_device_ids(me).await.expect("read").len() };
+    let walked = |len: usize| len > fleet_before;
+    assert!(!walked(fleet_len().await), "nothing walked the row in yet");
+
+    // No reach seated: the role refusal, as before the reach existed.
+    let refused = sibling
+        .walk_fleet()
+        .await
+        .expect_err("a non-holder with no reach walks nothing");
+    assert!(
+        format!("{refused:#}").contains("holds the engine role"),
+        "{refused:#}"
+    );
+    assert!(!walked(fleet_len().await));
+
+    // A reach whose holder's walk failed: an `Err` naming why.
+    sibling.seat_holder_walk(Arc::new(HolderRefuses));
+    let failed = sibling
+        .walk_fleet()
+        .await
+        .expect_err("the holder's failed walk is the non-holder's");
+    assert!(
+        format!("{failed:#}").contains("the holder's walk failed in this test"),
+        "{failed:#}"
+    );
+    assert!(!walked(fleet_len().await));
+
+    // A reach that walks: the holder walks, the non-holder reads the rows.
+    sibling.seat_holder_walk(Arc::new(HolderWalks(holder.clone())));
+    sibling
+        .walk_fleet()
+        .await
+        .expect("the holder walked for the non-holder");
+    assert!(
+        !sibling.is_engine_holder(),
+        "the single-writer contract is untouched: the holder walked"
+    );
+    assert!(
+        walked(fleet_len().await),
+        "the non-holder reads the row its holder walked in"
+    );
+
+    holder.shutdown().await;
+    sibling.shutdown().await;
+    other.shutdown().await;
 }

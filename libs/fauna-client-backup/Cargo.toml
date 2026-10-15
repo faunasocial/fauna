@@ -54,6 +54,13 @@ hex = { workspace = true }
 # transitive weight even though only the gated helpers use it.
 fauna-i18n = { path = "../fauna-i18n" }
 
+# The lived-in recovery's leg (`recover_leg`) carries `anyhow` context on its
+# delivery chain (the seams it drives — `fauna_core::file_download::BlobFetcher`,
+# `seal_blob` — already return `anyhow::Result`) and hashes each opened segment
+# half with `blake3` for the skip. Both wasm-clean, both already in the graph.
+anyhow = { workspace = true }
+blake3 = { workspace = true }
+
 # native_store's FileAuditStateStore encodes/decodes AuditStateSnapshot as JSON
 # on disk — a real (non-test) dependency now that the store lives here rather
 # than per-shell. Native-only in practice (native_store is
@@ -68,11 +75,6 @@ fauna-protocol = { path = "../fauna-protocol", default-features = false, feature
 fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
 
 [dev-dependencies]
-# The inclusion tests implement `fauna_core::file_download::BlobFetcher` over an
-# in-memory blob store, so a "missing record" is a real failure of the
-# production download walk rather than a flag the test sets. That trait's
-# methods return `anyhow::Result`.
-anyhow = { workspace = true }
 # The shared `block_on` single-poll test executor, so this crate's four
 # hand-rolled copies stop reimplementing it (one owner for the `RpcRequester`
 # seam's fake).

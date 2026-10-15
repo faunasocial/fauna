@@ -10,7 +10,9 @@ default = ["native"]
 # `fauna-core/sqlite-schema-meta` — the shared `schema_meta` single-row SQL
 # `storage.rs` delegates to for the two-number at-rest schema-version scheme.
 native = ["dep:rusqlite", "fauna-core/sqlite-schema-meta"]
-js = ["openmls/js"]
+# `fauna-core/js`: the shared Web Locks primitive the conversations-engine
+# role's web leg (`engine_role`) takes its lock over.
+js = ["openmls/js", "fauna-core/js"]
 # Attacker-simulation seams for the MLS-2 leaf-credential-binding tests
 # (`forge_key_package_bytes_for_test`, `add_member_from_bytes_unchecked_for_test`,
 # `new_in_memory_forged_for_test`). No honest path produces a credential≠signer

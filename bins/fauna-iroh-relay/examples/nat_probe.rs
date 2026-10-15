@@ -17,15 +17,24 @@
 //!
 //! ```text
 //! nat_probe relay  <bind-ip> <https-port> <out-dir> [--discovery] <member-seed>...
-//! nat_probe listen <seed> <relay-url> <relay-root.der>
-//! nat_probe dial   <seed> <relay-url> <relay-root.der> <peer-seed> <secs>
+//! nat_probe listen <key> <relay-url> <relay-root.der>
+//! nat_probe dial   <key> <relay-url> <relay-root.der> <peer> <secs>
 //! nat_probe local  <secs>      # all three in one process, one host, no NAT
 //! ```
 //!
+//! A `<key>` is either a one-byte seed (`0xa1` style, decimal) or a device's
+//! whole 32-byte Ed25519 secret as 64 hex digits; a `<peer>` is a seed or the
+//! peer's 32-byte PUBLIC key as 64 hex digits. The hex forms are how the image
+//! witness (`tests/e2e-unified/tests/platform/docker/test_iroh_relay.py`)
+//! drives a device the nest actually enrolled, through the nest's own relay at
+//! `https://relay.<domain>` (`behavior/p2p.md` § The relay, *Who may use it*).
+//!
 //! Output is line-oriented for a driver to grade: `PATH t=<secs> kind=<lan|
 //! wan_direct|relay>` on every change (and at connect), `FINAL kind=<..>
-//! bytes=<n>` at the end of a dial. `lan` and `wan_direct` are both a direct
-//! path; only the address class differs (`PeerConn::path`).
+//! bytes=<n>` at the end of a dial, `ACCEPTED peer=<hex>` on the listener for
+//! each connection — the key the dialer proved in the end-to-end handshake. `lan`
+//! and `wan_direct` are both a direct path; only the address class differs
+//! (`PeerConn::path`).
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
@@ -58,6 +67,26 @@ impl Admission for Members {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         Box::pin(async move { self.0.contains(&endpoint_key) })
     }
+}
+
+/// A `<key>` argument: a one-byte seed, or a whole secret as 64 hex digits.
+fn key_arg(s: &str) -> Result<[u8; 32]> {
+    if fauna_core::hex32::is_hex64(s) {
+        return fauna_core::hex32::decode(s).map_err(|e| anyhow!("bad key {s}: {e}"));
+    }
+    s.parse::<u8>()
+        .map(secret)
+        .map_err(|_| anyhow!("bad key {s} (a seed byte or 64 hex digits)"))
+}
+
+/// A `<peer>` argument: a one-byte seed, or a public key as 64 hex digits.
+fn peer_arg(s: &str) -> Result<[u8; 32]> {
+    if fauna_core::hex32::is_hex64(s) {
+        return fauna_core::hex32::decode(s).map_err(|e| anyhow!("bad peer {s}: {e}"));
+    }
+    s.parse::<u8>()
+        .map(public)
+        .map_err(|_| anyhow!("bad peer {s} (a seed byte or 64 hex digits)"))
 }
 
 fn secret(seed: u8) -> [u8; 32] {
@@ -115,11 +144,11 @@ async fn start_relay(
 
 /// The production peer-leg endpoint, trusting the probe relay's root.
 async fn endpoint(
-    seed: u8,
+    secret_key: [u8; 32],
     relay: RelayUrl,
     root: CertificateDer<'static>,
 ) -> Result<IrohTransport> {
-    IrohTransport::builder(secret(seed))
+    IrohTransport::builder(secret_key)
         .relay_url(relay)
         .ca_tls_config(CaTlsConfig::custom_roots(vec![root]))
         .build()
@@ -136,6 +165,10 @@ async fn listen(transport: IrohTransport) -> Result<()> {
     println!("LISTENING");
     while let Some(conn) = incoming.next().await {
         let conn: Arc<dyn PeerConn> = Arc::from(conn.map_err(|e| anyhow!("accept: {e}"))?);
+        println!(
+            "ACCEPTED peer={}",
+            fauna_core::hex32::encode(conn.peer_identity().as_bytes())
+        );
         tokio::spawn(async move {
             let started = Instant::now();
             let watch = tokio::spawn(watch_path("listener", conn.clone(), started));
@@ -252,18 +285,18 @@ async fn main() -> Result<()> {
                 .map_err(|e| anyhow!("relay: {e}"))?;
         }
         Some("listen") => {
-            let seed: u8 = arg(&args, 2, "seed")?;
+            let key = key_arg(&arg::<String>(&args, 2, "key")?)?;
             let url: RelayUrl = arg(&args, 3, "relay-url")?;
             let root = read_root(&arg::<String>(&args, 4, "relay-root.der")?)?;
-            listen(endpoint(seed, url, root).await?).await?;
+            listen(endpoint(key, url, root).await?).await?;
         }
         Some("dial") => {
-            let seed: u8 = arg(&args, 2, "seed")?;
+            let key = key_arg(&arg::<String>(&args, 2, "key")?)?;
             let url: RelayUrl = arg(&args, 3, "relay-url")?;
             let root = read_root(&arg::<String>(&args, 4, "relay-root.der")?)?;
-            let peer: u8 = arg(&args, 5, "peer-seed")?;
+            let peer = peer_arg(&arg::<String>(&args, 5, "peer")?)?;
             let secs: u64 = arg(&args, 6, "secs")?;
-            dial(&endpoint(seed, url, root).await?, public(peer), secs).await?;
+            dial(&endpoint(key, url, root).await?, peer, secs).await?;
         }
         Some("local") => {
             // One host, no NAT: the observer's sanity check — over the host's own
@@ -276,9 +309,9 @@ async fn main() -> Result<()> {
                 vec![public(0xa1), public(0xb2)],
             )
             .await?;
-            let listener = endpoint(0xa1, url.clone(), root.clone()).await?;
+            let listener = endpoint(secret(0xa1), url.clone(), root.clone()).await?;
             tokio::spawn(listen(listener));
-            let dialer = endpoint(0xb2, url, root).await?;
+            let dialer = endpoint(secret(0xb2), url, root).await?;
             dial(&dialer, public(0xa1), secs).await?;
             server.shutdown().await.ok();
         }

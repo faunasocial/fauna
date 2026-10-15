@@ -81,7 +81,7 @@ class FamilyVMTest {
             whenever(api.familyStatus()).thenReturn(reply)
             whenever(api.familyApprovalsList()).thenReturn(emptyList())
         }
-        FamilyVM(api, screenTimeStore, contentPolicyStore).refresh()
+        FamilyVM(api, screenTimeStore, contentPolicyStore, mock(android.content.Context::class.java)).refresh()
         return screenTimeStore to contentPolicyStore
     }
 
@@ -106,7 +106,7 @@ class FamilyVMTest {
             whenever(api.familyApprovalsList()).thenReturn(emptyList())
         }
         val ward = ByteArray(32) { 9 }
-        FamilyVM(api, mock(ScreenTimeStore::class.java), mock(ContentPolicyStore::class.java))
+        FamilyVM(api, mock(ScreenTimeStore::class.java), mock(ContentPolicyStore::class.java), mock(android.content.Context::class.java))
             .allowBlockedPeer(
                 com.fauna.app.core.UndenyDecide(
                     ward,

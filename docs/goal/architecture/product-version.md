@@ -2,7 +2,7 @@
 
 Owns: product-version
 Status: ratified
-Authority: owns what the product version IS (one fleet-wide `major.minor.patch` string), its source of truth (`Cargo.toml [workspace.package] version`), the lockstep-surface contract and its `version-lockstep-check` gate, the bump and reship rules, and the never-reuse invariant. What major/minor/patch *mean* for compatibility → [`version-compatibility.md`](version-compatibility.md) (I2/I3); each store's version-field *format* → that store's [`installers/`](installers/) doc; nest image tags & channels → [`build-system.md`](build-system.md) § Image tags & channels.
+Authority: owns what the product version IS (one fleet-wide `major.minor.patch` string), its source of truth (`Cargo.toml [workspace.package] version`), the lockstep-surface contract and its `version-lockstep-check` gate, the bump and reship rules, and the never-reuse invariant. What major/minor/patch *mean* for compatibility → [`version-compatibility.md`](version-compatibility.md) (I2/I3); each store's version-field *format* → that store's [`installers/`](installers/) doc; nest image tags & channels → [`image-pipeline.md`](image-pipeline.md) § Image tags & channels.
 
 Last verified: 2026-10-07 (reship scope ruled: a refusal re-uploads only the refusing store) | Source: `Cargo.toml`, the version-lockstep checker, the per-store packaging files it enumerates
 
@@ -33,7 +33,7 @@ existed:
 - **Release pipeline**: `build-nest-image.yml` / `restage-nest.yml` grep it;
   the production image's `:<version>` is the public repository's package,
   tagged by its own pipeline since the 2026-10-02 channel map (tag semantics
-  → [`build-system.md`](build-system.md) § Image tags & channels).
+  → [`image-pipeline.md`](image-pipeline.md) § Image tags & channels).
 - **Installers**: the macOS `.pkg` build extracts it
   (`installer/macos/build.sh`).
 
@@ -83,7 +83,7 @@ same contract at `0.x`.
 **A release is a train: the nest and all seven apps ship simultaneously at one
 version (ratified 2026-08-26, user-confirmed).** A bump allocates the train's
 number; cutting the release ships that number **everywhere** — the nest image
-promoted to `:<version>`, every app's channel that exists — so a version
+the public pipeline promotes to `:<version>`, every app's channel that exists — so a version
 string names one snapshot *and* one shipping event, and a user on any platform
 who reads "0.1.3" is on the same release as a user on any other. The one
 exception is the reship below — a store's re-upload, of unchanged code or of a
@@ -165,7 +165,9 @@ considered:
 
 ## Current values
 
-All lockstep surfaces: **`0.1.3`** (bumped 2026-10-07 under § Version
+All lockstep surfaces: **`0.1.4`** (bumped 2026-10-11: the parity train,
+which catches the apps up on most of what `0.1.3` shipped on only some; no store has accepted an upload of it
+yet, and its public commit is the next public sync). Before that, **`0.1.3`** (bumped 2026-10-07 under § Version
 strings are never reused or re-meant → *An upload spends the string*: the
 ratifying commit's `0.1.2` was uploaded to a Play draft from the public
 first-push commit on 2026-10-07 and refused rollout under Play's API-36
@@ -174,11 +176,10 @@ target floor, so it is spent unshipped). Why `0.1.2` and not
 store-mechanical reship of the snapshot, pre-model), so `0.1.1` is burned —
 reusing it would give one string two meanings, and moving windows back down
 to `0.1.0` would break MSI upgrade monotonicity. `0.1.3` is the first string
-no store has accepted an upload of. Shipped state per store: Microsoft
-Store `0.1.1`; Play holds **no release at all** — the one draft upload,
-`0.1.2`/`102`, is left in the Console as the record, and the next Play
-upload is `0.1.3`/`103` from the public commit carrying the bump and the
-targetSdk-36 change (see [`installers/android.md`](installers/android.md)
+no store had accepted an upload of. Shipped state per store: Microsoft
+Store `0.1.1`; Play serves **`0.1.3`/`103` on internal testing since
+2026-10-09**, built from the public commit that published `0.1.3` — the `0.1.3` train's commit — while the earlier draft upload `0.1.2`/`102` stays in the Console
+as the record (see [`installers/android.md`](installers/android.md)
 § Implementation status today; an earlier revision of this section claimed a
 pre-model `1.0.0`/`versionCode 1` upload, corrected 2026-08-23); Apple and the
 linux channels have shipped nothing.
@@ -186,7 +187,7 @@ linux channels have shipped nothing.
 ## Implementation status today
 
 - **Fully implemented as of the ratifying commit**: source and every lockstep
-  surface agree at `0.1.2`; `version-lockstep-check` (+ its `-test` companion)
+  surface agree at `0.1.4`; `version-lockstep-check` (+ its `-test` companion)
   runs in the cheap tier on both merge scripts.
 - The metainfo's `<releases>` list is empty — nothing has shipped; the first
   entry is appended when the linux channels first ship (an empty history

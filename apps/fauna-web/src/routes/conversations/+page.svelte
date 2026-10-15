@@ -10,7 +10,7 @@
   // `$lib/conversations`; this file is pure rendering + event→mutator glue.
 
   import { onMount, onDestroy } from 'svelte';
-  import { identity, onActorChange } from '$lib/store';
+  import { connectionStatus, identity, onActorChange } from '$lib/store';
   import { registerActorScopedReset } from '$lib/actorScope';
   import {
     ensureWasm,
@@ -46,7 +46,7 @@
   import { nodeUrl } from '$lib/api';
   import LinkPreviewCard from '$lib/components/LinkPreviewCard.svelte';
   import ContentLabelBadge from '$lib/components/ContentLabelBadge.svelte';
-  import { typedAddressDisplay, threadLabelDisplay, recipientResolveStatus, nextSortOrder, quicksetEmojis, contentLabelBadgeFor } from '$lib/wasm';
+  import { typedAddressDisplay, threadLabelDisplay, recipientResolveStatus, nextSortOrder, quicksetEmojis, moreGridEmojis, contentLabelBadgeFor } from '$lib/wasm';
   // The room model's render mappings — the wasm twins of the same
   // `fauna_conversations::room` helpers tui and linux call directly and the
   // UniFFI apps reach through their own twins, so this page hand-types no
@@ -63,7 +63,15 @@
     roomJoinRuleToken,
     roomHistoryPolicyToken,
     roomProspectiveClass,
+    roomNoticeFor,
+    roomNoticeLabel,
+    roomNoticeAttrToken,
+    roomInvitationText,
+    roomPendingInviteText,
+    offlineAffordance,
   } from '$lib/wasm';
+  import { makeOfflineGate } from '$lib/offline-gate';
+  import RoomLabelerRows from '$lib/components/RoomLabelerRows.svelte';
   import { resolveLocalized, type LocalizedText } from '$lib/i18n/localized';
   import { conversationTimestamp, byteSize } from '$lib/value-format';
   import { sourceGlyphEmoji } from '$lib/source-glyph';
@@ -97,6 +105,9 @@
   // forth across the wasm staging calls and never reads a field of it, so the
   // editor's rules stay decided in exactly one place for all seven apps.
   let roomSettingsOpen = $state(false);
+  // `room-leave-button` has opened `room-leave-confirm` (client-local, like the
+  // rename overlay): leaving is an immediate act, not a staged policy edit.
+  let roomLeaveConfirm = $state(false);
   let roomDraft: unknown = $state(null);
   // Reply "To" line add-input buffer (client-local; the committed recipients
   // live in the shared `compose.reply_recipients`).
@@ -488,6 +499,7 @@
     // lands during this instantiation is already heard.
     await ensureWasm();
     quickSetEmoji = quicksetEmojis();
+    moreGridEmoji = moreGridEmojis();
     ready = true;
   });
 
@@ -747,7 +759,12 @@
   }
 
   // List pane.
-  function newConversation() { run(() => manager?.startNewConversation()); }
+  function newConversation() {
+    run(async () => {
+      manager?.startNewConversation();
+      await manager?.refreshContactRoster();
+    });
+  }
   // Explicit discard of the new-thread composer. The draft now PERSISTS across
   // switching threads (shared ConversationsManager), so an explicit Cancel is the
   // only way (besides Send) to clear it. See conversations.md § Persistence.
@@ -755,7 +772,12 @@
   // Selecting a thread is what reads it — the shared manager decides that
   // (conversations.md § State & data shape → When a thread is read), so there
   // is no `markRead` here to keep in step.
-  function selectThread(id: string) { run(() => manager?.selectThread(id)); }
+  function selectThread(id: string) {
+    run(async () => {
+      manager?.selectThread(id);
+      await manager?.refreshListSend(id);
+    });
+  }
   function cycleSort() {
     run(() => manager?.setSort(nextSortOrder(snap?.sort)));
   }
@@ -779,13 +801,32 @@
       run(async () => { await manager?.resolveRecipient(); });
     }, 30);
   }
+  // Recipient suggestions (conversations.md § Where logic lives → *Recipient
+  // suggestions*): the row paints the finished label the manager derived with the
+  // address beside it when the two differ — the shape tui paints — and a click is
+  // `accept_suggestion(i)`, the Enter path run over that row's spelling (never
+  // `accept_current_recipient_chip`, which commits the *typed* text and ignores `i`).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function suggestionText(picker: any, i: number): string {
+    const address = chipDisplay(picker?.suggestions?.[i]);
+    const label = picker?.suggestion_displays?.[i];
+    return label && label !== address ? `${label} · ${address}` : address;
+  }
+  function acceptSuggestion(i: number) {
+    run(async () => {
+      if (await manager?.acceptSuggestion(i)) await manager?.refreshListSend();
+    });
+  }
+  function removeChip(i: number) {
+    run(() => manager?.removeRecipientChip(i));
+  }
   function onRecipientKeydown(e: KeyboardEvent) {
     if (e.key !== 'Enter') return;
     e.preventDefault();
     // Resolve, then commit the resolved chip — mirrors linux on_accept.
     run(async () => {
       await manager?.resolveRecipient();
-      manager?.acceptCurrentRecipientChip();
+      if (manager?.acceptCurrentRecipientChip()) await manager.refreshListSend();
     });
   }
 
@@ -874,7 +915,12 @@
 
   // Add-participant overlay.
   function openAddParticipant() {
-    if (selectedId) run(() => manager?.openAddParticipant(selectedId));
+    if (selectedId) {
+      run(async () => {
+        manager?.openAddParticipant(selectedId);
+        await manager?.refreshContactRoster();
+      });
+    }
   }
   function confirmAddParticipant() { run(async () => { await manager?.confirmAddParticipant(); }); }
   function cancelAddParticipant() { run(() => manager?.cancelAddParticipant()); }
@@ -938,6 +984,21 @@
   function cancelRoomSettings() {
     roomSettingsOpen = false;
     roomDraft = null;
+    roomLeaveConfirm = false;
+  }
+  // The walk-out. `room-leave-button` is greyed off `can_leave_room`; the
+  // capability is RE-CHECKED here at open, not only at paint, so a greyed
+  // control a driver clicks anyway opens nothing.
+  function openRoomLeave() {
+    if (!detail?.capabilities?.can_leave_room) return;
+    roomLeaveConfirm = true;
+  }
+  function confirmRoomLeave() {
+    const id = selectedId;
+    cancelRoomSettings();
+    // One verb; the class picks the door inside the backend. The thread stays
+    // in the leaver's list, and a refusal rides the page's `error-message`.
+    if (id) run(async () => { await manager?.leaveRoom(id); });
   }
   // The four staging gestures below carry no such guard on purpose: they are
   // reachable only from inside an OPEN editor, and the editor opens only where
@@ -980,6 +1041,64 @@
     });
   }
 
+  // ── The community room's controls (`ui/conversations.md` § Element IDs →
+  // *The community room's three controls*, *Pending invitations*, *The room's
+  // labeler set*). Painters over the shared manager: every choice, gate and
+  // sentence below is a wasm twin of the Rust the other six apps call.
+  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+
+  // `room-invitation[i]` rows atop the list — absent while none stands.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let roomInvitations = $derived<any[]>(snap?.room_invitations ?? []);
+  function acceptInvitation(id: number) {
+    // The manager selects the room's thread on success, so the page follows it.
+    run(async () => { await manager?.acceptRoomInvitation(id); });
+  }
+  function declineInvitation(id: number) {
+    run(async () => { await manager?.declineRoomInvitation(id); });
+  }
+
+  // `recipient-picker-home-nest-toggle`: the composer's choice, read back off
+  // the draft. A send founds a community room — the `room.create` ceremony,
+  // never a queued append — exactly when the toggle is on and the prospective
+  // class is community, so only then does the send need a nest.
+  let newComposeHomeNest = $derived(!!newCompose?.recipient_picker?.include_home_nest);
+  let newComposeFoundsRoom = $derived(newComposeHomeNest && newComposeRoomClass === 'Community');
+  function toggleHomeNest() {
+    const next = !newComposeHomeNest;
+    run(() => manager?.setNewThreadHomeNest(next));
+  }
+
+  // The room's standing notice on the thread header, off the two projected
+  // facts (`awaiting_key` wins — decided in shared Rust).
+  let roomNotice = $derived.by(() => {
+    const room = detail?.room;
+    if (!room) return null;
+    return roomNoticeFor(!!room.awaiting_key, !!room.moderation_unverified);
+  });
+
+  // The editor's home-nest read, pending invitations and labeler set — each
+  // painted only where the seeded draft / projected room carries it.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let roomDraftNestRead = $derived<boolean | null>((roomDraft as any)?.nest_read ?? null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let roomDraftHasLabelers = $derived(((roomDraft as any)?.labelers ?? null) !== null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let pendingInvites = $derived<any[]>(detail?.room?.pending_invites ?? []);
+  function stageNestRead() {
+    if (roomDraft) roomDraft = manager?.roomSettingsToggleNestRead(roomDraft) ?? roomDraft;
+  }
+  function stageLabeler(labelerId: string) {
+    if (roomDraft) roomDraft = manager?.roomSettingsToggleLabeler(roomDraft, labelerId) ?? roomDraft;
+  }
+  // Withdrawing acts AT ONCE, outside Save's staged set (like leaving); the
+  // editor stays open and the manager re-lists on success.
+  function withdrawInvite(inviteeActorHex: string) {
+    const id = selectedId;
+    if (!id) return;
+    run(async () => { await manager?.withdrawRoomInvite(id, inviteeActorHex); });
+  }
+
   // Rename overlay.
   function openRename() {
     renameValue = detail?.label ?? '';
@@ -1007,15 +1126,15 @@
   // menu that renders these is unreachable until the snapshot exists, so the empty
   // starting value is never painted.
   //
-  // `MORE_GRID_EMOJI` stays web-local: it is the fuller "more" grid, and web has no native
-  // emoji picker, so a built grid is the one sanctioned per-platform divergence (§ Rendering
-  // / picker glue), same toggle path; its buttons carry NO `dm-reaction-option` id so they
-  // never inflate the fixed-6 quick-set count the e2e relies on.
+  // The fuller "more" picker is a free-entry single-emoji field (§ Rendering / picker
+  // glue): "more" swaps the menu's button in place for an <input> under the SAME
+  // `dm-reaction-more-button` id (*entry mode*), so any emoji is reachable — typed,
+  // pasted, or from the browser's / OS's own emoji panel. The twenty-emoji shortcut grid
+  // beneath it reads `fauna_conversations::MORE_GRID_EMOJIS` (filled in `onMount` like the
+  // quick-set); its buttons carry NO `dm-reaction-option` id so they never inflate the
+  // fixed-6 quick-set count the e2e relies on. Same toggle path for all three.
   let quickSetEmoji = $state<string[]>([]);
-  const MORE_GRID_EMOJI = [
-    '👍', '❤️', '😂', '😮', '😢', '🙏', '🎉', '🔥', '👏', '🙌',
-    '😍', '🤔', '😎', '😡', '👀', '✅', '❌', '💯', '🚀', '⭐',
-  ];
+  let moreGridEmoji = $state<string[]>([]);
 
   // Per-bubble flyout state — client-local UI (the manager has no "menu open" flag),
   // keyed by `message_id` so a snapshot refresh (a fresh object each tick) doesn't
@@ -1034,10 +1153,41 @@
     closeMessageMenus();
     openActionsFor = msgId;
   }
+  // Entry mode keeps the actions menu open — the field takes the button's place in it.
   function openMoreReactions(msgId: string) {
-    closeMessageMenus();
+    openDeleteConfirmFor = null;
     openMoreFor = msgId;
   }
+  // The field's first grapheme (`Intl.Segmenter`, so a ZWJ sequence or a flag is never
+  // split), and whether it is an emoji — the windows field's `FirstCompleteEmoji` rule: a
+  // pictograph, a regional-indicator flag or a keycap commits by itself; a letter, digit
+  // or punctuation waits for Enter, so typing a word does not commit its first letter.
+  const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+  function firstGrapheme(text: string): string | null {
+    const first = graphemes.segment(text.trim())[Symbol.iterator]().next();
+    return first.done ? null : first.value.segment;
+  }
+  function isCompleteEmoji(g: string): boolean {
+    return /\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20E3/u.test(g);
+  }
+  // `input` commits as soon as one complete emoji is in the field — the one gesture an
+  // emoji panel makes. Keystrokes arrive one at a time, so a multi-code-point emoji typed
+  // scalar by scalar (❤ then VS16) commits on its first scalar; Enter commits whatever
+  // whole grapheme the field holds. Esc goes back to the menu.
+  function commitMoreEntry(msgId: string, text: string, onEnter: boolean) {
+    const first = firstGrapheme(text);
+    if (first && (onEnter || isCompleteEmoji(first))) pickReaction(msgId, first);
+  }
+  function onMoreEntryKeydown(msgId: string, e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitMoreEntry(msgId, (e.currentTarget as HTMLInputElement).value, true);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      openMoreFor = null;
+    }
+  }
+  function focusField(node: HTMLInputElement) { node.focus(); }
   function openDeleteConfirm(msgId: string) {
     closeMessageMenus();
     openDeleteConfirmFor = msgId;
@@ -1101,6 +1251,38 @@
       <p class="muted">{t.conversations.list.no_conversations}</p>
     {/if}
 
+    <!-- Pending community-room invitations, atop the conversation list below
+         its own controls and ABSENT while none stands. The sentence is the
+         shared `RoomInvitationSnapshot::text` (no app composes it); `role`
+         rides `data-role` for the same reason the member chip's does. Accept
+         is `room.accept_invite` (the manager selects the room's thread, which
+         the page then shows); decline acknowledges the inbox item. -->
+    {#if roomInvitations.length > 0}
+      <div class="room-invitations">
+        <!-- eslint-disable-next-line -->
+        {#each roomInvitations as invitation, i (invitation.id)}
+          <div
+            data-testid={IDS.ROOM_INVITATION}
+            class="room-invitation"
+            data-role={roomRoleAttrToken(invitation.role)}
+          >
+            <span>{roomInvitationText(invitation)}</span>
+            <button
+              data-testid={IDS.ROOM_INVITATION_ACCEPT_BUTTON}
+              class="action-btn primary"
+              use:offlineGate={{ kind: 'fauna.conversations.room.accept_invite' }}
+              onclick={() => acceptInvitation(invitation.id)}>{t.common.accept}</button
+            >
+            <button
+              data-testid={IDS.ROOM_INVITATION_DECLINE_BUTTON}
+              class="action-btn"
+              onclick={() => declineInvitation(invitation.id)}>{t.common.decline}</button
+            >
+          </div>
+        {/each}
+      </div>
+    {/if}
+
     <div class="rows">
       <!-- eslint-disable-next-line -->
       {#each threads as thread, i (thread.thread_id)}
@@ -1136,9 +1318,15 @@
           </span>
           <!-- Shared contextual last-activity formatter (today → local clock /
                Yesterday / weekday / older → date). Plain row text, no testid —
-               matches linux/windows (value-formatting.md § Conversation timestamp;
-               conversations.md list-row "clients must not hand-roll it"). -->
-          <span class="row-time">{conversationTimestamp(thread.last_activity_ms)}</span>
+               value-formatting.md § Conversation timestamp; conversations.md
+               list-row "clients must not hand-roll it"). Tagged
+               `conversation-item-timestamp`, and absent while the thread has
+               no activity time (`last_activity_ms` = 0, ui.yaml). -->
+          {#if thread.last_activity_ms > 0}
+            <span data-testid={IDS.CONVERSATION_ITEM_TIMESTAMP} class="row-time"
+              >{conversationTimestamp(thread.last_activity_ms)}</span
+            >
+          {/if}
         </button>
       {/each}
     </div>
@@ -1179,6 +1367,19 @@
             class="room-class"
             data-class={roomClassAttrToken(detail.room.class)}
             >{roomClassLabel(detail.room.class)}</span
+          >
+        {/if}
+        <!-- The room's standing notice, iff one holds: which of the two facts
+             speaks (awaiting-key wins), its text and its `state` token are all
+             the shared `RoomNotice`'s. The token rides `data-state` like the
+             guardian marker's. Never a mark on a bubble a parked record
+             targets (`conversation-rooms.md` § Members verify what they paint). -->
+        {#if roomNotice}
+          <span
+            data-testid={IDS.THREAD_ROOM_NOTICE}
+            class="room-class"
+            data-state={roomNoticeAttrToken(roomNotice)}
+            >{roomNoticeLabel(roomNotice)}</span
           >
         {/if}
         <!-- The family gate's marker in the detail, the row's twin — the
@@ -1294,16 +1495,15 @@
             {t.conversations.unified.thread_add_participant}
           </button>
         {/if}
-        <!-- The policy editor's door: painted whenever the thread is a room,
-             greyed unless the viewer may set the policy — a policy-less room greys
-             it too, having nothing to edit (`ui/conversations.md` § Element
-             IDs). Absent, like the class statement, where the rail models no
-             room. -->
+        <!-- The policy editor's door: painted AND LIVE whenever the thread is a
+             room — the walk-out lives inside it and is a plain member's verb,
+             so the greying moves inside, per control (`ui/conversations.md`
+             § Element IDs). Absent, like the class statement, where the rail
+             models no room. -->
         {#if detail.room}
           <button
             data-testid={IDS.THREAD_ROOM_SETTINGS_BUTTON}
             class="hdr-btn"
-            disabled={!detail.capabilities?.can_set_policy}
             onclick={openRoomSettings}
           >
             {t.conversations.unified.thread_room_settings}
@@ -1322,7 +1522,7 @@
         {#each detail.messages ?? [] as msg, i (msg.message_id)}
           {@const quote = quotedMessageBlock(msg.document)}
           {@const showReactions = !!caps?.supports_reactions}
-          {@const showDelete = !!caps?.supports_message_delete && !!msg.is_own}
+          {@const showDelete = !!msg.can_delete}
           {@const showFlagSpam = !msg.is_own}
           {@const showReport = !msg.is_own && msgReportTarget(msg) !== null}
           {@const showActions = showReactions || showDelete || showFlagSpam || showReport}
@@ -1432,7 +1632,19 @@
                   {#each quickSetEmoji as emoji, qi}
                     <button data-testid={IDS.DM_REACTION_OPTION} class="reaction-option" title={emoji} onclick={() => pickReaction(msg.message_id, emoji)}>{emoji}</button>
                   {/each}
-                  <button data-testid={IDS.DM_REACTION_MORE_BUTTON} class="reaction-more" onclick={() => openMoreReactions(msg.message_id)}>{t.conversations.detail.more_reactions}</button>
+                  {#if openMoreFor === msg.message_id}
+                    <input
+                      data-testid={IDS.DM_REACTION_MORE_BUTTON}
+                      class="reaction-more-entry"
+                      aria-label={t.conversations.detail.more_reactions}
+                      placeholder={t.conversations.detail.more_reactions}
+                      use:focusField
+                      oninput={(e) => commitMoreEntry(msg.message_id, e.currentTarget.value, false)}
+                      onkeydown={(e) => onMoreEntryKeydown(msg.message_id, e)}
+                    />
+                  {:else}
+                    <button data-testid={IDS.DM_REACTION_MORE_BUTTON} class="reaction-more" onclick={() => openMoreReactions(msg.message_id)}>{t.conversations.detail.more_reactions}</button>
+                  {/if}
                 {/if}
                 {#if showDelete}
                   <button data-testid={IDS.DM_MESSAGE_DELETE_BUTTON} class="delete-option" onclick={() => openDeleteConfirm(msg.message_id)}>{t.conversations.detail.delete_message}</button>
@@ -1445,13 +1657,13 @@
                 {/if}
               </div>
             {/if}
-            <!-- The fuller "more" emoji grid (the only sanctioned web divergence — no
-                 native emoji picker). Plain buttons WITHOUT the dm-reaction-option id so
-                 they never inflate the fixed-6 quick-set count; same toggle path. -->
-            {#if openMoreFor === msg.message_id}
+            <!-- The fuller picker's shortcut grid, beneath the entry-mode field (§ Rendering
+                 / picker glue). Plain buttons WITHOUT the dm-reaction-option id so they
+                 never inflate the fixed-6 quick-set count; same toggle path. -->
+            {#if openActionsFor === msg.message_id && openMoreFor === msg.message_id}
               <div class="more-grid">
                 <!-- eslint-disable-next-line -->
-                {#each MORE_GRID_EMOJI as emoji, mi}
+                {#each moreGridEmoji as emoji, mi}
                   <button class="grid-emoji" title={emoji} aria-label={emoji} onclick={() => pickReaction(msg.message_id, emoji)}>{emoji}</button>
                 {/each}
               </div>
@@ -1570,7 +1782,7 @@
         <div class="chips">
           <!-- eslint-disable-next-line -->
           {#each newCompose?.recipient_picker?.chips ?? [] as chip, i}
-            <span data-testid={IDS.RECIPIENT_PICKER_CHIP} class="chip">{chipDisplay(chip)}</span>
+            <button data-testid={IDS.RECIPIENT_PICKER_CHIP} class="chip removable" onclick={() => removeChip(i)}>{chipDisplay(chip)} ×</button>
           {/each}
         </div>
         <input
@@ -1588,13 +1800,28 @@
         {/if}
         <div class="suggestions">
           <!-- eslint-disable-next-line -->
-          {#each newCompose?.recipient_picker?.suggestions ?? [] as sug, i}
-            <button data-testid={IDS.RECIPIENT_PICKER_SUGGESTION} class="suggestion" onclick={() => run(async () => { await manager?.resolveRecipient(); manager?.acceptCurrentRecipientChip(); })}>{addrDisplay(sug)}</button>
+          {#each newCompose?.recipient_picker?.suggestions ?? [] as _sug, i}
+            <button data-testid={IDS.RECIPIENT_PICKER_SUGGESTION} class="suggestion" onclick={() => acceptSuggestion(i)}>{suggestionText(newCompose?.recipient_picker, i)}</button>
           {/each}
         </div>
         <span data-testid={IDS.RECIPIENT_RESOLVE_STATUS} data-state={newComposeResolve.token} class="resolve-status">
           {newComposeResolve.label ? resolveLocalized(newComposeResolve.label) : ''}
         </span>
+        <!-- Whether the room's home nest joins it — the composer's choice,
+             painted whether or not a chip is committed yet. `data-checked`
+             carries the state (the `room-admin-toggle` shape); the choice
+             itself is the shared draft's (`set_new_thread_home_nest`), and
+             `recipient-picker-class` below follows it. -->
+        <button
+          data-testid={IDS.RECIPIENT_PICKER_HOME_NEST_TOGGLE}
+          class="action-btn"
+          data-checked={newComposeHomeNest ? 'true' : 'false'}
+          onclick={toggleHomeNest}
+        >
+          {newComposeHomeNest
+            ? t.conversations.unified.room_home_nest_yes
+            : t.conversations.unified.room_home_nest_no}
+        </button>
         <!-- The class of the room about to be created, stated once a chip is
              committed and before the first message goes out
              (`conversation-rooms.md` § The three classes). Derived in shared
@@ -1683,6 +1910,20 @@
             markdownEnabled={markdownEnabled}
             markersShown={composeMarkersShown}
           />
+          <!-- List send (`mail-mass-mailing.md` § Composing a list message):
+               present only while the compose's one mail recipient is one of the
+               account's own lists. Every text is the shared manager's. -->
+          {#if activeCompose.list_send}
+            <div class="list-send">
+              <p data-testid={IDS.DM_COMPOSE_LIST_SEND_WARNING} class="muted">{resolveLocalized(activeCompose.list_send.send_warning)}</p>
+              {#if activeCompose.list_send.quota_warning}
+                <p data-testid={IDS.DM_COMPOSE_LIST_QUOTA_WARNING} class="muted">{resolveLocalized(activeCompose.list_send.quota_warning)}</p>
+              {/if}
+              {#if activeCompose.list_send.progress}
+                <p data-testid={IDS.DM_COMPOSE_LIST_SEND_PROGRESS} class="muted">{resolveLocalized(activeCompose.list_send.progress)}</p>
+              {/if}
+            </div>
+          {/if}
           <div class="compose-actions">
             {#if mode === 'new'}
               <button data-testid={IDS.NEW_CONVERSATION_CANCEL} class="action-btn" onclick={cancelNewConversation}>{t.common.cancel}</button>
@@ -1707,7 +1948,19 @@
                 }}
               />
             </label>
-            <button data-testid={IDS.DM_SEND_BUTTON} class="action-btn primary" onclick={send}>{t.common.send}</button>
+            <!-- A send that founds a community room is the `room.create`
+                 ceremony, so only that send needs a nest; every other send's
+                 gate is the rail's own (null = no gate declared here). -->
+            {#if mode === 'new' && newComposeFoundsRoom}
+              <button
+                data-testid={IDS.DM_SEND_BUTTON}
+                class="action-btn primary"
+                use:offlineGate={{ kind: 'fauna.conversations.room.create' }}
+                onclick={send}>{t.common.send}</button
+              >
+            {:else}
+              <button data-testid={IDS.DM_SEND_BUTTON} class="action-btn primary" onclick={send}>{t.common.send}</button>
+            {/if}
           </div>
         </div>
       {/if}
@@ -1721,7 +1974,7 @@
           <div class="chips">
             <!-- eslint-disable-next-line -->
             {#each addPart.picker?.chips ?? [] as chip, i}
-              <span data-testid={IDS.RECIPIENT_PICKER_CHIP} class="chip">{addrDisplay(chip)}</span>
+              <button data-testid={IDS.RECIPIENT_PICKER_CHIP} class="chip removable" onclick={() => removeChip(i)}>{chipDisplay(chip)} ×</button>
             {/each}
           </div>
           <input
@@ -1733,6 +1986,12 @@
             oninput={onRecipientInput}
             onkeydown={onRecipientKeydown}
           />
+          <div class="suggestions">
+            <!-- eslint-disable-next-line -->
+            {#each addPart.picker?.suggestions ?? [] as _sug, i}
+              <button data-testid={IDS.RECIPIENT_PICKER_SUGGESTION} class="suggestion" onclick={() => acceptSuggestion(i)}>{suggestionText(addPart.picker, i)}</button>
+            {/each}
+          </div>
           <span data-testid={IDS.RECIPIENT_RESOLVE_STATUS} data-state={addPartResolve.token} class="resolve-status">
             {addPartResolve.label ? resolveLocalized(addPartResolve.label) : ''}
           </span>
@@ -1771,6 +2030,7 @@
             <select
               data-testid={IDS.ROOM_JOIN_RULE_SELECT}
               class="input"
+              disabled={!detail.capabilities?.can_set_policy}
               value={roomJoinRuleToken(roomDraftJoinRule)}
               onchange={stageJoinRule}
             >
@@ -1785,6 +2045,7 @@
             <select
               data-testid={IDS.ROOM_HISTORY_POLICY_SELECT}
               class="input"
+              disabled={!detail.capabilities?.can_set_policy}
               value={roomHistoryPolicyToken(roomDraftHistoryPolicy)}
               onchange={stageHistoryPolicy}
             >
@@ -1830,14 +2091,99 @@
             </div>
           {/each}
 
+          <!-- Whether the room's home nest reads it — painted only where the
+               draft carries a value to stage (a community room), greyed unless
+               the viewer may set policy, and STAGED: Save commits it as a
+               rotation with the nest in or out. -->
+          {#if roomDraftNestRead !== null}
+            <div class="room-row">
+              <button
+                data-testid={IDS.ROOM_NEST_READ_TOGGLE}
+                class="action-btn"
+                data-checked={roomDraftNestRead ? 'true' : 'false'}
+                disabled={!detail.capabilities?.can_set_policy}
+                onclick={stageNestRead}
+              >
+                {roomDraftNestRead
+                  ? t.conversations.unified.room_nest_read_yes
+                  : t.conversations.unified.room_nest_read_no}
+              </button>
+            </div>
+          {/if}
+
+          <!-- Invitations still pending on the room, for a viewer who may
+               withdraw them. The whole section is ABSENT while the nest served
+               none (`pending_invites` null or empty). Text is the shared
+               `RoomPendingInviteSnapshot::text`; `lapsed` rides `data-lapsed`
+               (the `data-checked` shape). Withdraw is live on every row —
+               serving the row IS the permission — and acts at once, outside
+               Save's staged set, like leaving. -->
+          {#if pendingInvites.length > 0}
+            <span>{t.conversations.unified.room_pending_invites_label}</span>
+            {#each pendingInvites as invite, i (invite.invitee_actor_hex)}
+              <div class="room-row">
+                <span
+                  data-testid={IDS.ROOM_PENDING_INVITE}
+                  data-lapsed={invite.lapsed ? 'true' : 'false'}
+                  >{roomPendingInviteText(invite)}</span
+                >
+                <button
+                  data-testid={IDS.ROOM_PENDING_INVITE_WITHDRAW_BUTTON}
+                  class="action-btn"
+                  use:offlineGate={{ kind: 'fauna.conversations.room.revoke_invite' }}
+                  onclick={() => withdrawInvite(invite.invitee_actor_hex)}
+                  >{t.conversations.unified.room_pending_invite_withdraw}</button
+                >
+              </div>
+            {/each}
+          {/if}
+
+          <!-- The room's labeler set, painted only while the draft carries one
+               (a community room). The rows, their staging and the in-place
+               inspect view live in the component; the draft stays here. -->
+          {#if roomDraftHasLabelers && manager}
+            <RoomLabelerRows
+              {manager}
+              draft={roomDraft}
+              canSetPolicy={!!detail.capabilities?.can_set_policy}
+              ontoggle={stageLabeler}
+            />
+          {/if}
+
           <div class="overlay-actions">
             <button class="action-btn" onclick={cancelRoomSettings}>{t.common.cancel}</button>
             <button
               data-testid={IDS.ROOM_SETTINGS_SAVE_BUTTON}
               class="action-btn primary"
+              disabled={!detail.capabilities?.can_set_policy}
               onclick={saveRoomSettings}>{t.common.save}</button
             >
           </div>
+
+          <!-- The walk-out, below Save and OUTSIDE the staged set. Greyed —
+               never hidden — for the owner, who hands the room over first. -->
+          <div class="overlay-actions">
+            <button
+              data-testid={IDS.ROOM_LEAVE_BUTTON}
+              class="action-btn"
+              disabled={!detail.capabilities?.can_leave_room}
+              onclick={openRoomLeave}>{t.conversations.unified.room_leave}</button
+            >
+          </div>
+          {#if roomLeaveConfirm}
+            <div class="overlay-actions">
+              <button class="action-btn" onclick={() => (roomLeaveConfirm = false)}
+                >{t.common.cancel}</button
+              >
+              <button
+                data-testid={IDS.ROOM_LEAVE_CONFIRM}
+                class="action-btn primary"
+                disabled={!detail.capabilities?.can_leave_room}
+                use:offlineGate={{ kind: 'fauna.conversations.room.leave' }}
+                onclick={confirmRoomLeave}>{t.common.leave}</button
+              >
+            </div>
+          {/if}
         </div>
       </div>
     {/if}
@@ -1907,11 +2253,14 @@
   .members { display: flex; gap: 0.25rem; flex-wrap: wrap; flex: 1; }
   .chip { background: var(--bg-hover); border-radius: 999px; padding: 0.1rem 0.5rem; font-size: 0.75rem; display: inline-flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; }
   /* Only a membership-change-capable chip is Remove, so only that one points. */
-  .chip.removable { cursor: pointer; }
+  .chip.removable { cursor: pointer; border: none; color: inherit; font-family: inherit; }
   .chip.greyed { opacity: 0.55; cursor: not-allowed; }
   /* The room's class statement, on the thread header and on the new-thread
      picker alike — a quiet caption, like linux's dim caption label. */
   .room-class { font-size: 0.75rem; color: var(--text-muted); }
+  .room-invitations { display: flex; flex-direction: column; gap: 0.4rem; padding: 0.4rem 0.5rem; }
+  .room-invitation { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; }
+  .room-invitation .action-btn.primary { margin-left: auto; }
   .guardian-state { font-size: 0.75rem; color: var(--text-muted); flex-shrink: 0; }
   /* One row of the room policy editor: the caption or member name takes the
      slack, the controls sit at the end. */
@@ -1957,6 +2306,10 @@
     color: var(--text); cursor: pointer; font-size: 0.78rem; padding: 0.15rem 0.4rem;
   }
   .reaction-more:hover { background: var(--bg-hover); }
+  .reaction-more-entry {
+    border: 1px solid var(--accent); border-radius: 6px; background: var(--bg);
+    color: var(--text); font-size: 0.9rem; padding: 0.1rem 0.4rem; width: 7rem;
+  }
   .delete-option { color: var(--danger, #e74c3c); border-color: var(--danger, #e74c3c); }
   .delete-option:hover { background: rgba(231, 76, 60, 0.1); }
   .more-grid {

@@ -94,7 +94,7 @@ public enum HostAdmission: Equatable, Sendable {
     case foreign
 }
 
-/// Evaluate the guard in `on-demand-files.md` § Apple File Provider binding
+/// Evaluate the guard in `on-demand-files-apple.md` § Apple File Provider binding
 /// (*the actor-scoped device identity*)'s order: parse the identifier, then the
 /// structural check (the identifier's account against the provisioned one —
 /// BEFORE the record is consulted, so a foreign-scoped domain is refused

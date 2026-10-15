@@ -228,7 +228,7 @@ func TestDNSBLErrorSentinelFailsOpen(t *testing.T) {
 	// 127.255.255.254 is Spamhaus's "query refused: public/open resolver" error
 	// sentinel (RFC 5782 §2.3 reserves 127.255.255.0/24 for errors) — NOT a
 	// listing. It must fail open, else a box resolving DNSBLs through a public
-	// resolver rejects every legitimate sender (the example.com inbound bounce).
+	// resolver rejects every legitimate sender (the live-nest inbound bounce).
 	for _, code := range []string{"127.255.255.252", "127.255.255.254", "127.255.255.255"} {
 		res := newFakeResolver()
 		res.ipAddr["5.113.0.203.zen.spamhaus.org"] = []net.IP{net.ParseIP(code)}

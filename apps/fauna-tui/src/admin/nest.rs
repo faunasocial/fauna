@@ -241,14 +241,17 @@ pub(super) fn nest_elements(state: &AdminState) -> Vec<Element> {
             },
         ),
         // Serving port — the draft re-seeds from the persisted value on every
-        // reflective snapshot (`super::apply_outcome`); behind the router it's inert
-        // (the hint says 443), but ui.yaml still scopes the input to the page.
+        // reflective snapshot (`super::apply_outcome`). Behind the router the port
+        // is a non-choice, so input and save render READ-ONLY (present, disabled;
+        // the hint says 443 — `nest/common.md` § Serving ports): the nest refuses
+        // the save there (`fauna.node_policy.serving_port_fronted`).
         Element::input(
             ids::ADMIN_NEST_SERVING_PORT_INPUT,
             state.serving_port_input.clone(),
             Field::Admin(AdminField::ServingPort),
         )
-        .labelled(t::nest_page::SERVING_PORT_LABEL),
+        .labelled(t::nest_page::SERVING_PORT_LABEL)
+        .enabled(!fronted),
         Element::chrome(if fronted {
             t::nest_page::SERVING_PORT_FRONTED_HINT
         } else {
@@ -257,7 +260,7 @@ pub(super) fn nest_elements(state: &AdminState) -> Vec<Element> {
         Element::gesture_button(
             ids::ADMIN_NEST_SERVING_PORT_SAVE_BUTTON,
             t::nest_page::SERVING_PORT_SAVE,
-            true,
+            !fronted,
             Gesture::Admin(Action::SaveServingPort),
         ),
         // NAT mode — a one-of-N `Radio` pair (vocabulary rule 1), a save
@@ -568,8 +571,9 @@ pub(super) fn nest_elements(state: &AdminState) -> Vec<Element> {
     ));
 
     // Factory reset — the danger zone. `admin-factory-reset-button` arms the inline
-    // confirm (`admin-factory-reset-confirm-button`, present only while armed — the
-    // sign-out-confirm shape); confirm mints+persists the code and dispatches.
+    // confirm (`admin-factory-reset-confirm-button` + `-cancel-button`, present only
+    // while armed — the sign-out-confirm shape); confirm mints+persists the code and
+    // dispatches, cancel disarms and wipes nothing.
     els.push(Element::label(
         ids::ADMIN_FACTORY_RESET_SECTION,
         t::settings_page::FACTORY_RESET_TITLE,
@@ -590,6 +594,12 @@ pub(super) fn nest_elements(state: &AdminState) -> Vec<Element> {
             t::settings_page::FACTORY_RESET_CONFIRM_BUTTON,
             true,
             Gesture::Admin(Action::ConfirmFactoryReset),
+        ));
+        els.push(Element::gesture_button(
+            ids::ADMIN_FACTORY_RESET_CANCEL_BUTTON,
+            t::settings_page::FACTORY_RESET_CANCEL,
+            true,
+            Gesture::Admin(Action::CancelFactoryReset),
         ));
     }
 
@@ -997,6 +1007,7 @@ mod tests {
         assert!(ids.contains(&"nest-os-updates-count"));
         assert!(ids.contains(&"nest-os-restart-now-button"));
         assert!(ids.contains(&"admin-factory-reset-confirm-button"));
+        assert!(ids.contains(&"admin-factory-reset-cancel-button"));
         let count = els
             .iter()
             .find(|e| e.id == "nest-os-updates-count")
@@ -1011,6 +1022,7 @@ mod tests {
         assert!(!ids.contains(&"nest-os-updates-count"));
         assert!(!ids.contains(&"nest-os-restart-now-button"));
         assert!(!ids.contains(&"admin-factory-reset-confirm-button"));
+        assert!(!ids.contains(&"admin-factory-reset-cancel-button"));
     }
 
     fn inheritor(label: &str) -> fauna_client_admin::SeedRotationInheritor {
@@ -1345,6 +1357,35 @@ mod tests {
             .find(|e| e.id == id)
             .unwrap_or_else(|| panic!("{id} painted"))
             .enabled
+    }
+
+    /// Behind the router the serving port is a non-choice, so the field renders
+    /// READ-ONLY — input and save present but disabled, the hint naming 443
+    /// (`nest/common.md` § Serving ports); on a direct listener both stay live.
+    /// Swapping the hint alone left an editable field whose save the nest
+    /// refuses (`fauna.node_policy.serving_port_fronted`).
+    #[test]
+    fn a_router_fronted_nest_renders_the_serving_port_read_only() {
+        let mut app = crate::app::tests::test_app();
+        for fronted in [true, false] {
+            app.admin.nest_snapshot = Some(NestPageSnapshot {
+                fronted_by_router: fronted,
+                ..Default::default()
+            });
+            let els = nest_elements(&app.admin);
+            for id in [
+                "admin-nest-serving-port-input",
+                "admin-nest-serving-port-save-button",
+            ] {
+                assert_eq!(enabled(&els, id), !fronted, "{id} with fronted={fronted}");
+            }
+            assert_eq!(
+                els.iter()
+                    .any(|e| e.text == t::nest_page::SERVING_PORT_FRONTED_HINT),
+                fronted,
+                "the 443 hint paints exactly when fronted"
+            );
+        }
     }
 
     /// Until the key set answers, the section paints the reason line and NO

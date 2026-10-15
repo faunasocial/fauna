@@ -10,7 +10,7 @@ use fauna_core::secret::SecretString;
 use fauna_protocol::atproto_pds::{AtprotoGrantInfo, AtprotoSessionInfo};
 use fauna_protocol::nostr::BunkerAppEntry;
 use fauna_protocol::oauth_consent::BlockedClient;
-use fauna_protocol::principals::PrincipalInfo;
+use fauna_protocol::principals::{OracleOp, PrincipalInfo};
 
 use super::{ConnectedAppsApiError, ConnectedAppsNestApi};
 
@@ -19,6 +19,7 @@ use super::{ConnectedAppsApiError, ConnectedAppsNestApi};
 pub enum FakeCall {
     ListPrincipals,
     RevokePrincipal(Vec<u8>),
+    ListPrincipalOps(Vec<u8>),
     ListPendingConsents,
     ResolveConsent(Vec<u8>, bool),
     MintGrant(Vec<u8>),
@@ -35,12 +36,16 @@ pub enum FakeCall {
     ListMailCredentials,
     RevokeMailCredential(String),
     RevealMailSecret(String),
+    ExternalAppsEnabled,
 }
 
 #[derive(Debug, Default)]
 struct Inner {
     calls: Vec<FakeCall>,
     principals: Vec<PrincipalInfo>,
+    /// Each principal's oracle record, by principal id, newest first.
+    ops: Vec<(Vec<u8>, Vec<OracleOp>)>,
+    fail_ops: bool,
     consents: Vec<NestConsentRow>,
     codes: Vec<(String, NestConsentRow)>,
     handoffs: Vec<(String, NestConsentRow)>,
@@ -54,6 +59,9 @@ struct Inner {
     fail_all: bool,
     fail_revokes: bool,
     fail_mail: bool,
+    external_apps_off: bool,
+    external_apps_unavailable: bool,
+    fail_external_apps: bool,
 }
 
 /// A scripted nest: set rows, drive the machine, read [`Self::calls`].
@@ -85,6 +93,17 @@ impl FakeConnectedAppsNestApi {
     }
     pub fn set_principals(&self, rows: Vec<PrincipalInfo>) {
         self.inner.lock().unwrap().principals = rows;
+    }
+    /// One principal's oracle record, newest first. A principal with none set
+    /// reads an empty record — the nest's answer for one never served.
+    pub fn set_principal_ops(&self, principal_id: &[u8], ops: Vec<OracleOp>) {
+        let mut g = self.inner.lock().unwrap();
+        g.ops.retain(|(id, _)| id != principal_id);
+        g.ops.push((principal_id.to_vec(), ops));
+    }
+    /// The oracle record read fails transiently from now on.
+    pub fn fail_ops(&self) {
+        self.inner.lock().unwrap().fail_ops = true;
     }
     pub fn set_consents(&self, rows: Vec<NestConsentRow>) {
         self.inner.lock().unwrap().consents = rows;
@@ -135,6 +154,18 @@ impl FakeConnectedAppsNestApi {
     pub fn fail_mail(&self) {
         self.inner.lock().unwrap().fail_mail = true;
     }
+    /// The account's external-apps switch (default ON).
+    pub fn set_external_apps_enabled(&self, enabled: bool) {
+        self.inner.lock().unwrap().external_apps_off = !enabled;
+    }
+    /// Answer the switch read as an account below the full-PDS level.
+    pub fn external_apps_unavailable(&self) {
+        self.inner.lock().unwrap().external_apps_unavailable = true;
+    }
+    /// The switch read fails transiently from now on.
+    pub fn fail_external_apps(&self) {
+        self.inner.lock().unwrap().fail_external_apps = true;
+    }
     /// Every revoke fails transiently from now on.
     pub fn fail_revokes(&self) {
         self.inner.lock().unwrap().fail_revokes = true;
@@ -166,6 +197,20 @@ impl ConnectedAppsNestApi for FakeConnectedAppsNestApi {
         g.principals.retain(|p| p.principal_id != principal_id);
         Ok(g.principals.len() != before)
     }
+    async fn list_principal_ops(
+        &self,
+        principal_id: Vec<u8>,
+    ) -> Result<Vec<OracleOp>, ConnectedAppsApiError> {
+        let g = self.record(FakeCall::ListPrincipalOps(principal_id.clone()));
+        if g.fail_all || g.fail_ops {
+            return Err(transient());
+        }
+        Ok(g.ops
+            .iter()
+            .find(|(id, _)| *id == principal_id)
+            .map(|(_, ops)| ops.clone())
+            .unwrap_or_default())
+    }
     async fn list_pending_consents(&self) -> Result<Vec<NestConsentRow>, ConnectedAppsApiError> {
         let g = self.record(FakeCall::ListPendingConsents);
         if g.fail_all {
@@ -177,6 +222,7 @@ impl ConnectedAppsNestApi for FakeConnectedAppsNestApi {
         &self,
         consent_id: Vec<u8>,
         approved: bool,
+        _folder: Option<i64>,
     ) -> Result<bool, ConnectedAppsApiError> {
         let mut g = self.record(FakeCall::ResolveConsent(consent_id.clone(), approved));
         if g.fail_all {
@@ -346,5 +392,15 @@ impl ConnectedAppsNestApi for FakeConnectedAppsNestApi {
             });
         }
         Ok(SecretString::new(format!("secret-{credential_id}")))
+    }
+    async fn external_apps_enabled(&self) -> Result<bool, ConnectedAppsApiError> {
+        let g = self.record(FakeCall::ExternalAppsEnabled);
+        if g.fail_all || g.fail_external_apps {
+            return Err(transient());
+        }
+        if g.external_apps_unavailable {
+            return Err(unavailable());
+        }
+        Ok(!g.external_apps_off)
     }
 }

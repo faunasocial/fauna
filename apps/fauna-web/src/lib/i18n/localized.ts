@@ -4,6 +4,7 @@
 // test (`just web-unit-test`). Same file either way.
 import { t } from './strings.ts';
 import type { RowCell } from '$lib/rpc';
+import type { EditorCell } from '$lib/wasm';
 
 /**
  * A runtime localized string — an i18n key plus a flat substitution map.
@@ -74,6 +75,31 @@ export function resolveLocalizedNested(lt: LocalizedText | undefined | null): st
 }
 
 /**
+ * A `LocalizedText` whose template arguments may themselves be translatable
+ * (mirrors `fauna_client_connected_apps::compose::ComposedText`): `nested`
+ * maps an argument name to the text that fills it, and wins over `text.args`
+ * of the same name.
+ */
+export interface ComposedText {
+  text: LocalizedText;
+  nested: Record<string, LocalizedText>;
+}
+
+/**
+ * Resolve a shared-Rust `ComposedText` — the JS twin of `ComposedText::resolve`:
+ * each `nested` text resolves first and fills its argument, then the outer
+ * template resolves. The composition (order, which key, which args) is the
+ * shared module's; this only maps keys to the generated `t` table.
+ */
+export function resolveComposed(ct: ComposedText): string {
+  const args: Record<string, string> = { ...(ct.text.args ?? {}) };
+  for (const [name, nested] of Object.entries(ct.nested ?? {})) {
+    args[name] = resolveLocalized(nested);
+  }
+  return resolveLocalized({ key: ct.text.key, args });
+}
+
+/**
  * A gated-feature quota cell's headroom sentence, fully composed — the JS
  * twin of shared Rust `fauna_client_features::row::cell_value_text`. When
  * `cell.magnitudes` is set (`volume` cells), its two localized magnitudes are
@@ -94,4 +120,21 @@ export function cellValueText(cell: RowCell): string {
     },
   };
   return resolveLocalized(composed);
+}
+
+/**
+ * A feature-policy editor cell's no-effect note, fully composed (`null` when
+ * the cell has none) — the JS twin of shared Rust
+ * `fauna_client_features::editor_note_text`. When `note_magnitude` is set, it
+ * is resolved first and substituted for the note's `{limit}` hole, for the
+ * same reason as [cellValueText]: a localized magnitude ("2 GB") is a flat
+ * string by the time the outer template resolves.
+ */
+export function editorNoteText(cell: EditorCell): string | null {
+  if (!cell.note) return null;
+  if (!cell.note_magnitude) return resolveLocalized(cell.note);
+  return resolveLocalized({
+    key: cell.note.key,
+    args: { ...cell.note.args, limit: resolveLocalized(cell.note_magnitude) },
+  });
 }

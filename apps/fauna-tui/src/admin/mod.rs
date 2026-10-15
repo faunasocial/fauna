@@ -36,6 +36,9 @@ mod bridges;
 mod calendar;
 mod contacts;
 mod custody_hosting;
+/// The Held-Custody page's answered state, for `automation::state_json`.
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+pub(crate) use custody_hosting::state_json as custody_hosting_state_json;
 mod dashboard;
 mod dns;
 /// The local-domain fixtures, for the `nest_retire` page's admin-entry tests.
@@ -80,7 +83,8 @@ use fauna_client_mail_settings::forwarders::{
     ForwarderAction, ForwarderMachine, ForwardersSnapshot,
 };
 use fauna_client_mail_settings::local_domains::{
-    DEFAULT_CERT_MODE, LocalDomainAction, LocalDomainMachine, LocalDomainsSnapshot, RoleAddressKind,
+    DEFAULT_CERT_MODE, DomainDmarcPolicy, LocalDomainAction, LocalDomainMachine,
+    LocalDomainsSnapshot, RoleAddressKind,
 };
 use fauna_client_mail_settings::webdav_policy::{
     WebdavPolicyAction, WebdavPolicyMachine, WebdavPolicySnapshot,
@@ -100,7 +104,6 @@ use fauna_protocol::admin::{
     AdminTierUpdateRequest, DEFAULT_LAPSE_TIER,
 };
 use fauna_protocol::age::AgeBand;
-use fauna_sync_engine::account_runtime::AccountStoreHandle;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::app::{App, DataMessage, PageOutcome, UiMessage};
@@ -778,6 +781,13 @@ pub struct UsersState {
     /// `admin-users-admit-tier-select` — the admitted account's tier draft
     /// (seeded to "free" like the invite tier when empty).
     pub admit_tier_draft: String,
+    /// `admin-users-admit-guardian-select` — the picked guardian's display LABEL
+    /// for a supervised admission ([`GUARDIAN_NONE_VALUE`] / `""` = none), like
+    /// [`Self::invite_guardian_draft`]. Resolved to the wire actor id at admit
+    /// time by [`resolve_guardian`]. Transient form state, untouched by `reseed`
+    /// beyond the none seed. The Admit section sends no band yet
+    /// (`age_band: None`) — its band select awaits the user's rule-A sign-off.
+    pub admit_guardian_draft: String,
     /// Per-pending-request approve-at tier drafts (`invite-request-row-tier-select[i]`),
     /// parallel to `snapshot.invite_requests`, re-seeded on every fold.
     pub request_tier_drafts: Vec<String>,
@@ -846,6 +856,9 @@ impl UsersState {
         // triggered by an unrelated mutation must not wipe a half-filled form).
         if self.admit_tier_draft.is_empty() {
             self.admit_tier_draft = default_tier.clone();
+        }
+        if self.admit_guardian_draft.is_empty() {
+            self.admit_guardian_draft = GUARDIAN_NONE_VALUE.to_string();
         }
 
         // Invite-form drafts (§ 3) — seed sensible defaults only when untouched.
@@ -1113,6 +1126,11 @@ pub struct AdminState {
     /// `BeginManualIssueCert` and `CompleteManualIssueCert` (linux's
     /// `client.rs::dns_machine` learned this).
     dns: Option<Arc<DnsManagementMachine>>,
+    /// The poke that ends this session's auto-renew tick's six-hour wait — empty
+    /// in a production build; the e2e agent's `auto_renew_wake` fires it
+    /// ([`crate::loop_wake::LoopWake`]). Fresh at every [`init`], so a departed
+    /// session's lingering tick is never the one woken.
+    pub auto_renew_wake: crate::loop_wake::LoopWake,
     /// Last `admin-dns` DNS snapshot the page painted — the per-domain record
     /// matrix + verdicts, the held credentials, and (Phase 2) the cert lifecycle.
     pub dns_snapshot: Option<DnsSnapshot>,
@@ -1253,6 +1271,11 @@ pub struct AdminWebSnapshot {
     /// `option` is [`picker_option`]'s injective handle/hex string, never the
     /// raw editable label (`admin.md` § 2).
     pub actors: Vec<(Vec<u8>, String)>,
+    /// The domain the nest serves web content at — `fauna.nest.info`'s
+    /// `web_serving_domain` via `WebClient::serving_domain`, the same read
+    /// apple's `AdminWebVM` and tui's Settings → Web use. Empty = the nest
+    /// serves no web content (honoured, never substituted).
+    pub serving_domain: String,
     /// The last read/write failure, bridged onto the page's `error-message`.
     pub error: Option<String>,
 }
@@ -1260,15 +1283,18 @@ pub struct AdminWebSnapshot {
 impl AdminState {
     /// The `https://<domain>/` the apex serves at, for `admin-web-apex-info`.
     ///
-    /// The domain is the nest's own host (the fallback linux uses when its
-    /// account cache has no domain) — `admin-web` is nest-wide, so the
-    /// deployment's host IS the apex domain. Both halves are shared Rust: the
-    /// host parse is `fauna_core::format::url_host` (the one shape linux/windows/
-    /// apple's per-app parses were unified onto) and the formatting is
-    /// `fauna_core::web::apex_url`, so the hint can't drift from the nest's
-    /// routing.
+    /// The domain is the nest's own web serving domain
+    /// (`AdminWebSnapshot::serving_domain`, `fauna.nest.info`'s
+    /// `web_serving_domain`) — never the host this app dialed, which under a
+    /// standalone nest is the bind address (`admin.md` § 7). Formatting is the
+    /// shared `fauna_core::web::apex_url`.
     pub fn apex_url(&self) -> String {
-        fauna_core::web::apex_url(&fauna_core::format::url_host(&self.nest_url))
+        let domain = self
+            .web_snapshot
+            .as_ref()
+            .map(|s| s.serving_domain.as_str())
+            .unwrap_or_default();
+        fauna_core::web::apex_url(domain)
     }
 }
 
@@ -1472,9 +1498,13 @@ fn spawn_auto_renew_cadence(
         return;
     };
     let tx = tx.clone();
+    // The e2e build's agent can end the wait early (`auto_renew_wake`, convention
+    // 14), so a witness drives this loop's own next pass instead of waiting out
+    // six hours; a production build's `LoopWake` is empty and sleeps the clock.
+    let wake = state.auto_renew_wake.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(
+            wake.sleep(std::time::Duration::from_secs(
                 fauna_client_dns::auto_renew_poll_secs(),
             ))
             .await;
@@ -1505,6 +1535,27 @@ fn spawn_auto_renew_cadence(
             )));
         }
     });
+}
+
+/// The background re-check of an open `admin-dns` page
+/// (`dns-management.md` § Manual + live verification: "on a slow background
+/// cadence") — the shared `DnsManagementMachine::background_recheck`, which
+/// re-reads the matrix, verifies it and re-publishes whatever managed record
+/// it finds gone (§ Fauna-managed → Reconcile). `main.rs` ticks it every
+/// `fauna_client_dns::record_recheck_secs()` while [`dns_page_open`] holds; the
+/// cadence and the tick are the shared crate's, so this owns only the timer's
+/// gate. `None` before sign-in builds the machine.
+pub fn dns_recheck_op(state: &AdminState) -> Option<Op> {
+    state
+        .dns
+        .clone()
+        .map(|machine| Op::DnsBackgroundRecheck { machine })
+}
+
+/// Is the `admin-dns` sub-page the one the admin shell shows? (The caller
+/// checks that the admin shell itself is on screen.)
+pub fn dns_page_open(state: &AdminState) -> bool {
+    state.sub == AdminPage::Dns
 }
 
 /// Entering the admin shell loads its **current** sub-page (the Dashboard on a
@@ -1701,6 +1752,8 @@ pub enum Action {
     RestartHost,
     /// `admin-factory-reset-button` — arm the inline confirm.
     OpenFactoryResetConfirm,
+    /// `admin-factory-reset-cancel-button` — disarm the confirm; nothing is wiped.
+    CancelFactoryReset,
     /// `admin-factory-reset-confirm-button` — mint+persist the claim code, dispatch
     /// `fauna.admin.factory_reset`, then re-onboard at the pre-filled claim code.
     ConfirmFactoryReset,
@@ -1972,8 +2025,11 @@ pub enum Action {
     /// `admin-users-admit-tier-select` — set the admitted account's tier draft
     /// (LOCAL; committed by the admit button).
     SetAdmitTier(String),
+    /// `admin-users-admit-guardian-select` — set the admitted account's guardian
+    /// draft (LOCAL; `""` = none).
+    SetAdmitGuardian(String),
     /// `admin-users-admit-button` — admit the drafted actor id under the
-    /// drafted handle + tier (one `fauna.admin.users.create` call).
+    /// drafted handle + tier (+ guardian) (one `fauna.admin.users.create` call).
     AdmitUser,
     // ── admin-users: the invite-code section (`admin.md` § 2 → Section 3) ──
     /// `admin-settings-tier-select` — set the minted code's tier draft (LOCAL).
@@ -2072,6 +2128,13 @@ pub enum Action {
     SelectDnsCatchAll {
         row: usize,
         label: String,
+    },
+    /// `admin-dns-domain-dmarc-policy-select[row]` — set this domain's
+    /// published DMARC policy from its RFC 7489 tag (`reject` clears the
+    /// override). Commits immediately, like the catch-all picker.
+    SelectDnsDmarcPolicy {
+        row: usize,
+        tag: String,
     },
     /// `admin-dns-domain-role-address-<role>-select[row]` — designate or clear
     /// ("Admin (default)") one role address's override actor. Commits immediately.
@@ -2333,6 +2396,7 @@ impl Action {
             Action::RemoveDnsDomain { .. } => Some("fauna.bridges.remove_local_domain"),
             Action::RestoreDnsDomain { .. } => Some("fauna.bridges.restore_local_domain"),
             Action::SelectDnsCatchAll { .. } => Some("fauna.bridges.set_catch_all_actor"),
+            Action::SelectDnsDmarcPolicy { .. } => Some("fauna.bridges.update_local_domain_config"),
             Action::SelectDnsRoleAddress { .. } => Some("fauna.bridges.set_role_address"),
             Action::SubmitDnsRename => Some("fauna.bridges.start_primary_domain_rename"),
             Action::ConfirmDnsRenameComplete => {
@@ -2394,6 +2458,7 @@ impl Action {
             // an inline form. Nothing dispatches until the confirm/submit,
             // which is declared above.
             Action::OpenFactoryResetConfirm
+            | Action::CancelFactoryReset
             | Action::OpenCustodyHostingRemoveConfirm { .. }
             | Action::CancelCustodyHostingRemove
             | Action::CancelSeedRotate
@@ -2436,6 +2501,7 @@ impl Action {
             | Action::SetRegistrationMode(_)
             | Action::SetAgeVerificationRequired(_)
             | Action::SetAdmitTier(_)
+            | Action::SetAdmitGuardian(_)
             | Action::SetInviteTier(_)
             | Action::SetInviteGuardian(_)
             | Action::SetInviteAgeBand(_)
@@ -2665,6 +2731,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             app.admin.factory_reset_confirming = true;
             None
         }
+        Action::CancelFactoryReset => {
+            app.admin.factory_reset_confirming = false;
+            None
+        }
         Action::ConfirmFactoryReset => {
             let nest = app.admin.nest.clone()?;
             let nest_url = app.admin.nest_url.clone();
@@ -2746,10 +2816,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 return None;
             }
             let nest = app.admin.nest.clone()?;
-            // The account-store handle, read here while `app` is in hand: the
+            // The account-store slot, taken here while `app` is in hand: the
             // ceremony writes the successor's custody row through it before it
-            // dispatches.
-            let store = app.settings.account_store.clone();
+            // dispatches, resolving it per call.
+            let store = app.settings.account_runtime.clone();
             app.admin.seed_rotate_status = Some(t::nest_page::ROTATE_SEED_WORKING.to_string());
             Some(Op::RotateDeploymentSeed { nest, store })
         }
@@ -3234,6 +3304,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             app.admin.users.admit_tier_draft = tier;
             None
         }
+        Action::SetAdmitGuardian(guardian) => {
+            app.admin.users.admit_guardian_draft = guardian;
+            None
+        }
         Action::AdmitUser => match admit_mutation(&app.admin.users) {
             Ok(mutation) => mutate_users_op(app, mutation),
             Err(hint) => {
@@ -3379,6 +3453,22 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             local_domains_op(
                 &app.admin,
                 LocalDomainAction::SetCatchAllActor { domain, actor_id },
+            )
+        }
+        Action::SelectDnsDmarcPolicy { row, tag } => {
+            let domain = dns_row_domain(&app.admin, row)?;
+            let policy = DomainDmarcPolicy::from_tag(&tag)?;
+            // Only the policy: every other per-domain knob rides `None`
+            // ("leave alone"), so this picker can never touch another one.
+            local_domains_op(
+                &app.admin,
+                LocalDomainAction::UpdateConfig {
+                    domain,
+                    mta_sts_max_age_seconds: None,
+                    mta_sts_cert_mode: None,
+                    spf_record: None,
+                    dmarc_policy: Some(policy),
+                },
             )
         }
         Action::SelectDnsRoleAddress { row, role, label } => {
@@ -3771,10 +3861,15 @@ fn admit_mutation(users: &UsersState) -> Result<UsersMutation, String> {
         .flatten()
         .ok_or_else(|| t::users_page::ADMIT_ACTOR_HINT.to_string())?;
     let handle = Some(users.admit_handle_input.trim().to_string()).filter(|h| !h.is_empty());
+    let guardian = users
+        .snapshot
+        .as_ref()
+        .and_then(|s| resolve_guardian(s, &users.admit_guardian_draft));
     Ok(UsersMutation::AdmitUser {
         actor,
         tier: users.admit_tier_draft.clone(),
         handle,
+        guardian,
     })
 }
 
@@ -3881,14 +3976,14 @@ fn user_change_tier_mutation(
 /// shared `fauna_core::format::next_page_offset` stepper (the harvested
 /// sibling of `total_pages`/`current_page`, `admin/users.rs`).
 /// Pure guard logic — the click side-effect is [`users_page_op`]'s.
-fn next_users_offset(users: &UsersState) -> Option<i64> {
+pub(super) fn next_users_offset(users: &UsersState) -> Option<i64> {
     let total = users.snapshot.as_ref().map(|s| s.total).unwrap_or(0);
     fauna_core::format::next_page_offset(users.offset, total, USERS_PAGE_SIZE)
 }
 
 /// The offset one page back, or `None` at page 1. Delegates to the shared
 /// `fauna_core::format::prev_page_offset` stepper.
-fn prev_users_offset(users: &UsersState) -> Option<i64> {
+pub(super) fn prev_users_offset(users: &UsersState) -> Option<i64> {
     fauna_core::format::prev_page_offset(users.offset, USERS_PAGE_SIZE)
 }
 
@@ -3973,25 +4068,20 @@ impl std::fmt::Display for TierAddRefusal {
     }
 }
 
-/// Build the `tiers.create` request from the add form's drafts. Pure — the
-/// [`tier_update_req`] shape, same shared cap validator (`parse_cap`: trims,
-/// clamps a negative to `0`, refuses fractional/empty), plus the one rule a new
-/// tier adds: a name. A name already taken is the nest's call (`fauna.admin.conflict`).
+/// Build the `tiers.create` request from the add form's drafts — the shared
+/// `fauna_client_admin::tier_create_request` (name-trim + `parse_cap` caps),
+/// mapped onto this module's Display-able refusal. A name already taken is the
+/// nest's call (`fauna.admin.conflict`).
 fn tier_create_req(state: &AdminState) -> Result<AdminTierCreateRequest, TierAddRefusal> {
-    let name = state.tier_add_name.trim();
-    if name.is_empty() {
-        return Err(TierAddRefusal::EmptyName);
-    }
-    let caps = &state.tier_add_caps;
-    let parse = |s: &str| fauna_core::format::parse_cap(s).ok_or(TierAddRefusal::InvalidCap);
-    Ok(AdminTierCreateRequest {
-        name: name.to_string(),
-        max_inbox_bytes: parse(&caps.inbox)?,
-        max_storage_bytes: parse(&caps.storage)?,
-        max_devices: parse(&caps.devices)?,
-        max_blob_size: parse(&caps.blob_size)?,
-        max_feeds: parse(&caps.feeds)?,
-        extra: Default::default(),
+    use fauna_client_admin::TierCreateRefusal;
+    let c = &state.tier_add_caps;
+    fauna_client_admin::tier_create_request(
+        &state.tier_add_name,
+        [&c.inbox, &c.storage, &c.devices, &c.blob_size, &c.feeds],
+    )
+    .map_err(|r| match r {
+        TierCreateRefusal::EmptyName => TierAddRefusal::EmptyName,
+        TierCreateRefusal::InvalidCap => TierAddRefusal::InvalidCap,
     })
 }
 
@@ -4115,8 +4205,8 @@ pub enum Op {
     /// The shared `fauna.account.am_i_admin` gate (`admin.md` § Shell). Its bool
     /// reveals/hides the gated `admin-tab` sidebar row — nothing else.
     CheckGate { nest: Arc<NestClient> },
-    /// The dashboard's `fauna.admin.stats` + `.status` reads (`admin.md` § 1
-    /// Dashboard → Data sources), through the shared `AdminClient` (no HTTP twin).
+    /// The dashboard's five reads and the shared card fold (`admin.md` § 1
+    /// Dashboard → *The card set*), through the shared `AdminClient`.
     LoadDashboard { nest: Arc<NestClient> },
     /// One `admin-calendar` machine dispatch (`Refresh` / `SetCaldavEnabled` /
     /// `SetCaldavPort`), then re-snapshot — one Op variant per machine so the whole
@@ -4301,11 +4391,11 @@ pub enum Op {
     /// caller most needs its verdict.
     RotateDeploymentSeed {
         nest: Arc<NestClient>,
-        /// The account-store handle — the plane door the ceremony writes the
-        /// successor's custody row through *before* it dispatches (the CR-1
-        /// ordering). `None` before the store is ready; the shared drive
-        /// decides what that permits.
-        store: Option<AccountStoreHandle>,
+        /// The settings-owned account-store slot — the plane door the ceremony
+        /// writes the successor's custody row through *before* it dispatches
+        /// (the CR-1 ordering), read per call by the shared drive so a confirm
+        /// clicked while the store is still assembling waits it out.
+        store: crate::settings::AccountRuntimeSlot,
     },
     /// The `admin-users` whole-page read (`users_list` + `tiers_list` +
     /// `invite_codes_list` + `invite_requests_list` + `fauna.setup.status`) at the
@@ -4357,6 +4447,9 @@ pub enum Op {
         machine: Arc<DnsManagementMachine>,
         action: DnsAction,
     },
+    /// One background re-check tick of an open `admin-dns` page
+    /// ([`dns_recheck_op`]), then re-snapshot.
+    DnsBackgroundRecheck { machine: Arc<DnsManagementMachine> },
     /// One `admin-dns` local-domain-machine dispatch (domain CRUD / catch-all /
     /// role address / the rename lifecycle), then re-snapshot. The machine
     /// re-reads the rows itself after every mutation, so no extra `Refresh` rides
@@ -4442,6 +4535,10 @@ pub enum UsersMutation {
         actor: Vec<u8>,
         tier: String,
         handle: Option<String>,
+        /// The supervised designation (`admin-users-admit-guardian-select`);
+        /// `None` admits an ordinary account. The Admit section sends no band
+        /// yet — the typed `age_band` seam is open, the select awaits sign-off.
+        guardian: Option<Vec<u8>>,
     },
     /// `invite_codes_create` — mint an invite code (empty code ⇒ the nest mints); the
     /// reply's token is threaded to `admin-users-invite-code-copy-btn` via
@@ -4478,7 +4575,7 @@ pub enum Outcome {
     /// The gate result — folded onto [`App::am_i_admin`] (an app-level field, not
     /// page state: it drives the sidebar even off the admin page).
     GateLoaded { is_admin: bool },
-    /// A fresh dashboard snapshot (stats + version).
+    /// A fresh dashboard snapshot (the shared card set, and a failed read's detail).
     DashboardLoaded(DashboardSnapshot),
     /// A failed dashboard read — lands on the admin page's `error-message`.
     Failed(String),
@@ -4625,34 +4722,10 @@ impl Op {
                     .unwrap_or(false);
                 Outcome::GateLoaded { is_admin }
             }
+            // The shared card set: the five reads and the one fold. A failed
+            // read drops only its own cards and rides the snapshot's `error`.
             Op::LoadDashboard { nest } => {
-                // The two shared reads the linux dashboard makes, on one client:
-                // `fauna.admin.stats` (the four stat cards) and `fauna.admin.status`
-                // (the running version). Loaded atomically — a partial dashboard
-                // (stats-but-no-version) would fail the e2e's "Version" wait for no
-                // benefit, so either both land or the page shows the error.
-                let client = AdminClient::new(nest.clone());
-                let stats = match client.stats().await {
-                    Ok(stats) => stats,
-                    Err(e) => return Outcome::Failed(format!("load admin stats: {e}")),
-                };
-                let version = match client.status().await {
-                    Ok(status) => status.version,
-                    Err(e) => return Outcome::Failed(format!("load admin status: {e}")),
-                };
-                // The Mail card's state (`fauna.bridges.mail_health`). Tolerant,
-                // unlike the two reads above: a failed read (or
-                // any other error) drops the one card, never the dashboard.
-                let mail_state = fauna_client_bridges::MailAdminClient::new(nest)
-                    .mail_health()
-                    .await
-                    .ok()
-                    .map(|reply| reply.state);
-                Outcome::DashboardLoaded(DashboardSnapshot {
-                    stats,
-                    version,
-                    mail_state,
-                })
+                Outcome::DashboardLoaded(AdminClient::new(nest).dashboard_snapshot().await)
             }
             // The three DAV dispatches share one shape: run the action, drop its
             // `Result` (a failure rides `snapshot.error`, which `apply_outcome`
@@ -4989,6 +5062,10 @@ impl Op {
                 let _ = machine.dispatch(action).await;
                 Outcome::DnsSnapshotOnly(Box::new(machine.snapshot()))
             }
+            Op::DnsBackgroundRecheck { machine } => {
+                machine.background_recheck().await;
+                Outcome::DnsSnapshotOnly(Box::new(machine.snapshot()))
+            }
             Op::LocalDomains { machine, action } => {
                 let _ = machine.dispatch(action).await;
                 Outcome::LocalDomainsSnapshotOnly(Box::new(machine.snapshot()))
@@ -5176,8 +5253,9 @@ impl Op {
                         actor,
                         tier,
                         handle,
+                        guardian,
                     } => client
-                        .users_create(actor, tier, String::new(), handle)
+                        .users_create(actor, tier, String::new(), handle, guardian, None)
                         .await
                         .map_err(|e| format!("admit user: {e}")),
                     UsersMutation::DeleteInvite { code } => client
@@ -5268,14 +5346,22 @@ async fn load_web_snapshot<R: RpcRequester>(nest: &R) -> AdminWebSnapshot {
             return AdminWebSnapshot {
                 current: None,
                 actors: Vec::new(),
+                serving_domain: String::new(),
                 error: Some(format!("load apex actor: {e}")),
             };
         }
     };
     let actors = users_actor_picker_options(nest).await;
+    // Best-effort like the actor list: a failed read paints the empty-domain
+    // explainer rather than hiding the designation the admin came to set.
+    let serving_domain = WebClient::new(nest)
+        .serving_domain()
+        .await
+        .unwrap_or_default();
     AdminWebSnapshot {
         current,
         actors,
+        serving_domain,
         error: None,
     }
 }
@@ -5387,13 +5473,13 @@ async fn submit_takedown(nest: Arc<NestClient>, form: TakedownForm) -> String {
 /// the successor's row to every box the admin binds.
 async fn rotate_deployment_seed(
     nest: Arc<NestClient>,
-    store: Option<AccountStoreHandle>,
+    store: crate::settings::AccountRuntimeSlot,
 ) -> String {
-    let verdict = fauna_client_account_runtime::deployment_seeds::rotate_deployment_seed(
-        &nest,
-        store.as_ref(),
-    )
-    .await;
+    let verdict =
+        fauna_client_account_runtime::deployment_seeds::rotate_deployment_seed(&nest, move || {
+            store.lock().ok().and_then(|handle| handle.clone())
+        })
+        .await;
     crate::wizard::localized(&verdict)
 }
 
@@ -5582,8 +5668,18 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             }
         }
         Outcome::DashboardLoaded(snapshot) => {
+            // A failed read surfaces on `error-message` (admin.md § 1.
+            // Dashboard); the other reads' cards still render.
+            match &snapshot.error {
+                Some(detail) => {
+                    app.errors
+                        .insert(Page::Admin, t::dashboard::load_error(detail));
+                }
+                None => {
+                    app.errors.remove(&Page::Admin);
+                }
+            }
             app.admin.dash = Some(snapshot);
-            app.errors.remove(&Page::Admin);
         }
         Outcome::Failed(message) => {
             app.errors.insert(Page::Admin, message);
@@ -6657,12 +6753,38 @@ mod tests {
                 "http://127.0.0.1:1".to_string(),
                 fauna_core::identity::ActorKeypair::generate(),
             ),
-            store: None,
+            store: Default::default(),
         };
         assert!(
             crate::app::PageOp::Admin(op).outlives_click(),
             "the agent must spawn the rotation, not await it"
         );
+    }
+
+    /// Completing a manual issuance waits on the domain's name servers for up to
+    /// 45 minutes, so the agent spawns it; cancel is one local write and stays
+    /// awaited like every other click.
+    #[test]
+    fn completing_a_manual_issuance_outlives_the_click_and_cancelling_does_not() {
+        let machine = Arc::new(fauna_client_dns::build_dns_management_machine(
+            NestClient::new(
+                "http://127.0.0.1:1".to_string(),
+                fauna_core::identity::ActorKeypair::generate(),
+            ),
+        ));
+        let complete = Op::Dns {
+            machine: machine.clone(),
+            action: DnsAction::CompleteManualIssueCert,
+        };
+        assert!(
+            crate::app::PageOp::Admin(complete).outlives_click(),
+            "the agent must spawn the completion, not await it"
+        );
+        let cancel = Op::Dns {
+            machine,
+            action: DnsAction::CancelManualIssueCert,
+        };
+        assert!(!crate::app::PageOp::Admin(cancel).outlives_click());
     }
 
     /// The double-fire guard: confirming **disarms first**, so a second click on
@@ -6783,6 +6905,7 @@ mod tests {
             Action::SaveNatMode,
             Action::RestartHost,
             Action::OpenFactoryResetConfirm,
+            Action::CancelFactoryReset,
             Action::ConfirmFactoryReset,
             Action::OpenSeedRotateConfirm,
             Action::CancelSeedRotate,
@@ -6869,6 +6992,7 @@ mod tests {
             Action::SetAgeVerificationRequired(true),
             Action::SaveRegistration,
             Action::SetAdmitTier(s()),
+            Action::SetAdmitGuardian(s()),
             Action::AdmitUser,
             Action::SetInviteTier(s()),
             Action::SetInviteGuardian(s()),
@@ -6898,6 +7022,7 @@ mod tests {
             },
             Action::ToggleDnsManageAll { managed: true },
             Action::SelectDnsCatchAll { row: 0, label: s() },
+            Action::SelectDnsDmarcPolicy { row: 0, tag: s() },
             Action::SelectDnsRoleAddress {
                 row: 0,
                 role: RoleAddressKind::Postmaster,
@@ -6950,7 +7075,7 @@ mod tests {
     /// added to the enum and never to the corpus, so their declarations went
     /// unchecked until the issuer controls' pass re-derived it. Re-count from
     /// the enum when adding one, never by incrementing.
-    const ACTION_COUNT: usize = 134;
+    const ACTION_COUNT: usize = 137;
 
     #[test]
     fn every_admin_action_is_in_the_corpus() {
@@ -7157,6 +7282,7 @@ mod tests {
             Action::ToggleMail(MailToggle::AuthEnforceDkim),
             Action::SetRegistrationMode(String::new()),
             Action::OpenFactoryResetConfirm,
+            Action::CancelFactoryReset,
             Action::OpenRotateConfirm {
                 pubkey_hex: String::new(),
             },

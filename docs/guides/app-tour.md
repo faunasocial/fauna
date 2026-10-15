@@ -87,7 +87,8 @@ you can keep several and switch between them in the feed list.
   redrawn larger rather than just repeated at card size.
 - **Play a video** — tap a video on a post and it plays right there in the
   feed, with the usual player controls. Nothing downloads until you tap, so a
-  video never starts on its own.
+  video never starts on its own. A video on a post from the fediverse plays the
+  same way, fetched through your nest so its server never sees your address.
 - **Content provenance** — a small badge appears on images carrying embedded
   content-credential (C2PA) information — the kind cameras and editing tools
   can attach to certify how a picture was captured or edited. Tap it to see
@@ -155,7 +156,8 @@ you can keep several and switch between them in the feed list.
   nothing and unlocks nothing, so nobody gets extra access by paying. Sometimes
   a payment arrives without a readable amount; when that happens the post still
   says how many tips it got, and simply shows no figure, rather than pretending
-  the amount was nothing.
+  the amount was nothing. When someone tips one of your posts, you also get a
+  notification saying who tipped and how much; open it to go to the post.
 - **Trending** — a built-in feed at the top of the list shows what is drawing
   unusually high *recent* engagement, on your nest and across the nests it talks
   to. It is computed only from public engagement counts and timestamps (never
@@ -166,7 +168,10 @@ you can keep several and switch between them in the feed list.
   of your feeds at once.
 - **Build your own feed** — create a feed from rules (include/require terms,
   tags, sources) combined with ranking factors and weights. Your feeds are
-  yours: delete and remake them freely.
+  yours: delete and remake them freely. Two of the factors are what other
+  people did with a public post: *Watched to the end* and *Skipped past*, each
+  counted only once enough people share it anonymously. Weigh the first up
+  and the second down for a feed of what holds attention.
 - **Follow the wider world** — subscribe a feed to an external source through
   a [bridge](bridges-bluesky-nostr.md) (for example a Bluesky feed), and posts
   from there appear alongside native ones. Pictures on posts from Bluesky and
@@ -204,7 +209,11 @@ each thread shows which; the reading and writing experience is the same.
   picker; it resolves and confirms who you will reach, and the chip shows which
   way the message will travel. If someone you already talk to over Fauna can't
   be reached right now, the picker says *Lookup failed — try again* instead of
-  quietly falling back to plain email. Add several recipients
+  quietly falling back to plain email. As you type, the picker offers the
+  people you already know — your contacts first, then people you have written
+  with — matching a name, a nickname you gave them, a label or part of their
+  address; pick one and it is checked exactly as if you had typed it in full.
+  Remove a recipient with the × on its chip. Add several recipients
   and it becomes a group. Subjects are optional — toggle one on for
   email-style threads; changing the subject mid-thread shows as a divider.
 - **In a thread** — messages with timestamps and attachments (images inline),
@@ -349,8 +358,8 @@ each thread shows which; the reading and writing experience is the same.
   only without the nest's search.
 - **Unfinished messages keep themselves** — a half-written message is not
   something you have to remember to save. Leave a thread mid-sentence, start a
-  new conversation and come back, quit the app entirely, or pick up a different
-  device: the text, the subject and the files you had attached are all still
+  new conversation and come back, quit the app entirely, sign out and back in,
+  or pick up a different device: the text, the subject and the files you had attached are all still
   waiting where you left them. A file comes back as its name and size, though,
   not the file itself: send from a device that no longer has it — a different
   device, or this one after the app has restarted — and the app asks you to
@@ -467,6 +476,17 @@ any tier — hand the code to the buyer however you like. Every code, whether
 you minted it or a provider's webhook did, is listed there with its
 redemption status (unredeemed, redeemed, or voided) so you always have an
 audit trail of who's paid.
+
+Visitors to your website can use these codes without a Fauna account: every
+paid post and paid file shows a box to enter one. To have a buyer land back on
+your site with their code after paying, set your provider's "after payment"
+redirect to your site's address followed by
+`/api/v1/paywall/return/<provider>?ref=`, plus the reference your provider
+fills in — for Stripe that is
+`https://<your site>/api/v1/paywall/return/stripe?ref={CHECKOUT_SESSION_ID}`.
+The page they land on shows their code and tells them to keep it. If a paid
+page you published earlier doesn't show the code box yet, publish or edit a
+post to refresh your site.
 
 Your own active subscriptions are listed under Settings →
 [Subscriptions](#subscriptions).
@@ -937,7 +957,12 @@ do. The sub-pages:
   If you did not, press **My Identity Was Stolen** on that screen, paste your
   recovery kit and type `SUCCEED`: the account moves to a new key the other
   person does not have, the lock does not apply to it, and you are signed in
-  straight away.
+  straight away. You can also lock your account without signing in: when
+  your device was taken and you are on someone else's, the first screen offers
+  **Lock my account for 24 hours**. Paste your secret key, enter your handle
+  (or let the key's link supply it), read the same warning and type `LOCK`.
+  When the lock lands you are back on the first screen with the time it ends,
+  and nothing of your account stays on that device.
 - **Folders** — the control plane for file sync; big enough to get its
   [own section below](#folders).
 - **Mail, calendar & contacts** — likewise,
@@ -1068,7 +1093,9 @@ do. The sub-pages:
   apps signed in with one of your app passwords, and the Nostr apps your nest
   signs for. Each row says what the app is, where it comes from, what it may
   reach in plain words, when it was last used and how long it lasts, and has
-  a **Disconnect** button that asks you to confirm before it acts. Above the
+  a **Disconnect** button that asks you to confirm before it acts. While
+  **Allow external apps** is off on the Bluesky page, every app it affects is
+  still listed here, marked **Paused** until you turn it back on. Above the
   list, **Connect an app** is where you type the code an app on another device
   (a TV, a watch, a command-line tool) shows you; a valid code opens the same
   approval card a browser sign-in shows. An app on the same device as Fauna
@@ -1083,7 +1110,13 @@ do. The sub-pages:
   blocked that way is listed at the bottom of the page under **Blocked apps**,
   with **Allow requests again** to undo it. A mail app password's row also
   shows the exact address a mail app signs in with, and lets you copy it and
-  reveal or copy the password itself.
+  reveal or copy the password itself. An app your nest has used your keys for
+  — signing Nostr events for it, say, issuing it a short-lived Bluesky
+  service token, or writing records to your Bluesky repository for it, which
+  shows the kind of record and its key — also says how many times that happened in the current
+  window, how many of its requests your nest has answered in all, and what the
+  most recent one was and when, worded the way its approval card worded the
+  permission. Your key itself never leaves your nest.
 - **Content moderation** — the training queue: correct the classifier when it
   mislabels something, and it learns. If your nest's administrator has ever
   been legally compelled to withhold something you posted, that decision shows
@@ -1211,7 +1244,9 @@ words, the community labelers you subscribe to, and your trained topics.
   beside any other, and unsubscribing withdraws it. If your nest has no mail
   service yet, or mail isn't set up for you, the labeler is listed but won't
   run until it is — the page tells you so. Subscribe and its labels become ranking
-  factors you can weight in your feeds — unsubscribe any time. A labeler comes
+  factors you can weight in your feeds — unsubscribe any time. A program over
+  public posts scores your feeds right on your device, as you browse; your nest
+  never runs it. A labeler comes
   in three kinds: a **program** that scores content as it arrives, a **list** —
   someone's published set of posts with scores — or a **word-pattern model**,
   which matches posts nobody has seen yet. Inspecting a list shows you its name
@@ -1221,7 +1256,11 @@ words, the community labelers you subscribe to, and your trained topics.
   word-pattern model was built by a newer version of the app than yours, its
   kind reads **needs a newer app**: it stays in your list and keeps whatever
   you've set, but it won't affect your feeds until you update — rather than
-  quietly scoring your posts by rules this version doesn't understand.
+  quietly scoring your posts by rules this version doesn't understand. In the
+  same way, a program that writes its labels in a newer format than your app
+  reads says so when you inspect it — it needs a newer version of the app — and
+  can't be subscribed to until you update; if one you already subscribe to
+  moves to such a format, it leaves your feeds as they were until you update.
 - **Trained topics** — teach the app what a topic means to *you*. Create a
   topic (say, "Cats"), then on any post open the **⋯** menu and tap **More
   like this** or **Less like this**; each tap teaches the topic on the spot,
@@ -1230,8 +1269,10 @@ words, the community labelers you subscribe to, and your trained topics.
   weight — and the feed reorders as you teach. Rename or delete a topic here
   any time, and see how many examples each one has learned from.
 - **Learn from my activity** — each trained topic also has a switch that lets
-  it learn gently from how you actually read: linger on a post and the topic
-  nudges toward it, scroll straight past and it nudges away. It's off until
+  it learn gently from how you actually read: linger on a post — a photo
+  counts like text — or play a post's video to the end, and the topic nudges
+  toward it; scroll straight
+  past and it nudges away. It's off until
   you turn it on, per topic, and turning it off stops the learning without
   undoing what a topic already knows. Explicit taps always count far more
   than a lingering read, and re-reading something you skipped undoes the

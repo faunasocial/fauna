@@ -34,9 +34,11 @@ from helpers.budgets import UI_SETTLE_S
 pytestmark = pytest.mark.tier_2
 
 # `awaiting-dns-fallthrough-button` ("Use a different nest") landed on tui — the
-# lead app — 2026-09-25 (rule-A approved), then windows; every other app still
-# carries only the generated UiIds constant, unused.
-_FALLTHROUGH_BUTTON_APPS = ("tui", "windows")
+# lead app — 2026-09-25 (rule-A approved), then windows, then web, linux, android
+# and macOS/iOS — all seven apps now paint it. The
+# tuple stays until android and macOS/iOS have run this file green on their
+# machines; once they have, delete it with the two skip arms that read it.
+_FALLTHROUGH_BUTTON_APPS = ("tui", "windows", "web", "linux", "android", "macos", "ios")
 
 
 @pytest.mark.feature("set-up-a-nest-from-the-app")

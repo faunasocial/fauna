@@ -65,6 +65,59 @@ class CloudBackupPostureTest {
     }
 
     /**
+     * `allowBackup="false"` rules cloud backup only: for an app targeting API 31+
+     * the platform lets some devices carry the private tree in a device-to-device
+     * transfer unless `android:dataExtractionRules` says otherwise. The sealed
+     * credential files would then arrive without their Keystore key. So the
+     * manifest must point at a rules file, and the file must exclude every domain
+     * from BOTH sections.
+     */
+    @Test
+    fun theManifestPointsAtRulesExcludingEveryDomainFromBothSections() {
+        val manifest = parse("src/main/AndroidManifest.xml")
+        val application = manifest.getElementsByTagName("application").item(0)
+        val rules = application.attributes
+            .getNamedItemNS(ANDROID_NS, "dataExtractionRules")?.nodeValue
+        assertEquals(
+            "<application> must carry android:dataExtractionRules: allowBackup=\"false\" " +
+                "alone leaves device-to-device transfer open on some devices at API 31+",
+            "@xml/data_extraction_rules",
+            rules,
+        )
+        val file = java.io.File("src/main/res/xml/data_extraction_rules.xml")
+        assertTrue("the rules file the manifest names must exist: ${file.path}", file.isFile)
+        val doc = parse(file.path)
+        for (section in listOf("cloud-backup", "device-transfer")) {
+            val nodes = doc.getElementsByTagName(section)
+            assertEquals("rules file must have exactly one <$section>", 1, nodes.length)
+            val excluded = (0 until nodes.item(0).childNodes.length)
+                .map { nodes.item(0).childNodes.item(it) }
+                .filter { it.nodeName == "exclude" }
+                .map { it.attributes.getNamedItem("domain")?.nodeValue }
+                .toSet()
+            assertEquals(
+                "<$section> must exclude every domain; missing: ${DOMAINS - excluded}",
+                DOMAINS,
+                excluded,
+            )
+        }
+    }
+
+    private fun parse(path: String): org.w3c.dom.Document =
+        javax.xml.parsers.DocumentBuilderFactory.newInstance()
+            .apply { isNamespaceAware = true }
+            .newDocumentBuilder()
+            .parse(java.io.File(path))
+
+    private companion object {
+        const val ANDROID_NS = "http://schemas.android.com/apk/res/android"
+        val DOMAINS = setOf(
+            "root", "file", "database", "sharedpref", "external",
+            "device_root", "device_file", "device_database", "device_sharedpref",
+        )
+    }
+
+    /**
      * The other half: the declaration must name the rule this test checks.
      *
      * On its own the assertion above only proves *some* property of the manifest;
@@ -80,7 +133,8 @@ class CloudBackupPostureTest {
             "the declaration handed to Rust must name the file and attribute a reviewer " +
                 "(and the test above) can check; got: ${CloudBackupPosture.DECLARATION}",
             CloudBackupPosture.DECLARATION.contains("AndroidManifest.xml") &&
-                CloudBackupPosture.DECLARATION.contains("android:allowBackup=\"false\""),
+                CloudBackupPosture.DECLARATION.contains("android:allowBackup=\"false\"") &&
+                CloudBackupPosture.DECLARATION.contains("android:dataExtractionRules"),
         )
     }
 

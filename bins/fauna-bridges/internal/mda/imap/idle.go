@@ -17,7 +17,8 @@ import (
 // idleSubscribeRPCTimeout caps the synchronous nest round-trip that
 // registers the IDLE push subscription. Separate from the IDLE loop
 // timeout itself — the registration happens before the MDA returns
-// the `+ idling` continuation to the MUA, so latency here is bounded.
+// the `+ idling` continuation to the MUA (PrepareIdle, called by the
+// fork ahead of the continuation), so latency here is bounded.
 const idleSubscribeRPCTimeout = 10 * time.Second
 
 // idleSeqLookupRPCTimeout caps each per-event `fetch_message_metadata`
@@ -125,17 +126,87 @@ func (a *updateWriterAdapter) WriteVanished(uids imap.UIDSet) error {
 	return a.w.WriteVanished(uids)
 }
 
+// idleRegistration is one IDLE's live push subscription: the nest's
+// subscription_id and the router channel its pushes arrive on.
+type idleRegistration struct {
+	subscriptionID uint64
+	events         <-chan wsrpc.MailboxStateEvent
+}
+
+// PrepareIdle registers the IDLE push subscription BEFORE the client is
+// told it is idling. The vendored fork's handleIdle calls it ahead of
+// writing `+ idling` (FORK.md row 20), so by the time the MUA can act on
+// the continuation the nest subscription and its router route are both
+// in place: a change the MUA's other session makes after seeing `+`
+// commits after the subscription exists, its push follows the subscribe
+// reply on the same WS connection, and the route is registered before
+// the continuation is written. Registering inside Idle instead (it runs
+// only after `+`) loses such a change's push — the nest has no
+// subscriber yet, or the push reaches the router before the route does.
+// An error refuses the IDLE with a tagged response, no continuation.
+func (s *Session) PrepareIdle() error {
+	reg, err := s.registerIdle(context.Background())
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	stale := s.preparedIdle
+	s.preparedIdle = reg
+	router := s.router
+	s.mu.Unlock()
+	if stale != nil {
+		// A prepare whose IDLE never ran (the continuation write failed);
+		// the connection is dying, but release its route all the same.
+		router.Unregister(stale.subscriptionID)
+	}
+	return nil
+}
+
+// registerIdle subscribes to the SELECTed mailbox's state pushes with the
+// nest and registers the router route for the returned subscription_id.
+func (s *Session) registerIdle(parentCtx context.Context) (*idleRegistration, error) {
+	s.mu.Lock()
+	actorID := s.actorID
+	mailbox := s.selectedMailbox
+	client := s.client
+	router := s.router
+	s.mu.Unlock()
+	if actorID == nil {
+		return nil, errors.New("imap: IDLE requires authenticated state")
+	}
+	if mailbox == "" {
+		return nil, errors.New("imap: IDLE requires a SELECTed mailbox")
+	}
+	if router == nil {
+		// Backend wired without a router — production always supplies
+		// one; this guard exists so a test that forgets the router
+		// surfaces the gap explicitly rather than nil-panicking.
+		return nil, errors.New("imap: IDLE requires a notification router")
+	}
+	subCtx, cancel := context.WithTimeout(parentCtx, idleSubscribeRPCTimeout)
+	subscriptionID, err := wsrpc.SubscribeMailboxState(subCtx, client, actorID, mailbox)
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("imap: IDLE subscribe failed: %w", err)
+	}
+	return &idleRegistration{subscriptionID: subscriptionID, events: router.Register(subscriptionID)}, nil
+}
+
 // Idle implements imapserver.SessionIMAP4rev2.Idle.  emersion's
 // imapserver/idle.go invokes this on the IMAP server's reader goroutine
-// after writing `+ idling` to the wire; the stop channel closes when
-// the MUA sends `DONE` (or the IMAP connection drops).
+// after writing `+ idling` to the wire — and, in the vendored fork,
+// after PrepareIdle registered the push subscription ahead of that
+// write; the stop channel closes when the MUA sends `DONE` (or the IMAP
+// connection drops).
 //
 // Wire flow per imap-server.md § IDLE:
 //
 //  1. Register a `fauna.bridges.subscribe_mailbox_state` subscription
-//     with nest for the SELECTed mailbox.  The subscription_id nest
-//     returns is per-WS-connection-lifetime; F.2's router demuxes
-//     incoming `BridgeMailboxStatePush` frames by it.
+//     with nest for the SELECTed mailbox (PrepareIdle, before `+`; the
+//     loop below takes it over, or registers one itself when no prepare
+//     ran).  The subscription_id nest returns is per-WS-connection-
+//     lifetime; F.2's router demuxes incoming `BridgeMailboxStatePush`
+//     frames by it.
 //  2. Register an event channel with the Backend's notification router
 //     under that subscription_id.
 //  3. Enter a select loop on (a) the event channel, (b) the stop
@@ -201,32 +272,23 @@ func (s *Session) idle(
 	client := s.client
 	router := s.router
 	timeout := s.idleTimeout
+	reg := s.preparedIdle
+	s.preparedIdle = nil
 	s.mu.Unlock()
-	if actorID == nil {
-		return errors.New("imap: IDLE requires authenticated state")
-	}
-	if mailbox == "" {
-		return errors.New("imap: IDLE requires a SELECTed mailbox")
-	}
-	if router == nil {
-		// Backend wired without a router — production always supplies
-		// one; this guard exists so a test that forgets the router
-		// surfaces the gap explicitly rather than nil-panicking.
-		return errors.New("imap: IDLE requires a notification router")
-	}
 	if timeout <= 0 {
 		timeout = defaultIdleTimeout
 	}
 
-	subCtx, cancel := context.WithTimeout(parentCtx, idleSubscribeRPCTimeout)
-	subscriptionID, err := wsrpc.SubscribeMailboxState(subCtx, client, actorID, mailbox)
-	cancel()
-	if err != nil {
-		return fmt.Errorf("imap: IDLE subscribe failed: %w", err)
+	if reg == nil {
+		// No PrepareIdle ran ahead of the continuation (a direct caller);
+		// register now — the same checks and the same subscription.
+		var err error
+		if reg, err = s.registerIdle(parentCtx); err != nil {
+			return err
+		}
 	}
-
-	eventCh := router.Register(subscriptionID)
-	defer router.Unregister(subscriptionID)
+	defer router.Unregister(reg.subscriptionID)
+	eventCh := reg.events
 
 	fetcher := s.metadataFetcher(client)
 

@@ -23,21 +23,21 @@ Stamped 2026-10-01 at dc4b94e0f1.
 3. [app] Linking the two nests once also sets up your mailbox on the home nest, so relayed mail is readable there straight away, in the app and in a mail app, with no second step to turn mail on — `docs/goal/architecture/nest/deployment-home-with-public-relay.md` § Topology
    - `tests/e2e-unified/tests/live/test_private_relay_hetzner.py::test_private_relay_behind_hetzner_public_node`
 4. [nest] Mail that arrives while the home nest is switched off or unreachable waits on the relay, still sealed, and comes home once the home nest is back — `docs/goal/architecture/nest/deployment-home-with-public-relay.md` § Inbound mail
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_mail_waits_on_the_relay_while_the_home_nest_is_unreachable`
 5. [nest] Mail is handed to the home nest only once both nests are linked to each other; until then it stays on the relay — `docs/goal/architecture/nest/deployment-home-with-public-relay.md` § Topology
    - `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_two_nest_mail_relay_round_trip_and_no_readable_copy`
 6. [nest] Mail you send appears in your Sent folder on the home nest — `docs/goal/architecture/nest/deployment-home-with-public-relay.md` § Outbound mail
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_mail_you_send_lands_in_the_home_sent_folder`
 7. [nest] Mail the relay judged to be spam arrives in the Junk folder on the home nest, and other mail in the inbox — `docs/goal/architecture/nest/deployment-home-with-public-relay.md` § Inbound mail
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_mail_the_relay_judged_spam_lands_in_junk_at_home`
 8. [nest] The home nest serves your mail and calendar to apps on your own network only, never on the public internet and never through the relay — `docs/goal/architecture/nest/deployment-home-with-public-relay.md` § MUA reach (IMAP / CalDAV)
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_the_home_nest_serves_mail_on_its_lan_only`
 9. [nest] The home nest takes in no mail from the internet and accepts no outgoing mail itself; both go through the relay — `docs/goal/architecture/nest/deployment-home-with-public-relay.md` § Outbound mail
    - `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_two_nest_mail_relay_round_trip_and_no_readable_copy`
 10. [nest] A very large incoming message still reaches the home nest, and never holds up the mail that arrives after it — `docs/goal/architecture/nest/deployment-home-with-public-relay.md` § Relay frame budget
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_a_message_over_the_relay_frame_budget_reaches_home_and_holds_up_nothing`
 11. [nest] A certificate the admin's app obtains for the home nest reaches it through the relay and is installed there, and the relay can neither read nor alter it — `docs/goal/architecture/nest/tls-certificates.md` § B. Trusted-cert acquisition
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_a_certificate_for_the_home_nest_reaches_it_through_the_relay`
 12. [nest] The home nest installs a delivered certificate only if one of its own admins signed it; one sent by anyone else is never served — `docs/goal/architecture/nest/tls-certificates.md` § B. Trusted-cert acquisition
    - (none)
 
@@ -57,15 +57,15 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/live/test_private_relay_hetzner.py::test_private_relay_behind_hetzner_public_node` | — |
-| 2 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_two_nest_mail_relay_round_trip_and_no_readable_copy` | nest (linux): failed |
+| 2 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_two_nest_mail_relay_round_trip_and_no_readable_copy` | nest (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/live/test_private_relay_hetzner.py::test_private_relay_behind_hetzner_public_node` | — |
-| 4 | nest | (none) | — |
-| 5 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_two_nest_mail_relay_round_trip_and_no_readable_copy` | nest (linux): failed |
-| 6 | nest | (none) | — |
-| 7 | nest | (none) | — |
-| 8 | nest | (none) | — |
-| 9 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_two_nest_mail_relay_round_trip_and_no_readable_copy` | nest (linux): failed |
-| 10 | nest | (none) | — |
-| 11 | nest | (none) | — |
+| 4 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_mail_waits_on_the_relay_while_the_home_nest_is_unreachable` | nest (linux): passed |
+| 5 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_two_nest_mail_relay_round_trip_and_no_readable_copy` | nest (linux): passed |
+| 6 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_mail_you_send_lands_in_the_home_sent_folder` | nest (linux): passed |
+| 7 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_mail_the_relay_judged_spam_lands_in_junk_at_home` | nest (linux): passed |
+| 8 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_the_home_nest_serves_mail_on_its_lan_only` | nest (linux): passed |
+| 9 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_two_nest_mail_relay_round_trip_and_no_readable_copy` | nest (linux): passed |
+| 10 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_a_message_over_the_relay_frame_budget_reaches_home_and_holds_up_nothing` | nest (linux): passed |
+| 11 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_a_certificate_for_the_home_nest_reaches_it_through_the_relay` | nest (linux): passed |
 | 12 | nest | (none) | — |
 <!-- features-render:end -->

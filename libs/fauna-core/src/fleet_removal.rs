@@ -1,8 +1,8 @@
 //! Which fleet member a devices-page removal excludes — resolved from
 //! **client-held truth**, never from the nest's word.
 //!
-//! Authority: `docs/goal/architecture/account-data-taxonomy.md` § The
-//! generation machinery → *Fleet-scope reclamation*, clause (4) (*The removal
+//! Authority: `docs/goal/architecture/fleet-scope-reclamation.md`
+//! § *Fleet-scope reclamation*, clause (4) (*The removal
 //! target*); `docs/goal/behavior/devices.md` § Removing a Device.
 //!
 //! The devices page lists `fauna.sync.devices.list` rows, and every field on

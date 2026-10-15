@@ -133,11 +133,13 @@
 
 mod capability_sweep;
 mod drive;
+mod e2e_holds;
 #[cfg(any(debug_assertions, feature = "e2e-agent"))]
 pub mod e2e_readers;
 mod enrollment;
 mod handle;
 mod handle_source;
+mod host;
 mod pass;
 mod stop;
 
@@ -148,16 +150,20 @@ pub use enrollment::{
     fleet_bootstrap, fleet_bootstrap_rows, r14_trust,
 };
 pub use handle::{
-    AccountStoreHandle, GroupCeremonyAuthority, LedgerIdentity, PumpCycles, PumpCyclesView,
-    RUNTIME_GONE,
+    AccountStoreHandle, GroupCeremonyAuthority, HolderWalk, HolderWalkSeat, LedgerIdentity,
+    PumpCycles, PumpCyclesView, RUNTIME_GONE,
 };
 pub use handle_source::{
     ACCOUNT_HANDLE_WAIT, AccountHandleSource, AccountMailStore, AccountStoreAccess,
     FIRST_PASS_WAIT, NotReadyReason, RUNTIME_ABSENT, ScopeNotReady, SeatAccountStore,
     first_listing_gate, not_ready_reason, not_ready_reason_key, read_gate, wait_for_account_handle,
 };
+pub use host::{
+    AccountRuntimeHost, AssemblySettle, InstallClaim, InstallOutcome, PendingAssembly,
+    RuntimeTeardown, assembly_channel,
+};
 pub use pass::{PassTimings, PumpReport, push_step_error};
-pub use stop::{ACCOUNT_RUNTIME_STOP_BUDGET, StopReason, stop_one};
+pub use stop::{ACCOUNT_RUNTIME_STOP_BUDGET, REMOVED_ACCOUNT_RETIRE_BUDGET, StopReason, stop_one};
 
 pub use crate::host_legs::{ElectionOutcome, EngineElection, Presence};
 pub use crate::principal_custody::{EnrollmentRefusal, PrincipalCustody};
@@ -186,9 +192,9 @@ use crate::generation_escrow_recover::EscrowRecoveryMemo;
 use crate::generation_tip::GenerationTrust;
 use crate::scope_set::derive_content_scopes;
 
-use drive::{Drive, Driven, SignOutWatch, contained_pump, drive_pass};
+use drive::{Drive, Driven, SignOutWatch, contained_pump, drive_pass, serve_counted};
 use enrollment::retire_enrollment;
-use handle::{Cmd, LocalCtx, Served, serve_local_cmd};
+use handle::{Cmd, LocalCtx, Served};
 use pass::{
     FleetWriter, PassInputs, Planes, enrollment_healthy, log_pump, publish_step, pump,
     reassembly_reason, seed_pass, walk_found_burnt, walk_one_scope,
@@ -949,6 +955,7 @@ impl AccountDriver {
             p2p_participation_changed: Arc::new(watch::channel(0u64).0),
             grant_registered,
             ledger_identity,
+            holder_walk: HolderWalkSeat::default(),
         };
         (driver, handle)
     }
@@ -1121,8 +1128,8 @@ impl AccountDriver {
             // else of a predecessor's fleet-only branch opens in the walk.
             // The reclamation pass alone is handed the wider retired
             // machinery keys, to open a predecessor's machinery rows and
-            // retire them (`account-data-taxonomy.md` § The generation
-            // machinery → *Fleet-scope reclamation*, clause (3)(i)).
+            // retire them (`fleet-scope-reclamation.md`
+            // § *Fleet-scope reclamation*, clause (3)(i)).
             Ok(p) => p
                 .with_generation_custody(slot)
                 .with_predecessor_mint_keys(settings.attested_predecessors.mint_kind_keys())
@@ -1149,6 +1156,7 @@ impl AccountDriver {
             session_rpc,
             schedule: &schedule,
             enrollment_target: &settings.enrollment_target_device_id,
+            departed_devices: settings.attested_predecessors.departed_devices(),
             // The two seed-only slots are filled for the seed-leg role's
             // holder alone — `writer!()` below.
             escrow_recovery: None,
@@ -1325,6 +1333,17 @@ impl AccountDriver {
                     // own default: the role answer holds there too.
                     report.skipped_non_holder = true;
                     log_pump($label, &report);
+                    // A key recovered beside another engine holder opens
+                    // nothing until that holder's next full reconcile
+                    // re-presents the rows (`seed_pass`, step 3): the host
+                    // asks it for that pass now (`holder_pass_owed`).
+                    if matches!(
+                        report.generation_escrow_recovery,
+                        Some(crate::generation_escrow_recover::EscrowRecoveryPass::Recovered(n))
+                            if n > 0
+                    ) {
+                        cycles.owe_holder_pass();
+                    }
                     report
                 })
             };
@@ -1422,6 +1441,7 @@ impl AccountDriver {
                 membership_answered: answered,
                 endpoint_facts: facts.as_ref(),
                 ledger_actor: actor.map(ActorId),
+                fleet_walk: e2e_holds::Prompt::Unprompted,
             };
             // Every full pass is boxed, as the seed pass is: inline, the pump's
             // future would sit in the serve's own (`native-async-execution.md`
@@ -1458,6 +1478,24 @@ impl AccountDriver {
             // would have run.
             seed_pass_if_held!("seed prologue");
         }
+        // A seed prologue that ran on a store whose fleet scope its engine
+        // holder had not listed yet — a sign-in beside the agent, on a fresh
+        // or erased store — recovered nothing: escrow recovery asks on the
+        // receipts and mint rows the listing merges. So until the listed
+        // fact lands, the seed-leg holder re-reads it on the grant latch's
+        // poll and runs one seed pass the moment it does, rather than at the
+        // backstop tick, minutes later, with every tip-sealed read held for
+        // the holder meanwhile (`account-runtime.md` § Multi-instance
+        // concurrency → *The seed-leg role*, part 2). A failed read polls
+        // nothing; the tick still runs the seed pass.
+        let mut first_listing_owed = !role.is_holder()
+            && seed_legs.is_holder()
+            && !store
+                .listed(ACCOUNT_STATE_FLEET_SCOPE)
+                .await
+                .unwrap_or(true);
+        let mut listing_backoff = presence_poll_backoff(settings.backstop_interval);
+        let mut listing_poll = std::pin::pin!(fauna_sleep::sleep(listing_backoff.ceiling()));
 
         // The backstop ticker: one cross-target sleep (`fauna_sleep`), re-armed
         // when its tick is OBSERVED — tokio's `MissedTickBehavior::Delay` by
@@ -1480,7 +1518,7 @@ impl AccountDriver {
                     None,
                     sign_out,
                     &mut drive!(),
-                    publish_step(planes),
+                    publish_step(planes, e2e_holds::Prompt::Unprompted),
                 )
                 .await;
                 let Ok(report) = outcome else {
@@ -1543,6 +1581,9 @@ impl AccountDriver {
                     () = &mut presence_poll, if seed_holding && role.is_holder() => {
                         Wake::PresencePoll
                     }
+                    () = &mut listing_poll, if first_listing_owed && !role.is_holder() => {
+                        Wake::FirstListingPoll
+                    }
                 },
             };
             match wake {
@@ -1550,9 +1591,12 @@ impl AccountDriver {
                 // Between passes a local command is served exactly as it is
                 // inside one — a tip-sealed put a pass parked included, which
                 // may mint here — and a local write then arms the publish
-                // step above.
+                // step above. Counted the same way too: a background write
+                // served here moves the generation at once, a gesture's never
+                // does (there is no run to subtract from — the tally is
+                // dropped).
                 Wake::Cmd(cmd) if cmd.is_local() => {
-                    match serve_local_cmd(cmd, &mut local!(false)).await {
+                    match serve_counted(cmd, &mut local!(false), cycles, &mut 0).await {
                         Served::Done => {}
                         Served::Reassemble => return ServeEnd::Reassemble,
                         Served::Park(_) => unreachable!(
@@ -1562,7 +1606,7 @@ impl AccountDriver {
                 }
                 Wake::Cmd(cmd) => {
                     match cmd {
-                        Cmd::ReconcileNow { reply } => {
+                        Cmd::ReconcileNow { reply, fleet_walk } => {
                             // A non-holder first re-tries the election: a free
                             // role should not make an explicit "reconcile now"
                             // answer "not my job" (the kernel arbitrates — this
@@ -1643,6 +1687,7 @@ impl AccountDriver {
                                 membership_answered: answered,
                                 endpoint_facts: facts.as_ref(),
                                 ledger_actor: actor.map(ActorId),
+                                fleet_walk,
                             };
                             let outcome = contained_pump(
                                 "reconcile-now",
@@ -1681,20 +1726,20 @@ impl AccountDriver {
                                 return ServeEnd::Reassemble;
                             }
                         }
-                        // The grant-mint door's publish: the local-write
-                        // wake's step, run now on every role (a non-holder's
-                        // own rows are its own to publish), then the one
-                        // question the mint asks — does any ledger row this
-                        // device wrote still sit above its published
-                        // high-water?
-                        Cmd::PublishLedger { reply } => {
+                        // An awaited publish (the grant-mint door's, the
+                        // mail rotation's): the local-write wake's step, run
+                        // now on every role (a non-holder's own rows are its
+                        // own to publish), then the one question the caller
+                        // asks — does any row of `kind` this device wrote
+                        // still sit above its published high-water?
+                        Cmd::PublishOwn { kind, what, reply } => {
                             *publish_due = false;
                             let outcome = contained_pump(
-                                "publish-ledger",
+                                "publish-own",
                                 None,
                                 sign_out,
                                 &mut drive!(),
-                                publish_step(planes),
+                                publish_step(planes, e2e_holds::Prompt::Awaited),
                             )
                             .await;
                             let Ok(report) = outcome else {
@@ -1703,7 +1748,7 @@ impl AccountDriver {
                                 ));
                                 return ServeEnd::Reassemble;
                             };
-                            log_pump("publish-ledger", &report);
+                            log_pump("publish-own", &report);
                             if report.stale_writer {
                                 let _ = reply.send(Err(
                                     "the writer was rotated under this process; the publish \
@@ -1712,24 +1757,21 @@ impl AccountDriver {
                                 ));
                                 tracing::info!(
                                     "account runtime: reassembling — the writer was rotated \
-                                     under this process (publish-ledger)"
+                                     under this process (publish-own)"
                                 );
                                 return ServeEnd::Reassemble;
                             }
                             let owed = planes
                                 .fleet
-                                .owes_own_state(|kind, _| {
-                                    kind == fauna_protocol::merge_policy::KIND_SUCCESSION_LEDGER
-                                })
+                                .owes_own_state(|row_kind, _| row_kind == kind)
                                 .await;
                             let _ = reply.send(match owed {
                                 Ok(false) => Ok(()),
                                 Ok(true) if report.errors.is_empty() => {
-                                    Err("the bound nest has not acknowledged the grant log yet"
-                                        .into())
+                                    Err(format!("the bound nest has not acknowledged {what} yet"))
                                 }
                                 Ok(true) => Err(format!(
-                                    "the bound nest did not acknowledge the grant log: {}",
+                                    "the bound nest did not acknowledge {what}: {}",
                                     report.errors.join("; ")
                                 )),
                                 Err(e) => Err(format!("reading the unpublished rows: {e:#}")),
@@ -1748,8 +1790,8 @@ impl AccountDriver {
                             // so a sign-out against an unreachable nest never
                             // holds the store open past the budget.
                             //
-                            // The plane leg FIRST (charter § The generation
-                            // machinery → *Fleet-scope reclamation*, clause
+                            // The plane leg FIRST (`fleet-scope-reclamation.md`
+                            // § *Fleet-scope reclamation*, clause
                             // (4)): this device's own `Removed` row and the
                             // retirement of its own rows ride the session and
                             // key the grant revoke is about to end. Inside the
@@ -1923,6 +1965,7 @@ impl AccountDriver {
                                 membership_answered: answered,
                                 endpoint_facts: facts.as_ref(),
                                 ledger_actor: actor.map(ActorId),
+                                fleet_walk: e2e_holds::Prompt::Unprompted,
                             };
                             let outcome = contained_pump(
                                 "reconnect",
@@ -1982,6 +2025,28 @@ impl AccountDriver {
                     } else {
                         presence_backoff.grow();
                         presence_poll.set(fauna_sleep::sleep(presence_backoff.ceiling()));
+                    }
+                }
+
+                // The seed-leg holder's re-read of the fleet scope's listed
+                // fact, owed since a seed prologue that ran before it (the
+                // note at `first_listing_owed`): listed → the seed pass its
+                // escrow recovery needed; else back off toward the backstop.
+                Wake::FirstListingPoll => {
+                    if store
+                        .listed(ACCOUNT_STATE_FLEET_SCOPE)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        first_listing_owed = false;
+                        tracing::info!(
+                            "account runtime: the fleet scope's first listing landed — running \
+                             the seed pass its escrow recovery waited for"
+                        );
+                        seed_pass_if_held!("seed first listing");
+                    } else {
+                        listing_backoff.grow();
+                        listing_poll.set(fauna_sleep::sleep(listing_backoff.ceiling()));
                     }
                 }
 
@@ -2053,6 +2118,7 @@ impl AccountDriver {
                         membership_answered: answered,
                         endpoint_facts: facts.as_ref(),
                         ledger_actor: actor.map(ActorId),
+                        fleet_walk: e2e_holds::Prompt::Unprompted,
                     };
                     let outcome = contained_pump(
                         label,
@@ -2103,6 +2169,8 @@ enum Wake {
     GrantLatch,
     /// A seed-holding holder's re-read of the agent's presence is due.
     PresencePoll,
+    /// A seed-leg holder's re-read of the fleet scope's listed fact is due.
+    FirstListingPoll,
 }
 
 /// Which plane scope a push wakes, if any — the ONE push→nudge mapping every

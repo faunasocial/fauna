@@ -119,6 +119,19 @@ pub struct CalendarState {
     #[serde(with = "serde_bytes")]
     pub encrypted_metadata: Vec<u8>,
     pub highestmodseq: u64,
+    /// The prune floor: the highest modseq any tombstone the retention prune
+    /// dropped from this calendar carried (0 = none ever pruned). Below it the
+    /// manifest's tombstone list is incomplete, so a replica rebuilt from it
+    /// must not enumerate deletions since an older sync-token — the
+    /// sync-collection answers stale (`caldav-server.md` § Stale sync-token
+    /// handling). Omitted at rest while 0, so a never-pruned manifest encodes
+    /// as before.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pruned_modseq: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +248,7 @@ mod tests {
             calendar_id: [0x42; 32],
             encrypted_metadata: vec![1, 2, 3],
             highestmodseq: 9,
+            pruned_modseq: 0,
         });
         let man_bytes = m.encode().expect("encode manifest");
         fauna_cbor::decode_strict::<CalPlacementManifest>(&man_bytes)
@@ -251,6 +265,7 @@ mod tests {
             calendar_id: [0x42; 32],
             encrypted_metadata: vec![1, 2, 3],
             highestmodseq: 42,
+            pruned_modseq: 0,
         });
         m.tombstones.push(EventTombstoneRef {
             calendar_id: [0x42; 32],

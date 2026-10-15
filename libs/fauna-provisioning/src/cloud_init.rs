@@ -1,51 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-/// Which builds a provisioned box's automatic updater follows — the
-/// `vps-config-update-channel-row` choice on `vps_config`
-/// (`docs/goal/behavior/onboarding-provisioning.md` § 5). [`Self::image_tag`]
-/// is the ONE place a channel becomes an image tag; which pipeline moves each
-/// tag is `docs/goal/architecture/build-system.md` § Image tags & channels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-pub enum UpdateChannel {
-    /// Released builds. The default.
-    #[default]
-    Stable,
-    /// Release candidates under verification.
-    Test,
-    /// The newest development builds, not yet verified.
-    Dev,
-}
-
-impl UpdateChannel {
-    /// Every channel, in the order the page lists them.
-    pub const ALL: [UpdateChannel; 3] = [Self::Stable, Self::Test, Self::Dev];
-
-    /// The stable id the UI keys its rows by
-    /// (`vps-config-update-channel-row[<id>]`).
-    pub fn id(self) -> &'static str {
-        match self {
-            Self::Stable => "stable",
-            Self::Test => "test",
-            Self::Dev => "dev",
-        }
-    }
-
-    /// The channel with this [`Self::id`], if any.
-    pub fn from_id(id: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|c| c.id() == id)
-    }
-
-    /// The image tag the box pulls and its updater polls.
-    pub fn image_tag(self) -> &'static str {
-        match self {
-            Self::Stable => "latest",
-            Self::Test => "test",
-            Self::Dev => "dev",
-        }
-    }
-}
+/// Moved to [`crate::update_channel`], its one home; re-exported here for the
+/// callers that name it by its provisioning path.
+pub use crate::update_channel::UpdateChannel;
 
 /// Parameters for generating a cloud-init payload.
 ///
@@ -62,7 +19,6 @@ impl UpdateChannel {
 pub struct CloudInitParams {
     pub domain: String,
     pub image_tag: String,
-    pub watchtower_poll: u32,
     pub claim_code: String,
     /// Whether this box provisions the **mail subsystem**. Decided at
     /// onboarding (`vps_config`), seeded from the handle's real-domain default
@@ -71,7 +27,7 @@ pub struct CloudInitParams {
     /// - `true` → the compose carries the mail ports `{25,465,587,993}`, the
     ///   content-scan env `FAUNA_CLAMD_ADDR`/`FAUNA_RSPAMD_URL`, the `clamd` +
     ///   `rspamd` sidecars, and the matching `ufw` rules.
-    /// - `false` → a **lean social-only box** (nest + watchtower only): no mail
+    /// - `false` → a **lean social-only box** (nest + updater only): no mail
     ///   ports and **no ~1.5 GB `clamd`**, so the 1 GB VPS tier stays viable
     ///   (`installers/vps.md` § Minimum VPS Requirements). A social-only box
     ///   cannot later enable mail without a resize — a documented, accepted
@@ -132,7 +88,7 @@ impl<'de> Deserialize<'de> for CloudInitParams {
 // ── Host OS Maintenance (installers/vps.md § Host OS Maintenance) ───────────
 //
 // An onboarded box keeps **Ubuntu itself** patched (the nest *image* is
-// Watchtower's job) with no human ever logging in, so the whole policy is
+// the Fauna updater's job) with no human ever logging in, so the whole policy is
 // artifact-set IPC + constants — never a human-edited knob. These static files
 // are baked into cloud-init below: `unattended-upgrades` for the live-apply
 // majority, and a `fauna-reboot-coordinator` systemd timer that reboots the box
@@ -203,6 +159,10 @@ RESTART_REQUESTED="$MAINT_DIR/restart-requested"
 # host->nest (root-owned, exported :ro to the container): only root writes here.
 HOST_DIR=/opt/fauna/maintenance-host
 HOST_STATUS="$HOST_DIR/host-status"
+# The host's own global-unicast addresses: the IP bridge cert's second source
+# (nest/tls-certificates.md § B-IP *When*). The nest cannot see them from inside
+# its bridge network.
+HOST_ADDRESSES="$HOST_DIR/host-addresses"
 CEILING_SECS=86400
 # Min host uptime before an admin "restart now" is honoured (INFO-1 anti-loop): a
 # compromised container that re-plants restart-requested after each boot would
@@ -267,6 +227,44 @@ fauna_read_connection_count() {
     echo "$_cc"
 }
 
+# Pure filter: `ip -o addr show` output on stdin -> one `address=<ip>` line per
+# global-unicast address the host holds (IPv4 and IPv6). Coarse on purpose:
+# loopback, link-local, ULA, RFC 1918 and CGNAT are dropped here, and the nest
+# re-classifies every address itself (is_global_ip), so nothing here is a trust
+# decision. A field carrying anything but hex digits, `.` and `:` is dropped,
+# never echoed into the root-owned file.
+fauna_host_address_lines() {
+    while read -r _idx _ifname _family _cidr _rest; do
+        case "$_family" in inet|inet6) : ;; *) continue ;; esac
+        case " $_rest " in *" scope global "*) : ;; *) continue ;; esac
+        _addr=${_cidr%%/*}
+        case "$_addr" in ''|*[!0-9A-Fa-f:.]*) continue ;; esac
+        case "$_family:$_addr" in
+            inet:10.*|inet:127.*|inet:169.254.*|inet:192.168.*) continue ;;
+            inet:172.1[6-9].*|inet:172.2[0-9].*|inet:172.3[01].*) continue ;;
+            inet:100.6[4-9].*|inet:100.[7-9][0-9].*|inet:100.1[01][0-9].*|inet:100.12[0-7].*) continue ;;
+            inet6:[Ff][CcDd]*|inet6:[Ff][Ee][89AaBb]*|inet6:::1) continue ;;
+        esac
+        printf 'address=%s\n' "$_addr"
+    done
+}
+
+# Write the filtered listing on stdin to $1 atomically (tmp + rename), like
+# host-status. Argument-only so the tests can aim it at a scratch path.
+fauna_write_host_addresses() {
+    _dest=$1
+    fauna_host_address_lines > "$_dest.tmp"
+    mv "$_dest.tmp" "$_dest"
+}
+
+# Publish the host's addresses into the ROOT-OWNED $HOST_DIR. An unreadable
+# interface table leaves the last published set in place rather than blanking
+# it.
+fauna_publish_host_addresses() {
+    _listing=$(ip -o addr show 2>/dev/null) || return 0
+    printf '%s\n' "$_listing" | fauna_write_host_addresses "$HOST_ADDRESSES"
+}
+
 fauna_coordinator_main() {
     # Both dirs are created by cloud-init (runcmd) before this timer's first run;
     # we never mkdir them here (the root-owned $HOST_DIR must stay root-owned, and
@@ -311,6 +309,11 @@ fauna_coordinator_main() {
         printf 'last_patched_at=%s\n' "$last_patched_at"
     } > "$_tmp"
     mv "$_tmp" "$HOST_STATUS"
+
+    # Refresh the host's published addresses every run (an address added or
+    # moved since first boot reaches the nest within one timer interval). Never
+    # allowed to stop the reboot decision below.
+    fauna_publish_host_addresses || true
 
     # Read the nest's live connection count defensively + hang-proof (HM-3) —
     # extracted as a pure, argument-only fn so the cloud-init tests can plant a
@@ -360,11 +363,24 @@ fauna_coordinator_main() {
     fi
 }
 
-# When sourced for unit testing (FAUNA_COORDINATOR_TEST=1) expose only the pure
-# helper functions (fauna_reboot_decision, fauna_read_connection_count) — do not
-# gather host state or reboot.
+# Entry point. `publish-addresses` is the first-boot call cloud-init makes
+# before `docker compose up`: it publishes host-addresses and exits WITHOUT the
+# reboot decision, because a freshly patched box may already carry
+# /run/reboot-required and would reboot before the compose is up. A bare run
+# (the timer) is the full coordinator.
+fauna_coordinator_entry() {
+    case "${1:-}" in
+        publish-addresses) fauna_publish_host_addresses ;;
+        *) fauna_coordinator_main ;;
+    esac
+}
+
+# When sourced for unit testing (FAUNA_COORDINATOR_TEST=1) expose only the
+# helper functions (fauna_reboot_decision, fauna_read_connection_count,
+# fauna_host_address_lines, fauna_write_host_addresses, fauna_coordinator_entry)
+# — do not gather host state or reboot.
 if [ "${FAUNA_COORDINATOR_TEST:-}" != 1 ]; then
-    fauna_coordinator_main
+    fauna_coordinator_entry "$@"
 fi"#;
 
 /// `/etc/systemd/system/fauna-reboot-coordinator.service` — oneshot, driven by
@@ -413,9 +429,12 @@ WantedBy=timers.target"#;
 /// uid 1000 (the nest writes nest-readiness / restart-requested there);
 /// `/opt/fauna/maintenance-host` is left **root-owned `0755`** (only root writes
 /// host-status there; exported `:ro` to the container) so a compromised nest can
-/// neither symlink-plant nor forge the host status. The coordinator timer is
-/// enabled last.
-const MAINTENANCE_RUNCMD: &str = "\n  - mkdir -p /opt/fauna/maintenance\n  - chown 1000:1000 /opt/fauna/maintenance\n  - mkdir -p /opt/fauna/maintenance-host\n  - chmod 0755 /opt/fauna/maintenance-host\n  - systemctl daemon-reload\n  - systemctl enable --now fauna-reboot-coordinator.timer";
+/// neither symlink-plant nor forge the host status. Once the host dir exists the
+/// coordinator's `publish-addresses` entry point writes `host-addresses` (and
+/// only that — never the reboot decision), so the nest's first lifecycle tick
+/// already sees the host's addresses (`installers/vps.md` § Host OS Maintenance
+/// → 3). The coordinator timer is enabled last.
+const MAINTENANCE_RUNCMD: &str = "\n  - mkdir -p /opt/fauna/maintenance\n  - chown 1000:1000 /opt/fauna/maintenance\n  - mkdir -p /opt/fauna/maintenance-host\n  - chmod 0755 /opt/fauna/maintenance-host\n  - /usr/local/sbin/fauna-reboot-coordinator publish-addresses || true\n  - systemctl daemon-reload\n  - systemctl enable --now fauna-reboot-coordinator.timer";
 
 /// Prefix every non-empty line of `text` with `spaces` spaces, for embedding a
 /// file's content under a YAML `content: |` block scalar. Blank lines stay
@@ -488,7 +507,7 @@ fn maintenance_write_files() -> String {
 /// The **mail subsystem** is provisioned only when `params.enable_mail` — the
 /// mail ports, the content-scan env, the `clamd`/`rspamd` sidecars, their `configs:` block, and the matching `ufw`
 /// rules are all gated on it. A social-only box (`enable_mail == false`) gets a
-/// lean nest+watchtower compose with no ~1.5 GB `clamd`, keeping the 1 GB VPS
+/// lean nest+updater compose with no ~1.5 GB `clamd`, keeping the 1 GB VPS
 /// tier viable (`installers/vps.md` § Minimum VPS Requirements). See
 /// [`CloudInitParams::enable_mail`].
 ///
@@ -641,34 +660,36 @@ write_files:
             - /opt/fauna/maintenance:/data/maintenance
             - /opt/fauna/maintenance-host:/data/maintenance-host:ro
           environment:
-            FAUNA_MODE: public{mail_env}{seed_env}
+            FAUNA_MODE: public
+            # The update-channel seed (nest/update-channel.md § The channel as
+            # nest state): the same tag as `image:`, read only while no admin
+            # has chosen a channel from the app.
+            FAUNA_IMAGE_TAG: {image_tag}{mail_env}{seed_env}
           labels:
-            - "com.centurylinklabs.watchtower.enable=true"
+            - "social.fauna.update=true"
           logging: *default-logging
           # 15s > the nest's WS 1001 drain (GRACEFUL_SHUTDOWN_TIMEOUT 7s) + DB
-          # flush, so a Watchtower redeploy never SIGKILLs the nest mid-shutdown
+          # flush, so an updater re-create never SIGKILLs the nest mid-shutdown
           # (mirrors docker-compose.yml).
           stop_grace_period: 15s
           restart: unless-stopped
-        watchtower:
-          # Maintained fork of containrrr/watchtower (unmaintained; its bundled
-          # Docker client speaks API v1.25, which Docker 24+ rejects -> silent
-          # auto-update failure — mirrors docker-compose.yml).
-          image: nickfedor/watchtower:latest@sha256:3b8d2e3f0f6ff9295a5d634e4fdb7062e5e6602f71d89baa15cd4d39d22b5743
+        fauna-updater:
+          # The Fauna updater (nest/update-channel.md § The updater): the nest
+          # image's second binary at the same tag, holding the Docker socket
+          # and nothing else; it follows the channel the nest reports and
+          # re-creates the labelled nest on a newer build, never an older one
+          # (mirrors docker-compose.yml).
+          image: ghcr.io/faunasocial/nest:{image_tag}
+          entrypoint: ["/usr/local/bin/fauna-updater"]
           volumes:
             - /var/run/docker.sock:/var/run/docker.sock
-          environment:
-            WATCHTOWER_CLEANUP: "true"
-            WATCHTOWER_POLL_INTERVAL: "{watchtower_poll}"
-            WATCHTOWER_LABEL_ENABLE: "true"
-            WATCHTOWER_ROLLING_RESTART: "true"
           logging: *default-logging
           restart: unless-stopped{mail_services}
 {mail_configs}      volumes:
         fauna-data:
     permissions: '0600'
   # No /opt/fauna/.env: the compose above carries literal values (domain, image
-  # tag, poll), so an .env would be inert (the compose has no ${{...}} refs).
+  # tag), so an .env would be inert (the compose has no ${{...}} refs).
   # Switch the image tag by editing the compose `image:` line.
   - path: /opt/fauna/claim-code
     content: "{claim_code}"
@@ -677,7 +698,8 @@ write_files:
 runcmd:
   - systemctl enable docker
   - systemctl start docker
-  - ufw allow 22/tcp
+  - systemctl disable --now ssh.service ssh.socket
+  - ufw deny 22/tcp
   - ufw allow 80/tcp
   - ufw allow 443/tcp
   - ufw allow 7842/udp{mail_ufw}
@@ -685,7 +707,6 @@ runcmd:
   - docker compose -f /opt/fauna/docker-compose.yml up -d
 "#,
         image_tag = params.image_tag,
-        watchtower_poll = params.watchtower_poll,
         claim_code = params.claim_code,
         // NB: params.domain is no longer injected — the box boots DOMAINLESS and
         // learns its domain from the admin's claim handle (the primary
@@ -708,30 +729,6 @@ runcmd:
 mod tests {
     use super::*;
 
-    /// The channel → tag mapping is the contract between the wizard's choice
-    /// and the pipelines that move the tags; `stable` must stay `latest`, the
-    /// tag every box provisioned before the choice existed already follows.
-    #[test]
-    fn update_channel_ids_and_tags() {
-        let table: Vec<_> = UpdateChannel::ALL
-            .into_iter()
-            .map(|c| (c.id(), c.image_tag()))
-            .collect();
-        assert_eq!(
-            table,
-            [("stable", "latest"), ("test", "test"), ("dev", "dev")]
-        );
-        assert_eq!(UpdateChannel::default(), UpdateChannel::Stable);
-        for c in UpdateChannel::ALL {
-            assert_eq!(UpdateChannel::from_id(c.id()), Some(c));
-        }
-        assert_eq!(UpdateChannel::from_id("latest"), None);
-        assert_eq!(
-            serde_json::to_string(&UpdateChannel::Dev).unwrap(),
-            "\"dev\""
-        );
-    }
-
     /// The box boots DOMAINLESS: the rendered compose must NOT inject
     /// `FAUNA_DOMAIN`. The nest learns its domain from the admin's claim handle
     /// (the primary `mail_domains` row IS the deployment identity;
@@ -741,7 +738,6 @@ mod tests {
         let params = CloudInitParams {
             domain: "test.example.com".into(),
             image_tag: "latest".into(),
-            watchtower_poll: 300,
             claim_code: "AABBCC".into(),
             enable_mail: true,
             deployment_seed: None,
@@ -753,7 +749,10 @@ mod tests {
             "cloud-init must boot domainless (no FAUNA_DOMAIN env): {output}"
         );
         assert!(output.contains("ghcr.io/faunasocial/nest:latest"));
-        assert!(output.contains("WATCHTOWER_POLL_INTERVAL: \"300\""));
+        assert!(
+            !output.contains("WATCHTOWER"),
+            "the updater has no interval to set"
+        );
     }
 
     #[test]
@@ -761,7 +760,6 @@ mod tests {
         let params = CloudInitParams {
             domain: "x.com".into(),
             image_tag: "dev".into(),
-            watchtower_poll: 60,
             claim_code: "AABBCC".into(),
             enable_mail: true,
             deployment_seed: None,
@@ -779,13 +777,21 @@ mod tests {
             assert!(output.contains(port), "missing port mapping {port}");
         }
         for port in [
-            "22/tcp", "80/tcp", "443/tcp", "7842/udp", "25/tcp", "465/tcp", "587/tcp", "993/tcp",
+            "80/tcp", "443/tcp", "7842/udp", "25/tcp", "465/tcp", "587/tcp", "993/tcp",
         ] {
             assert!(
                 output.contains(&format!("ufw allow {port}")),
                 "missing ufw rule {port}"
             );
         }
+        // A deployed box runs no sshd and allows no 22/tcp (deployment-threat-model.md
+        // § Concern 1a): both units off (Ubuntu socket-activates sshd), the port denied.
+        assert!(
+            !output.contains("ufw allow 22/tcp"),
+            "22/tcp must never be allowed"
+        );
+        assert!(output.contains("systemctl disable --now ssh.service ssh.socket"));
+        assert!(output.contains("ufw deny 22/tcp"));
     }
 
     /// Bridge-isolation hardening is an IMAGE property (UID split + Landlock +
@@ -810,12 +816,17 @@ mod tests {
             let params = CloudInitParams {
                 domain: "x.com".into(),
                 image_tag: "latest".into(),
-                watchtower_poll: 300,
                 claim_code: "AABBCC".into(),
                 enable_mail,
                 deployment_seed: None,
             };
-            let output = build_cloud_init(&params);
+            let rendered = build_cloud_init(&params);
+            // The one sanctioned override is the updater's own entrypoint — a
+            // second container of the image that runs no nest and mints nothing
+            // (`nest/update-channel.md` § The updater); it appears exactly once.
+            let updater_entrypoint = r#"entrypoint: ["/usr/local/bin/fauna-updater"]"#;
+            assert_eq!(rendered.matches(updater_entrypoint).count(), 1);
+            let output = rendered.replace(updater_entrypoint, "");
             for banned in [
                 "privileged",
                 "cap_add",
@@ -859,7 +870,6 @@ mod tests {
         let params = CloudInitParams {
             domain: "x.com".into(),
             image_tag: "dev".into(),
-            watchtower_poll: 60,
             claim_code: "AABBCC".into(),
             enable_mail: true,
             deployment_seed: None,
@@ -902,7 +912,6 @@ mod tests {
         let params = CloudInitParams {
             domain: "x.com".into(),
             image_tag: "dev".into(),
-            watchtower_poll: 60,
             claim_code: "AABBCC".into(),
             enable_mail: true,
             deployment_seed: None,
@@ -927,7 +936,6 @@ mod tests {
         let params = CloudInitParams {
             domain: "test.example.com".into(),
             image_tag: "latest".into(),
-            watchtower_poll: 300,
             claim_code: "A1B2C3".into(),
             enable_mail: true,
             deployment_seed: None,
@@ -969,7 +977,6 @@ mod tests {
         let params = CloudInitParams {
             domain: "x.com".into(),
             image_tag: "dev".into(),
-            watchtower_poll: 60,
             claim_code: "AABBCC".into(),
             enable_mail: false,
             deployment_seed: Some(seed.clone()),
@@ -993,6 +1000,59 @@ mod tests {
         );
     }
 
+    /// The update-channel seed (`nest/update-channel.md` § The channel as nest
+    /// state → *The seed*): the nest's environment repeats the literal tag the
+    /// compose wrote into `image:`, so the box follows the channel the wizard
+    /// chose until an admin picks another from the app.
+    #[test]
+    fn test_cloud_init_seeds_the_update_channel_from_the_image_tag() {
+        for tag in ["dev", "test", "latest"] {
+            let output = build_cloud_init(&CloudInitParams {
+                domain: "x.com".into(),
+                image_tag: tag.into(),
+                claim_code: "AABBCC".into(),
+                enable_mail: false,
+                deployment_seed: None,
+            });
+            assert!(
+                output.contains(&format!("image: ghcr.io/faunasocial/nest:{tag}")),
+                "{output}"
+            );
+            assert!(
+                output.contains(&format!("\n            FAUNA_IMAGE_TAG: {tag}\n")),
+                "the nest's env must carry the seed beside FAUNA_MODE: {output}"
+            );
+        }
+    }
+
+    /// The updater replaces Watchtower (`nest/update-channel.md` § The
+    /// bundles): a second container of the nest image at the same tag, its
+    /// entrypoint overridden; the nest — and only the nest — carries the label
+    /// that puts it under the updater's management.
+    #[test]
+    fn test_cloud_init_runs_the_updater_from_the_nest_image() {
+        let output = build_cloud_init(&CloudInitParams {
+            domain: "x.com".into(),
+            image_tag: "test".into(),
+            claim_code: "AABBCC".into(),
+            enable_mail: true,
+            deployment_seed: None,
+        });
+        let updater = output
+            .split("\n        fauna-updater:\n")
+            .nth(1)
+            .expect("a fauna-updater service");
+        let updater = &updater[..updater.find("\n        clamd:").unwrap_or(updater.len())];
+        assert!(
+            updater.contains("image: ghcr.io/faunasocial/nest:test\n"),
+            "{updater}"
+        );
+        assert!(updater.contains(r#"entrypoint: ["/usr/local/bin/fauna-updater"]"#));
+        assert!(updater.contains("restart: unless-stopped"));
+        assert_eq!(output.matches("social.fauna.update=true").count(), 1);
+        assert!(!output.to_lowercase().contains("watchtower"), "{output}");
+    }
+
     /// DKIM keys are nest-minted (when the mail domain is added, and at boot)
     /// and published post-boot from the nest's DKIM selector list; cloud-init
     /// must NOT embed a client-generated key or it would publish a key the
@@ -1002,7 +1062,6 @@ mod tests {
         let params = CloudInitParams {
             domain: "x.com".into(),
             image_tag: "dev".into(),
-            watchtower_poll: 60,
             claim_code: "AABBCC".into(),
             enable_mail: true,
             deployment_seed: None,
@@ -1028,7 +1087,6 @@ mod tests {
         let params = CloudInitParams {
             domain: "x.com".into(),
             image_tag: "dev".into(),
-            watchtower_poll: 60,
             claim_code: "AABBCC".into(),
             enable_mail: true,
             deployment_seed: None,
@@ -1045,16 +1103,15 @@ mod tests {
     }
 
     /// A **social-only** box (`enable_mail == false`) provisions a lean
-    /// nest+watchtower compose: NO mail ports, NO content-scan env, NO ~1.5 GB
+    /// nest+updater compose: NO mail ports, NO content-scan env, NO ~1.5 GB
     /// clamd/rspamd sidecars, and NO mail `ufw` rules — keeping the 1 GB VPS tier viable
     /// (`installers/vps.md` § Minimum VPS Requirements). The base nest surface
-    /// (HTTP/HTTPS ports, volume, watchtower) is unchanged.
+    /// (HTTP/HTTPS ports, volume, updater) is unchanged.
     #[test]
     fn test_cloud_init_social_only_omits_mail() {
         let params = CloudInitParams {
             domain: "social.example.com".into(),
             image_tag: "dev".into(),
-            watchtower_poll: 60,
             claim_code: "AABBCC".into(),
             enable_mail: false,
             deployment_seed: None,
@@ -1072,7 +1129,7 @@ mod tests {
             "80:8080",
             "443:443",
             "fauna-data:",
-            "nickfedor/watchtower:latest",
+            "fauna-updater:",
             "stop_grace_period: 15s",
             "ufw allow 443/tcp",
             "7842:7842/udp",
@@ -1128,7 +1185,6 @@ mod tests {
         let output = build_cloud_init(&CloudInitParams {
             domain: "x.com".into(),
             image_tag: "dev".into(),
-            watchtower_poll: 60,
             claim_code: "AABBCC".into(),
             enable_mail: false,
             deployment_seed: None,
@@ -1139,12 +1195,90 @@ mod tests {
         );
     }
 
+    /// A sidecar holds no secret and no socket
+    /// (`deployment-threat-model.md` § Concern 1a mitigation 1). Audited on the
+    /// RENDERED compose with mail on — what a provisioned box actually runs. The
+    /// repo-file and guide copies are audited by the private fleet's compose-sidecar audit.
+    #[test]
+    fn test_cloud_init_sidecars_hold_no_secret_or_socket() {
+        let output = build_cloud_init(&CloudInitParams {
+            domain: "x.com".into(),
+            image_tag: "dev".into(),
+            claim_code: "AABBCC".into(),
+            enable_mail: true,
+            deployment_seed: Some("SEEDSEED".into()),
+        });
+        /// Non-comment lines of the `<service>:` block (6-space-indented compose).
+        fn block(out: &str, service: &str) -> Vec<String> {
+            let lines: Vec<&str> = out.lines().collect();
+            let header = format!("{service}:");
+            let start = lines
+                .iter()
+                .position(|l| l.trim() == header)
+                .unwrap_or_else(|| panic!("rendered compose has no `{service}:` service"));
+            let indent = lines[start].len() - lines[start].trim_start().len();
+            lines[start + 1..]
+                .iter()
+                .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+                .take_while(|l| l.len() - l.trim_start().len() > indent)
+                .map(|l| l.trim().to_string())
+                .collect()
+        }
+        for service in ["clamd", "rspamd"] {
+            let b = block(&output, service);
+            assert!(!b.is_empty(), "{service} block empty");
+            for forbidden in ["fauna-data", "docker.sock", "/opt/fauna"] {
+                assert!(
+                    !b.iter().any(|l| l.contains(forbidden)),
+                    "{service} must not mention {forbidden}: {b:?}"
+                );
+            }
+            for key in [
+                "environment:",
+                "env_file:",
+                "secrets:",
+                "privileged:",
+                "network_mode:",
+            ] {
+                assert!(
+                    !b.iter().any(|l| l.starts_with(key)),
+                    "{service} must not carry `{key}`: {b:?}"
+                );
+            }
+        }
+        // The updater holds the one socket and nothing else: no data volume, no
+        // host state, no environment, no port (nest/update-channel.md § The
+        // updater → *What it holds*).
+        let w = block(&output, "fauna-updater");
+        assert!(w.iter().any(|l| l.contains("/var/run/docker.sock")));
+        for forbidden in [
+            "fauna-data",
+            "/opt/fauna",
+            "environment:",
+            "ports:",
+            "env_file:",
+        ] {
+            assert!(
+                !w.iter().any(|l| l.contains(forbidden)),
+                "fauna-updater must not carry {forbidden}: {w:?}"
+            );
+        }
+        // The socket is named nowhere else in the rendered compose.
+        assert_eq!(
+            output
+                .lines()
+                .filter(|l| l.contains("/var/run/docker.sock") && !l.trim_start().starts_with('#'))
+                .count(),
+            1,
+            "docker.sock must appear exactly once (fauna-updater)"
+        );
+    }
+
     #[test]
     fn test_cloud_init_has_unattended_upgrades() {
         let params = CloudInitParams {
             domain: "x.com".into(),
             image_tag: "dev".into(),
-            watchtower_poll: 60,
             claim_code: "AABBCC".into(),
             enable_mail: true,
             deployment_seed: None,
@@ -1189,7 +1323,6 @@ mod tests {
         let params = CloudInitParams {
             domain: "x.com".into(),
             image_tag: "dev".into(),
-            watchtower_poll: 60,
             claim_code: "AABBCC".into(),
             enable_mail: false,
             deployment_seed: None,
@@ -1496,7 +1629,6 @@ mod tests {
         let rendered = build_cloud_init(&CloudInitParams {
             domain: "example.com".into(),
             image_tag: "latest".into(),
-            watchtower_poll: 300,
             claim_code: "CLAIMCODE".into(),
             enable_mail: true,
             deployment_seed: None,
@@ -1548,5 +1680,170 @@ mod tests {
                 got.len(),
             );
         }
+    }
+
+    // ── host-addresses publication (installers/vps.md § Host OS Maintenance → 3;
+    //    nest/tls-certificates.md § B-IP *When*, source (2)) ────────────────────
+
+    /// Run `body` against the sourced coordinator script (functions only —
+    /// `FAUNA_COORDINATOR_TEST=1` skips the entry point), feeding `stdin`, and
+    /// return stdout.
+    fn run_coordinator_fns(body: &str, stdin: &str) -> String {
+        use std::io::Write;
+        let script = format!("{REBOOT_COORDINATOR_SCRIPT}\n{body}\n");
+        let mut child = std::process::Command::new("sh")
+            .env("FAUNA_COORDINATOR_TEST", "1")
+            .arg("-c")
+            .arg(&script)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("run sh");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(stdin.as_bytes())
+            .expect("write stdin");
+        let out = child.wait_with_output().expect("sh output");
+        assert!(
+            out.status.success(),
+            "coordinator fns failed: stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// Canned `ip -o addr show` output from a provisioned VPS: loopback, a
+    /// public v4 + v6 on the uplink, the v6 link-local, Docker's RFC 1918
+    /// bridge, a ULA, a CGNAT address and two more private ranges. Only the
+    /// two global addresses survive the coarse host-side filter (the nest
+    /// re-applies `is_global_ip`).
+    const CANNED_IP_O_ADDR: &str = "\
+1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever
+1: lo    inet6 ::1/128 scope host noprefixroute \\       valid_lft forever preferred_lft forever
+2: eth0    inet 93.184.216.34/32 metric 100 scope global dynamic eth0\\       valid_lft 85000sec preferred_lft 85000sec
+2: eth0    inet6 2a01:4f8:c012:1234::1/64 scope global \\       valid_lft forever preferred_lft forever
+2: eth0    inet6 fe80::9400:3ff:fe12:3456/64 scope link \\       valid_lft forever preferred_lft forever
+3: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\\       valid_lft forever preferred_lft forever
+4: wg0    inet6 fd00:1234::1/64 scope global \\       valid_lft forever preferred_lft forever
+5: tun0    inet 100.64.0.7/10 scope global tun0\\       valid_lft forever preferred_lft forever
+6: eth1    inet 10.0.0.2/32 brd 10.0.0.2 scope global dynamic eth1\\       valid_lft forever preferred_lft forever
+7: eth2    inet 192.168.1.5/24 scope global eth2\\       valid_lft forever preferred_lft forever
+";
+
+    /// The pure filter turns the host's interface listing into one
+    /// `address=<ip>` line per global-unicast address, v4 and v6, dropping
+    /// loopback, link-local, ULA, RFC 1918 and CGNAT.
+    #[test]
+    fn test_host_address_lines_filters_the_interface_listing() {
+        let got = run_coordinator_fns("fauna_host_address_lines", CANNED_IP_O_ADDR);
+        assert_eq!(
+            got, "address=93.184.216.34\naddress=2a01:4f8:c012:1234::1\n",
+            "only the uplink's global v4 + v6 may be published"
+        );
+    }
+
+    /// A line whose address field carries anything but hex digits, `.` and `:`
+    /// is dropped, never echoed into the root-owned file.
+    #[test]
+    fn test_host_address_lines_drops_malformed_addresses() {
+        let got = run_coordinator_fns(
+            "fauna_host_address_lines",
+            "2: eth0    inet 93.184.216.34;rm/32 scope global eth0\n\
+             2: eth0    inet6 2a01:4f8::$(id)/64 scope global \n",
+        );
+        assert_eq!(got, "", "malformed addresses must not be published");
+    }
+
+    /// The writer lands the file atomically (tmp + rename) at the path it is
+    /// given, leaving no `.tmp` behind.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_write_host_addresses_is_atomic_at_the_given_path() {
+        let dir = std::env::temp_dir().join(format!("fauna-hostaddr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("host-addresses");
+        run_coordinator_fns(
+            &format!("fauna_write_host_addresses '{}'", dest.display()),
+            CANNED_IP_O_ADDR,
+        );
+        let body = std::fs::read_to_string(&dest).expect("host-addresses written");
+        let tmp_left = dir.join("host-addresses.tmp").exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            body,
+            "address=93.184.216.34\naddress=2a01:4f8:c012:1234::1\n"
+        );
+        assert!(
+            !tmp_left,
+            "the tmp file must be renamed over, never left behind"
+        );
+    }
+
+    /// `publish-addresses` publishes and exits WITHOUT the reboot decision (a
+    /// freshly patched box may already carry /run/reboot-required at first
+    /// boot); a bare run is the full coordinator. Stubs stand in for the two
+    /// effectful functions so the dispatch itself is what is pinned.
+    #[test]
+    fn test_publish_addresses_entry_point_skips_the_reboot_decision() {
+        let stubs = "fauna_publish_host_addresses() { echo publish; }\n\
+                     fauna_coordinator_main() { echo main; }\n";
+        assert_eq!(
+            run_coordinator_fns(
+                &format!("{stubs}fauna_coordinator_entry publish-addresses"),
+                ""
+            ),
+            "publish\n"
+        );
+        assert_eq!(
+            run_coordinator_fns(&format!("{stubs}fauna_coordinator_entry"), ""),
+            "main\n"
+        );
+    }
+
+    /// The publication lands in the root-owned host→nest dir, never the
+    /// container-owned rw one; the coordinator publishes on every run; and the
+    /// first-boot publish runs after the host dir exists and BEFORE
+    /// `docker compose up`, so the nest's first lifecycle tick sees it.
+    #[test]
+    fn test_cloud_init_publishes_host_addresses_before_compose_up() {
+        assert!(REBOOT_COORDINATOR_SCRIPT.contains("HOST_ADDRESSES=\"$HOST_DIR/host-addresses\""));
+        assert!(!REBOOT_COORDINATOR_SCRIPT.contains("$MAINT_DIR/host-addresses"));
+        let main_body = REBOOT_COORDINATOR_SCRIPT
+            .split_once("fauna_coordinator_main() {")
+            .expect("main fn")
+            .1
+            .split_once("\n}\n")
+            .expect("main fn end")
+            .0;
+        assert!(
+            main_body.contains("fauna_publish_host_addresses"),
+            "every coordinator run must refresh host-addresses"
+        );
+
+        let output = build_cloud_init(&CloudInitParams {
+            domain: "x.com".into(),
+            image_tag: "dev".into(),
+            claim_code: "AABBCC".into(),
+            enable_mail: false,
+            deployment_seed: None,
+        });
+        let runcmd = output.split_once("\nruncmd:\n").expect("runcmd").1;
+        let publish = runcmd
+            .find("- /usr/local/sbin/fauna-reboot-coordinator publish-addresses")
+            .expect("first-boot publish in runcmd");
+        let host_dir = runcmd
+            .find("chmod 0755 /opt/fauna/maintenance-host")
+            .expect("host dir created in runcmd");
+        let compose_up = runcmd
+            .find("docker compose -f /opt/fauna/docker-compose.yml up -d")
+            .expect("compose up in runcmd");
+        assert!(
+            host_dir < publish,
+            "publish only once the root-owned dir exists"
+        );
+        assert!(publish < compose_up, "publish before the nest comes up");
     }
 }

@@ -36,11 +36,12 @@ pub use deposit_adoption::DepositAdoption;
 pub struct SnapshotFileToRestore {
     /// Folder-relative path (the write target under the output dir).
     pub relative_path: String,
-    /// The file's manifest content hash — the walk's entry point.
+    /// The file's manifest content hash — the walk's entry point. The one
+    /// stamp the entry opens under is its licensing row's signed
+    /// `content_key_version` (writer-signed change records, ruling (10)(c)),
+    /// read by the snapshot entry reader; the listing carries none the walk
+    /// honours.
     pub manifest_hash: ContentHash,
-    /// M2 content-key generation stamped on the snapshot's chunks (`None` for an
-    /// owner-only / plaintext folder — the `BackupKey` root opens it).
-    pub content_key_version: Option<u64>,
 }
 
 /// The outcome of a client-side full restore
@@ -87,13 +88,18 @@ pub struct RestoreSummary {
 /// below: this callback is the user's own terminal naming their own files,
 /// not a log or error string that could leave the device (`file-sync.md`
 /// § Sealed names & paths).
-pub async fn restore_snapshot_walk(
+pub async fn restore_snapshot_walk<R>(
     fetcher: &dyn fauna_core::file_download::BlobFetcher,
     keys: &fauna_core::file_download::FileDownloadKeys,
+    reader: &fauna_client_snapshots::SnapshotEntryReader<'_, R>,
     files: &[SnapshotFileToRestore],
     output_dir: &Path,
     mut on_file: impl FnMut(usize, usize, &str),
-) -> Result<RestoreSummary> {
+) -> Result<RestoreSummary>
+where
+    R: fauna_protocol::RpcRequester,
+    R::Error: fauna_protocol::RpcErrorClass + core::fmt::Display,
+{
     std::fs::create_dir_all(output_dir).with_context(|| {
         format!(
             "creating restore output dir {}",
@@ -115,14 +121,16 @@ pub async fn restore_snapshot_walk(
             summary.skipped += 1;
             continue;
         }
-        let file_data = match fauna_core::file_download::download_file_bytes_by_manifest(
-            fetcher,
-            keys,
-            file.manifest_hash,
-            file.content_key_version,
-            &file.relative_path,
-        )
-        .await
+        // The ONE snapshot entry reader (`fauna_client_snapshots::entry_reader`):
+        // a snapshot entry's `manifest_hash` is the home nest's unsigned word
+        // and its seal is not a licence, so every entry — sealed or plaintext
+        // — is read only under the judged change row of the snapshot's set
+        // that named exactly that manifest under this path, resolved before
+        // any byte (`backup-restore.md` § Security Properties →
+        // Integrity).
+        let file_data = match reader
+            .download_bytes(fetcher, keys, &file.relative_path, file.manifest_hash)
+            .await
         {
             Ok(data) => data,
             Err(e) => {
@@ -200,6 +208,14 @@ pub async fn restore_snapshot_walk(
 /// bytes are real files on disk, and freeing them is the platform placeholder
 /// surface's job (Windows cfapi). The fold therefore *reports* the row, carrying
 /// the nest's head, and a cfapi-aware caller performs the invalidation.
+///
+/// A restore this device recorded makes one too, over a copy this device keeps — a
+/// pinned file on a cfapi root, which the platform will not free, or any file on an
+/// always-resident root: the restored version reaches that copy by the road another
+/// device's edit takes to it, so the restore hands it to the root's loop as one of
+/// these
+/// ([`EngineCommand::ApplyStaleHydrated`](crate::always_resident::EngineCommand::ApplyStaleHydrated);
+/// `docs/goal/behavior/file-versions.md` § Restore, ordering 2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaleHydratedRow {
     /// Folder-relative path, forward-slash normalized (`fauna_core::sync`).
@@ -214,6 +230,13 @@ pub struct StaleHydratedRow {
     pub remote_mtime: i64,
     /// The existing row's `version_num`, carried so the re-point preserves it.
     pub version_num: i64,
+    /// The identity the head was recorded as, when the reporter knows it — a
+    /// restore this device recorded. Every door that moves the row to the head
+    /// stamps it (`writer-signed-change-records.md` ruling (11)(d): an entry
+    /// whose head names no signer opens under no owner root). `None` from the
+    /// fold, which persists the signers it verified on its own
+    /// (`SyncEngine::persist_head_signers`).
+    pub signed_as: Option<[u8; 32]>,
 }
 
 /// What one [`SyncEngine::record_placeholders_from_changes`] pass did, and what it
@@ -245,10 +268,66 @@ pub struct PlaceholderFold {
     /// platform that keeps its folders always-resident; non-empty only on an
     /// on-demand host whose local copy the nest has superseded.
     pub stale_hydrated: Vec<StaleHydratedRow>,
+    /// The remote deletes the fold left in place, sorted by path: every path whose
+    /// batch-latest change is a delete and that still holds a live row here — a
+    /// placeholder the platform may have put on the disk, or a hydrated copy. The
+    /// fold removes none of these rows, because the row may go only once what the
+    /// disk holds has gone: the fold advances the anchor whatever happens next, so a
+    /// row dropped ahead of a failed removal would strand the file
+    /// (`delete-propagation.md` § *How a delete travels*: a skipped delete never
+    /// comes back). The on-demand host applies each through
+    /// [`SyncEngine::apply_folded_delete`] — the same verdict the resident pull's
+    /// delete arm runs; a host with no disk of its own drops the cloud-only rows
+    /// ([`SyncEngine::drop_cloud_only_deletes`]).
+    pub deleted: Vec<FoldedDelete>,
     /// The share plane's provisional rows this fold retired — what a host
     /// that owns its tree settles its peer-landed bodies by
     /// (`provider_face::owned_tree::OwnedTree::settle_peer_bodies`).
     pub overlay: OverlayReconcile,
+}
+
+/// A remote delete [`SyncEngine::record_placeholders_from_changes`] left for its
+/// caller ([`PlaceholderFold::deleted`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoldedDelete {
+    /// Folder-relative path, forward-slash normalized (`fauna_core::sync`).
+    pub relative_path: String,
+    /// The device that recorded the delete (hex) — named in the conflict report
+    /// when the delete is declined.
+    pub deleting_device: Option<String>,
+}
+
+/// What [`SyncEngine::apply_folded_delete`] did with one [`FoldedDelete`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldedDeleteOutcome {
+    /// The file left the disk — or nothing was on it — and its row is gone.
+    Applied,
+    /// The bytes are content the nest lacks: kept, the delete-vs-edit conflict
+    /// reported and the survivor uploaded (`conflicts.md`). The row stays.
+    KeptConflict,
+    /// The bytes were kept with no conflict — a lineage the delete cannot refer to,
+    /// or a disk that could not answer. The row stays, and the next fold, which
+    /// reads the whole log, reports it again.
+    Kept,
+    /// Nothing left to do: the row went, or settled as a delete, since the fold.
+    Moot,
+}
+
+/// What a remote delete may do to a path — the one decision every remote delete
+/// goes through, the resident pull's delete arm and the on-demand fold's alike
+/// ([`SyncEngine::remote_delete_verdict`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteDeleteVerdict {
+    Apply,
+    /// Keep the bytes AND record the delete-vs-edit conflict (file-sync.md
+    /// § Conflicts, ratified 2026-07-29): the lineage lost a delete to content
+    /// the nest lacks, and silence here reads downstream as a sync bug when the
+    /// survivor re-uploads and "resurrects" the file.
+    KeepConflict,
+    /// Keep the bytes with no conflict row: there is no shared lineage for the
+    /// tombstone to lose to (untracked, recreated after an applied tombstone,
+    /// headless), or an infra failure.
+    KeepSilent,
 }
 
 /// What one retire-on-arrival pass over the share overlay did
@@ -284,7 +363,6 @@ pub struct SupersededBody {
 /// `tree`'s kept root, above the storage floor. `free_space` answers the
 /// device's free space where they land — a closure so the floor is measured
 /// at each landing, and a test can script it.
-#[cfg(feature = "p2p-share")]
 pub struct OnDemandLanding<'a> {
     pub tree: &'a crate::provider_face::owned_tree::OwnedTree,
     pub free_space: &'a dyn Fn() -> Option<u64>,
@@ -698,7 +776,7 @@ pub fn default_format_registry() -> fauna_core::format::FormatRegistry {
 ///
 /// Borrows rather than owns — it is built per call by
 /// [`SyncEngine::blob_fetcher`] and lives only for that await.
-struct EngineBlobFetcher<'a> {
+pub(crate) struct EngineBlobFetcher<'a> {
     client: &'a SyncClient,
     transfer_pool: &'a crate::transfer::TransferPool,
     /// This host's sibling devices and the folder's `FolderRef` wire string —
@@ -929,7 +1007,7 @@ pub struct SyncEngine {
     /// `always_resident::dir_event_tests::the_download_echo_does_not_disarm_the_removal_echo`.
     recent_removals: Mutex<HashSet<String>>,
     /// **This root's placeholders are never on its disk** — the linux FUSE
-    /// root's posture (`on-demand-files.md` § Linux FUSE binding, the dehydrate
+    /// root's posture (`on-demand-files-linux.md` § Linux FUSE binding, the dehydrate
     /// rule, obligations 2 and 4), set once at boot by the host that serves the
     /// root ([`Self::set_placeholders_off_disk`]) and never cleared. A cfapi or
     /// File Provider placeholder is a file on the disk, so its absence can be a
@@ -1061,6 +1139,9 @@ pub struct SyncEngine {
     /// [`crate::peer_share_store::ShareServeMemo`].
     #[cfg(feature = "p2p-share")]
     share_serve_memo: std::sync::Mutex<crate::peer_share_store::ShareServeMemo>,
+    /// Where the serve core reads this replica's bodies
+    /// ([`Self::set_serve_body`]); `None` = the bound tree at `watch_dir`.
+    serve_body: std::sync::Mutex<Option<Arc<dyn crate::share_body::BodySource>>>,
     /// Per-set conflict policy (file-sync.md § Conflicts, ratified
     /// 2026-07-10) — how [`Self::download_and_write_file`] auto-resolves a
     /// detected divergence. Read off the authoritative nest folder row by
@@ -1230,7 +1311,7 @@ pub struct SyncEngine {
     /// [`Self::close_lease_window`] around an upload pass, never per file.
     lease: crate::folder_lease::LeasePosture,
     /// The set's content-key floor as last read — decision 2's **pre-seal hold**
-    /// (`on-demand-files.md` § Shared sets on a capability host):
+    /// (`on-demand-files-shared-sets.md` § Shared sets on a capability host):
     /// [`Self::content_seal_root`] refuses to seal under a generation the owner
     /// has rotated past, on every host alike. Armed at build from the row the
     /// binding was resolved from ([`Self::with_seal_floor`]) and re-installed by
@@ -1241,7 +1322,7 @@ pub struct SyncEngine {
     /// read keeps the last floor but marks it unread.
     seal_floor: std::sync::RwLock<crate::binding_edge::SealFloor>,
     /// A reader's engine: built over a set the account may only read, by a
-    /// control-inverted host (`on-demand-files.md` § Shared sets on a
+    /// control-inverted host (`on-demand-files-shared-sets.md` § Shared sets on a
     /// capability host, decision 3). It pulls, lists and opens; the provider
     /// face refuses every write on it ([`crate::provider_face::ReadOnlyHost`]).
     /// Fixed at build ([`Self::with_read_only`]) — a grant change is a basis
@@ -1301,6 +1382,15 @@ pub struct SyncEngine {
     /// ([`Self::set_learned_predecessors`]), so a proven link is neither asked
     /// for again nor read as a fresh gain by the next build.
     learned_predecessors: fauna_client_sync::row_judge::LearnedPredecessors,
+    /// The set-nonce source a **snapshot** reader judges the version history
+    /// under ([`Self::restore_snapshot_files_to_dir`],
+    /// [`Self::download_snapshot_entry_bytes`]): the custody the restore host
+    /// resolves nonces through, handed in by
+    /// `engine_lifecycle::build_restore_engine`. `None` on a set-bound engine
+    /// — its own rows are judged by [`Self::row_reader`] — and on a restore
+    /// engine built without custody, whose snapshot reader then verifies no
+    /// signed row (every plaintext entry stays refused; sealed ones open).
+    snapshot_nonces: Option<fauna_client_sync::SetNonceSource>,
     /// The set's inbox of parked third-party deposits, armed by the build for
     /// a set the account owns ([`Self::set_deposit_inbox`]); `None` adopts
     /// nothing (`deposit_adoption`).
@@ -1515,6 +1605,7 @@ impl SyncEngine {
             test_owner_signed_all: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "p2p-share")]
             share_serve_memo: std::sync::Mutex::new(Default::default()),
+            serve_body: std::sync::Mutex::new(None),
             conflict_policy,
             format_registry,
             ignore: std::sync::RwLock::new(ignore),
@@ -1548,6 +1639,7 @@ impl SyncEngine {
             custody_refetch_request: std::sync::RwLock::new(None),
             row_reader: std::sync::RwLock::new(fauna_protocol::sync_row_verify::RowReader::new()),
             learned_predecessors: Default::default(),
+            snapshot_nonces: None,
             deposit_inbox: std::sync::RwLock::new(None),
         }
     }
@@ -1669,8 +1761,11 @@ impl SyncEngine {
     /// when a batch of served rows holds one refused `signature_invalid` on a
     /// set this account does not own — the nonce this engine was built with
     /// is not the one the set's writers sign under, and only the process that
-    /// holds the MLS group can open the envelope that names the new one. Must
-    /// not block: the host spawns or notifies.
+    /// holds the MLS group can open the envelope that names the new one — and,
+    /// by ruling (7)(b)(ii) rule (6)(b), when a batch admits a row on such a
+    /// set sealed under a content-key generation this engine holds no key for
+    /// (the owner rotated and re-published with no commit). Once per batch
+    /// either way. Must not block: the host spawns or notifies.
     pub fn set_custody_refetch_request(&self, request: CustodyRefetchRequest) {
         *self
             .custody_refetch_request
@@ -2290,7 +2385,7 @@ impl SyncEngine {
         self.read_only
     }
 
-    /// Install a resident host's refresh edge (`on-demand-files.md` § Shared sets
+    /// Install a resident host's refresh edge (`on-demand-files-shared-sets.md` § Shared sets
     /// on a capability host, decision 2): the pre-seal hold is armed from the
     /// edge's basis, and every [`Self::refresh_sync_mode`] tick that reads the
     /// set's row compares it against that basis and calls the edge's
@@ -2298,10 +2393,35 @@ impl SyncEngine {
     /// resident engines take this; the control-inverted host drives its own.
     pub fn with_binding_edge(self, edge: crate::binding_edge::BindingEdge) -> Self {
         let floor = crate::binding_edge::SealFloor::Floor(edge.basis.content_key_floor());
-        let mut this = self.with_seal_floor(floor);
+        let mut this = self.with_seal_floor(floor).with_folder_ref(edge.folder_ref);
         *this.seen_basis.write().unwrap() = Some(edge.basis.clone());
         this.binding_edge = Some(edge);
         this
+    }
+
+    /// Name the folder's row to the byte client, so every chunk GET carries
+    /// the relay hint's ref form beside the name
+    /// (`SyncClient::set_folder_ref`; `file-sync.md` § Relay serving, step
+    /// (4)): a name finds this actor's own same-named set first, so a member
+    /// owning one reaches the shared set it reads only by its ref.
+    /// `assemble_engine` sets it from the resolved binding — every production
+    /// engine's road — and [`Self::with_binding_edge`] re-asserts the same
+    /// identity from the edge.
+    pub fn with_folder_ref(mut self, folder_ref: fauna_core::folder_keys::FolderRef) -> Self {
+        self.client.set_folder_ref(Some(folder_ref));
+        self
+    }
+
+    /// This engine's set row — the one place it holds it (set by
+    /// [`Self::with_folder_ref`]). Every per-set request the engine sends
+    /// stamps it through [`fauna_protocol::folders::addressed_at`], so a
+    /// member owning a same-named set reaches the bound set and not its own
+    /// (`set-addressing.md` § The row form → *Whoever holds the row sends
+    /// it*); a `Foreign` ref stamps nothing, the channel form being that
+    /// set's address, and `None` (an engine no binding named) sends the name
+    /// forms alone.
+    pub fn folder_row(&self) -> Option<fauna_core::folder_keys::FolderRef> {
+        self.client.folder_ref()
     }
 
     /// Fetch chunk bodies from this host's admitted sibling devices before the
@@ -2648,11 +2768,14 @@ impl SyncEngine {
         }
 
         let client = fauna_client_folders::FoldersClient::new(std::sync::Arc::clone(&control));
-        let req = fauna_protocol::folders::LeaseAcquireRequest {
-            name: folder.clone(),
-            device_id: self.device_id_hex().to_string(),
-            ..Default::default()
-        };
+        let req = fauna_protocol::folders::addressed_at(
+            fauna_protocol::folders::LeaseAcquireRequest {
+                name: folder.clone(),
+                device_id: self.device_id_hex().to_string(),
+                ..Default::default()
+            },
+            self.folder_row(),
+        );
         match client.lease_acquire(req).await {
             Ok(reply) if reply.acquired => {
                 *hold = Some(LeaseHold { acquired_at: now });
@@ -2747,7 +2870,11 @@ impl SyncEngine {
         let control = self.control_plane();
         let client = fauna_client_folders::FoldersClient::new(std::sync::Arc::clone(&control));
         if let Err(e) = client
-            .lease_release(folder.clone(), self.device_id_hex().to_string())
+            .lease_release(
+                folder.clone(),
+                self.device_id_hex().to_string(),
+                self.folder_row(),
+            )
             .await
         {
             tracing::debug!(
@@ -3033,7 +3160,6 @@ impl SyncEngine {
     /// [`Self::refresh_reader_roster`] now uses, once p2p cross-nest is
     /// scoped), or the control plane is not currently connected (an offline
     /// tick must not wait out RPC deadlines).
-    #[cfg(feature = "p2p-share")]
     pub async fn refresh_share_writer_roster(&self) {
         // Each skip below leaves the cache exactly as it was — and an EMPTY
         // cache refuses every row every peer serves, forever and silently
@@ -3440,12 +3566,14 @@ impl SyncEngine {
 
         // By hash: a sealed set rests no plaintext name on the nest, so a
         // by-name update finds nothing (`path-sealing.md` § the set-name plane).
-        let req =
-            fauna_protocol::folders::addressed(fauna_protocol::folders::FolderUpdateRequest {
+        let req = fauna_protocol::folders::addressed_at(
+            fauna_protocol::folders::FolderUpdateRequest {
                 name: folder.to_string(),
                 name_sealed: Some(fauna_protocol::ByteBuf::from(sealed)),
                 ..Default::default()
-            });
+            },
+            self.folder_row(),
+        );
         let control = Arc::clone(&*self.control.read().unwrap());
         match control.update_folder(req).await {
             Ok(ok) => Ok(ok),
@@ -4012,6 +4140,14 @@ impl SyncEngine {
             .read_base(relative_path)
             .is_some_and(|b| ContentHash::of_raw(&b) == file_hash);
         if let Some(entry) = self.db.get_entry(relative_path)? {
+            if Self::is_stale_cache(&entry, &file_hash) {
+                tracing::debug!(
+                    path = %fauna_core::log_redact::log_path(relative_path),
+                    "a recorded version's stale cache under its placeholder row, not an edit — \
+                     nothing to upload"
+                );
+                return Ok(None);
+            }
             proven_reissue = proven_reissue
                 || entry.recorded_content_hash == Some(file_hash)
                 || self.causal().frontier(relative_path).is_some_and(|f| {
@@ -4361,6 +4497,14 @@ impl SyncEngine {
             .read_base(relative_path)
             .is_some_and(|b| ContentHash::of_raw(&b) == file_hash);
         if let Some(entry) = self.db.get_entry(relative_path)? {
+            if Self::is_stale_cache(&entry, &file_hash) {
+                tracing::debug!(
+                    path = %fauna_core::log_redact::log_path(relative_path),
+                    "a recorded version's stale cache under its placeholder row (streaming), \
+                     not an edit — nothing to upload"
+                );
+                return Ok(None);
+            }
             proven_reissue = proven_reissue
                 || entry.recorded_content_hash == Some(file_hash)
                 || self.causal().frontier(relative_path).is_some_and(|f| {
@@ -4830,7 +4974,7 @@ impl SyncEngine {
     /// hold, its count and the confirm cover the same rows.
     ///
     /// **Under the off-disk posture no `Placeholder` row is evidence, marked or
-    /// not** ([`Self::set_placeholders_off_disk`]; `on-demand-files.md` § Linux
+    /// not** ([`Self::set_placeholders_off_disk`]; `on-demand-files-linux.md` § Linux
     /// FUSE binding, the dehydrate rule): such a root's placeholder is never on
     /// its disk, so its absence from a scan says nothing — whatever a mark that
     /// slipped through claims. `LocallyDeleted` rows stay: they are deletes the
@@ -4997,6 +5141,12 @@ impl SyncEngine {
                         self.db
                             .update_state(&file.relative_path, SyncState::LocallyModified)?;
                         stats.modified_files += 1;
+                    } else if Self::is_stale_cache(&entry, &hash) {
+                        // Left as it is: the row describes its head, not this disk. Its size
+                        // is the head's, and the free that later lets the cache go reads it to
+                        // describe the placeholder — rewritten to the cache's, the two would
+                        // agree and the placeholder keep the replaced version's size.
+                        stats.unchanged_files += 1;
                     } else {
                         // Hash matches — update mtime+size in DB so next scan skips it
                         // (preserve the manifest + its generation untouched).
@@ -5806,7 +5956,7 @@ impl SyncEngine {
                     manifest_hex = Some(hex::encode(uploaded.manifest_hash.digest()));
                     size_bytes = uploaded.manifest.total_size as i64;
                     content_key_version = uploaded.content_key_version;
-                    thumbnail = self.thumbnail_hash_for_reseal(&path, None, signer).await;
+                    thumbnail = self.thumbnail_hash_for_reseal(&path, signer).await;
                 } else if let Err(e) = fauna_core::file_download::fetch_manifest(
                     &self.blob_fetcher(),
                     &keys,
@@ -5947,57 +6097,24 @@ impl SyncEngine {
             anyhow::bail!("re-seal of the restored version held back: {hold}");
         }
 
-        // One column, two stores ([`Self::reseal_one_entry`]): the hash names a
-        // chunk-store manifest for an engine-recorded file, a blob-store
-        // primary for a Media-page upload. The manifest first — the shared
-        // windowed move, opening under the signer's roots.
+        // The hash names a chunk-store manifest — every producer records a
+        // folder file as one (`media.md` § Encryption at rest → *One at-rest
+        // shape*). The shared windowed move, opening under the signer's roots.
         let keys = fauna_core::file_download::FileDownloadKeys {
             record_signer: signer,
             ..self.download_keys()
         };
-        let manifest_err = match self
+        let uploaded = self
             .reseal_nest_copy_windowed_under(path, manifest_hash, None, &keys)
             .await
-        {
-            Ok(uploaded) => {
-                return Ok(ResealedVersion {
-                    manifest_hash: uploaded.manifest_hash,
-                    size_bytes: uploaded.manifest.total_size as i64,
-                });
-            }
-            Err(e) => e,
-        };
-
-        // No manifest opened: a Media-page upload rests as one blob primary
-        // under the bare owner key. Its content address is the only anchor
-        // those bytes have (the frame carries no AAD), so it is checked before
-        // anything opens; whatever the blob store answers that is not this
-        // hash's blob, or opens under no root the signer may reach, is the
-        // version that does not open.
-        let plaintext = self
-            .client
-            .download_blob_opt(&manifest_hash)
-            .await?
-            .filter(|sealed| *blake3::hash(sealed).as_bytes() == manifest_hash.digest())
-            .and_then(|sealed| {
-                signer
-                    .retired_keys(&self.predecessor_backup_keys)
-                    .into_iter()
-                    .filter_map(|key| key.client_key())
-                    .find_map(|key| fauna_core::crypto::decrypt_backup_chunk(key, &sealed).ok())
-            });
-        let Some(plaintext) = plaintext else {
-            tracing::warn!(
-                path = %path_r,
-                error = %format!("{manifest_err:#}"),
-                "an inherited version did not open under a retired root; not restored"
-            );
-            return Err(refused());
-        };
-        let uploaded = self
-            .upload_sealed(self.seal_for_upload(&plaintext)?, path, false)
-            .await
-            .with_context(|| format!("restoring {path_r}: uploading the re-sealed version"))?;
+            .map_err(|e| {
+                tracing::warn!(
+                    path = %path_r,
+                    error = %format!("{e:#}"),
+                    "an inherited version did not open under a retired root; not restored"
+                );
+                refused()
+            })?;
         Ok(ResealedVersion {
             manifest_hash: uploaded.manifest_hash,
             size_bytes: uploaded.manifest.total_size as i64,
@@ -6093,6 +6210,19 @@ impl SyncEngine {
     /// the owner's. A member's engine keeps the materialized walk: an unstamped
     /// placeholder there is the owner's pre-bind content, which it can neither
     /// open nor is its to move.
+    ///
+    /// **A plaintext head is moved only under a verdict** (`encryption-at-rest.md`
+    /// § Readable classes → *Who may move a plaintext head*, ruled 2026-10-13):
+    /// the one unstamped head a non-owner seat ever materializes is a
+    /// public-window record — the owner's declassified file — and re-sealing it
+    /// records a sealed head over the owner's, which the owner's converged
+    /// corpus stamp never re-opens (a public website goes partly dark until the
+    /// owner flips the audience twice). A seat whose verifier holds no anchor
+    /// ([`Self::holds_declassification_anchor`]) has no verdict on the folder's
+    /// audience — its sealed posture is a fail-safe for what it writes, never a
+    /// finding — so it moves only a plaintext head it authored itself
+    /// ([`Self::prebind_may_move_unstamped_head`]). An anchored seat keeps the
+    /// flip-back arm it verified; the owner's seats keep everything.
     fn prebind_owed_rows(
         &self,
         target_version: u64,
@@ -6124,10 +6254,53 @@ impl SyncEngine {
                         && (e.state == SyncState::Synced
                             || e.content_key_version.is_some()
                             || self.record_is_owner_signed(m))
+                        && (e.content_key_version.is_some()
+                            || self.prebind_may_move_unstamped_head(m))
                 }
             }
         });
         Ok(rows)
+    }
+
+    /// Whether this seat's verifier can judge the folder's audience at all —
+    /// the declassification anchor `build_engine` judged the binding under
+    /// (`encryption-at-rest.md` § Readable classes → *The declassification is
+    /// owner-ATTESTED*): the seat's own identity for a set its account owns,
+    /// the channel's MLS-recorded owner for a member seat, and nothing on a
+    /// member seat of an MLS-less host (the bearer-only sync agent, the File
+    /// Provider helper), whose reader binding names no owner
+    /// (`ReaderBinding::owner`) and which seals by construction. Not a
+    /// verdict — a seat with an anchor may still judge a folder sealed.
+    fn holds_declassification_anchor(&self) -> bool {
+        self.row_reader
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .binding()
+            .owner
+            .is_some()
+    }
+
+    /// May the pre-bind pass re-seal the UNSTAMPED recorded head `manifest` —
+    /// a plaintext (public-window) record, on a bound set the only unstamped
+    /// head a non-owner seat materializes — from this seat
+    /// (`encryption-at-rest.md` § Readable classes → *Who may move a plaintext
+    /// head*, 2026-10-13)? Yes under a verdict: the owner's own seats and a
+    /// member seat holding an anchor judge the audience themselves, and the
+    /// flip-back re-seal is theirs. A seat with no anchor has no verdict, so
+    /// it moves only a head this account signed
+    /// ([`Self::manifest_signer`]: the current identity or a proven
+    /// predecessor — the signer the pull's verify step persisted, never the
+    /// row's `author_actor_id`); another writer's head, or one whose signer
+    /// this device cannot vouch for, stays where its author left it. Leaving
+    /// a plaintext head in place discloses nothing — it rests world-readable
+    /// already, under the owner's attested choice.
+    fn prebind_may_move_unstamped_head(&self, manifest: &ContentHash) -> bool {
+        use fauna_core::file_download::RecordSigner;
+        self.holds_declassification_anchor()
+            || matches!(
+                self.manifest_signer(manifest),
+                RecordSigner::Current | RecordSigner::Predecessor(_)
+            )
     }
 
     /// The set's current nest heads with the reader's verdict on each — what
@@ -6583,12 +6756,14 @@ impl SyncEngine {
             );
             return;
         }
-        let req =
-            fauna_protocol::folders::addressed(fauna_protocol::web::WebFilesPruneSealedRequest {
+        let req = fauna_protocol::folders::addressed_at(
+            fauna_protocol::web::WebFilesPruneSealedRequest {
                 folder,
                 paths: live,
                 ..Default::default()
-            });
+            },
+            self.folder_row(),
+        );
         let control = Arc::clone(&*self.control.read().unwrap());
         match control.prune_sealed_web_files(req).await {
             Ok(0) => {}
@@ -6876,31 +7051,12 @@ impl SyncEngine {
         let Some(manifest_hash) = entry.manifest_hash else {
             return Ok(ResealOutcome::AlreadyCurrent); // filtered by the query; defensive
         };
-        // One column, two stores. `manifest_hash` names a chunk-store manifest
-        // for an engine-recorded file, but a **blob-store primary** for a
-        // Media-page upload — so a manifest fetch that misses is not
-        // necessarily an error, it is the other provenance. Handing the failure
-        // to the blob arm is what lets the completion observable drain at all
-        // on an account holding any Media-page upload; before it, such an entry
-        // failed here every catch-up, forever (`sync-agent.md` A8).
-        let manifest = match self
+        // `manifest_hash` names a chunk-store manifest — every producer
+        // records a folder file as one (`media.md` § Encryption at rest → *One
+        // at-rest shape*).
+        let manifest = self
             .fetch_manifest(&manifest_hash, entry.content_key_version)
-            .await
-        {
-            Ok(manifest) => manifest,
-            // Ruling (10)(c), the stamp binds the root: a stamped record opens
-            // under its generation or not at all, and a blob primary rests
-            // under the bare owner key (recorded unstamped), so a stamped
-            // entry never reaches the blob arm — the manifest failure stands.
-            Err(manifest_err) if entry.content_key_version.is_some() => {
-                return Err(manifest_err);
-            }
-            Err(manifest_err) => {
-                return self
-                    .reseal_blob_primary(entry, manifest_hash, manifest_err)
-                    .await;
-            }
-        };
+            .await?;
         if self
             .opens_under_root(&manifest, current_root, &entry.path)
             .await?
@@ -6957,239 +7113,12 @@ impl SyncEngine {
         Ok(ResealOutcome::Resealed)
     }
 
-    /// The **raw-AEAD Library plane's** re-seal arm: move a Media-page upload's
-    /// blob-store primary off a retired owner root.
+    /// The thumbnail hash a re-seal should record: **move** the recorded one off
+    /// the retired root.
     ///
-    /// Reached only when the manifest fetch missed, because the two provenances
-    /// share one `manifest_hash` column
-    /// ([`SyncClient::download_blob_opt`](crate::nest_client::SyncClient::download_blob_opt)).
-    /// This is a *different seal* from the chunk plane, not a variant of it:
-    /// a single framed `decrypt_backup_chunk` blob under the **bare**
-    /// `BackupKey` (`Audience::Library`), never the convergent chunk root — which
-    /// is why `FileDownloadKeys` does not reach it and why it did not move with
-    /// the chunk plane (`succession-aftermath.md` § Re-key scope, the `BackupKey`
-    /// corpus row).
-    ///
-    /// ⚠ **The content address is the only anchor this plane has, and it is
-    /// load-bearing.** The backup-chunk frame carries no AAD, so a
-    /// tag proves only *sealed-under-some-root-we-hold* — never *these bytes*.
-    /// Without the address check a malicious nest serves any blob it holds under
-    /// a retired root and this pass re-seals it under the **current** key and
-    /// re-records it at the victim's path: the substitution becomes the
-    /// account's own authenticated content. Do not carry the chunk leg's
-    /// reasoning across — there the seal is content-bound by construction, so
-    /// its walk may verify afterwards; here nothing else authenticates the
-    /// bytes.
-    ///
-    /// The check runs **before** the candidate opens, matching the read plane
-    /// (`MediaMachine::open_library_blob`). ⚠ Be precise about why, because the
-    /// two call sites differ: on the *read* plane the ordering is itself
-    /// load-bearing — the plaintext is handed to the user, so opening first
-    /// would serve substituted bytes. Here it is **defense-in-depth**:
-    /// reversing it changes no observable, since the address check still bails
-    /// before anything is re-sealed, uploaded or recorded. The tests reflect
-    /// that honestly — `post_succession_reseal_rejects_a_substituted_library_blob`
-    /// pins the *check* (deleting it re-records attacker bytes) and no test pins
-    /// the *ordering* at this call site, because at this call site there is
-    /// nothing to observe. Keep the ordering anyway: it is free, and it keeps
-    /// the two planes' shape identical for a reader.
-    async fn reseal_blob_primary(
-        &self,
-        entry: &crate::db::SyncEntry,
-        blob_hash: ContentHash,
-        manifest_err: anyhow::Error,
-    ) -> Result<ResealOutcome> {
-        let path = entry.path.as_str();
-        // Redacted once and reused by every log line/error string below
-        // (`path-sealing.md` § Sealed names & paths, S7).
-        let path_r = fauna_core::log_redact::log_path(path);
-        // This plane exists only under an owner `BackupKey`. A bound or
-        // plaintext set has no Library blob to move, so the manifest failure
-        // was the real one.
-        let Some(current) = self
-            .backup_key
-            .as_ref()
-            .and_then(|k| k.client_key())
-            .cloned()
-        else {
-            return Err(manifest_err.context(format!(
-                "re-sealing {path_r}: no owner key for a Library blob"
-            )));
-        };
-
-        let hash_hex = hex::encode(blob_hash.digest());
-        let Some(sealed) = self.client.download_blob_opt(&blob_hash).await? else {
-            // Neither store holds it: the manifest failure stands, with its own
-            // diagnosis rather than a blob-shaped one.
-            return Err(manifest_err.context(format!(
-                "re-sealing {path_r}: {hash_hex} is in neither the manifest store nor the blob store"
-            )));
-        };
-
-        // ⚠ The only anchor these bytes have — see the doc comment. Run it
-        // before the candidate opens, mirroring the read plane's shape.
-        if !blake3::hash(&sealed)
-            .to_hex()
-            .as_str()
-            .eq_ignore_ascii_case(&hash_hex)
-        {
-            anyhow::bail!("re-sealing {path_r}: the nest served a different blob for {hash_hex}");
-        }
-
-        // Current key first — the steady state once the pass has run, and the
-        // state any post-succession upload was born in.
-        if fauna_core::crypto::decrypt_backup_chunk(&current, &sealed).is_ok() {
-            self.db.mark_current_root_sealed(path)?;
-            return Ok(ResealOutcome::AlreadyCurrent);
-        }
-        // The retired roots are bounded by who signed the head naming this
-        // blob (`writer-signed-change-records.md` ruling (8)(c), the bare-key
-        // twin of `MediaMachine::open_library_blob`): a predecessor's
-        // signature moves only what its own root or an earlier one sealed.
-        // The current-key probe above is not that open — it re-seals and
-        // records nothing, exactly like the chunk arm's `opens_under_root`.
-        let signer = self.manifest_signer(&blob_hash);
-        let plaintext = signer
-            .retired_keys(&self.predecessor_backup_keys)
-            .into_iter()
-            .filter_map(|key| key.client_key())
-            .find_map(|key| fauna_core::crypto::decrypt_backup_chunk(key, &sealed).ok());
-        let Some(plaintext) = plaintext else {
-            // Owed, not done: no root this record's signer may reach opens
-            // it. Leaving it unmarked is what keeps bound (3) from being
-            // licensed to drop the keys — the list must drain on merit, never
-            // by giving up.
-            anyhow::bail!(
-                "re-sealing {path_r}: no current or retired owner root its record's signer may \
-                 reach opens the Library blob {hash_hex}; entry stays owed"
-            );
-        };
-
-        // Re-seal under the current bare key. `process_and_seal` is the same
-        // producer `MediaMachine::do_upload` runs, so the re-sealed primary is
-        // byte-shaped exactly like an original upload — including a regenerated
-        // thumbnail on a producer build, which moves that seal with the primary
-        // instead of stranding it under the retired root.
-        let audience = fauna_media::audience::Audience::Library {
-            backup_key: current,
-        };
-        let payload = fauna_media::pipeline::process_and_seal(&plaintext, &audience);
-        let size_bytes = payload.primary.bytes.len() as i64;
-        let new_hash_hex = self
-            .client
-            .upload_blob_multipart(
-                &payload.primary_sidecar.to_dag_cbor(),
-                &payload.primary.bytes,
-            )
-            .await
-            .with_context(|| {
-                format!("re-sealing {path_r}: uploading the re-sealed Library blob")
-            })?;
-
-        // Best-effort, exactly like every other thumbnail site: a thumbnail that
-        // fails to upload must not orphan the primary that already landed.
-        let regenerated = match payload.thumbnail {
-            Some((sealed_thumb, thumb_sidecar)) => {
-                match self
-                    .client
-                    .upload_blob_multipart(&thumb_sidecar.to_dag_cbor(), &sealed_thumb.bytes)
-                    .await
-                {
-                    Ok(hash) => Some(hash),
-                    Err(e) => {
-                        tracing::warn!(
-                            path = %path_r,
-                            error = %e,
-                            "re-sealed Library thumbnail failed to upload; falling back to a move"
-                        );
-                        None
-                    }
-                }
-            }
-            None => None,
-        };
-        // A build without the thumbnailer regenerates nothing, so it moves the
-        // recorded thumbnail instead of dropping its pointer.
-        let thumbnail_hash = self
-            .thumbnail_hash_for_reseal(path, regenerated, signer)
-            .await;
-
-        // The sentinel is gated on the RECORD, exactly as the chunk plane
-        // settled it: an unrecorded re-seal leaves the nest head naming the
-        // predecessor-sealed blob, so every other device keeps fetching that
-        // copy — and marking it done would license bound (3) to drop the only
-        // keys that open it.
-        let Some(ref folder) = self.folder else {
-            return Ok(ResealOutcome::StillOwed);
-        };
-        let new_hash = ContentHash::from_digest_raw(
-            hex::decode(&new_hash_hex)
-                .ok()
-                .and_then(|v| <[u8; 32]>::try_from(v).ok())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("re-sealing {path_r}: nest returned a malformed blob hash")
-                })?,
-        );
-        match self
-            .record_change(
-                folder,
-                path,
-                Some(&new_hash_hex),
-                size_bytes,
-                "create",
-                // Unstamped, always: these bytes rest under the bare owner key,
-                // and a stamp names a content-key generation — a stamp here
-                // would be the stamped-but-owner-sealed record ruling (10)(c)
-                // never opens (stamped entries never reach this arm).
-                None,
-                thumbnail_hash.as_deref(),
-                // A proven reissue by construction — the same reasoning the
-                // nest-sourced chunk leg records under: these bytes came out of
-                // the recorded head itself, so nothing novel is being authored
-                // and a receiver past this frontier must skip rather than merge.
-                self.resolution_stamp(path),
-            )
-            .await
-        {
-            Ok(_seq) => {
-                self.db.update_recorded_head(
-                    path,
-                    &new_hash,
-                    size_bytes,
-                    None,
-                    &self.own_actor_id().0,
-                )?;
-                // Keep the cached pointer equal to what we just recorded —
-                // otherwise the next pass would chase the pre-move thumbnail.
-                self.db
-                    .set_thumbnail_hash(path, thumbnail_hash.as_deref())?;
-                self.db.mark_current_root_sealed(path)?;
-                Ok(ResealOutcome::Resealed)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    path = %path_r,
-                    error = %e,
-                    "Library-blob re-seal: the re-sealed blob uploaded but its change record did \
-                     not land; the nest head is unchanged, so the entry stays owed"
-                );
-                Ok(ResealOutcome::StillOwed)
-            }
-        }
-    }
-
-    /// The thumbnail hash a re-seal should record: regenerate if this build can,
-    /// otherwise **move** the recorded one off the retired root.
-    ///
-    /// `regenerated` is what the caller's own producer yielded — `Some` on a
-    /// build with the thumbnailer compiled in, which already re-seals under the
-    /// current key on the way and needs nothing further. `None` has two causes
-    /// that look identical here and must be told apart by the *recorded head*,
-    /// not by guessing: the file legitimately has no thumbnail (a text file, a
-    /// record made without one), or this build cannot render one
-    /// (`process_media` off, or the upload failed). The row's cached
-    /// `thumbnail_hash` is the discriminator — a head that names a thumbnail has
-    /// one, whatever this build can do about it.
+    /// The row's cached `thumbnail_hash` is the discriminator — a head that
+    /// names a thumbnail has one; a file with none (a text file, a record made
+    /// without one) has nothing to move.
     ///
     /// ⚠ **Recording `None` over a head that names a thumbnail is the bug this
     /// closes.** The nest's latest-per-path projection takes the newest row, so
@@ -7205,16 +7134,11 @@ impl SyncEngine {
     async fn thumbnail_hash_for_reseal(
         &self,
         path: &str,
-        regenerated: Option<String>,
         signer: fauna_core::file_download::RecordSigner,
     ) -> Option<String> {
-        if regenerated.is_some() {
-            return regenerated;
-        }
-        // Read the pointer here rather than taking it as an argument: both
-        // re-seal arms reach this from a different shape (one holds the entry,
-        // one holds only the path), and a lookup keyed by the path they both
-        // have is one row of local sqlite.
+        // Read the pointer here rather than taking it as an argument: the
+        // callers reach this from different shapes, and a lookup keyed by the
+        // path they all have is one row of local sqlite.
         let recorded = self.db.get_entry(path).ok().flatten()?.thumbnail_hash?;
         match self.move_recorded_thumbnail(path, &recorded, signer).await {
             Ok(moved) => moved,
@@ -7251,14 +7175,12 @@ impl SyncEngine {
     ///   or no held root opens it). The pointer drops, as it does today.
     /// - `Err` — the fetch itself failed, or the nest served the wrong bytes.
     ///
-    /// ⚠ **The content address is load-bearing here for the same reason it is on
-    /// the primary** ([`Self::reseal_blob_primary`]): the backup-chunk frame
-    /// carries no AAD, so a tag proves only *sealed-under-some-root-we-hold*,
-    /// never *these bytes*. Without the check a malicious nest serves any blob
-    /// it holds under a retired root and this pass re-seals it under the
-    /// **current** key and re-records it as the user's own thumbnail. A
-    /// thumbnail is a smaller prize than a file's contents — it is also the one
-    /// the user actually looks at.
+    /// ⚠ **The content address is the only anchor these bytes have**: the
+    /// backup-chunk frame carries no AAD, so a tag proves only
+    /// *sealed-under-some-root-we-hold*, never *these bytes*. Without the check
+    /// a malicious nest serves any blob it holds under a retired root and this
+    /// pass re-seals it under the **current** key and re-records it as the
+    /// user's own thumbnail — the one tile the user actually looks at.
     ///
     /// `signer` is who signed the head naming this thumbnail
     /// (`writer-signed-change-records.md` ruling (8)(c), through the same
@@ -7520,6 +7442,16 @@ impl SyncEngine {
             }
             other => other,
         };
+        // The head this re-seal reissues — what the supersede below names as
+        // its source, so the nest refuses to mark when the row directly below
+        // the new head is anything else (a peer's newer edit this device has
+        // not pulled): `mls-group-key-material.md` § M2 → *(B) Reclaim*,
+        // property (1)'s second conjunct. Read BEFORE the upload, which
+        // overwrites the local row's manifest with the re-sealed one.
+        let source_manifest = match &source {
+            ResealSource::LocalFile => self.db.get_entry(path)?.and_then(|e| e.manifest_hash),
+            ResealSource::NestBytes { manifest_hash, .. } => Some(*manifest_hash),
+        };
         let receipt = match source {
             // Force: bypass the unchanged-content short-circuit — the file's
             // content is unchanged by definition; its at-rest sealing (or its
@@ -7568,9 +7500,12 @@ impl SyncEngine {
 
         // Reclaim — best-effort supersede of the stale rows. Skipped when the
         // change record never reached the nest (the head there is still the
-        // old manifest; a supersede would head-mismatch).
+        // old manifest; a supersede would head-mismatch), and when this device
+        // never recorded a head for the path (nothing it could reissue — the
+        // nest would refuse an absent source anyway).
         if receipt.recorded
             && let Some(ref folder) = self.folder
+            && let Some(source_manifest) = source_manifest
         {
             match fauna_client_sync::SyncClient::new(self.nest_client.clone())
                 .changes_supersede(
@@ -7578,6 +7513,8 @@ impl SyncEngine {
                     self.client.device_id_hex(),
                     path,
                     hex::encode(receipt.manifest_hash.digest()),
+                    hex::encode(source_manifest.digest()),
+                    self.folder_row(),
                 )
                 .await
             {
@@ -7592,7 +7529,9 @@ impl SyncEngine {
                 // deliberately non-fatal (the re-sealed record already landed
                 // via `changes.record`; reclaiming the stale pre-re-seal record
                 // is the owner's verified-reclaim pass). Same arm as any other
-                // refusal: nothing propagates, the engine never wedges.
+                // refusal — `supersede_source_not_head` (a peer recorded a
+                // newer edit this re-seal did not source from) included:
+                // nothing propagates, the engine never wedges.
                 Err(e) => tracing::warn!(
                     path = %path_r,
                     error = %e,
@@ -7650,7 +7589,7 @@ impl SyncEngine {
         // thumbnail: the recorded one is MOVED instead (needs no thumbnailer),
         // so the pointer survives the re-seal either way.
         let thumbnail_hash = self
-            .thumbnail_hash_for_reseal(path, None, self.manifest_signer(&manifest_hash))
+            .thumbnail_hash_for_reseal(path, self.manifest_signer(&manifest_hash))
             .await;
 
         let mut recorded = false;
@@ -8044,6 +7983,7 @@ impl SyncEngine {
         let seq = if let Some((home_nest_url, channel_id_hex)) = self.foreign_routing() {
             use fauna_protocol::RpcRequester;
             let mut req = fauna_protocol::sync::SyncChangeRecordRequest {
+                folder_id: None,
                 folder: folder.to_string(),
                 device_id: self.client.device_id_hex().to_string(),
                 path: path.to_string(),
@@ -8063,7 +8003,10 @@ impl SyncEngine {
                 signer_key: None,
                 signer_cert: None,
             };
-            req = fauna_protocol::folders::addressed(req);
+            // Through the row-aware funnel like the same-nest arm: a foreign
+            // set's ref is `Foreign`, which stamps no row — the channel form
+            // above is its address.
+            req = fauna_protocol::folders::addressed_at(req, self.folder_row());
             // Signed last, over the final field values; the relay carries the
             // cert inline (the home nest holds no row of this writer's grants).
             self.sign_record(&mut req);
@@ -8095,6 +8038,7 @@ impl SyncEngine {
                     path_sealed.clone(),
                     causal.derived_through,
                     causal.is_resolution,
+                    self.folder_row(),
                 )
                 .await
                 .inspect_err(|e| self.note_access_refusal(folder, e))
@@ -8148,7 +8092,7 @@ impl SyncEngine {
     ///
     /// Four doors, each load-bearing:
     /// - **Provenance is judged HERE**, authoritatively
-    ///   ([`fauna_peer_share::provenance::judge_peer_row`]): each row as served
+    ///   ([`fauna_protocol::peer_row::judge_peer_row`]): each row as served
     ///   through this engine's own reader (its nonce, owner and roster, plus
     ///   the row's inline cert), the share leg's cached writer roster standing
     ///   in for a roster the reader has not read — the engine never trusts
@@ -8173,14 +8117,30 @@ impl SyncEngine {
     /// body. An on-demand replica lands through
     /// [`Self::ingest_peer_share_rows_on_demand`]: the same four doors, and
     /// bodies by policy.
-    #[cfg(feature = "p2p-share")]
     pub async fn ingest_peer_share_rows(
         &self,
-        accepted: &[fauna_protocol::peer_share::PeerShareChange],
+        accepted: &[fauna_protocol::peer_row::PeerChangeRow],
         proven_actor_hex: &str,
         fetcher: &dyn fauna_core::file_download::BlobFetcher,
     ) -> Result<crate::peer_share_store::PeerIngestReport> {
-        self.ingest_peer_share_rows_landing(accepted, proven_actor_hex, fetcher, None)
+        let origin = crate::peer_share_store::PeerPageOrigin::Share {
+            peer_actor_hex: proven_actor_hex.to_string(),
+        };
+        self.ingest_peer_share_rows_landing(accepted, &origin, fetcher, None)
+            .await
+    }
+
+    /// [`Self::ingest_peer_share_rows`] with the page's ORIGIN named — the one
+    /// door both peer legs ingest through (`p2p-shared-set-build.md` § Build
+    /// design — the same-account row leg, decision 3): a share peer's page, or
+    /// a sibling device's (the same-account leg's nest-down folder pull).
+    pub async fn ingest_peer_rows(
+        &self,
+        accepted: &[fauna_protocol::peer_row::PeerChangeRow],
+        origin: &crate::peer_share_store::PeerPageOrigin,
+        fetcher: &dyn fauna_core::file_download::BlobFetcher,
+    ) -> Result<crate::peer_share_store::PeerIngestReport> {
+        self.ingest_peer_share_rows_landing(accepted, origin, fetcher, None)
             .await
     }
 
@@ -8193,23 +8153,24 @@ impl SyncEngine {
     /// it is wanted ([`crate::share_landing::body_is_wanted`]) — in the kept
     /// root, where it stays until the nest confirms it, and never into the
     /// device's last free space ([`crate::share_landing::STORAGE_FLOOR_BYTES`]).
-    #[cfg(feature = "p2p-share")]
     pub async fn ingest_peer_share_rows_on_demand(
         &self,
-        accepted: &[fauna_protocol::peer_share::PeerShareChange],
+        accepted: &[fauna_protocol::peer_row::PeerChangeRow],
         proven_actor_hex: &str,
         fetcher: &dyn fauna_core::file_download::BlobFetcher,
         landing: &OnDemandLanding<'_>,
     ) -> Result<crate::peer_share_store::PeerIngestReport> {
-        self.ingest_peer_share_rows_landing(accepted, proven_actor_hex, fetcher, Some(landing))
+        let origin = crate::peer_share_store::PeerPageOrigin::Share {
+            peer_actor_hex: proven_actor_hex.to_string(),
+        };
+        self.ingest_peer_share_rows_landing(accepted, &origin, fetcher, Some(landing))
             .await
     }
 
-    #[cfg(feature = "p2p-share")]
     pub(crate) async fn ingest_peer_share_rows_landing(
         &self,
-        accepted: &[fauna_protocol::peer_share::PeerShareChange],
-        proven_actor_hex: &str,
+        accepted: &[fauna_protocol::peer_row::PeerChangeRow],
+        origin: &crate::peer_share_store::PeerPageOrigin,
         fetcher: &dyn fauna_core::file_download::BlobFetcher,
         landing: Option<&OnDemandLanding<'_>>,
     ) -> Result<crate::peer_share_store::PeerIngestReport> {
@@ -8229,15 +8190,25 @@ impl SyncEngine {
         // leg's cached one stands in, chains and all, so the one judge gives a
         // peer-served row the nest pull's verdict
         // (`writer-signed-change-records.md` ruling (11)(i)).
-        let reader = fauna_peer_share::provenance::reader_over_cached_roster(
+        let reader = fauna_protocol::peer_row::reader_over_cached_roster(
             reader,
             crate::peer_share_store::cached_writer_roster(&self.db),
         );
-        let peer_is_cached_writer = self
-            .db
-            .cached_share_writer(proven_actor_hex)
-            .unwrap_or(false);
         let own = self.own_actor_id().0;
+        let proven_actor = origin.proven_actor_hex(&hex::encode(own));
+        let proven_actor_hex = proven_actor.as_str();
+        let peer_is_cached_writer = origin.peer_is_cached_writer(&self.db);
+        // Relay retention keys on "this replica did not author it": on the
+        // same-account leg every row's signed actor is this account, and the
+        // row's device is what tells a sibling's row from this replica's own.
+        let own_device = self.client.device_id_hex().to_ascii_lowercase();
+        let authored_elsewhere = |writer: &[u8; 32], change: &fauna_protocol::sync::SyncChange| {
+            *writer != own
+                || change
+                    .device_id
+                    .as_deref()
+                    .is_none_or(|d| !d.eq_ignore_ascii_case(&own_device))
+        };
         let mut relayable = Vec::new();
         let mut relayable_pending = Vec::new();
 
@@ -8248,7 +8219,7 @@ impl SyncEngine {
         let admissions: Vec<_> = accepted
             .iter()
             .map(|row| {
-                fauna_peer_share::provenance::judge_peer_row(
+                fauna_protocol::peer_row::judge_peer_row(
                     &reader,
                     &row.change,
                     row.sequenced,
@@ -8265,10 +8236,10 @@ impl SyncEngine {
             .map(|(row, admission)| {
                 let mut change = row.change.clone();
                 change.author_actor_id = match admission {
-                    Ok(fauna_peer_share::provenance::PeerRowAdmission::Verified { writer }) => {
+                    Ok(fauna_protocol::peer_row::PeerRowAdmission::Verified { writer }) => {
                         Some(hex::encode(writer))
                     }
-                    Ok(fauna_peer_share::provenance::PeerRowAdmission::ChannelProven) => {
+                    Ok(fauna_protocol::peer_row::PeerRowAdmission::ChannelProven) => {
                         Some(proven_actor_hex.to_ascii_lowercase())
                     }
                     Err(_) => change.author_actor_id,
@@ -8280,8 +8251,8 @@ impl SyncEngine {
 
         for ((row, change), admission) in accepted.iter().zip(changes.iter()).zip(admissions) {
             let writer_hex = match admission {
-                Ok(fauna_peer_share::provenance::PeerRowAdmission::Verified { writer }) => {
-                    if writer != own {
+                Ok(fauna_protocol::peer_row::PeerRowAdmission::Verified { writer }) => {
+                    if authored_elsewhere(&writer, &row.change) {
                         if row.sequenced {
                             relayable.push((writer, row.change.clone()));
                         } else {
@@ -8290,7 +8261,7 @@ impl SyncEngine {
                     }
                     hex::encode(writer)
                 }
-                Ok(fauna_peer_share::provenance::PeerRowAdmission::ChannelProven) => {
+                Ok(fauna_protocol::peer_row::PeerRowAdmission::ChannelProven) => {
                     report.channel_proven += 1;
                     proven_actor_hex.to_lowercase()
                 }
@@ -8302,7 +8273,7 @@ impl SyncEngine {
                     );
                     if matches!(
                         refusal,
-                        fauna_peer_share::provenance::RowRefusal::NotJudgeableYet(_)
+                        fauna_protocol::peer_row::RowRefusal::NotJudgeableYet(_)
                     ) && row.sequenced
                     {
                         // Judgeable later: keep the cursor below it.
@@ -8426,8 +8397,13 @@ impl SyncEngine {
                             );
                             report.skipped.push((path.to_string(), "peer fetch failed"));
                             // The one skip a retry can cure: hold the cursor
-                            // below it so the peer serves this row again.
-                            if row.sequenced {
+                            // below it so the peer serves this row again. A
+                            // failure marked permanent (a newer-format manifest,
+                            // no key material) is not that skip — holding for
+                            // it would re-list the same page on every pass.
+                            if row.sequenced
+                                && fauna_core::apply_failure::permanent_reason(&e).is_none()
+                            {
                                 report.retry_floor = Some(
                                     report.retry_floor.map_or(change.seq, |f| f.min(change.seq)),
                                 );
@@ -8487,7 +8463,6 @@ impl SyncEngine {
     /// commits it (`Synced`, the peer manifest as its head, **no** dehydration
     /// proof), so [`Self::holds_provisional_peer_body`] can tell it from a
     /// write intent and the reconcile's confirm is what later frees it.
-    #[cfg(feature = "p2p-share")]
     #[allow(clippy::too_many_arguments)] // one row's whole context; a struct would only rename it
     async fn land_peer_row_on_demand(
         &self,
@@ -8546,14 +8521,17 @@ impl SyncEngine {
         // metadata only — so the file lists; a wanted body is retried by the
         // next pass (an un-sequenced row is served on every tail page, and a
         // sequenced one is held below the cursor).
+        // `permanent`: the failure is one no retry can cure (a newer-format
+        // manifest, no key material), so the cursor is not held for it.
         let unlanded = |report: &mut crate::peer_share_store::PeerIngestReport,
-                        reason: &'static str|
+                        reason: &'static str,
+                        permanent: bool|
          -> Result<()> {
             if !has_row {
                 self.record_peer_placeholder(tree, path, change, peer_manifest)?;
             }
             report.skipped.push((path.to_string(), reason));
-            if sequenced {
+            if sequenced && !permanent {
                 report.retry_floor =
                     Some(report.retry_floor.map_or(change.seq, |f| f.min(change.seq)));
             }
@@ -8593,30 +8571,35 @@ impl SyncEngine {
                 // and again on the bytes that actually arrived.
                 if !landing_fits((landing.free_space)(), change.size_bytes.max(0) as u64) {
                     report.storage_limited = true;
-                    return unlanded(report, "storage floor");
+                    return unlanded(report, "storage floor", false);
                 }
-                let bytes = match fauna_core::file_download::download_file_bytes_by_manifest(
-                    fetcher,
-                    &self.peer_row_keys(change),
-                    peer_manifest,
-                    change.content_key_version,
-                    path,
-                )
-                .await
-                {
-                    Ok(b) => b,
-                    Err(e) => {
-                        tracing::warn!(
-                            path = %fauna_core::log_redact::log_path(path),
-                            error = %e,
-                            "peer landing fetch failed"
-                        );
-                        return unlanded(report, "peer fetch failed");
-                    }
-                };
+                let (bytes, manifest) =
+                    match fauna_core::file_download::download_file_bytes_and_manifest(
+                        fetcher,
+                        &self.peer_row_keys(change),
+                        peer_manifest,
+                        change.content_key_version,
+                        path,
+                    )
+                    .await
+                    {
+                        Ok(landed) => landed,
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %fauna_core::log_redact::log_path(path),
+                                error = %e,
+                                "peer landing fetch failed"
+                            );
+                            return unlanded(
+                                report,
+                                "peer fetch failed",
+                                fauna_core::apply_failure::permanent_reason(&e).is_some(),
+                            );
+                        }
+                    };
                 if !landing_fits((landing.free_space)(), bytes.len() as u64) {
                     report.storage_limited = true;
-                    return unlanded(report, "storage floor");
+                    return unlanded(report, "storage floor", false);
                 }
                 let staged = tree.temp_path(BodyRoot::Kept)?;
                 tokio::fs::write(&staged, &bytes).await?;
@@ -8648,6 +8631,8 @@ impl SyncEngine {
                 // stays in the kept root until the nest confirms it.
                 self.db
                     .mark_share_overlay_materialized(path, Some(&hex::encode(content.digest())))?;
+                // A landed body is one this seat holds, so it serves.
+                self.index_held_body(path, &manifest, change.content_key_version);
                 report.materialized += 1;
             }
         }
@@ -8659,7 +8644,6 @@ impl SyncEngine {
     /// are anywhere this device can fetch them. The row is the fold's own
     /// shape ([`Self::record_placeholders_from_changes`]); the tree then drops
     /// any cache-root body under it.
-    #[cfg(feature = "p2p-share")]
     fn record_peer_placeholder(
         &self,
         tree: &crate::provider_face::owned_tree::OwnedTree,
@@ -8713,14 +8697,12 @@ impl SyncEngine {
     /// the resulting value back — [`EngineCommand::ShareIngest`]'s epilogue.
     ///
     /// [`EngineCommand::ShareIngest`]: crate::always_resident::EngineCommand::ShareIngest
-    #[cfg(feature = "p2p-share")]
     pub fn advance_share_pull_cursor(&self, peer_hex: &str, cursor: i64) -> Result<i64> {
         self.db.advance_share_pull_cursor(peer_hex, cursor)?;
         self.db.share_pull_cursor(peer_hex)
     }
 
     /// This set's pull cursor for `peer_hex` (`0` = never pulled).
-    #[cfg(feature = "p2p-share")]
     pub fn share_pull_cursor(&self, peer_hex: &str) -> Result<i64> {
         self.db.share_pull_cursor(peer_hex)
     }
@@ -8783,18 +8765,24 @@ impl SyncEngine {
             let Some(version) = entry.content_key_version else {
                 continue; // an unversioned head is an owner-only head — not this corpus
             };
-            let Some(secret) = keys.key_for(version).copied() else {
-                continue; // generation no longer retained
-            };
-            let Some(sealed) = crate::peer_share_store::rederive_manifest_from_disk(
-                &crate::share_body::TreeBodySource::new(self.watch_dir.clone()),
-                &entry.path,
-                secret,
-                version,
-                &target,
-            )
-            .await?
-            else {
+            // Every same-version candidate (an empty set = generation no longer
+            // retained): the re-seal is checked against `target`, so the first
+            // that reproduces it is the sealing generation.
+            let mut resealed = None;
+            for secret in keys.keys_for(version).copied() {
+                resealed = crate::peer_share_store::rederive_manifest_from_disk(
+                    self.serve_body().as_ref(),
+                    &entry.path,
+                    secret,
+                    version,
+                    &target,
+                )
+                .await?;
+                if resealed.is_some() {
+                    break;
+                }
+            }
+            let Some(sealed) = resealed else {
                 continue;
             };
             // Retain so the next fetch is a lookup (best-effort, like the
@@ -8842,30 +8830,26 @@ impl SyncEngine {
         let Some(version) = hit.content_key_version else {
             return Ok(None); // sealed share corpora always carry a generation
         };
-        let Some(secret) = self
-            .content_keys
-            .as_ref()
-            .and_then(|k| k.key_for(version))
-            .copied()
-        else {
+        let Some(keys) = self.content_keys.as_ref() else {
             return Ok(None);
         };
         crate::peer_share_store::chunk_body_from_hit(
-            &crate::share_body::TreeBodySource::new(self.watch_dir.clone()),
+            self.serve_body().as_ref(),
             &self.share_serve_memo,
             &hit,
-            secret,
+            keys.keys_for(version).copied(),
             store_key,
         )
         .await
     }
 
     /// Record that the body now at `relative_path` is `manifest`'s content, in
-    /// the store-key index the serve reads (`held_chunks`). Called where the
-    /// seat seals an upload and where it applies a download — the two places
-    /// the manifest is in hand. Best-effort like the manifest retention: a
-    /// lost row costs only the serveability of that body until it is next
-    /// sealed or applied.
+    /// the store-key index the serve reads (`held_chunks`). Called wherever
+    /// the seat gains a body with the manifest in hand: it seals an upload,
+    /// applies a download, hydrates an on-demand placeholder, or lands a
+    /// peer's body ([`Self::index_recorded_body`] is the door for a body that
+    /// arrives without one). Best-effort like the manifest retention: a lost
+    /// row costs only the serveability of that body until it is next indexed.
     fn index_held_body(
         &self,
         relative_path: &str,
@@ -8887,19 +8871,67 @@ impl SyncEngine {
         }
     }
 
+    /// Index the body `relative_path`'s row records, for a body a host placed
+    /// without the manifest in hand (an on-demand host's peer-transfer
+    /// landing): one manifest fetch, then [`Self::index_held_body`].
+    /// Best-effort like every index write — a failure leaves that body
+    /// unservable, and is logged.
+    pub async fn index_recorded_body(&self, relative_path: &str) {
+        let indexed = async {
+            let Some(entry) = self.db.get_entry(relative_path)? else {
+                return Ok(());
+            };
+            let Some(manifest_hash) = entry.manifest_hash else {
+                return Ok(());
+            };
+            let manifest = self
+                .fetch_manifest(&manifest_hash, entry.content_key_version)
+                .await?;
+            self.index_held_body(relative_path, &manifest, entry.content_key_version);
+            anyhow::Ok(())
+        };
+        if let Err(e) = indexed.await {
+            tracing::warn!(
+                error = %e,
+                path = %fauna_core::log_redact::log_path(relative_path),
+                "store-key index of a landed body failed; it is unservable until re-indexed"
+            );
+        }
+    }
+
+    /// Read this replica's bodies through `body` rather than the bound tree at
+    /// the engine's root — an on-demand replica that owns its tree, whose
+    /// bodies stand in a kept root or a cache root
+    /// ([`crate::share_body::OnDemandBodySource`]; `p2p-shared-set-build.md`
+    /// § *Phone peers — design*, decision 1). Every serve the engine makes
+    /// reads through it: the relay's, the peer leg's and the share leg's.
+    pub fn set_serve_body(&self, body: Arc<dyn crate::share_body::BodySource>) {
+        *self.serve_body.lock().expect("serve body poisoned") = Some(body);
+    }
+
+    /// The source the serve core reads this replica's bodies through.
+    fn serve_body(&self) -> Arc<dyn crate::share_body::BodySource> {
+        self.serve_body
+            .lock()
+            .expect("serve body poisoned")
+            .clone()
+            .unwrap_or_else(|| crate::share_body::TreeBodySource::shared(self.watch_dir.clone()))
+    }
+
     /// Serve one stored chunk from the body this seat holds — the engine's one
     /// serve path (`file-sync.md` § Relay serving → *The seat serves from the
     /// file, through one serve core*).
     ///
     /// The key resolves through this folder's store-key index to a path and a
-    /// plaintext range; the core reads it, checks it, seals it under the root
+    /// plaintext range; the core reads it through the replica's body source
+    /// ([`Self::set_serve_body`]), checks it, seals it under the root
     /// the upload would have used, and serves it only when the result is
     /// `store_key`. `Ok(None)` — never an error — for a key the index does not
     /// name, a path whose row is a placeholder, a body that changed, or a
     /// reseal that does not reproduce the key. Nothing is fetched from the nest
     /// on this path, ever.
     pub async fn serve_chunk(&self, store_key: &[u8; 32]) -> Result<Option<Vec<u8>>> {
-        let body = crate::share_body::TreeBodySource::new(self.watch_dir.clone());
+        let body = self.serve_body();
         for row in self.db.held_chunks(store_key)? {
             let not_held = self.db.get_entry(&row.path)?.is_some_and(|e| {
                 matches!(
@@ -8911,9 +8943,13 @@ impl SyncEngine {
                 continue;
             }
             for root in self.serve_seal_roots(row.content_key_version) {
-                if let Some(served) =
-                    crate::serve_core::serve_held_chunk(&body, &row.path, &row.chunk, root.as_ref())
-                        .await?
+                if let Some(served) = crate::serve_core::serve_held_chunk(
+                    body.as_ref(),
+                    &row.path,
+                    &row.chunk,
+                    root.as_ref(),
+                )
+                .await?
                 {
                     return Ok(Some(served));
                 }
@@ -8965,8 +9001,7 @@ impl SyncEngine {
             return self
                 .content_keys
                 .as_ref()
-                .and_then(|k| k.key_for(version))
-                .map(|k| vec![Some(*k)])
+                .map(|k| k.keys_for(version).map(|key| Some(*key)).collect())
                 .unwrap_or_default();
         }
         let mut roots = Vec::with_capacity(2);
@@ -9362,7 +9397,7 @@ impl SyncEngine {
                 .nest_client
                 .request(
                     "fauna.sync.changes.list",
-                    fauna_protocol::folders::addressed(
+                    fauna_protocol::folders::addressed_at(
                         fauna_protocol::sync::SyncChangesListRequest {
                             folder: Some(folder.to_string()),
                             device_id: None,
@@ -9372,6 +9407,7 @@ impl SyncEngine {
                             name_hash: None,
                             ..Default::default()
                         },
+                        self.folder_row(),
                     ),
                 )
                 .await
@@ -9379,7 +9415,7 @@ impl SyncEngine {
             reply
         } else {
             fauna_client_sync::SyncClient::new(self.nest_client.clone())
-                .changes_list(Some(folder.to_string()), None, since)
+                .changes_list(Some(folder.to_string()), None, since, self.folder_row())
                 .await
                 .context("fauna.sync.changes.list")?
         };
@@ -9415,6 +9451,7 @@ impl SyncEngine {
                         path_hash: change.path_hash.to_ascii_lowercase(),
                         row: row.to_vec(),
                         signer_cert,
+                        device_id: change.device_id.as_deref().map(str::to_ascii_lowercase),
                     })
                 });
             if let Err(e) = retained {
@@ -9606,7 +9643,19 @@ impl SyncEngine {
             let reader = self.row_reader.read().unwrap_or_else(|e| e.into_inner());
             self.retain_relayed_rows(&reader, &relayable, true);
         }
-        if nonce_stale {
+        // Ruling (7)(b)(ii) rule (6)(b): an admitted row sealed under a
+        // generation this member holds no key for says the owner rotated and
+        // re-published with no commit (a serve-off) — the same ask, once per
+        // batch. A row naming no generation (pre-bind) asks nothing.
+        let generation_missing = !owns_set
+            && kept.iter().any(|c| {
+                c.content_key_version.is_some_and(|v| {
+                    self.content_keys
+                        .as_ref()
+                        .is_none_or(|keys| keys.key_for(v).is_none())
+                })
+            });
+        if nonce_stale || generation_missing {
             let request = self
                 .custody_refetch_request
                 .read()
@@ -10982,242 +11031,14 @@ impl SyncEngine {
                         // past the tombstone whether or not it was applied, so the
                         // delete never came back.
                         // …but `exists()` answers "is something here?", never
-                        // "is this the file the tombstone refers to?". The
-                        // tombstone's subject is the **row**, not the path. Two
-                        // ways a *different* file occupies a tombstoned path,
-                        // both of them user data that exists nowhere else:
-                        //
-                        //   - **no row at all** — a brand-new local file the
-                        //     engine has never synced (a fresh bind replaying a
-                        //     set's whole history meets exactly this); and
-                        //   - **a tombstoned row** (`delete_entry` soft-deletes,
-                        //     so the row outlives the file) with a file back on
-                        //     disk — i.e. a RECREATION after the delete already
-                        //     landed. A replayed tombstone must not erase it.
-                        //
-                        // Deleting either is a no-user-data-loss violation
-                        // (`docs/goal/principles.md`), and it compounds: with no
-                        // live row, reconcile's delete-detection never queues an
-                        // upload, so the bytes are simply gone. Found live
-                        // 2026-07-24 — the multiseat linux seat's phase-1 files
-                        // were destroyed this way and `new=0` followed.
-                        //
-                        // Declining here does NOT reopen § Files Appear
-                        // Automatically's "a skipped delete never comes back":
-                        // that hazard is a *tracked* file stranded on disk while
-                        // the nest shows it deleted. These files are untracked or
-                        // recreated, so there is no such divergence to strand —
-                        // reconcile sees an unknown/new local file and uploads it
-                        // as a fresh create at a higher seq, which is precisely
-                        // how every device converges on "the file exists".
-                        // Tracked-ness alone is NOT enough, because a live row
-                        // does not imply the nest has the bytes: the upload path
-                        // writes its row *before* the upload lands ("Mark as
-                        // uploading" — `local_hash` = the new bytes,
-                        // `manifest_hash` = the OLD base). So a file recreated at
-                        // a tombstoned path carries a live `Uploading` row for the
-                        // whole in-flight window.
-                        //
-                        // And the ROW alone is not enough either — the DISK must
-                        // agree with it:
-                        // `local_hash` refreshes only when `upload_file` reaches
-                        // "Mark as uploading", and a local edit sits behind the
-                        // watcher debouncer first, whose timer resets on every
-                        // event — a continuously written file stays unobserved
-                        // for the whole write. The nudge-path pull deliberately
-                        // runs no converge before applying. In that window the
-                        // row reads Synced with matching hashes while the disk
-                        // holds bytes the nest has never seen; unlinking on the
-                        // row's word destroys their only copy with no conflict
-                        // marker (`principles.md` § No user-data loss — the
-                        // overwrite path already protects this case; the delete
-                        // path must too).
-                        //
-                        // So a tombstone may only be applied when BOTH hold:
-                        // the row's state says its content is settled
-                        // (`Synced`/`Placeholder` — not mid-upload, not an
-                        // observed local edit), AND the disk still hashes to the
-                        // row's `local_hash`. Two identities that must NOT be
-                        // compared to each other in the process: `local_hash` is
-                        // the content's hash, `manifest_hash` is the hash of the
-                        // manifest that reassembles to it. They differ for every
-                        // real file, so testing `local_hash == manifest_hash` as
-                        // a stand-in for "synced" declined every delete on every
-                        // device that obtained the file by download — and
-                        // reconcile then re-uploaded it as a fresh create,
-                        // resurrecting deleted files fleet-wide.
+                        // "is this the file the tombstone refers to?" — the
+                        // shared verdict answers that ([`Self::remote_delete_verdict`],
+                        // which the on-demand fold's deletes go through too).
                         let full_path = self.watch_dir.join(path);
-                        // How the disk answers for the row's bytes. The four
-                        // KEEP words differ in what they owe the user (below):
-                        // `Unsynced`/`Unprovable` name content the nest lacks;
-                        // `NoHead`/`Unreadable` name a lineage the tombstone
-                        // cannot refer to, or an infra failure.
-                        enum DiskWord {
-                            /// disk == `local_hash`: the bytes ARE the last
-                            /// synced version.
-                            Synced,
-                            /// disk != `local_hash`: an unobserved (e.g.
-                            /// mid-debounce) edit — content the nest lacks.
-                            Unsynced,
-                            /// A materialized file with no local identity —
-                            /// nothing proves it holds no edit.
-                            Unprovable,
-                            /// A cloud placeholder: no local bytes at stake.
-                            NoLocalBytes,
-                            /// No recorded head: nothing of this lineage ever
-                            /// reached the nest.
-                            NoHead,
-                            /// The re-hash failed; fail CLOSED.
-                            Unreadable,
-                        }
-                        enum Tombstone {
-                            Apply,
-                            /// Keep the bytes AND record the delete-vs-edit
-                            /// conflict (file-sync.md § Conflicts, ratified
-                            /// 2026-07-29): the lineage lost a delete to
-                            /// content the nest lacks, and silence here reads
-                            /// downstream as a sync bug when the survivor
-                            /// re-uploads and "resurrects" the file.
-                            KeepConflict,
-                            /// Keep the bytes with no conflict row: there is
-                            /// no shared lineage for the tombstone to lose to
-                            /// (untracked, recreated after an applied
-                            /// tombstone, headless), or an infra failure.
-                            KeepSilent,
-                        }
-                        let verdict = match self.db.get_entry(path) {
-                            Ok(Some(entry)) => {
-                                let disk = match (entry.local_hash, entry.manifest_hash) {
-                                    // A head is recorded, so something of this
-                                    // file reached the nest — but only the disk
-                                    // can say the bytes about to be destroyed are
-                                    // still the synced ones. `local_hash` is the
-                                    // content identity of the last synced
-                                    // version, so disk == local_hash means no
-                                    // unsynced edit is being unlinked. Fail
-                                    // CLOSED on an unreadable file, like the
-                                    // row-read arm below (a MISSING file also
-                                    // lands here — moot, the exists() gate below
-                                    // no-ops either way).
-                                    //
-                                    // ⚠ `local_hash` and `manifest_hash` are
-                                    // DIFFERENT identities — the content's hash
-                                    // vs. the hash of the manifest that
-                                    // *reassembles* to that content
-                                    // (`ContentHash::of_raw(&manifest_bytes)`;
-                                    // see `download_file_bytes`, and
-                                    // `db::clear_recorded_content_hash`). They
-                                    // are equal only for a row seeded by a test
-                                    // helper, never for a real downloaded file,
-                                    // so they must NEVER be compared to each
-                                    // other: doing so declined every delete on
-                                    // every device that got the file by download
-                                    // and let reconcile resurrect it as a new
-                                    // create.
-                                    (Some(local), Some(_head)) => {
-                                        match fauna_core::chunker_stream::content_hash_streaming(
-                                            &full_path,
-                                        ) {
-                                            Ok(disk) if disk == local => DiskWord::Synced,
-                                            Ok(_) => DiskWord::Unsynced,
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    path = %fauna_core::log_redact::log_path(path),
-                                                    error = %e,
-                                                    "cannot re-hash the file for a remote delete; keeping it"
-                                                );
-                                                DiskWord::Unreadable
-                                            }
-                                        }
-                                    }
-                                    // No recorded head yet: nothing of this file
-                                    // has ever reached the nest.
-                                    (_, None) => DiskWord::NoHead,
-                                    // A head but no local identity. A cloud
-                                    // PLACEHOLDER holds no local bytes, so the
-                                    // tombstone costs nothing and applies. A
-                                    // materialized file with no local identity
-                                    // (a partial hydration that never stamped
-                                    // one — `mark_hydrated`'s early returns) may
-                                    // hold an unsynced edit, and nothing here can
-                                    // prove otherwise, so keep it.
-                                    (None, Some(_)) => {
-                                        if crate::placeholder::path_is_cloud_placeholder(&full_path)
-                                        {
-                                            DiskWord::NoLocalBytes
-                                        } else {
-                                            DiskWord::Unprovable
-                                        }
-                                    }
-                                };
-                                // Only a row whose content is SETTLED can be
-                                // spoken for by a tombstone. `Uploading` holds
-                                // bytes in flight (its `local_hash` is already
-                                // the new content while `manifest_hash` is still
-                                // the old base), `LocallyModified` /
-                                // `Conflicted` hold an observed local edit, and
-                                // `RemotelyModified` / `Downloading` are
-                                // mid-apply; none of that content is on the nest,
-                                // so no tombstone can refer to it. `Deleted`
-                                // already applied. The state is the honest
-                                // discriminator here — a hash comparison is not,
-                                // because a mid-upload row's `local_hash` DOES
-                                // match the disk.
-                                let settled = matches!(
-                                    entry.state,
-                                    SyncState::Synced | SyncState::Placeholder
-                                );
-                                if settled
-                                    && matches!(disk, DiskWord::Synced | DiskWord::NoLocalBytes)
-                                {
-                                    Tombstone::Apply
-                                } else {
-                                    // Which keeps are CONFLICTS: exactly the
-                                    // rows holding content the nest lacks. The
-                                    // three in-flight local states hold it by
-                                    // definition; a settled row holds it when
-                                    // the disk diverged from the recorded
-                                    // identity (the mid-debounce edit) or when
-                                    // nothing proves it doesn't (the
-                                    // identity-less materialized row). NOT
-                                    // conflicts: `Deleted` (the tombstone
-                                    // already applied — this decline is replay
-                                    // against a recreation), the mid-apply
-                                    // remote states (the local bytes are the
-                                    // recoverable synced version), a headless
-                                    // lineage (the tombstone cannot refer to
-                                    // it), and infra failures.
-                                    let local_only_content = !matches!(disk, DiskWord::NoHead)
-                                        && match entry.state {
-                                            SyncState::Uploading
-                                            | SyncState::LocallyModified
-                                            | SyncState::Conflicted => true,
-                                            SyncState::Synced | SyncState::Placeholder => matches!(
-                                                disk,
-                                                DiskWord::Unsynced | DiskWord::Unprovable
-                                            ),
-                                            _ => false,
-                                        };
-                                    if local_only_content {
-                                        Tombstone::KeepConflict
-                                    } else {
-                                        Tombstone::KeepSilent
-                                    }
-                                }
-                            }
-                            Ok(None) => Tombstone::KeepSilent,
-                            Err(e) => {
-                                // Fail CLOSED: if we cannot prove the row is
-                                // ours to delete, keep the bytes.
-                                tracing::error!(
-                                    path = %fauna_core::log_redact::log_path(path),
-                                    error = %e,
-                                    "cannot read sync row for a remote delete; keeping the local file"
-                                );
-                                Tombstone::KeepSilent
-                            }
-                        };
-                        if full_path.exists() && matches!(verdict, Tombstone::KeepConflict) {
+                        let verdict = self.remote_delete_verdict(path, &full_path);
+                        if full_path.exists()
+                            && matches!(verdict, RemoteDeleteVerdict::KeepConflict)
+                        {
                             tracing::info!(
                                 path = %fauna_core::log_redact::log_path(path),
                                 "declined a remote delete for locally modified content; \
@@ -11229,7 +11050,9 @@ impl SyncEngine {
                                 change.device_id.as_deref(),
                             )
                             .await;
-                        } else if full_path.exists() && matches!(verdict, Tombstone::KeepSilent) {
+                        } else if full_path.exists()
+                            && matches!(verdict, RemoteDeleteVerdict::KeepSilent)
+                        {
                             tracing::info!(
                                 path = %fauna_core::log_redact::log_path(path),
                                 "declined a remote delete for an untracked or recreated local \
@@ -11249,7 +11072,14 @@ impl SyncEngine {
                                 self.db.delete_entry(path)?;
                                 tracing::info!(path = %fauna_core::log_redact::log_path(path), "applied remote delete");
                                 count += 1;
+                                self.cure_skipped_path(path).await;
                             }
+                        } else {
+                            // Nothing on this disk: the common shape of a skipped
+                            // CREATE (it never wrote the file), so the tombstone has
+                            // nothing to unlink — but the set has deleted the path,
+                            // so this device is no longer behind on it.
+                            self.cure_skipped_path(path).await;
                         }
                     }
                 }
@@ -11279,6 +11109,242 @@ impl SyncEngine {
             },
             max_seq,
         ))
+    }
+
+    /// What a remote delete may do to `path`, whose copy on this disk is
+    /// `full_path` — the one decision every remote delete goes through: the
+    /// resident pull's delete arm ([`Self::apply_remote_changes`]) and the
+    /// on-demand fold's ([`Self::apply_folded_delete`]). Reads the row and, for a
+    /// hydrated file, the disk; changes nothing.
+    fn remote_delete_verdict(
+        &self,
+        path: &str,
+        full_path: &std::path::Path,
+    ) -> RemoteDeleteVerdict {
+        // `exists()` answers "is something here?", never
+        // "is this the file the tombstone refers to?". The
+        // tombstone's subject is the **row**, not the path. Two
+        // ways a *different* file occupies a tombstoned path,
+        // both of them user data that exists nowhere else:
+        //
+        //   - **no row at all** — a brand-new local file the
+        //     engine has never synced (a fresh bind replaying a
+        //     set's whole history meets exactly this); and
+        //   - **a tombstoned row** (`delete_entry` soft-deletes,
+        //     so the row outlives the file) with a file back on
+        //     disk — i.e. a RECREATION after the delete already
+        //     landed. A replayed tombstone must not erase it.
+        //
+        // Deleting either is a no-user-data-loss violation
+        // (`docs/goal/principles.md`), and it compounds: with no
+        // live row, reconcile's delete-detection never queues an
+        // upload, so the bytes are simply gone. Found live
+        // 2026-07-24 — the multiseat linux seat's phase-1 files
+        // were destroyed this way and `new=0` followed.
+        //
+        // Declining here does NOT reopen § Files Appear
+        // Automatically's "a skipped delete never comes back":
+        // that hazard is a *tracked* file stranded on disk while
+        // the nest shows it deleted. These files are untracked or
+        // recreated, so there is no such divergence to strand —
+        // reconcile sees an unknown/new local file and uploads it
+        // as a fresh create at a higher seq, which is precisely
+        // how every device converges on "the file exists".
+        // Tracked-ness alone is NOT enough, because a live row
+        // does not imply the nest has the bytes: the upload path
+        // writes its row *before* the upload lands ("Mark as
+        // uploading" — `local_hash` = the new bytes,
+        // `manifest_hash` = the OLD base). So a file recreated at
+        // a tombstoned path carries a live `Uploading` row for the
+        // whole in-flight window.
+        //
+        // And the ROW alone is not enough either — the DISK must
+        // agree with it:
+        // `local_hash` refreshes only when `upload_file` reaches
+        // "Mark as uploading", and a local edit sits behind the
+        // watcher debouncer first, whose timer resets on every
+        // event — a continuously written file stays unobserved
+        // for the whole write. The nudge-path pull deliberately
+        // runs no converge before applying. In that window the
+        // row reads Synced with matching hashes while the disk
+        // holds bytes the nest has never seen; unlinking on the
+        // row's word destroys their only copy with no conflict
+        // marker (`principles.md` § No user-data loss — the
+        // overwrite path already protects this case; the delete
+        // path must too).
+        //
+        // So a tombstone may only be applied when BOTH hold:
+        // the row's state says its content is settled
+        // (`Synced`/`Placeholder` — not mid-upload, not an
+        // observed local edit), AND the disk still hashes to the
+        // row's `local_hash`. Two identities that must NOT be
+        // compared to each other in the process: `local_hash` is
+        // the content's hash, `manifest_hash` is the hash of the
+        // manifest that reassembles to it. They differ for every
+        // real file, so testing `local_hash == manifest_hash` as
+        // a stand-in for "synced" declined every delete on every
+        // device that obtained the file by download — and
+        // reconcile then re-uploaded it as a fresh create,
+        // resurrecting deleted files fleet-wide.
+        // How the disk answers for the row's bytes. The four
+        // KEEP words differ in what they owe the user (below):
+        // `Unsynced`/`Unprovable` name content the nest lacks;
+        // `NoHead`/`Unreadable` name a lineage the tombstone
+        // cannot refer to, or an infra failure.
+        enum DiskWord {
+            /// disk == `local_hash`: the bytes ARE the last
+            /// synced version.
+            Synced,
+            /// disk != `local_hash`: an unobserved (e.g.
+            /// mid-debounce) edit — content the nest lacks.
+            Unsynced,
+            /// A materialized file with no local identity —
+            /// nothing proves it holds no edit.
+            Unprovable,
+            /// A cloud placeholder: no local bytes at stake.
+            NoLocalBytes,
+            /// No recorded head: nothing of this lineage ever
+            /// reached the nest.
+            NoHead,
+            /// The re-hash failed; fail CLOSED.
+            Unreadable,
+        }
+        match self.db.get_entry(path) {
+            Ok(Some(entry)) => {
+                let disk = match (entry.local_hash, entry.manifest_hash) {
+                    // A head is recorded, so something of this
+                    // file reached the nest — but only the disk
+                    // can say the bytes about to be destroyed are
+                    // still the synced ones. `local_hash` is the
+                    // content identity of the last synced
+                    // version, so disk == local_hash means no
+                    // unsynced edit is being unlinked. Fail
+                    // CLOSED on an unreadable file, like the
+                    // row-read arm below (a MISSING file also
+                    // lands here — moot: each caller acts only on
+                    // a file still present).
+                    //
+                    // ⚠ `local_hash` and `manifest_hash` are
+                    // DIFFERENT identities — the content's hash
+                    // vs. the hash of the manifest that
+                    // *reassembles* to that content
+                    // (`ContentHash::of_raw(&manifest_bytes)`;
+                    // see `download_file_bytes`, and
+                    // `db::clear_recorded_content_hash`). They
+                    // are equal only for a row seeded by a test
+                    // helper, never for a real downloaded file,
+                    // so they must NEVER be compared to each
+                    // other: doing so declined every delete on
+                    // every device that got the file by download
+                    // and let reconcile resurrect it as a new
+                    // create.
+                    // …but never READ a cloud-only placeholder: the
+                    // provider's own read of its own placeholder is
+                    // answered by nobody and stalls for cfapi's full
+                    // 60 s (`crate::placeholder`). It holds no local
+                    // bytes whatever identity the row carries (a
+                    // `Synced` row the OS dehydrated ahead of its
+                    // flip back to `Placeholder`), so the tombstone
+                    // costs nothing.
+                    (Some(_), Some(_))
+                        if crate::placeholder::path_is_cloud_placeholder(full_path) =>
+                    {
+                        DiskWord::NoLocalBytes
+                    }
+                    (Some(local), Some(_head)) => {
+                        match fauna_core::chunker_stream::content_hash_streaming(full_path) {
+                            Ok(disk) if disk == local => DiskWord::Synced,
+                            Ok(_) => DiskWord::Unsynced,
+                            Err(e) => {
+                                tracing::warn!(
+                                    path = %fauna_core::log_redact::log_path(path),
+                                    error = %e,
+                                    "cannot re-hash the file for a remote delete; keeping it"
+                                );
+                                DiskWord::Unreadable
+                            }
+                        }
+                    }
+                    // No recorded head yet: nothing of this file
+                    // has ever reached the nest.
+                    (_, None) => DiskWord::NoHead,
+                    // A head but no local identity. A cloud
+                    // PLACEHOLDER holds no local bytes, so the
+                    // tombstone costs nothing and applies. A
+                    // materialized file with no local identity
+                    // (a partial hydration that never stamped
+                    // one — `mark_hydrated`'s early returns) may
+                    // hold an unsynced edit, and nothing here can
+                    // prove otherwise, so keep it.
+                    (None, Some(_)) => {
+                        if crate::placeholder::path_is_cloud_placeholder(full_path) {
+                            DiskWord::NoLocalBytes
+                        } else {
+                            DiskWord::Unprovable
+                        }
+                    }
+                };
+                // Only a row whose content is SETTLED can be
+                // spoken for by a tombstone. `Uploading` holds
+                // bytes in flight (its `local_hash` is already
+                // the new content while `manifest_hash` is still
+                // the old base), `LocallyModified` /
+                // `Conflicted` hold an observed local edit, and
+                // `RemotelyModified` / `Downloading` are
+                // mid-apply; none of that content is on the nest,
+                // so no tombstone can refer to it. `Deleted`
+                // already applied. The state is the honest
+                // discriminator here — a hash comparison is not,
+                // because a mid-upload row's `local_hash` DOES
+                // match the disk.
+                let settled = matches!(entry.state, SyncState::Synced | SyncState::Placeholder);
+                if settled && matches!(disk, DiskWord::Synced | DiskWord::NoLocalBytes) {
+                    RemoteDeleteVerdict::Apply
+                } else {
+                    // Which keeps are CONFLICTS: exactly the
+                    // rows holding content the nest lacks. The
+                    // three in-flight local states hold it by
+                    // definition; a settled row holds it when
+                    // the disk diverged from the recorded
+                    // identity (the mid-debounce edit) or when
+                    // nothing proves it doesn't (the
+                    // identity-less materialized row). NOT
+                    // conflicts: `Deleted` (the tombstone
+                    // already applied — this decline is replay
+                    // against a recreation), the mid-apply
+                    // remote states (the local bytes are the
+                    // recoverable synced version), a headless
+                    // lineage (the tombstone cannot refer to
+                    // it), and infra failures.
+                    let local_only_content = !matches!(disk, DiskWord::NoHead)
+                        && match entry.state {
+                            SyncState::Uploading
+                            | SyncState::LocallyModified
+                            | SyncState::Conflicted => true,
+                            SyncState::Synced | SyncState::Placeholder => {
+                                matches!(disk, DiskWord::Unsynced | DiskWord::Unprovable)
+                            }
+                            _ => false,
+                        };
+                    if local_only_content {
+                        RemoteDeleteVerdict::KeepConflict
+                    } else {
+                        RemoteDeleteVerdict::KeepSilent
+                    }
+                }
+            }
+            Ok(None) => RemoteDeleteVerdict::KeepSilent,
+            Err(e) => {
+                // Fail CLOSED: if we cannot prove the row is
+                // ours to delete, keep the bytes.
+                tracing::error!(
+                    path = %fauna_core::log_redact::log_path(path),
+                    error = %e,
+                    "cannot read sync row for a remote delete; keeping the local file"
+                );
+                RemoteDeleteVerdict::KeepSilent
+            }
+        }
     }
 
     /// The retire-on-arrival sweep [`Self::apply_remote_changes`] runs after
@@ -11489,6 +11555,9 @@ impl SyncEngine {
             /// The head's thumbnail pointer, cached onto the row so a later
             /// re-seal can MOVE it rather than drop it (`SyncEntry::thumbnail_hash`).
             thumbnail: Option<String>,
+            /// The device that recorded the change — named when a delete is
+            /// declined ([`FoldedDelete::deleting_device`]).
+            device: Option<String>,
         }
 
         let mut latest: HashMap<String, Folded> = HashMap::new();
@@ -11523,6 +11592,7 @@ impl SyncEngine {
                     mtime: created_at_ms_to_unix_secs(change.created_at),
                     content_key_version: change.content_key_version,
                     thumbnail: change.thumbnail_hash.clone(),
+                    device: change.device_id.clone(),
                 },
             );
         }
@@ -11531,28 +11601,35 @@ impl SyncEngine {
         let mut created: Vec<crate::enumerate::PlaceholderRow> = Vec::new();
         let mut repointed: Vec<crate::enumerate::PlaceholderRow> = Vec::new();
         let mut stale_hydrated: Vec<StaleHydratedRow> = Vec::new();
+        let mut deleted: Vec<FoldedDelete> = Vec::new();
         for (path, folded) in &latest {
             // Latest state is a delete (`manifest_hash = None`).
             let Some(manifest_hex) = folded.manifest.as_deref() else {
-                // A remote delete that lands in a *later* pull than the create:
-                // drop the stale placeholder this fold left earlier so the file
-                // browser stops listing the gone file. Only a `Placeholder` row
-                // is ours to remove — a `Synced`/on-disk row (the always→
-                // on-demand *switch* case) carries local bytes whose deletion is
-                // the full reconcile path's job, never this bytes-free fold's.
-                // (A delete *within* one pull simply never records a row.)
+                // A remote delete. (A delete *within* one pull simply never records
+                // a row.) What this disk holds for the path is the host's to remove
+                // — a placeholder the platform listed or this fold materialized, a
+                // hydrated copy — and the row goes only after it, so a live row is
+                // REPORTED, never removed here ([`PlaceholderFold::deleted`]); the
+                // host applies it through the resident pull's own verdict
+                // ([`Self::apply_folded_delete`]). Until 2026-10-08 this arm dropped a
+                // `Placeholder` row and left its placeholder on the disk, and left a
+                // `Synced` row to a "full reconcile path" no on-demand host runs.
                 //
-                // A `LocallyDeleted` row is removed too: the nest already holds a
-                // delete for it, so the one this device owes is moot (decision (f)
-                // of `delete-propagation.md` § *An offline placeholder delete
-                // propagates* — nothing is left dangling).
-                if let Some(entry) = self.db.get_entry(path)?
-                    && matches!(
-                        entry.state,
-                        SyncState::Placeholder | SyncState::LocallyDeleted
-                    )
-                {
-                    self.db.remove_entry(path)?;
+                // A `LocallyDeleted` row is removed here: the nest already holds a
+                // delete for it, so the one this device owes is moot, and nothing of
+                // it is on this disk (decision (f) of `delete-propagation.md` § *An
+                // offline placeholder delete propagates* — nothing is left dangling).
+                // A `Deleted` row already applied a delete.
+                match self.db.get_entry(path)? {
+                    Some(entry) if entry.state == SyncState::LocallyDeleted => {
+                        self.db.remove_entry(path)?;
+                    }
+                    Some(entry) if entry.state == SyncState::Deleted => {}
+                    Some(_) => deleted.push(FoldedDelete {
+                        relative_path: path.clone(),
+                        deleting_device: folded.device.clone(),
+                    }),
+                    None => {}
                 }
                 continue;
             };
@@ -11564,6 +11641,8 @@ impl SyncEngine {
             let mut is_new = existing.is_none();
             // An existing `Placeholder` re-pointed at a moved head (not the 0-byte stamp below).
             let mut head_moved = false;
+            // That placeholder's local identity, carried through its re-point (below).
+            let mut carried_local_hash = None;
             if let Some(existing) = existing {
                 // The head comparison is over the *content* identity only —
                 // deliberately not `remote_mtime`: a device that recorded its own
@@ -11587,8 +11666,8 @@ impl SyncEngine {
                     self.db.clear_seen(path)?;
                     is_new = true;
                 } else if existing.state != SyncState::Placeholder {
-                    // The fold *writes* `Placeholder` rows and only those — the same
-                    // rule its delete arm above follows. A hydrated row's bytes are on
+                    // The fold *writes* `Placeholder` rows and only those (its delete
+                    // arm above reports a live row, never removes it). A hydrated row's bytes are on
                     // disk (the always→on-demand *switch* case), and rewriting its
                     // manifest here would orphan them.
                     // ...but a `Synced` row whose head has moved is a real, stale
@@ -11610,6 +11689,9 @@ impl SyncEngine {
                             content_key_version: folded.content_key_version,
                             remote_mtime: folded.mtime,
                             version_num: existing.version_num,
+                            // Persisted by the fold's own pass once the row
+                            // holds the head (`persist_head_signers`).
+                            signed_as: None,
                         });
                     }
                     continue;
@@ -11639,6 +11721,7 @@ impl SyncEngine {
                     continue;
                 }
                 head_moved = !head_matches;
+                carried_local_hash = existing.local_hash;
             }
             // A 0-byte file has no bytes to fetch, so on an on-demand root cfapi fires **no**
             // FETCH_DATA when it is opened (measured on a live cfapi root, 2026-07-15 — opening
@@ -11653,14 +11736,21 @@ impl SyncEngine {
             // materializes it, reconcile sees hash==local_hash and leaves it stable — no spurious
             // "modified" upload of an empty file. Kept in shared Rust so a macOS File Provider
             // (identical empty-file case) inherits it (priority #2).
+            //
+            // A re-pointed placeholder keeps the identity of the bytes the disk last held under
+            // it: a version already recorded, which the uploader then takes for no edit should
+            // they still be there — a restore's stale cache, whose free a held file refused
+            // (`file-versions.md` § Restore, ordering 2). Dropping it would hand that cache to
+            // the uploader as an edit of the new head, recording the replaced version over
+            // another device's change.
             let (local_hash, local_mtime) = if folded.size == 0 {
                 (Some(ContentHash::of_raw(b"")), folded.mtime)
             } else {
-                (None, 0)
+                (carried_local_hash, 0)
             };
             self.db.upsert_entry(
                 path,
-                local_hash, // empty-content identity for a 0-byte file; None otherwise
+                local_hash, // empty-content identity for a 0-byte file; else the carried one
                 None,       // remote_hash: not carried by changes.list
                 Some(manifest_hash), // the hydration anchor
                 SyncState::Placeholder,
@@ -11670,6 +11760,11 @@ impl SyncEngine {
                 1,                          // version_num
                 folded.content_key_version, // the generation to decrypt this version
             )?;
+            if head_moved {
+                // The dehydration proof is the content the OLD head reassembles to. Left
+                // behind, it would vouch for a stale cache as the new head.
+                self.db.clear_recorded_content_hash(path)?;
+            }
             recorded += 1;
             let row = || crate::enumerate::PlaceholderRow {
                 rel: path.clone(),
@@ -11693,8 +11788,9 @@ impl SyncEngine {
         // thumbnail concern in five places that have nothing else to do with
         // thumbnails, to save one indexed UPDATE per pulled path.
         //
-        // Only live heads: the delete arm removed its row, and a `UPDATE …
-        // WHERE path` against a gone row is a no-op anyway.
+        // Only live heads: a deleted path's row is on its way out (the delete
+        // arm reported it), and a `UPDATE … WHERE path` against a gone row is a
+        // no-op anyway.
         for (path, folded) in &latest {
             if folded.manifest.is_some() {
                 self.db
@@ -11723,13 +11819,146 @@ impl SyncEngine {
         stale_hydrated.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
         created.sort_by(|a, b| a.rel.cmp(&b.rel));
         repointed.sort_by(|a, b| a.rel.cmp(&b.rel));
+        deleted.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
         Ok(PlaceholderFold {
             recorded,
             created,
             repointed,
             stale_hydrated,
+            deleted,
             overlay,
         })
+    }
+
+    /// Apply one remote delete the placeholder fold left for its caller
+    /// ([`PlaceholderFold::deleted`]) — the on-demand twin of the resident pull's
+    /// delete arm, through the same [`Self::remote_delete_verdict`]
+    /// (`delete-propagation.md` § *How a delete travels*; `on-demand-files.md`
+    /// § *Sync direction*: an on-demand root applies remote deletes as a full root
+    /// does). `remove` is the root's binding removing what its disk holds at the
+    /// path (the agent's `PlaceholderInvalidator::remove`).
+    ///
+    /// The row is read afresh — a local delete or an upload may have moved it since
+    /// the fold — and then:
+    ///
+    /// - **nothing on the disk** (a placeholder never listed, an off-disk root's
+    ///   row, a file already gone): the row is all there is, and it goes;
+    /// - **a disk that cannot answer** (anything but a definite `NotFound`,
+    ///   `crate::presence`): kept, for the next fold to retry;
+    /// - **the verdict applies** (a cloud-only placeholder, or a settled copy the
+    ///   disk re-hashes to): the removal-echo suppression is armed, the binding
+    ///   removes the file, and only THEN the row goes. A failed removal disarms the
+    ///   suppression and keeps the row — the fold reads the whole log, so its next
+    ///   pass reports the delete again — where a row dropped first would strand the
+    ///   file for ever (§ *A skipped delete never comes back*);
+    /// - **content the nest lacks** (an unsynced edit): the bytes stay, and the
+    ///   delete-vs-edit conflict is reported with the survivor uploaded as the
+    ///   winner, as the pull's arm does;
+    /// - **anything else the verdict keeps**: kept, silently.
+    ///
+    /// The row is hard-removed ([`crate::db::SyncDb::remove_entry`]), never tombstoned: a
+    /// tombstone would block the fold from recording a later re-create.
+    pub async fn apply_folded_delete(
+        &self,
+        delete: &FoldedDelete,
+        remove: impl FnOnce(&std::path::Path) -> Result<()>,
+    ) -> Result<FoldedDeleteOutcome> {
+        let path = delete.relative_path.as_str();
+        let Some(entry) = self.db.get_entry(path)? else {
+            // No row: a skipped create never made one. The set deleted the path,
+            // so a skip recorded under it is no longer a stale copy.
+            self.cure_skipped_path(path).await;
+            return Ok(FoldedDeleteOutcome::Moot);
+        };
+        match entry.state {
+            SyncState::Deleted => return Ok(FoldedDeleteOutcome::Moot),
+            // A local delete since the fold: the one this device owes is moot,
+            // exactly as the fold settles it.
+            SyncState::LocallyDeleted => {
+                self.db.remove_entry(path)?;
+                return Ok(FoldedDeleteOutcome::Moot);
+            }
+            _ => {}
+        }
+        let full_path = self.watch_dir.join(path);
+        match crate::presence::path_presence(&full_path) {
+            crate::presence::Presence::Absent => {
+                self.db.remove_entry(path)?;
+                tracing::info!(
+                    path = %fauna_core::log_redact::log_path(path),
+                    "applied remote delete (nothing on this disk)"
+                );
+                self.cure_skipped_path(path).await;
+                return Ok(FoldedDeleteOutcome::Applied);
+            }
+            crate::presence::Presence::Unknown(kind) => {
+                tracing::warn!(
+                    path = %fauna_core::log_redact::log_path(path),
+                    ?kind,
+                    "cannot tell what this disk holds for a remote delete; keeping the row \
+                     for the next pass"
+                );
+                return Ok(FoldedDeleteOutcome::Kept);
+            }
+            crate::presence::Presence::Present => {}
+        }
+        match self.remote_delete_verdict(path, &full_path) {
+            RemoteDeleteVerdict::Apply => {
+                // The REMOVAL channel, as the pull's arm arms it: the watcher's
+                // `Removed` for our own unlink must not come back as a user delete.
+                self.note_recent_removal(path);
+                if let Err(e) = remove(&full_path) {
+                    // Nothing was removed, so no event of ours is coming: a later
+                    // genuine delete of this file must not be swallowed.
+                    self.was_recent_removal(path);
+                    return Err(e.context(format!(
+                        "removing {} for a remote delete; the row stays for the next pass",
+                        fauna_core::log_redact::log_path(path)
+                    )));
+                }
+                self.db.remove_entry(path)?;
+                tracing::info!(path = %fauna_core::log_redact::log_path(path), "applied remote delete");
+                self.cure_skipped_path(path).await;
+                Ok(FoldedDeleteOutcome::Applied)
+            }
+            RemoteDeleteVerdict::KeepConflict => {
+                tracing::info!(
+                    path = %fauna_core::log_redact::log_path(path),
+                    "declined a remote delete for locally modified content; \
+                     reporting a resolved delete-vs-edit conflict (edit wins)"
+                );
+                self.report_declined_delete(path, &full_path, delete.deleting_device.as_deref())
+                    .await;
+                Ok(FoldedDeleteOutcome::KeptConflict)
+            }
+            RemoteDeleteVerdict::KeepSilent => {
+                tracing::debug!(
+                    path = %fauna_core::log_redact::log_path(path),
+                    "declined a remote delete (no settled lineage, or an unreadable file)"
+                );
+                Ok(FoldedDeleteOutcome::Kept)
+            }
+        }
+    }
+
+    /// Drop the cloud-only rows among a fold's reported deletes — for a host with
+    /// no disk of its own to remove anything from (the File Provider: what bytes a
+    /// file holds, the OS keeps). A `Placeholder` row is the whole of such a file
+    /// here, so the row going is the delete. Other rows are left as they are.
+    /// Returns how many rows went.
+    pub fn drop_cloud_only_deletes(&self, fold: &PlaceholderFold) -> Result<usize> {
+        let mut dropped = 0;
+        for delete in &fold.deleted {
+            if self
+                .db
+                .get_entry(&delete.relative_path)?
+                .is_some_and(|e| e.state == SyncState::Placeholder)
+            {
+                self.db.remove_entry(&delete.relative_path)?;
+                dropped += 1;
+            }
+        }
+        Ok(dropped)
     }
 
     /// Re-point a hydrated row the fold reported as stale ([`StaleHydratedRow`]) at
@@ -11757,7 +11986,92 @@ impl SyncEngine {
             row.size_bytes,
             row.version_num,
             row.content_key_version,
+        )?;
+        self.stamp_reported_signer(row)
+    }
+
+    /// Stamp the head a row was just moved to as signed by the identity its
+    /// report names ([`StaleHydratedRow::signed_as`]) — every door that moves a
+    /// row to a reported head names its signer when the report carries one. A
+    /// report without one (the fold's) leaves the stamp to the fold's own pass.
+    fn stamp_reported_signer(&self, row: &StaleHydratedRow) -> Result<()> {
+        if let Some(signer) = row.signed_as {
+            self.db
+                .set_head_signed_as(&row.relative_path, &row.manifest_hash, &signer)?;
+        }
+        Ok(())
+    }
+
+    /// [`Self::download_file_to_path`] for the head a fold REPORTED for a stale
+    /// hydrated row ([`StaleHydratedRow`]) — not the one the row records, which
+    /// still names the version on the disk. The first half of replacing a copy the
+    /// binding keeps on the disk instead of freeing it (a pinned file on a cfapi
+    /// root, which the platform will not free): the new head lands at `dest`,
+    /// beside the old copy, and the binding swaps it in. Returns the verified
+    /// whole-file content hash; on any failure `dest` is removed.
+    pub async fn download_head_to_path(
+        &self,
+        row: &StaleHydratedRow,
+        dest: &Path,
+    ) -> Result<ContentHash> {
+        let (hash, manifest) = fauna_core::file_download::download_file_to_path_and_manifest(
+            &self.blob_fetcher(),
+            &self.download_keys_for_record(&row.manifest_hash),
+            row.manifest_hash,
+            row.content_key_version,
+            &row.relative_path,
+            dest,
         )
+        .await?;
+        // As in [`Self::download_file_to_path`]: the body the seat now holds is indexed.
+        self.index_held_body(&row.relative_path, &manifest, row.content_key_version);
+        Ok(hash)
+    }
+
+    /// The durable half of replacing a stale hydrated copy IN PLACE: the binding
+    /// swapped `row`'s head — fetched by [`Self::download_head_to_path`], hashing
+    /// to `content_hash` — in over the old copy, so the row moves to that head,
+    /// `Synced` over the bytes now on the disk, with the content as its local
+    /// identity and its fetched proof. [`Self::repoint_hydrated_to_placeholder`]
+    /// and [`Self::mark_hydrated`] in one write, for a copy whose bytes were never
+    /// freed. **Call it only after the swap**: a row moved first, over the old
+    /// bytes, would read them back as a local edit and upload the old version over
+    /// the other device's — or, for a restore, over the version the user restored
+    /// (`docs/goal/behavior/file-versions.md` § Restore, ordering 2).
+    pub fn record_replaced_head(
+        &self,
+        row: &StaleHydratedRow,
+        content_hash: ContentHash,
+    ) -> Result<()> {
+        let rel = row.relative_path.as_str();
+        let meta = std::fs::metadata(self.watch_dir.join(rel)).with_context(|| {
+            format!(
+                "stat the replaced {}",
+                fauna_core::log_redact::log_path(rel)
+            )
+        })?;
+        let mtime = meta
+            .modified()
+            .ok()
+            .map(fauna_core::data::Timestamp::secs_or_zero)
+            .unwrap_or(0);
+        self.db.upsert_entry(
+            rel,
+            Some(content_hash),
+            None, // remote_hash: not carried by changes.list
+            Some(row.manifest_hash),
+            SyncState::Synced,
+            mtime,
+            row.remote_mtime,
+            meta.len() as i64,
+            row.version_num,
+            row.content_key_version,
+        )?;
+        self.stamp_reported_signer(row)?;
+        // The bytes on the disk were fetched from `row.manifest_hash` and verified
+        // against it, so the head provably reassembles to this local content.
+        self.db
+            .stamp_recorded_content_from_local(rel, crate::db::ProofOrigin::Fetched)
     }
 
     /// Ensure the WS-RPC control plane is open — a no-op when it already is (the
@@ -11783,7 +12097,8 @@ impl SyncEngine {
     ///
     /// Returns the [`PlaceholderFold`]: rows written, plus the hydrated rows the
     /// fold reported rather than rewrote (see [`StaleHydratedRow`] — the caller
-    /// owns their cfapi invalidation).
+    /// owns their cfapi invalidation) and the remote deletes it left in place
+    /// ([`PlaceholderFold::deleted`] — the caller owns their removal).
     pub async fn populate_placeholders_from_nest(&self) -> Result<PlaceholderFold> {
         // The accepts gate covers this rail too (phase 2 slice c) — a
         // placeholder IS a remote change landing on the seat, just without its
@@ -11813,7 +12128,7 @@ impl SyncEngine {
     /// invisible until `fileproviderd` reconstructs the extension; the appex calls
     /// this on the set's nest-authoritative cadence (`BuiltEngine::rescan_interval`)
     /// and then `signalEnumerator(for: .rootContainer)` iff it returns `true`
-    /// (`file-sync.md` § Apple File Provider binding — *a pulled remote change
+    /// (`on-demand-files-apple.md` § Apple File Provider binding — *a pulled remote change
     /// signals the enumerator*).
     ///
     /// It **applies** the stale-hydrated rows [`Self::populate_placeholders_from_nest`]
@@ -11847,6 +12162,12 @@ impl SyncEngine {
     /// connection (the `changes.list` fetch that produces the fold is not
     /// unit-testable — see `populate_placeholders_test.rs`'s module doc).
     pub fn apply_refresh_fold(&self, fold: &PlaceholderFold) -> Result<bool> {
+        // A remote delete of a file this host holds only as a placeholder: the row
+        // going is the whole delete, and it counts as a change — the enumerator must
+        // be signalled, or the gone file stays listed. A hydrated row's remote
+        // delete is not applied here yet (`delete-propagation.md` § *How a delete
+        // travels*, the on-demand bullet's implementation status).
+        let dropped = self.drop_cloud_only_deletes(fold)?;
         for row in &fold.stale_hydrated {
             self.repoint_hydrated_to_placeholder(row)?;
             // `repoint_hydrated_to_placeholder` re-points the manifest but leaves the
@@ -11856,7 +12177,7 @@ impl SyncEngine {
             // moves to the new manifest.
             self.db.clear_recorded_content_hash(&row.relative_path)?;
         }
-        Ok(fold.recorded > 0 || !fold.stale_hydrated.is_empty())
+        Ok(fold.recorded > 0 || !fold.stale_hydrated.is_empty() || dropped > 0)
     }
 
     /// Download a file's plaintext bytes on demand by its manifest hash.
@@ -11928,6 +12249,31 @@ impl SyncEngine {
     /// [`Self::download_keys`] for a read of one named manifest: its
     /// unstamped record opens under the owner root iff that record verified as
     /// this account's own ([`Self::owner_signed_manifests`]).
+    /// Where a snapshot reader finds each set's nonce
+    /// ([`Self::snapshot_nonces`]) — set once by the restore host's builder.
+    pub fn set_snapshot_nonces(&mut self, nonces: Option<fauna_client_sync::SetNonceSource>) {
+        self.snapshot_nonces = nonces;
+    }
+
+    /// The seat a snapshot reader judges the version history as: this
+    /// account's identity, the nonce source the restore host handed in, the
+    /// predecessors the reader binding proved and the links this engine
+    /// learned — the same seat shape every judged listing reads under.
+    fn snapshot_seat(&self) -> fauna_client_sync::row_judge::ReaderSeat {
+        fauna_client_sync::row_judge::ReaderSeat {
+            own: Some(self.own_actor_id().0),
+            nonces: self.snapshot_nonces.clone(),
+            predecessors: self
+                .row_reader
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .binding()
+                .account_predecessors
+                .clone(),
+            learned: self.learned_predecessors.clone(),
+        }
+    }
+
     fn download_keys_for_record(
         &self,
         manifest_hash: &ContentHash,
@@ -11944,7 +12290,6 @@ impl SyncEngine {
     /// identity the peer door recovered as its signer (ruling (8)(c)) — the
     /// ingest rewrote the row's `author_actor_id` to it before anything read
     /// the row ([`Self::ingest_peer_share_rows_landing`]).
-    #[cfg(feature = "p2p-share")]
     fn peer_row_keys(
         &self,
         change: &fauna_protocol::sync::SyncChange,
@@ -11955,7 +12300,7 @@ impl SyncEngine {
         }
     }
 
-    fn download_keys(&self) -> fauna_core::file_download::FileDownloadKeys {
+    pub(crate) fn download_keys(&self) -> fauna_core::file_download::FileDownloadKeys {
         fauna_core::file_download::FileDownloadKeys {
             backup_key: self.backup_key.clone(),
             // Read candidates only. `content_open_roots` suppresses these
@@ -11981,6 +12326,11 @@ impl SyncEngine {
             // snapshot restore, the sealed selective-sync lists — is no
             // retired identity's row.
             record_signer: fauna_core::file_download::RecordSigner::Current,
+            // A sync read's addresses come from writer-signed rows, which is
+            // what licenses a public-audience folder's plaintext; only a read
+            // that names no signed row — the snapshot restore — sets it
+            // ([`Self::restore_snapshot_files_to_dir`]).
+            sealed_only: false,
             epoch_secret: self.epoch_secret,
             // No `..Default::default()`: every field is now named, so a future
             // addition to `FileDownloadKeys` breaks HERE, loudly, instead of
@@ -11992,7 +12342,7 @@ impl SyncEngine {
     /// Bind the shared walk's blob-fetch seam to this engine's pooled transfer
     /// worker, so a shared-Rust download keeps the native concurrency + bandwidth
     /// limiter rather than fetching chunks one at a time.
-    fn blob_fetcher(&self) -> EngineBlobFetcher<'_> {
+    pub(crate) fn blob_fetcher(&self) -> EngineBlobFetcher<'_> {
         EngineBlobFetcher {
             client: &self.client,
             transfer_pool: &self.transfer_pool,
@@ -12072,12 +12422,19 @@ impl SyncEngine {
                 fauna_core::log_redact::log_path(relative_path)
             )
         })?;
-        self.download_file_bytes_by_manifest(
+        let (bytes, manifest) = fauna_core::file_download::download_file_bytes_and_manifest(
+            &self.blob_fetcher(),
+            &self.download_keys_for_record(&manifest_hash),
             manifest_hash,
             entry.content_key_version,
             relative_path,
         )
-        .await
+        .await?;
+        // A hydrated body is one this seat holds: index it for the serve
+        // (`file-sync.md` § Relay serving — an on-demand root serves what it
+        // hydrated). Until the host marks the row hydrated the serve skips it.
+        self.index_held_body(relative_path, &manifest, entry.content_key_version);
+        Ok(bytes)
     }
 
     /// [`Self::download_file_bytes`]'s bounded-memory twin: the tracked file's
@@ -12104,7 +12461,7 @@ impl SyncEngine {
                 fauna_core::log_redact::log_path(relative_path)
             )
         })?;
-        fauna_core::file_download::download_file_to_path_by_manifest(
+        let (hash, manifest) = fauna_core::file_download::download_file_to_path_and_manifest(
             &self.blob_fetcher(),
             &self.download_keys_for_record(&manifest_hash),
             manifest_hash,
@@ -12112,7 +12469,10 @@ impl SyncEngine {
             relative_path,
             dest,
         )
-        .await
+        .await?;
+        // As in [`Self::download_file_bytes`]: the hydrated body is indexed.
+        self.index_held_body(relative_path, &manifest, entry.content_key_version);
+        Ok(hash)
     }
 
     /// Restore a snapshot's files to `output_dir` — this engine's binding of
@@ -12121,27 +12481,63 @@ impl SyncEngine {
     /// (`docs/goal/behavior/backup-restore.md`
     /// § 4 + § Restoring Files).
     ///
-    /// Per file the walk fetches the manifest + chunks by store key, opens them
-    /// under the owner `BackupKey` root (a plaintext manifest passes
-    /// through, a sealed manifest with no key fails closed), verifies the
-    /// whole-file content address, then writes the plaintext into
+    /// Per file the walk licenses the entry first — a snapshot entry's
+    /// `manifest_hash` is the home nest's unsigned word and its seal is not a
+    /// licence, so only the judged change row of `set` that named exactly that
+    /// manifest under the entry's path licenses it, sealed or plaintext (the
+    /// ONE snapshot entry reader, `fauna_client_snapshots::entry_reader`; an
+    /// unlicensed one lands in [`RestoreSummary::unverified`] unfetched —
+    /// `backup-restore.md` § Security Properties, Integrity) — then fetches the manifest + chunks by
+    /// store key, opens them under the roots the row's signer may open,
+    /// verifies the whole-file content address, then writes the plaintext into
     /// `output_dir/relative_path` through the shared containment guard +
     /// `atomic_write_file`. This is why the surface works on sealed snapshots
     /// where the server-side ZIP route now refuses loudly (§ 4): the plaintext
     /// only ever materializes where the keys live.
     pub async fn restore_snapshot_files_to_dir(
         &self,
+        set: &fauna_client_snapshots::SnapshotSet,
         files: &[SnapshotFileToRestore],
         output_dir: &Path,
     ) -> Result<RestoreSummary> {
+        let sync = fauna_client_sync::SyncClient::new(self.nest_client.clone());
+        let seat = self.snapshot_seat();
+        let reader = fauna_client_snapshots::SnapshotEntryReader::new(&sync, &seat, set);
         restore_snapshot_walk(
             &self.blob_fetcher(),
             &self.download_keys(),
+            &reader,
             files,
             output_dir,
             |_idx, _total, _relative_path| {},
         )
         .await
+    }
+
+    /// One snapshot entry's bytes — the per-file download every native app's
+    /// Backups page offers, through the SAME reader the full restore walks
+    /// ([`restore_snapshot_walk`]; `backup-restore.md` § Security Properties
+    /// → Integrity): licensed by the judged change row of `set` that named
+    /// the entry's manifest under its path, sealed or plaintext, before any
+    /// byte. Until that reader existed the per-file doors read through
+    /// [`Self::download_file_bytes_by_manifest`], the engine's generic
+    /// manifest read, which was never sealed-only.
+    pub async fn download_snapshot_entry_bytes(
+        &self,
+        set: &fauna_client_snapshots::SnapshotSet,
+        entry: &SnapshotFileToRestore,
+    ) -> Result<Vec<u8>> {
+        let sync = fauna_client_sync::SyncClient::new(self.nest_client.clone());
+        let seat = self.snapshot_seat();
+        let reader = fauna_client_snapshots::SnapshotEntryReader::new(&sync, &seat, set);
+        reader
+            .download_bytes(
+                &self.blob_fetcher(),
+                &self.download_keys(),
+                &entry.relative_path,
+                entry.manifest_hash,
+            )
+            .await
     }
 
     /// Record that an on-demand placeholder has been hydrated: transition its SyncDb entry to
@@ -12233,9 +12629,10 @@ impl SyncEngine {
     /// (`Placeholder` → `Synced`), and a **pure state transition**: NOT a re-point
     /// ([`repoint_hydrated_to_placeholder`](Self::repoint_hydrated_to_placeholder)
     /// is for a *moved* nest head; here the head is unchanged). A no-op when the
-    /// row is already gone. `local_hash` is left as-is (a `Placeholder` row is
-    /// never consulted for upload — reconcile skips it on OS attributes — and a
-    /// later re-hydration overwrites it), matching the provider-initiated
+    /// row is already gone. `local_hash` is left as-is: it names the bytes just
+    /// freed, a recorded version, so should they ever stand under the row again
+    /// they are no edit ([`Self::is_stale_cache`]), and a later re-hydration
+    /// overwrites it. This matches the provider-initiated
     /// `FreeSpace` verb (`fauna-sync-agent` `pipe_server::mark_placeholder`),
     /// which this is the OS-initiated twin of.
     ///
@@ -12244,7 +12641,7 @@ impl SyncEngine {
     ///
     /// Under the off-disk posture ([`Self::set_placeholders_off_disk`]) the row
     /// is left **unseen** instead: nothing of the file is on the disk there, and
-    /// the root never writes the mark (`on-demand-files.md` § Linux FUSE binding,
+    /// the root never writes the mark (`on-demand-files-linux.md` § Linux FUSE binding,
     /// the dehydrate rule). That root frees bytes through
     /// [`Self::dehydrate_off_disk`]; this arm only keeps a stray caller honest.
     pub fn mark_placeholder(&self, relative_path: &str) -> Result<()> {
@@ -12262,7 +12659,7 @@ impl SyncEngine {
     }
 
     /// The **off-disk dehydrate's row half** — the first of its two steps
-    /// (`on-demand-files.md` § Linux FUSE binding, the dehydrate rule): if
+    /// (`on-demand-files-linux.md` § Linux FUSE binding, the dehydrate rule): if
     /// freeing `relative_path`'s bytes is provably lossless
     /// ([`Self::is_dehydration_safe`]), flip its row to `Placeholder` with the
     /// seen mark cleared and arm the recent-removal suppression, and answer
@@ -12300,23 +12697,62 @@ impl SyncEngine {
     /// not a `Synced` own record the gate keeps, or the disk no longer holds
     /// exactly the recorded body (a local edit, the upload rail's). `Err` when
     /// the fetch failed — no holder answered — with the old body and the old row
-    /// as they were; the next pull reports the row again and retries.
+    /// as they were; the next pull reports the row again and retries. The write
+    /// is [`Self::replace_kept_copy`]'s ([`Self::write_head_over_recorded_copy`]).
+    pub async fn replace_superseded_own_record(&self, row: &StaleHydratedRow) -> Result<bool> {
+        let Some(entry) = self.db.get_entry(&row.relative_path)? else {
+            return Ok(false);
+        };
+        if !Self::holder_keeps(&self.db, &entry) || entry.manifest_hash == Some(row.manifest_hash) {
+            return Ok(false);
+        }
+        self.write_head_over_recorded_copy(row, &entry).await
+    }
+
+    /// **A copy this device keeps is replaced, never freed** — the local apply of
+    /// a restore this device recorded on an always-resident root, where every
+    /// file is a kept copy (`file-versions.md` § Restore, ordering 2's kept-copy
+    /// branch). The restored version is written in over the copy, and only then
+    /// does the row move: a row moved first would name the restored version over
+    /// the replaced bytes, which the uploader reads back as an edit and records
+    /// over the restore.
+    ///
+    /// `Ok(true)` when the row now stands at `row`'s head, `Synced` over the
+    /// bytes on the disk and signed as [`StaleHydratedRow::signed_as`] — written
+    /// in now, or already there. `Ok(false)`, nothing touched, when the disk does
+    /// not hold exactly the recorded body: an unsynced local edit, which the
+    /// uploader records as a conflict with the restore. `Err` when the fetch
+    /// failed, with the copy and its row as they were.
+    pub async fn replace_kept_copy(&self, row: &StaleHydratedRow) -> Result<bool> {
+        let Some(entry) = self.db.get_entry(&row.relative_path)? else {
+            return Ok(false);
+        };
+        if entry.state == SyncState::Synced && entry.manifest_hash == Some(row.manifest_hash) {
+            self.stamp_reported_signer(row)?;
+            return Ok(true);
+        }
+        self.write_head_over_recorded_copy(row, &entry).await
+    }
+
+    /// Replace `entry`'s body with `row`'s head, row last — the shared half of
+    /// [`Self::replace_superseded_own_record`] and [`Self::replace_kept_copy`].
+    /// Only a `Synced` row over exactly the body its head was proven to
+    /// reassemble to is written over; anything else is a local edit, and
+    /// `Ok(false)` leaves it whole.
     ///
     /// The write goes through the resident apply door
     /// ([`Self::download_and_write_file`]), which reads the disk again after the
     /// fetch and settles anything but the recorded body as a divergence
     /// (`conflicts.md`), so an edit landing during the fetch is not overwritten.
-    /// No listing context rides the fold's report, so the door judges as it does
-    /// for any caller without one.
-    pub async fn replace_superseded_own_record(&self, row: &StaleHydratedRow) -> Result<bool> {
+    /// No listing context rides the report, so the door judges as it does for
+    /// any caller without one.
+    async fn write_head_over_recorded_copy(
+        &self,
+        row: &StaleHydratedRow,
+        entry: &crate::db::SyncEntry,
+    ) -> Result<bool> {
         let rel = row.relative_path.as_str();
-        let Some(entry) = self.db.get_entry(rel)? else {
-            return Ok(false);
-        };
-        if entry.state != SyncState::Synced
-            || !Self::holder_keeps(&self.db, &entry)
-            || entry.manifest_hash == Some(row.manifest_hash)
-        {
+        if entry.state != SyncState::Synced {
             return Ok(false);
         }
         let full_path = self.watch_dir.join(rel);
@@ -12338,10 +12774,14 @@ impl SyncEngine {
             false,
         )
         .await?;
-        Ok(self
+        let replaced = self
             .db
             .get_entry(rel)?
-            .is_some_and(|e| e.manifest_hash == Some(row.manifest_hash)))
+            .is_some_and(|e| e.manifest_hash == Some(row.manifest_hash));
+        if replaced {
+            self.stamp_reported_signer(row)?;
+        }
+        Ok(replaced)
     }
 
     /// **A holder keeps what it wrote** (`file-sync.md` § Relay serving): is
@@ -12354,6 +12794,96 @@ impl SyncEngine {
     fn holder_keeps(db: &SyncDb, entry: &crate::db::SyncEntry) -> bool {
         entry.recorded_proof_origin == crate::db::ProofOrigin::OwnRecord
             && !matches!(db.residency_reading(), Ok(Some(false)))
+    }
+
+    /// Does the holder-keeps gate keep `relative_path`'s body — this device's
+    /// own record in a folder whose persisted residency reading is not *full*?
+    /// The row and the reading only, never the disk: the cheap half of
+    /// [`Self::is_dehydration_safe`], for a binding that must refuse a free
+    /// before the OS frees anything and must keep such a body out of the OS's
+    /// own eviction (`file-sync.md` § Relay serving → *A holder keeps what it
+    /// wrote*). No row is `false` — nothing was recorded for the gate to keep;
+    /// an unreadable row is `true`, the refusing direction.
+    pub fn keeps_own_record(&self, relative_path: &str) -> bool {
+        match self.db.get_entry(relative_path) {
+            Ok(Some(entry)) => Self::holder_keeps(&self.db, &entry),
+            Ok(None) => false,
+            Err(_) => true,
+        }
+    }
+
+    /// Every body on this disk the holder-keeps gate keeps: a `Synced` row
+    /// holding a dehydration proof this device earned by its own record, in a
+    /// folder whose persisted residency reading is not *full*. Empty, without a
+    /// listing, while the reading is full. A binding whose OS evicts on its own
+    /// holds each of these out of that eviction — re-read after every posture
+    /// refresh, so a folder flipped to metadata-only stops the OS evicting what
+    /// its seat wrote while it was full.
+    pub fn kept_own_records(&self) -> Result<Vec<String>> {
+        if matches!(self.db.residency_reading(), Ok(Some(false))) {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .db
+            .list_by_state(SyncState::Synced)?
+            .into_iter()
+            .filter(|e| {
+                e.recorded_content_hash.is_some()
+                    && e.recorded_proof_origin == crate::db::ProofOrigin::OwnRecord
+            })
+            .map(|e| e.path)
+            .collect())
+    }
+
+    /// Does the disk hold exactly the content `relative_path`'s recorded head
+    /// reassembles to — [`Self::is_dehydration_safe`]'s proof without its
+    /// holder-keeps clause? What a platform's in-sync assertion vouches for: a
+    /// body the gate keeps may still be vouched in sync, once its binding has
+    /// put it out of the OS's reach (`on-demand-files.md`, the paragraph *In a
+    /// metadata-only folder a seat's own record is not a dehydration proof*).
+    /// Fail-closed exactly as the full gate is.
+    pub fn is_recorded_content(&self, relative_path: &str) -> bool {
+        let Ok(Some(entry)) = self.db.get_entry(relative_path) else {
+            return false;
+        };
+        Self::disk_is_recorded(&entry, &self.watch_dir.join(relative_path))
+    }
+
+    /// Is `entry` a `Placeholder` row over exactly the bytes it names (`disk`)?
+    /// Those bytes are a cache of a version already recorded, which the provider
+    /// has yet to free: a restore's stale cache, whose free a held file refused
+    /// (`file-versions.md` § Restore, ordering 2). They are no edit — recording
+    /// them again would put the version the row moved past back over its head —
+    /// so the uploader declines them and reconcile leaves the row as it is. A
+    /// `Placeholder` row names only recorded bytes: the restore keeps its local
+    /// identity only when the row proved it recorded, a free keeps the identity
+    /// of the in-sync bytes it freed, and the fold carries it through a re-point.
+    /// Any other bytes under the row are an edit.
+    fn is_stale_cache(entry: &crate::db::SyncEntry, disk: &ContentHash) -> bool {
+        entry.state == SyncState::Placeholder && entry.local_hash == Some(*disk)
+    }
+
+    /// The proof half of the gate: the row is `Synced`, the file is not a
+    /// cloud-only placeholder, and its bytes hash to both the row's local
+    /// identity and the content its recorded head reassembles to.
+    fn disk_is_recorded(entry: &crate::db::SyncEntry, full_path: &Path) -> bool {
+        if entry.state != SyncState::Synced {
+            return false;
+        }
+        if crate::placeholder::path_is_cloud_placeholder(full_path) {
+            return false;
+        }
+        match fauna_core::chunker_stream::content_hash_streaming(full_path) {
+            Ok(disk_hash) => {
+                // The disk is unchanged since we recorded the local identity AND
+                // the recorded head reassembles to exactly these bytes — a
+                // record-failed / mid-edit row whose head still points at OLD
+                // content fails the second check (fail-closed on a NULL head too).
+                entry.local_hash == Some(disk_hash)
+                    && entry.recorded_content_hash == Some(disk_hash)
+            }
+            Err(_) => false,
+        }
     }
 
     /// Is freeing this file's local bytes **provably lossless by this engine's own
@@ -12412,30 +12942,12 @@ impl SyncEngine {
         let Ok(Some(entry)) = db.get_entry(relative_path) else {
             return false;
         };
-        if entry.state != SyncState::Synced {
-            return false;
-        }
-        if crate::placeholder::path_is_cloud_placeholder(full_path) {
-            return false;
-        }
-        if Self::holder_keeps(db, &entry) {
-            return false;
-        }
-        match fauna_core::chunker_stream::content_hash_streaming(full_path) {
-            Ok(disk_hash) => {
-                // The disk is unchanged since we recorded the local identity AND
-                // the recorded head reassembles to exactly these bytes — a
-                // record-failed / mid-edit row whose head still points at OLD
-                // content fails the second check (fail-closed on a NULL head too).
-                entry.local_hash == Some(disk_hash)
-                    && entry.recorded_content_hash == Some(disk_hash)
-            }
-            Err(_) => false,
-        }
+        // The row-only clause first, so a kept body is never hashed.
+        !Self::holder_keeps(db, &entry) && Self::disk_is_recorded(&entry, full_path)
     }
 
     /// **A resident root's pending downloads** — fetch every `Placeholder` row
-    /// onto the disk (`on-demand-files.md` § Linux FUSE binding, the flips rule:
+    /// onto the disk (`on-demand-files-linux.md` § Linux FUSE binding, the flips rule:
     /// *a `Placeholder` row on a resident root is a pending download, never a
     /// delete*). An on-demand→always flip leaves the folder's cloud-only files as
     /// rows with no bytes here, and the on-demand fold
@@ -12799,17 +13311,19 @@ impl SyncEngine {
             (file_data, actual)
         };
 
-        // If this path has an unresolved local conflict of a kind a propagated
-        // winner exists for, the incoming change is the winner the user chose
-        // (file-sync.md § Conflicts): take it verbatim and skip conflict
-        // detection, which would otherwise re-conflict against the local
-        // divergent copy. The local conflict row is cleared only after the
-        // write lands (below), so a failed write leaves it for the next
-        // catch-up. Never on a `catchup_failed` skip row: it has no winner, and
-        // arming here overwrote unpublished local edits with no conflict row
-        // and no retained loser (`conflicts.md` § Skipped catch-up changes
-        // reach the review list) — a later change on a skipped path goes
-        // through ordinary detection, and cures the skip once it lands.
+        // If this path has an unresolved local conflict a propagated winner
+        // exists for — a winner kind whose candidate-bearing chooser report
+        // landed on the nest (`record_unresolved_conflict`) — the incoming
+        // change is the winner the user chose (file-sync.md § Conflicts): take
+        // it verbatim and skip conflict detection, which would otherwise
+        // re-conflict against the local divergent copy. The local conflict row
+        // is cleared only after the write lands (below), so a failed write
+        // leaves it for the next catch-up. Never on a winner-less row — a
+        // `catchup_failed` skip, a candidate-free degrade, a report that never
+        // landed: arming there overwrote unpublished local edits with no
+        // conflict row and no retained loser (`conflicts.md` § Skipped catch-up
+        // changes reach the review list) — a later change on such a path goes
+        // through ordinary detection.
         let applying_winner = self
             .db
             .has_unresolved_winner_conflict_for_path(relative_path)
@@ -13213,10 +13727,14 @@ impl SyncEngine {
 
         // Winner applied and synced: clear the local conflict so it no longer
         // shows as unresolved (the nest already recorded the winner on resolve).
-        if applying_winner && self.db.resolve_winner_conflicts_for_path(relative_path)? {
+        // A change that landed through ordinary detection supersedes a
+        // winner-less degrade row the same way: the divergence it recorded was
+        // either absent or auto-resolved, its loser uploaded, by this landing.
+        if self.db.resolve_winner_conflicts_for_path(relative_path)? {
             tracing::info!(
                 path = %fauna_core::log_redact::log_path(relative_path),
-                "applied propagated conflict winner and cleared local conflict"
+                propagated_winner = applying_winner,
+                "applied a change over a local conflict and cleared it"
             );
         }
         // A later change on this path landed: a skip recorded here is no
@@ -13263,8 +13781,34 @@ impl SyncEngine {
         Ok(DownloadOutcome::Applied)
     }
 
-    /// Handle a self-echo: download the file data and update the merge base,
-    /// but only if the local file hasn't been modified by a merge in this batch.
+    /// The local file's bytes when they hash to `file_hash` — the self-echo's
+    /// stand-in for fetching the content it published. The hash is streamed
+    /// first, so a body that has moved on is never read here; the bytes read
+    /// are checked again, so a write racing the read falls back to the fetch.
+    /// A blanked hash (a sealed-only manifest that did not open) never matches.
+    async fn local_body_matching(
+        &self,
+        relative_path: &str,
+        file_hash: &ContentHash,
+    ) -> Option<Vec<u8>> {
+        if *file_hash == fauna_core::chunk::blank_file_hash() {
+            return None;
+        }
+        let full_path =
+            crate::path_guard::resolved_target_within_root(&self.watch_dir, relative_path)?;
+        let on_disk = fauna_core::chunker_stream::content_hash_streaming(&full_path).ok()?;
+        if on_disk != *file_hash {
+            return None;
+        }
+        let bytes = tokio::fs::read(&full_path).await.ok()?;
+        (ContentHash::of_raw(&bytes) == *file_hash).then_some(bytes)
+    }
+
+    /// Handle a self-echo: obtain the echoed content — the local body when it
+    /// still hashes to the manifest's file hash, else fetched, else NONE (the
+    /// row is then accounted from its manifest alone — `conflicts.md` clause
+    /// 5, refinement (iv)) — and update the merge base, but only if the local
+    /// file hasn't been modified by a merge in this batch.
     /// `content_key_version` is the generation the echoed change was sealed under
     /// (selects the open key, fail-closed for a bound set).
     async fn apply_self_echo(
@@ -13279,15 +13823,47 @@ impl SyncEngine {
         let manifest = self
             .fetch_manifest(&manifest_hash, content_key_version)
             .await?;
-        let chunk_data = self
-            .fetch_decoded_chunks(
-                &manifest_hash,
-                &manifest,
-                relative_path,
-                content_key_version,
-            )
-            .await?;
-        let file_data = fauna_core::chunker::reassemble_chunks(&chunk_data);
+        // The self-echo reads the local body (`file-sync.md` § Relay serving):
+        // the opened manifest carries the whole-file hash, so a local file
+        // still equal to it IS the echoed content and nothing is fetched — in
+        // every residency, and the one way a metadata-only folder's echo
+        // reaches its accounting at all (its nest never held a chunk).
+        //
+        // When neither the file nor the byte plane yields the bytes — a
+        // superseded own write in a metadata-only folder: the nest never held
+        // a chunk and this seat has moved on — the echo is accounted from its
+        // manifest alone (`conflicts.md` clause 5, refinement (iv)): `None`
+        // here, the whole-file hash standing in for the bytes below.
+        let file_data: Option<Vec<u8>> = match self
+            .local_body_matching(relative_path, &manifest.file_hash)
+            .await
+        {
+            Some(local) => Some(local),
+            None => match self
+                .fetch_decoded_chunks(
+                    &manifest_hash,
+                    &manifest,
+                    relative_path,
+                    content_key_version,
+                )
+                .await
+            {
+                Ok(chunk_data) => Some(fauna_core::chunker::reassemble_chunks(&chunk_data)),
+                Err(e) => {
+                    tracing::warn!(
+                        path = %fauna_core::log_redact::log_path(relative_path),
+                        error = %format!("{e:#}"),
+                        "self-echo: no seat serves the echoed bytes — accounting the row \
+                         from its manifest (conflicts.md clause 5, refinement (iv))"
+                    );
+                    None
+                }
+            },
+        };
+        let echoed_hash = match &file_data {
+            Some(bytes) => ContentHash::of_raw(bytes),
+            None => manifest.file_hash,
+        };
 
         // Causal accounting rides the SAME event as the base advance
         // (`conflicts.md` clause 5's pairing rule): the echo proves the log
@@ -13301,18 +13877,20 @@ impl SyncEngine {
         // that permanently stranded covering resolutions on the same-anchor
         // shape).
         let reissue_of_held = seq.is_some_and(|s| {
-            self.causal().holds_content_at_or_below(
-                relative_path,
-                s - 1,
-                &ContentHash::of_raw(&file_data),
-            )
+            self.causal()
+                .holds_content_at_or_below(relative_path, s - 1, &echoed_hash)
         });
         if let Some(seq) = seq {
             self.causal().advance_frontier(relative_path, seq);
             if is_resolution != Some(true) && !reissue_of_held {
                 self.causal().advance_edit_frontier(relative_path, seq);
             }
-            self.causal().hold(relative_path, seq, &file_data);
+            // Byte-less: nothing is held — the ledger holds bytes, a hold is
+            // best-effort by its own contract, and no reissue of bytes no
+            // seat holds can ever arrive for the content rung to catch.
+            if let Some(bytes) = &file_data {
+                self.causal().hold(relative_path, seq, bytes);
+            }
             self.causal().remember_manifest(
                 relative_path,
                 seq,
@@ -13349,8 +13927,16 @@ impl SyncEngine {
             );
         };
         if let Ok(local_data) = tokio::fs::read(&full_path).await {
+            // Local IS the echoed content: by bytes when they are in hand, by
+            // the whole-file hash when they are not (a write racing the
+            // byte-less path's hash check lands here with the bytes after
+            // all — local's own).
+            let local_is_echoed = match &file_data {
+                Some(bytes) => local_data == *bytes,
+                None => ContentHash::of_raw(&local_data) == echoed_hash,
+            };
             let log_later_tail = (is_resolution == Some(true) || reissue_of_held)
-                && local_data != file_data
+                && !local_is_echoed
                 && seq.is_some_and(|s| {
                     let local_at = self
                         .causal()
@@ -13366,8 +13952,8 @@ impl SyncEngine {
                     .effective_edit_frontier()
                     .is_some_and(|ef| w >= ef)
             });
-            if local_data == file_data {
-                self.save_base(relative_path, &file_data);
+            if local_is_echoed {
+                self.save_base(relative_path, &local_data);
                 // The in-flight flag clears exactly here: an own row's bytes
                 // came back equal to local, so everything local reflects is
                 // provably in the log at seqs the frontiers now account for.
@@ -13376,7 +13962,23 @@ impl SyncEngine {
                     &hex::encode(manifest_hash.digest()),
                 );
                 tracing::debug!(path = %fauna_core::log_redact::log_path(relative_path), "self-echo: updated merge base");
+            } else if log_later_tail && covering && file_data.is_none() {
+                // The re-adopt this arm would run needs the bytes, and no
+                // seat serves them: the unfetchable row is the log head, every
+                // peer's pull retries it for ever, and this seat — no
+                // unpublished work — would never publish again. So it
+                // RE-ASSERTS exactly as the stale-declined arm below does
+                // (`conflicts.md` clause 5, refinement (iv)): local republished
+                // as a resolution at the current anchor, a head this seat holds
+                // and serves, and clause 1 supersedes the lost one.
+                self.reassert_own_tail(
+                    relative_path,
+                    "self-echo: own covering tail unfetchable — re-asserted local at the \
+                     current anchor (conflicts.md clause 5, refinement (iv))",
+                )
+                .await;
             } else if log_later_tail && covering {
+                let file_data = file_data.expect("the byte-less arm runs first");
                 self.note_recent_download(relative_path);
                 crate::atomic_write::atomic_write_file(&full_path, &file_data)
                     .await
@@ -13441,19 +14043,12 @@ impl SyncEngine {
                 // the record `is_resolution = true` and the fresh log-tail
                 // row is covering by construction wherever this one was in
                 // content — the fleet converges onto it.
-                match self.upload_file(relative_path).await {
-                    Ok(_) => tracing::info!(
-                        path = %fauna_core::log_redact::log_path(relative_path),
-                        "self-echo: own tail declined stale — re-asserted local at the \
-                         current anchor (gap-3 ruling)"
-                    ),
-                    Err(e) => tracing::warn!(
-                        path = %fauna_core::log_redact::log_path(relative_path),
-                        error = %format!("{e:#}"),
-                        "self-echo: re-asserting stale-declined own tail failed \
-                         (the rescan retries)"
-                    ),
-                }
+                self.reassert_own_tail(
+                    relative_path,
+                    "self-echo: own tail declined stale — re-asserted local at the \
+                     current anchor (gap-3 ruling)",
+                )
+                .await;
             } else {
                 tracing::debug!(
                     path = %fauna_core::log_redact::log_path(relative_path),
@@ -13463,6 +14058,25 @@ impl SyncEngine {
         }
 
         Ok(())
+    }
+
+    /// Re-assert local as a fresh log-tail row (`conflicts.md` clause 5,
+    /// refinements (iii) and (iv)): re-drive the ordinary upload — the ledger
+    /// holds local (it came from an adopted row), so the widened
+    /// proven-reissue proof stamps the record `is_resolution = true` and the
+    /// row is covering by construction. A failed upload is left to the rescan.
+    async fn reassert_own_tail(&self, relative_path: &str, done: &'static str) {
+        match self.upload_file(relative_path).await {
+            Ok(_) => tracing::info!(
+                path = %fauna_core::log_redact::log_path(relative_path),
+                "{done}"
+            ),
+            Err(e) => tracing::warn!(
+                path = %fauna_core::log_redact::log_path(relative_path),
+                error = %format!("{e:#}"),
+                "self-echo: re-asserting own tail failed (the rescan retries)"
+            ),
+        }
     }
 
     /// Directory for storing merge-base versions (hidden, ignored by watcher).
@@ -13566,6 +14180,45 @@ impl SyncEngine {
         std::fs::read(&base_path).ok()
     }
 
+    /// The degrade every report site shares: record the conflict locally AND
+    /// send its unresolved report. The local row arms the verbatim-winner
+    /// apply only once its chooser report — one carrying `candidates` — has
+    /// LANDED (the row is stamped with the nest's id): only then can the user
+    /// choose a winner the nest propagates. A candidate-free report (the
+    /// version's upload failed) or a report that never landed leaves the row
+    /// unstamped, so the next change on the path goes through ordinary
+    /// detection instead of overwriting an edit that exists only on this disk
+    ///  — `conflicts.md` § Skipped catch-up changes
+    /// reach the review list, the verbatim-winner ruling.
+    async fn record_unresolved_conflict(
+        &self,
+        folder: &str,
+        relative_path: &str,
+        conflict_type: &str,
+        local_details: Option<&str>,
+        report_details: Option<String>,
+        candidates: Vec<ConflictCandidate>,
+    ) {
+        let local_id = self
+            .db
+            .record_conflict(relative_path, conflict_type, local_details)
+            .ok();
+        let carries_candidates = !candidates.is_empty();
+        let reported = self
+            .report_conflict_ws(
+                folder,
+                relative_path,
+                conflict_type,
+                report_details,
+                candidates,
+                None,
+            )
+            .await;
+        if let (Some(id), Ok(nest_id), true) = (local_id, reported, carries_candidates) {
+            let _ = self.db.set_conflict_nest_id(id, nest_id);
+        }
+    }
+
     /// Report a conflict (with candidate versions) to the nest over WS-RPC
     /// (`fauna.sync.conflicts.report`). Best-effort: a failed report degrades
     /// to local-only (the conflict is still recorded in the engine's `SyncDb`).
@@ -13654,6 +14307,12 @@ impl SyncEngine {
         };
         // Sign LAST: every covered field above holds its final value.
         self.sign_conflict_report(&mut req);
+        // Then the address funnel, as every by-name set request leaves: the
+        // report signature binds no address field (the same order as
+        // `changes_record`), and a nest holding the set by hash alone
+        // resolves no plaintext name — the report then failed `not_found`
+        // and the conflict stayed unresolved on every seat.
+        let req = fauna_protocol::folders::addressed_at(req, self.folder_row());
         let control = Arc::clone(&*self.control.read().unwrap());
         let id = control
             .report_conflict(req)
@@ -13761,17 +14420,21 @@ impl SyncEngine {
             )),
             _ => None,
         };
-        let req = ConflictReportRequest {
-            folder: folder.to_string(),
-            device_id: hex::encode(self.device_id),
-            path: String::new(),
-            conflict_type: crate::db::CATCHUP_FAILED.to_string(),
-            details,
-            path_hash: Some(fauna_protocol::ByteBuf::from(path_hash.to_vec())),
-            path_sealed: Some(fauna_protocol::ByteBuf::from(path_sealed)),
-            details_sealed,
-            ..Default::default()
-        };
+        // Unsigned (it mints no row), so addressed as it is built.
+        let req = fauna_protocol::folders::addressed_at(
+            ConflictReportRequest {
+                folder: folder.to_string(),
+                device_id: hex::encode(self.device_id),
+                path: String::new(),
+                conflict_type: crate::db::CATCHUP_FAILED.to_string(),
+                details,
+                path_hash: Some(fauna_protocol::ByteBuf::from(path_hash.to_vec())),
+                path_sealed: Some(fauna_protocol::ByteBuf::from(path_sealed)),
+                details_sealed,
+                ..Default::default()
+            },
+            self.folder_row(),
+        );
         let control = Arc::clone(&*self.control.read().unwrap());
         let id = control
             .report_conflict(req)
@@ -13954,19 +14617,15 @@ impl SyncEngine {
                     error = %e,
                     "conflict: uploading the local version failed — keeping local, reporting unresolved"
                 );
-                let _ = self
-                    .db
-                    .record_conflict(relative_path, "concurrent_edit", None);
-                let _ = self
-                    .report_conflict_ws(
-                        &folder,
-                        relative_path,
-                        "concurrent_edit",
-                        Some("local-version upload failed; unresolved".to_string()),
-                        Vec::new(),
-                        None,
-                    )
-                    .await;
+                self.record_unresolved_conflict(
+                    &folder,
+                    relative_path,
+                    "concurrent_edit",
+                    None,
+                    Some("local-version upload failed; unresolved".to_string()),
+                    Vec::new(),
+                )
+                .await;
                 return ResolvedApply::Unresolved;
             }
         };
@@ -13990,19 +14649,15 @@ impl SyncEngine {
                     error = %$err,
                     "conflict: resolved report failed — keeping local, reporting unresolved"
                 );
-                let _ = self
-                    .db
-                    .record_conflict(relative_path, "concurrent_edit", None);
-                let _ = self
-                    .report_conflict_ws(
-                        &folder,
-                        relative_path,
-                        "concurrent_edit",
-                        Some("auto-resolve report failed; unresolved".to_string()),
-                        candidates.clone(),
-                        None,
-                    )
-                    .await;
+                self.record_unresolved_conflict(
+                    &folder,
+                    relative_path,
+                    "concurrent_edit",
+                    None,
+                    Some("auto-resolve report failed; unresolved".to_string()),
+                    candidates.clone(),
+                )
+                .await;
                 return ResolvedApply::Unresolved;
             }};
         }
@@ -14178,19 +14833,15 @@ impl SyncEngine {
                     error = %e,
                     "declined delete: uploading the surviving version failed — recording the conflict locally"
                 );
-                let _ =
-                    self.db
-                        .record_conflict(relative_path, "delete_declined", details.as_deref());
-                let _ = self
-                    .report_conflict_ws(
-                        &folder,
-                        relative_path,
-                        "delete_declined",
-                        details,
-                        Vec::new(),
-                        None,
-                    )
-                    .await;
+                self.record_unresolved_conflict(
+                    &folder,
+                    relative_path,
+                    "delete_declined",
+                    details.as_deref(),
+                    details.clone(),
+                    Vec::new(),
+                )
+                .await;
                 return;
             }
         };
@@ -14276,19 +14927,15 @@ impl SyncEngine {
                     error = %e,
                     "declined delete: resolved report failed — recording the conflict locally"
                 );
-                let _ =
-                    self.db
-                        .record_conflict(relative_path, "delete_declined", details.as_deref());
-                let _ = self
-                    .report_conflict_ws(
-                        &folder,
-                        relative_path,
-                        "delete_declined",
-                        details,
-                        candidates,
-                        None,
-                    )
-                    .await;
+                self.record_unresolved_conflict(
+                    &folder,
+                    relative_path,
+                    "delete_declined",
+                    details.as_deref(),
+                    details.clone(),
+                    candidates,
+                )
+                .await;
             }
         }
     }
@@ -14317,6 +14964,7 @@ impl SyncEngine {
             .versions_list(
                 fauna_core::sync::path_hash(relative_path),
                 self.folder.clone(),
+                self.folder_row(),
             )
             .await
             .map_err(|e| {

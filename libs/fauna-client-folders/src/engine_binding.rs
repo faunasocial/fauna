@@ -290,7 +290,7 @@ pub fn retired_serve_custody(
     if !matches!(custody_channel_for(summary, cfg), Ok(None)) {
         return None;
     }
-    crate::custody::content_keys(cfg, &serve_custody_channel_id(&summary.name))
+    crate::custody::name_serve_keys(cfg, &summary.name)
 }
 
 /// The [`FolderRef`] a client should stamp on a folder binding for a folder
@@ -1114,6 +1114,55 @@ mod tests {
     fn retired_serve_custody_is_none_for_a_set_that_was_never_served() {
         let c = cfg();
         assert_eq!(retired_serve_custody(&c, &summary(None)), None);
+    }
+
+    /// Ruling (7)(b)(iii): a tombstone lends nothing to a re-created name. A
+    /// served `docs` deleted and re-created owner-only (fresh live nonce-bearing
+    /// entry, no channel yet) has no serve history of its own — the deleted
+    /// set's keys must not surface as its retired candidates.
+    #[test]
+    fn retired_serve_custody_ignores_a_tombstone_older_than_the_live_pick() {
+        use crate::custody::{key_named_set, record_created_set, retire_set};
+        let served = fauna_core::folder_keys::serve_custody_channel_id("docs");
+        let mut c = cfg();
+        record_created_set(&mut c, "docs", [0x10; 32], None, 100);
+        key_named_set(&mut c, "docs", served, [0x11; 32], 200);
+        retire_set(&mut c, "docs", 300);
+        record_created_set(&mut c, "docs", [0x20; 32], None, 400);
+        let mut unserved = summary(None);
+        unserved.name = "docs".into();
+        assert_eq!(retired_serve_custody(&c, &unserved), None);
+    }
+
+    /// The green twin: the same name served then unflagged — the live entry
+    /// itself holds the pseudo-channel — still yields its generations, and an
+    /// identity-move twin retired at/after the pick's `created_at` still joins.
+    #[test]
+    fn retired_serve_custody_keeps_the_names_own_entries() {
+        use crate::custody::{key_named_set, record_created_set};
+        let served = fauna_core::folder_keys::serve_custody_channel_id("docs");
+        let mut c = cfg();
+        record_created_set(&mut c, "docs", [0x20; 32], None, 400);
+        key_named_set(&mut c, "docs", served, [0x22; 32], 500);
+        let mut unserved = summary(None);
+        unserved.name = "docs".into();
+        assert_eq!(
+            retired_serve_custody(&c, &unserved).unwrap().current_key(),
+            &[0x22; 32]
+        );
+        // An identity-move twin: same nonce, same channel, retired after the
+        // pick was created.
+        let mut twin = c.sets[0].clone();
+        let mut twin_keys = FolderContentKeys::genesis([0x22; 32], 500);
+        twin_keys.rotate([0x33; 32], 510);
+        twin.keys = Some(twin_keys);
+        twin.retired_at = Some(450);
+        c.sets.push(twin);
+        assert_eq!(
+            retired_serve_custody(&c, &unserved).unwrap().current_key(),
+            &[0x33; 32],
+            "the twin's newer generation joins"
+        );
     }
 
     #[test]

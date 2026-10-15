@@ -1,6 +1,7 @@
 package com.fauna.app.provider
 
 import android.content.Context
+import android.provider.DocumentsContract
 import com.fauna.app.core.AccountStores
 import com.fauna.app.core.HexUtil
 import com.fauna.app.core.SessionAccount
@@ -13,6 +14,8 @@ import com.fauna.ffi.FfiFileProviderItem
 import com.fauna.ffi.FfiNestClient
 import com.fauna.ffi.FfiOnDemandPrefsStore
 import com.fauna.ffi.actorIdFromSecret
+import com.fauna.ffi.actorScopedFolderRef
+import com.fauna.ffi.folderRefForRow
 import com.fauna.ffi.backupKeyDerive
 import com.fauna.ffi.capabilityHostPresenceSets
 import com.fauna.ffi.hexFull
@@ -22,18 +25,21 @@ import com.fauna.ffi.machineRetainedKeyCustody
 import com.fauna.ffi.mintBearer
 import com.fauna.ffi.onDemandPresencePlan
 import dagger.hilt.android.qualifiers.ApplicationContext
+import uniffi.fauna_devices_machine.FolderSummary
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * The production [OnDemandSource]: one shared-Rust `FfiFileProviderHost` per
  * desired set, built through the capability constructor `appDeadOwnedTree`
- * (`on-demand-files.md` § Android SAF DocumentsProvider binding, *one
+ * (`on-demand-files-android.md` § Android SAF DocumentsProvider binding, *one
  * construction path*) — the owner `BackupKey`, a bearer source and a change
  * signer source, never the identity seed. The OS may start this process for
  * another app's picker with no app session running, so everything here is read
@@ -59,13 +65,18 @@ import kotlinx.coroutines.sync.withLock
  * cache root deleted (recorded bodies the nest can serve again), the kept root
  * left for the owning account's next session, and the provider notified so it
  * re-announces its roots.
+ *
+ * It is also the Folders page's [OnDemandToggle]: the `folder-on-demand-toggle`
+ * reads and writes the same preference store the plan reads, and a flip
+ * re-plans and re-announces the roots so the set appears in or leaves Files at
+ * once.
  */
 @Singleton
 class FfiOnDemandSource @Inject constructor(
     @ApplicationContext private val context: Context,
     private val sessionAccount: SessionAccount,
     private val accountStores: AccountStores,
-) : OnDemandSource {
+) : OnDemandSource, OnDemandToggle {
 
     /** The signed-in account's capability inputs, resolved once per account. */
     private class Account(
@@ -129,10 +140,55 @@ class FfiOnDemandSource @Inject constructor(
                 folderId,
                 context.filesDir.absolutePath,
                 context.cacheDir.absolutePath,
+                accountStores.predecessorChain(acct.actorHex),
             )
             FfiSetHost(ffi).also { hosts[scopedId] = it }
         }
     }
+
+    override suspend fun identify(folder: FolderSummary): OnDemandIdentity? = withContext(Dispatchers.IO) {
+        val actorHex = currentAccount()?.actorHex ?: return@withContext null
+        runCatching {
+            folderRefForRow(folder.id, folder.mlsGroupId, folder.homeNestUrl)?.let { ref ->
+                actorScopedFolderRef(actorHex, ref)?.let { OnDemandIdentity(it.scopedId, ref) }
+            }
+        }.getOrNull()
+    }
+
+    override suspend fun read(sets: List<OnDemandIdentity>): Map<String, OnDemandToggleState> =
+        withContext(Dispatchers.IO) {
+            val prefs = prefsStore()
+            val stronger = strongerRefs().toSet()
+            sets.associate { set ->
+                set.scopedId to OnDemandToggleState(
+                    shown = prefs.isEnabled(set.scopedId),
+                    stronger = set.folderRef in stronger,
+                )
+            }
+        }
+
+    override suspend fun setShown(scopedId: String, shown: Boolean) = withContext(Dispatchers.IO) {
+        prefsStore().setEnabled(scopedId, shown)
+    }
+
+    override suspend fun replan() {
+        withContext(Dispatchers.IO) { sets(refresh = true) }
+        val authority = "${context.packageName}.documents"
+        context.contentResolver.notifyChange(DocumentsContract.buildRootsUri(authority), null)
+        context.contentResolver.notifyChange(
+            DocumentsContract.buildChildDocumentsUri(authority, FaunaDocumentsProvider.ROOT_DOCUMENT_ID),
+            null,
+        )
+    }
+
+    /** The device-local toggle store the plan and the page share. */
+    private fun prefsStore() =
+        FfiOnDemandPrefsStore(File(accountStores.syncStateDir(), PREFS_FILE).absolutePath)
+
+    /** The bare refs a watched-directory ingress feeds — a stronger presence the plan leaves out. */
+    private suspend fun strongerRefs(): List<String> = runCatching {
+        accountStores.database().watchedDirectoryDao().getEnabled().first().map { it.folderId }
+    }.getOrDefault(emptyList())
 
     /**
      * One presence reconcile: the account's sets — its own and the ones
@@ -148,7 +204,7 @@ class FfiOnDemandSource @Inject constructor(
             acct.nest = it
         }
         // Every set the account holds, mapped in shared Rust
-        // (`capability_host_presence_sets`; `on-demand-files.md` § Shared sets
+        // (`capability_host_presence_sets`; `on-demand-files-shared-sets.md` § Shared sets
         // on a capability host, decision 3): an own folder is a delivery seat
         // where THIS device's place accepts, a folder shared with the account
         // once its share was accepted, read-only unless a writer. It reads the
@@ -164,13 +220,7 @@ class FfiOnDemandSource @Inject constructor(
             bearerProvider(acct),
             acct.signer,
         )
-        // The watched-directory ingress's sets — a stronger presence the plan
-        // leaves out.
-        val stronger = runCatching {
-            accountStores.database().watchedDirectoryDao().getEnabled().first().map { it.folderId }
-        }.getOrDefault(emptyList())
-        val prefs = FfiOnDemandPrefsStore(File(accountStores.syncStateDir(), PREFS_FILE).absolutePath)
-        val plan = onDemandPresencePlan(acct.actorHex, sets, stronger, prefs, hosts.keys.toList(), null)
+        val plan = onDemandPresencePlan(acct.actorHex, sets, strongerRefs(), prefsStore(), hosts.keys.toList(), null)
         for (removal in plan.remove) hosts.remove(removal.identifier)?.close()
         desired = (plan.add + plan.keep).associate { p ->
             p.scopedId to (OnDemandSet(p.scopedId, p.set.name, p.set.readOnly) to p.set.folderId)
@@ -208,12 +258,12 @@ class FfiOnDemandSource @Inject constructor(
         }
         teardownIfHeld()
         val nestUrl = sessionAccount.nestUrl ?: return null
-        val deviceId = sessionAccount.deviceId?.let { HexUtil.hexToBytes(it) } ?: return null
+        val deviceId = sessionAccount.resolveDeviceId()?.let { HexUtil.hexToBytes(it) } ?: return null
         val backupKey = runCatching { backupKeyDerive(secret) }.getOrNull() ?: return null
         val dialUrl = uniffi.fauna_launch_machine.resolvedDialUrl(nestUrl)
         val signer = runCatching { machineChangeSigner(HexUtil.hexToBytes(actorHex)) }.getOrNull() ?: return null
         // The hosts read the account's folder-key custody as this device
-        // (`on-demand-files.md` § Shared sets on a capability host, decision
+        // (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decision
         // 1′): their replica unwraps with the machine principal's key and the
         // slot's retained-key custody, installed here before any host builds.
         runCatching {

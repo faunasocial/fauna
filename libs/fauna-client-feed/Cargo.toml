@@ -11,7 +11,10 @@ license.workspace = true
 # feature so this crate compiles to wasm32; native workspace builds re-enable it
 # via Cargo feature unification. The path form is required to override
 # `default-features`.
-fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# `feed`: this crate IS the `fauna.feed.*` plane, so it carries the plane's
+# kind-catalog entries wherever it is linked (fauna-protocol's `feed` feature —
+# a build that excises the plane drops this crate, and the catalog text with it).
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["feed"] }
 
 # fauna-core: the canonical `scoring::FilterRule` the feed-rule encoder builds
 # (`encode_filter_rule`) and the `rules` wire field carries. `default-features = false` drops the native-only
@@ -32,7 +35,7 @@ serde = { workspace = true, features = ["derive"] }
 # wasm: forward the `js` feature (fauna-core's js-sys time backend) so the
 # transitive wasm build resolves. Off on native.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js", "feed"] }
 fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
 
 [dev-dependencies]

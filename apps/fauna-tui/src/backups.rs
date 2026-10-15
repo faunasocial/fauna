@@ -282,6 +282,21 @@ pub enum ReseedView {
     Done(fauna_client_backup::reseed::ReseedOutcome),
 }
 
+/// The recovery gesture on the fifth audit-alert reason (`ui/backups.md`
+/// § Audit-alert surface) — the re-seed gesture's shape: `Confirming` names
+/// the destination whose banner was pressed, `Running` paints
+/// `backup-audit-recover-result` with the running line and disarms every
+/// recover button, and `Done` keeps the last result until the next run.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum RecoverView {
+    #[default]
+    Closed,
+    /// `backup-audit-recover-confirm-modal` is open for this destination.
+    Confirming(String),
+    Running,
+    Done(fauna_client_backup::recover::RecoveryOutcome),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RestoreProgress {
     #[default]
@@ -367,6 +382,18 @@ pub struct BackupsState {
     /// precisely for the destination that is broken. `run_audit_pass` hands back
     /// the merge, and this field holds exactly what it returned.
     pub audit: Vec<DestinationAuditRecord>,
+    /// Bumped by every whole-page fold ([`Outcome::Loaded`]); a store-change
+    /// re-read ([`Op::Reread`]) carries the value it was dispatched at and is
+    /// dropped when one landed meanwhile — that fold painted fresher rows.
+    pub dest_paint_seq: u64,
+    /// Bumped by every [`Outcome::Failed`] fold. A whole-page read
+    /// ([`Op::Refresh`]) carries the value it was dispatched at, so a refusal
+    /// that landed while it was in flight is newer than the read and keeps
+    /// `error-message` and its open dialog ([`fold_refresh`]).
+    pub failure_seq: u64,
+    /// The error a store-change re-read put on `error-message`, so the next good
+    /// re-read retires that one and never a gesture's (`PageErrors::retire_own`).
+    pub dest_read_error: Option<String>,
     /// Which dialog the `backup-destination-add-modal` is serving, or `None`
     /// when it is closed.
     pub form: Option<FormMode>,
@@ -421,6 +448,9 @@ pub struct BackupsState {
     /// The re-seed gesture's state (`ui/backups.md` § Restore after losing the
     /// nest): the confirm modal, the running job, and the last result.
     pub reseed: ReseedView,
+    /// The recovery gesture's state (`ui/backups.md` § Audit-alert surface,
+    /// the fifth reason): the confirm modal, the running job, the last result.
+    pub recover: RecoverView,
 
     // ── the restore half ─────────────────────────────────────────────────────
     /// The local snapshots `restore-snapshot-select` offers — the owner-implicit
@@ -622,10 +652,34 @@ pub fn nav_enter_op(
         nest,
         secret,
         store,
+        since: state.failure_seq,
         // One op for the WHOLE page — both halves in one nav edge, rather than
         // racing two independent fetches (the module's stated posture).
         machine: state.machine(),
         custodian,
+    })
+}
+
+/// The open page's re-read off a store-change notice
+/// (`account-runtime.md` § Multi-instance concurrency, part 4 — re-driven from
+/// `App`'s `AccountStoreChanged` arm beside the feed): the destination half
+/// only, because it is the half that reads through the account store
+/// ([`Op::Reread`]). `None` pre-auth.
+pub fn store_resync_op(
+    state: &BackupsState,
+    custodian: crate::sync_agent::CustodianStoreHandle,
+) -> Option<Op> {
+    let (nest, secret, store) = state.dest_session()?;
+    Some(Op::Reread {
+        nest,
+        secret,
+        store,
+        custodian,
+        painted: (
+            state.destinations.clone(),
+            state.unattested_destination_marks.clone(),
+        ),
+        seq: state.dest_paint_seq,
     })
 }
 
@@ -774,6 +828,14 @@ pub enum Action {
     /// `backup-destination-reseed-confirm-button` — run the re-seed ceremony.
     ConfirmReseed,
 
+    /// `backup-audit-recover-button[i]` — arm the recovery confirm for the
+    /// destination whose fifth-reason banner carries the button.
+    OpenRecoverConfirm { destination_id: String },
+    /// `backup-audit-recover-cancel-button` — close it without side effect.
+    CancelRecover,
+    /// `backup-audit-recover-confirm-button` — run the recovery.
+    ConfirmRecover,
+
     // ── the restore half ─────────────────────────────────────────────────────
     /// `restore-source-select` — pick which configured destination holds the
     /// chunks. Carries the shared destination *label*, which is what the picker
@@ -919,6 +981,10 @@ impl Action {
             // here, and the nest the ceremony targets is the one this app is
             // signed in to, so it is reachable exactly when the gesture is.
             Action::ConfirmReseed => None,
+            // The recovery's verb, on the owner's own nest — the call the
+            // offline gate must see. Its other calls (the landing, the copy's
+            // reads at the destination) only serve it.
+            Action::ConfirmRecover => Some("fauna.backup.custody.recover"),
 
             // ── Local by construction ──────────────────────────────────────
             // Dialog transitions, selection state and the restore-kind ticks:
@@ -929,6 +995,8 @@ impl Action {
             | Action::CancelReclaim
             | Action::OpenReseedConfirm
             | Action::CancelReseed
+            | Action::OpenRecoverConfirm { .. }
+            | Action::CancelRecover
             | Action::OpenAddForm
             | Action::OpenEditForm { .. }
             | Action::CancelForm
@@ -1209,6 +1277,55 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 custodian: custodian_handle,
             })
         }
+        Action::OpenRecoverConfirm { destination_id } => {
+            // Armed only for a destination whose banner carries the button
+            // right now — the keyboard-actuation backstop — and never while a
+            // run is in flight.
+            if st.recover == RecoverView::Running
+                || !recover_targets(
+                    st,
+                    custodian_handle.device_id(),
+                    crate::backup_audit::now_secs(),
+                )
+                .contains(&destination_id)
+            {
+                return None;
+            }
+            st.recover = RecoverView::Confirming(destination_id);
+            st.form = None;
+            st.removing = None;
+            st.reclaiming = false;
+            app.errors.remove(&Page::Backups);
+            None
+        }
+        Action::CancelRecover => {
+            if matches!(st.recover, RecoverView::Confirming(_)) {
+                st.recover = RecoverView::Closed;
+            }
+            app.errors.remove(&Page::Backups);
+            None
+        }
+        Action::ConfirmRecover => {
+            let RecoverView::Confirming(id) = &st.recover else {
+                return None;
+            };
+            let destination = Box::new(
+                st.destinations
+                    .iter()
+                    .find(|d| &d.destination_id == id)?
+                    .clone(),
+            );
+            let (nest, secret, store) = st.dest_session()?;
+            st.recover = RecoverView::Running;
+            app.errors.remove(&Page::Backups);
+            Some(Op::Recover {
+                nest,
+                secret,
+                store,
+                destination,
+                custodian: custodian_handle,
+            })
+        }
 
         // ── the restore half ─────────────────────────────────────────────────
         Action::SelectRestoreSource(value) => {
@@ -1379,18 +1496,26 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         Action::DownloadFile { index } => {
             let (nest, secret) = st.session()?;
-            let file = st.snap.as_ref()?.detail.as_ref()?.files.get(index)?;
+            let folder_keys = st.folder_keys.clone()?;
+            let detail = st.snap.as_ref()?.detail.as_ref()?;
+            let file = detail.files.get(index)?;
             // Only a regular file has bytes to walk; a dir/symlink row paints the
             // button-less shape, and this is the actuation backstop behind that.
             if file.file_type != "regular" {
                 return None;
             }
+            let set = fauna_client_snapshots::SnapshotSet::from_named(
+                &detail.folder,
+                detail.folder_hash.as_deref(),
+            );
             let manifest_hash = file.manifest_hash.clone();
             let path = file.path.clone();
             app.errors.remove(&Page::Backups);
             Some(Op::DownloadFile {
                 nest,
                 secret,
+                folder_keys,
+                set,
                 manifest_hash,
                 path,
             })
@@ -1435,6 +1560,8 @@ pub enum Op {
         /// The `fauna.state.backup` door the destination list is read and
         /// written through (`BackupsState::store`).
         store: Arc<dyn BackupStateStore>,
+        /// [`BackupsState::failure_seq`] at dispatch.
+        since: u64,
         /// The snapshot half's machine, refreshed in the same op. `None`
         /// pre-auth — the destination half still loads.
         machine: Option<Arc<BackupsMachine>>,
@@ -1458,6 +1585,11 @@ pub enum Op {
     DownloadFile {
         nest: Arc<NestClient>,
         secret: [u8; 32],
+        /// The custody the snapshot reader resolves set nonces through — what
+        /// the judged row licensing every entry verifies under.
+        folder_keys: Arc<dyn fauna_client_folders::FolderKeyStore>,
+        /// The set the open snapshot was taken of, as its detail names it.
+        set: fauna_client_snapshots::SnapshotSet,
         manifest_hash: String,
         path: String,
     },
@@ -1586,6 +1718,26 @@ pub enum Op {
         folder_keys: Arc<dyn fauna_client_folders::FolderKeyStore>,
         custodian: crate::sync_agent::CustodianStoreHandle,
     },
+    /// Recover what the owner's nest lost from `destination`'s copy — the
+    /// confirmed `backup-audit-recover-button` action, by the row's leg
+    /// (`fauna_client_backup::recover::recover_leg`). A nest runs **in the
+    /// app** over the owner's own connections (`segment-backup-protocol.md`
+    /// § Recovery into the lived-in nest that regressed, part (1)): the shared
+    /// `fauna_sync_engine::recovery::recover_from_destination`. This device's
+    /// own custodian row runs in the **sync agent** that owns the store (§
+    /// Recovery from this device's own store, question (2)): the shared
+    /// `fauna_client_sync::recover_wire::await_agent_recover`. Then a
+    /// whole-page read, whose audit pass reads the record the leg's duty
+    /// cleared.
+    Recover {
+        nest: Arc<NestClient>,
+        secret: [u8; 32],
+        store: Arc<dyn BackupStateStore>,
+        /// Boxed: the row is wide, and every variant pays for the largest.
+        destination: Box<BackupDestination>,
+        /// For this device's sync id and the page read afterwards.
+        custodian: crate::sync_agent::CustodianStoreHandle,
+    },
     /// One audit pass on its own, folding onto [`Outcome::Audited`] — the
     /// targeted re-run the `backup_audit_run_now` agent command drives, so an
     /// e2e proof exercises the same [`audit_pass`] a user's page visit does
@@ -1600,6 +1752,35 @@ pub enum Op {
         /// regressions the pass folds into its row.
         custodian: crate::sync_agent::CustodianStoreHandle,
     },
+    /// The destination half's re-read off a store-change notice
+    /// ([`store_resync_op`]), folding onto [`Outcome::DestinationsReread`]: the
+    /// account store's backup-state door again, and — only when it answers
+    /// something other than what the page paints — the status projection, the
+    /// debounced audit and the orphaned-store verdict that hang off the list.
+    /// Never the restore half or the snapshot machine: neither reads the store.
+    Reread {
+        nest: Arc<NestClient>,
+        secret: [u8; 32],
+        store: Arc<dyn BackupStateStore>,
+        custodian: crate::sync_agent::CustodianStoreHandle,
+        /// The painted rows and marks, compared against the fresh read so an
+        /// unchanged answer costs no further round trip and paints nothing.
+        painted: (Vec<BackupDestination>, Vec<DestinationUnattestedMark>),
+        /// [`BackupsState::dest_paint_seq`] at dispatch — a whole-page fold that
+        /// landed since painted fresher rows than this read may hold.
+        seq: u64,
+    },
+}
+
+/// A changed destination half, read by [`Op::Reread`].
+#[derive(Debug)]
+pub struct DestinationsRead {
+    pub destinations: Vec<BackupDestination>,
+    pub unattested_destination_marks: Vec<DestinationUnattestedMark>,
+    pub statuses: BTreeMap<String, BackupDestinationStatusItem>,
+    pub audit: Option<Vec<DestinationAuditRecord>>,
+    /// Measured, always: `None` = nothing orphaned (or not knowable).
+    pub orphaned_store: Option<u64>,
 }
 
 /// What an op resolved to.
@@ -1641,6 +1822,18 @@ pub enum Outcome {
         /// pay for an IPC round trip to re-learn what it did not touch.
         orphaned_store: Option<Option<u64>>,
     },
+    /// A whole-page read whose destination or restore half failed, while the
+    /// snapshot half — its own machine and its own `fauna.folders.list` read —
+    /// still rendered. The halves fail independently (`backups.md` § Errors &
+    /// edge cases): the fresh snapshot render lands, `error` takes the page's
+    /// one `error-message`, and the destination and restore rows keep what they
+    /// paint. Without it, a throttled `fauna.nest.info` or a not-yet-ready
+    /// account store left the folder selector empty and disabled until the
+    /// user left and re-entered the page.
+    SnapshotHalfOnly {
+        error: String,
+        snapshots_page: Box<BackupsSnapshot>,
+    },
     /// The sealed custodian store was freed, and this is what the agent
     /// reports about it **afterwards** — `None` once nothing is orphaned any
     /// more, which is what retires `backup-orphaned-store-row`.
@@ -1657,6 +1850,16 @@ pub enum Outcome {
         result: fauna_client_backup::reseed::ReseedOutcome,
         page: Box<Outcome>,
     },
+    /// The recovery reached the shared driver's end — the [`Self::Reseeded`]
+    /// shape, for the same reason.
+    Recovered {
+        result: fauna_client_backup::recover::RecoveryOutcome,
+        page: Box<Outcome>,
+    },
+    /// The whole-page read ([`Op::Refresh`]) answered: `page` is the
+    /// [`Self::Loaded`] or [`Self::Failed`] it became, and `since` the
+    /// [`BackupsState::failure_seq`] it was dispatched at ([`fold_refresh`]).
+    Refreshed { since: u64, page: Box<Outcome> },
     /// A file's bytes were saved. Nothing on the page changes — the gesture's
     /// whole effect is on disk — so this carries no state; it exists so a
     /// failure is distinguishable from a silent no-op (convention 11: a command
@@ -1673,6 +1876,14 @@ pub enum Outcome {
     /// `None` carries the same "no pass completed, keep what is rendered"
     /// meaning as [`Self::Loaded`]'s field.
     Audited(Option<Vec<DestinationAuditRecord>>),
+    /// A store-change re-read of the destination half ([`Op::Reread`]).
+    /// `Ok(None)` = the store holds what the page paints. Folded under the
+    /// level rule: it never closes a dialog, clears a buffer or touches the
+    /// restore half, and retires only an error it put up itself.
+    DestinationsReread {
+        seq: u64,
+        read: Result<Option<Box<DestinationsRead>>, String>,
+    },
     /// A resolve / enroll / config / restore failure — lands on `error-message`,
     /// and the open dialog stays open so the input can be corrected.
     Failed(String),
@@ -1685,9 +1896,13 @@ impl Op {
                 nest,
                 secret,
                 store,
+                since,
                 machine,
                 custodian,
-            } => refresh(nest, secret, store, None, machine, Some(custodian)).await,
+            } => Outcome::Refreshed {
+                since,
+                page: Box::new(refresh(nest, secret, store, None, machine, Some(custodian)).await),
+            },
             Op::Add {
                 nest,
                 secret,
@@ -1807,6 +2022,13 @@ impl Op {
                 folder_keys,
                 custodian,
             } => reseed(nest, secret, store, folder_keys, custodian).await,
+            Op::Recover {
+                nest,
+                secret,
+                store,
+                destination,
+                custodian,
+            } => recover(nest, secret, store, destination, custodian).await,
             Op::Keep {
                 nest,
                 secret,
@@ -1861,9 +2083,13 @@ impl Op {
             Op::DownloadFile {
                 nest,
                 secret,
+                folder_keys,
+                set,
                 manifest_hash,
                 path,
-            } => download_snapshot_file(nest, secret, &manifest_hash, &path).await,
+            } => {
+                download_snapshot_file(nest, secret, folder_keys, set, &manifest_hash, &path).await
+            }
             Op::Audit {
                 nest,
                 secret,
@@ -1886,19 +2112,36 @@ impl Op {
                     Err(e) => Outcome::Failed(e),
                 }
             }
+            Op::Reread {
+                nest,
+                secret,
+                store,
+                custodian,
+                painted,
+                seq,
+            } => Outcome::DestinationsReread {
+                seq,
+                read: reread_destinations(nest, secret, store, custodian, painted)
+                    .await
+                    .map(|read| read.map(Box::new)),
+            },
         }
     }
 }
 
 /// Save one file's bytes out of the open snapshot.
 ///
-/// The bytes come from the **shared** client-side walk — `fauna_core::file_download`
-/// via `SyncEngine::download_file_bytes_by_manifest` — which owns the two
-/// content-address GETs, the seal discriminator, key precedence, decompression
-/// and the whole-file verify. This function adds only the two things that are
-/// genuinely per-platform: where the file lands, and the error text
-/// (`backups.md` § Where logic lives → *Single-file byte download*: "only the
-/// save step is platform glue").
+/// The bytes come from the **shared** snapshot entry reader —
+/// `SyncEngine::download_snapshot_entry_bytes`, the per-file door of the ONE
+/// reader the full restore walks: the entry, sealed or plaintext, licensed by
+/// the judged change row of the snapshot's set that named its manifest under
+/// its path, before any byte (`backup-restore.md` § Security Properties →
+/// Integrity) — which owns the
+/// two content-address GETs, the seal discriminator, key precedence,
+/// decompression and the whole-file verify. This function adds only the two
+/// things that are genuinely per-platform: where the file lands, and the error
+/// text (`backups.md` § Where logic lives → *Single-file byte download*: "only
+/// the save step is platform glue").
 ///
 /// **Where it lands, on a terminal.** tui has no file-save dialog to raise —
 /// `tui.md` § Declared platform absences already rules that out for uploads —
@@ -1908,6 +2151,8 @@ impl Op {
 async fn download_snapshot_file(
     nest: Arc<NestClient>,
     secret: [u8; 32],
+    folder_keys: Arc<dyn fauna_client_folders::FolderKeyStore>,
+    set: fauna_client_snapshots::SnapshotSet,
     manifest_hash_hex: &str,
     relative_path: &str,
 ) -> Outcome {
@@ -1928,12 +2173,7 @@ async fn download_snapshot_file(
     let Some(save_dir) = download_dir() else {
         return Outcome::Failed("no downloads directory to save into".to_string());
     };
-    let name = relative_path
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(relative_path);
-    let save_path = save_dir.join(name);
+    let name = relative_path.to_string();
 
     let auth = nest.auth().clone();
     let secret_hex = fauna_core::hex32::encode(&secret);
@@ -1948,22 +2188,32 @@ async fn download_snapshot_file(
             .build()
             .map_err(|e| format!("build snapshot-download runtime: {e}"))?;
         let bytes = rt.block_on(async move {
+            // The snapshot reader's nonce source: this seat's custody, the
+            // same resolver the Backups machine renders sealed paths through.
+            let resolver: Arc<dyn fauna_core::folder_keys::FolderKeyResolver> = Arc::new(
+                fauna_client_folders::NestFolderKeyResolver::new(Arc::clone(&nest), folder_keys),
+            );
             let engine = fauna_sync_engine::engine_lifecycle::build_restore_engine(
                 auth,
                 nest,
                 device_id,
                 &secret_hex,
+                Some(fauna_client_sync::SetNonceSource::Resolver(resolver)),
             );
             engine
-                .download_file_bytes_by_manifest(manifest_hash, None, &path)
+                .download_snapshot_entry_bytes(
+                    &set,
+                    &fauna_sync_engine::engine::SnapshotFileToRestore {
+                        relative_path: path.clone(),
+                        manifest_hash,
+                    },
+                )
                 .await
                 .map_err(|e| format!("download {path:?}: {e:#}"))
         })?;
-        if let Some(parent) = save_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        std::fs::write(&save_path, &bytes)
-            .map_err(|e| format!("write {}: {e}", save_path.display()))
+        save_into(&save_dir, &name, &bytes)
+            .map(|_| ())
+            .map_err(|e| format!("write {}: {e}", save_dir.display()))
     })
     .await;
 
@@ -1974,10 +2224,87 @@ async fn download_snapshot_file(
     }
 }
 
+/// A remote-supplied name as one safe file name: only its last non-empty path
+/// segment survives, control and reserved characters and a **leading `.`**
+/// become `_` (so `.bashrc` can never name a dotfile), and an empty result is
+/// `download`.
+pub(crate) fn sanitize_download_name(name: &str) -> String {
+    let segment = name
+        .rsplit(['/', '\\'])
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .unwrap_or("");
+    let mut out: String = segment
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if out.starts_with('.') {
+        out.replace_range(..1, "_");
+    }
+    if out.is_empty() {
+        "download".to_string()
+    } else {
+        out
+    }
+}
+
+/// Write `bytes` into `dir` under the sanitized `name` and never over a file
+/// already there: a taken name gets ` (2)`, ` (3)`, … before the extension, and
+/// the file is opened `create_new` so one appearing between probe and write is
+/// not clobbered either. Creates `dir` when missing. The single save path for
+/// every tui download.
+pub(crate) fn save_into(
+    dir: &std::path::Path,
+    name: &str,
+    bytes: &[u8],
+) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir)?;
+    let file_name = sanitize_download_name(name);
+    let as_path = std::path::Path::new(&file_name);
+    // A name with no extension (or only the sanitized leading `_`) keeps the
+    // whole name as the stem.
+    let (stem, ext) = match (as_path.file_stem(), as_path.extension()) {
+        (Some(s), Some(e)) => (
+            s.to_string_lossy().into_owned(),
+            format!(".{}", e.to_string_lossy()),
+        ),
+        _ => (file_name.clone(), String::new()),
+    };
+    for n in 1u32.. {
+        let candidate = if n == 1 {
+            file_name.clone()
+        } else {
+            format!("{stem} ({n}){ext}")
+        };
+        let path = dir.join(candidate);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(bytes)?;
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("the suffix counter is unbounded")
+}
+
 /// Where a downloaded file lands — snapshots here, and the account-data
 /// export (`settings/account.rs`, no native save dialog on a terminal either)
 /// reuses this rather than a second copy. The e2e harness dir when the run
-/// provides one, else the user's downloads dir, else `$HOME`.
+/// provides one, else `$XDG_DOWNLOAD_DIR`, else `$HOME/Downloads` — never bare
+/// `$HOME` (it need not exist yet; [`save_into`] creates it).
 pub(crate) fn download_dir() -> Option<std::path::PathBuf> {
     // The harness override, and NOT part of the production resolution below.
     //
@@ -1996,12 +2323,23 @@ pub(crate) fn download_dir() -> Option<std::path::PathBuf> {
     {
         return Some(std::path::PathBuf::from(dir));
     }
-    if let Some(dir) = std::env::var_os("XDG_DOWNLOAD_DIR").filter(|v| !v.is_empty()) {
+    resolve_download_dir(
+        std::env::var_os("XDG_DOWNLOAD_DIR"),
+        std::env::var_os("HOME"),
+    )
+}
+
+/// The production resolution of [`download_dir`], pure over its two inputs so a
+/// test can pin it without touching the process environment: a non-empty
+/// `XDG_DOWNLOAD_DIR`, else `$HOME/Downloads` — never bare `$HOME`; no `HOME` → `None`.
+fn resolve_download_dir(
+    xdg_download_dir: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    if let Some(dir) = xdg_download_dir.filter(|v| !v.is_empty()) {
         return Some(std::path::PathBuf::from(dir));
     }
-    let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
-    let downloads = home.join("Downloads");
-    Some(if downloads.is_dir() { downloads } else { home })
+    Some(std::path::PathBuf::from(home?).join("Downloads"))
 }
 
 /// How long one whole audit pass may take before the page gives up on it.
@@ -2072,9 +2410,9 @@ async fn audit_pass(
     // nest, read once for the pass.
     let folder_index = fauna_sync_engine::segment_backup::bound_replica_folder_index(
         nest,
-        Some(fauna_sync_engine::segment_backup::local_agent_state_dir(
-            &actor_id_hex,
-        )),
+        fauna_sync_engine::segment_backup::local_agent_state_dir(&actor_id_hex)
+            .inspect_err(|e| tracing::warn!("backup audit: no replica state dir: {e:#}"))
+            .ok(),
     )
     .await;
     let inclusion = fauna_client_pair::native_backup_inclusion_source(secret, folder_index);
@@ -2112,8 +2450,65 @@ async fn audit_pass(
     }
 }
 
+/// The whole-page read: the destination and restore halves ([`read_page`]),
+/// then the snapshot half on its own machine.
+///
+/// The halves fail independently (`backups.md` § Errors & edge cases), in both
+/// directions: a snapshot read that fails lands on the machine's own `error`
+/// (which this page renders as `error-message`), and a destination or restore
+/// read that fails still lands the snapshot render
+/// ([`Outcome::SnapshotHalfOnly`]) — never an early return past it, which left
+/// the folder selector empty and disabled until the user re-entered the page.
+async fn refresh(
+    nest: Arc<NestClient>,
+    secret: [u8; 32],
+    store: Arc<dyn BackupStateStore>,
+    restored: Option<Restored>,
+    machine: Option<Arc<BackupsMachine>>,
+    custodian: Option<crate::sync_agent::CustodianStoreHandle>,
+) -> Outcome {
+    let page = read_page(nest, secret, store, custodian).await;
+    let snapshots_page = match machine {
+        Some(m) => {
+            m.refresh().await;
+            Some(Box::new(m.snapshot()))
+        }
+        None => None,
+    };
+    match (page, snapshots_page) {
+        (Ok(page), snapshots_page) => Outcome::Loaded {
+            destinations: page.destinations,
+            unattested_destination_marks: page.unattested_destination_marks,
+            statuses: page.statuses,
+            restore: page.restore,
+            audit: page.audit,
+            restored,
+            snapshots_page,
+            orphaned_store: page.orphaned_store,
+        },
+        (Err(error), Some(snapshots_page)) => Outcome::SnapshotHalfOnly {
+            error,
+            snapshots_page,
+        },
+        // No machine on the op — nothing else to land.
+        (Err(error), None) => Outcome::Failed(error),
+    }
+}
+
+/// [`read_page`]'s result: everything [`Outcome::Loaded`] carries but the
+/// snapshot half and the op's own `restored` bit.
+struct PageRead {
+    destinations: Vec<BackupDestination>,
+    unattested_destination_marks: Vec<DestinationUnattestedMark>,
+    statuses: BTreeMap<String, BackupDestinationStatusItem>,
+    restore: RestoreData,
+    audit: Option<Vec<DestinationAuditRecord>>,
+    orphaned_store: Option<Option<u64>>,
+}
+
 /// Load the destination list and, when there is at least one, the nest's status
-/// projection for it.
+/// projection for it; then the restore half, the audit pass and the
+/// orphaned-store verdict.
 ///
 /// The zero-destination early return is not an optimization detail: the status
 /// rows render only when ≥1 destination is configured (`backups.md`
@@ -2124,19 +2519,14 @@ async fn audit_pass(
 /// erroring the page: the destinations themselves loaded fine, and "never / 0
 /// queued" is exactly what a destination whose coordinator has not run yet
 /// honestly reads.
-async fn refresh(
+async fn read_page(
     nest: Arc<NestClient>,
     secret: [u8; 32],
     store: Arc<dyn BackupStateStore>,
-    restored: Option<Restored>,
-    machine: Option<Arc<BackupsMachine>>,
     custodian: Option<crate::sync_agent::CustodianStoreHandle>,
-) -> Outcome {
+) -> Result<PageRead, String> {
     let (source_nest, destinations, unattested_destination_marks) =
-        match load_destinations(&nest, store.as_ref()).await {
-            Ok(loaded) => loaded,
-            Err(e) => return Outcome::Failed(e),
-        };
+        load_destinations(&nest, store.as_ref()).await?;
     let statuses = if destinations.is_empty() {
         BTreeMap::new()
     } else {
@@ -2155,10 +2545,7 @@ async fn refresh(
     // The restore half is NOT gated on having a destination: its local path
     // restores a snapshot this nest already holds, which is exactly the flow a
     // user with zero destinations configured runs.
-    let restore = match load_restore(Arc::clone(&nest)).await {
-        Ok(r) => r,
-        Err(e) => return Outcome::Failed(e),
-    };
+    let restore = load_restore(Arc::clone(&nest)).await?;
     // Last, and deliberately not fatal: the audit is this client's independent
     // check *on top of* the page, so a destination that will not answer must
     // still leave the rows and the restore half rendering. A failure there is
@@ -2172,17 +2559,6 @@ async fn refresh(
         custodian.as_ref(),
     )
     .await;
-    // The snapshot half, in the same op. Its failures live on the machine's own
-    // `error` field (which this page renders as `error-message`), so a snapshot
-    // read that fails must NOT take the destination half down with it — hence a
-    // fold of `snapshot()`, never an early `Outcome::Failed`.
-    let snapshots_page = match machine {
-        Some(m) => {
-            m.refresh().await;
-            Some(Box::new(m.snapshot()))
-        }
-        None => None,
-    };
     // The orphaned-store verdict, reached here for the same reason the audit is:
     // it needs a read (this device's sync id, and the agent's measurement of the
     // store) that must not happen on a render path. `None` means *not measured*
@@ -2192,16 +2568,67 @@ async fn refresh(
         Some(handle) => Some(orphaned_store_bytes(&handle, &destinations).await),
         None => None,
     };
-    Outcome::Loaded {
+    Ok(PageRead {
         destinations,
         unattested_destination_marks,
         statuses,
         restore,
         audit,
-        restored,
-        snapshots_page,
         orphaned_store,
+    })
+}
+
+/// [`Op::Reread`]'s body: the destination list and its marks again, and only
+/// when they differ from `painted` the reads that hang off the list — the
+/// status projection, the (24 h-debounced) audit pass and the orphaned-store
+/// verdict, each with [`refresh`]'s own failure posture. `Ok(None)` = unchanged.
+async fn reread_destinations(
+    nest: Arc<NestClient>,
+    secret: [u8; 32],
+    store: Arc<dyn BackupStateStore>,
+    custodian: crate::sync_agent::CustodianStoreHandle,
+    painted: (Vec<BackupDestination>, Vec<DestinationUnattestedMark>),
+) -> Result<Option<DestinationsRead>, String> {
+    let (source_nest, destinations, unattested_destination_marks) =
+        load_destinations(&nest, store.as_ref()).await?;
+    // The page paints the distinct rows (`apply_outcome`'s `Loaded` arm), so
+    // that is what the fresh read is compared as.
+    if fauna_core::data::distinct_destinations(&destinations) == painted.0
+        && unattested_destination_marks == painted.1
+    {
+        return Ok(None);
     }
+    let statuses = if destinations.is_empty() {
+        BTreeMap::new()
+    } else {
+        read_backup_status(Arc::clone(&nest), store.as_ref(), secret, source_nest)
+            .await
+            .map(|reply| {
+                reply
+                    .destinations
+                    .into_iter()
+                    .map(|row| (row.destination_id.clone(), row))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let audit = audit_pass(
+        &nest,
+        secret,
+        &destinations,
+        &nest.nest_url(),
+        source_nest,
+        Some(&custodian),
+    )
+    .await;
+    let orphaned_store = orphaned_store_bytes(&custodian, &destinations).await;
+    Ok(Some(DestinationsRead {
+        destinations,
+        unattested_destination_marks,
+        statuses,
+        audit,
+        orphaned_store,
+    }))
 }
 
 /// Is this device holding a sealed store no destination row claims, and how
@@ -2310,6 +2737,105 @@ async fn reseed(
         result,
         page: Box::new(page),
     }
+}
+
+/// The destinations whose fifth-reason banner carries
+/// `backup-audit-recover-button` at `now` — the shared rule
+/// (`fauna_client_backup::recover::recover_targets`), so every app offers the
+/// button on exactly the same rows: a nest, or this device's own custodian row
+/// (`this_device_id` is the sync id the agent registers under, the one its
+/// store's regressions are folded by).
+fn recover_targets(st: &BackupsState, this_device_id: Option<&str>, now: i64) -> Vec<String> {
+    fauna_client_backup::recover::recover_targets(
+        &st.audit,
+        &st.destinations,
+        this_device_id.unwrap_or_default(),
+        now,
+    )
+}
+
+/// The recovery, by the row's leg (the shared
+/// `fauna_client_backup::recover::recover_leg`): a nest runs the shared native
+/// composition over this app's own connections; this device's own custodian
+/// row runs the recovery from this device's own store in the sync agent that
+/// owns it. Either way a whole-page read follows, whose audit pass reads the
+/// record the leg's duty cleared. Nothing about the run's order or its result
+/// is decided here.
+async fn recover(
+    nest: Arc<NestClient>,
+    secret: [u8; 32],
+    store: Arc<dyn BackupStateStore>,
+    destination: Box<BackupDestination>,
+    custodian: crate::sync_agent::CustodianStoreHandle,
+) -> Outcome {
+    use fauna_client_backup::recover::{RecoverLeg, recover_leg};
+    let result = match recover_leg(&destination, custodian.device_id().unwrap_or_default()) {
+        Some(RecoverLeg::Destination) => {
+            recover_from_destination(Arc::clone(&nest), secret, &destination, &custodian).await
+        }
+        Some(RecoverLeg::OwnStore) => recover_from_own_store(secret, &custodian).await,
+        None => Err(t::backup_recover_failed(
+            "this backup's copy is not on this device",
+        )),
+    };
+    let result = match result {
+        Ok(result) => result,
+        Err(message) => return Outcome::Failed(message),
+    };
+    let page = refresh(nest, secret, store, None, None, Some(custodian)).await;
+    Outcome::Recovered {
+        result,
+        page: Box::new(page),
+    }
+}
+
+/// The recovery from this device's own store: the `NestBackupKey` handed to
+/// the agent's job, which grants it to the owner's nest before it delivers
+/// (`fauna_client_backup::recover::run_store_recovery`) — so the app grants
+/// nothing itself.
+async fn recover_from_own_store(
+    secret: [u8; 32],
+    custodian: &crate::sync_agent::CustodianStoreHandle,
+) -> Result<fauna_client_backup::recover::RecoveryOutcome, String> {
+    // Held in its own zeroize-on-drop type; the one bare copy is the IPC
+    // frame's, which zeroizes itself too.
+    let key = fauna_core::crypto::NestBackupKey::derive(&secret);
+    match custodian.recover(key.to_bytes()).await {
+        Some(Ok(result)) => Ok(result),
+        None => Err(t::BACKUP_RESEED_NO_AGENT.to_string()),
+        Some(Err(e)) => Err(t::backup_recover_failed(&e)),
+    }
+}
+
+/// The network leg: the shared native composition over this app's own
+/// connections.
+async fn recover_from_destination(
+    nest: Arc<NestClient>,
+    secret: [u8; 32],
+    destination: &BackupDestination,
+    custodian: &crate::sync_agent::CustodianStoreHandle,
+) -> Result<fauna_client_backup::recover::RecoveryOutcome, String> {
+    let device = custodian
+        .device_id()
+        .map(str::to_string)
+        .or_else(|| crate::media::device_id_hex_for_secret(secret));
+    let Some(device_id) = device.and_then(|hex| fauna_core::hex32::decode(&hex).ok()) else {
+        return Err(t::backup_recover_failed(
+            "this device has no sync identity to record the recovery under",
+        ));
+    };
+    let audit = crate::backup_audit::store(&ActorKeypair::from_secret(secret).actor_id_hex());
+    fauna_sync_engine::recovery::recover_from_destination(
+        fauna_sync_engine::recovery::NativeRecovery {
+            source: nest,
+            owner_secret: secret,
+            device_id,
+            destination,
+            audit: &audit,
+        },
+    )
+    .await
+    .map_err(|e| t::backup_recover_failed(&e))
 }
 
 /// The restore half's three reads.
@@ -2513,6 +3039,95 @@ async fn edit_destination(
         .map(|_| ())
 }
 
+/// Fold a whole-page read. One dispatched before a refusal that has since
+/// landed answers an older question than the refusal does: entering the page
+/// and pressing add at once races the two, and a slow read (an account store
+/// still assembling) used to land last, fold as a success, clear the message
+/// and close the dialog — so the user saw nothing at all. Such a read still
+/// paints its rows, but the refusal stays on `error-message` with its dialog
+/// and buffers until the user's next action; a stale read's own failure is
+/// dropped, because the gesture's message is the newer one.
+fn fold_refresh(app: &mut App, since: u64, page: Outcome) {
+    if since == app.backups.failure_seq {
+        return apply_outcome(app, page);
+    }
+    if matches!(page, Outcome::Failed(_)) {
+        return;
+    }
+    let error = app.errors.get(&Page::Backups).cloned();
+    let form = app.backups.form.take();
+    let removing = app.backups.removing.take();
+    let remove_reclaim = app.backups.remove_reclaim;
+    let reclaiming = app.backups.reclaiming;
+    let url_input = std::mem::take(&mut app.backups.url_input);
+    let name_input = std::mem::take(&mut app.backups.name_input);
+    apply_outcome(app, page);
+    if let Some(msg) = error {
+        app.errors.insert(Page::Backups, msg);
+    }
+    app.backups.form = form;
+    app.backups.removing = removing;
+    app.backups.remove_reclaim = remove_reclaim;
+    app.backups.reclaiming = reclaiming;
+    app.backups.url_input = url_input;
+    app.backups.name_input = name_input;
+}
+
+/// Fold a store-change re-read of the destination half under the level rule
+/// (`account-runtime.md` § Multi-instance concurrency, part 4): an unchanged
+/// answer paints nothing; a changed one replaces only the list and what hangs
+/// off it, keeping every dialog, buffer and the restore half; and an error
+/// slot is retired only when this re-read put the error there — a gesture's
+/// message (a failed add, a form left open to fix) stays.
+fn fold_destinations_reread(
+    app: &mut App,
+    seq: u64,
+    read: Result<Option<Box<DestinationsRead>>, String>,
+) {
+    // A whole-page fold landed since dispatch: it painted rows at least as
+    // fresh as this read's, and the next notice re-reads anyway.
+    if seq != app.backups.dest_paint_seq {
+        return;
+    }
+    match read {
+        Ok(changed) => {
+            if let Some(read) = changed {
+                let read = *read;
+                app.backups.destinations =
+                    fauna_core::data::distinct_destinations(&read.destinations);
+                app.backups.unattested_destination_marks = read.unattested_destination_marks;
+                app.backups.statuses = read.statuses;
+                if let Some(records) = read.audit {
+                    app.backups.audit = records;
+                }
+                app.backups.orphaned_store = read.orphaned_store;
+                clamp_index(
+                    &mut app.backups.selected_source,
+                    app.backups.destinations.len(),
+                );
+                // The remove confirm is armed for a destination id: one that
+                // is gone has nothing left to remove.
+                if let Some(id) = &app.backups.removing
+                    && !app
+                        .backups
+                        .destinations
+                        .iter()
+                        .any(|d| &d.destination_id == id)
+                {
+                    app.backups.removing = None;
+                    app.backups.remove_reclaim = false;
+                }
+            }
+            app.errors
+                .retire_own(&Page::Backups, &mut app.backups.dest_read_error);
+        }
+        Err(msg) => {
+            app.errors
+                .insert_own(Page::Backups, msg, &mut app.backups.dest_read_error);
+        }
+    }
+}
+
 /// Fold an op's result back into the page. One function for both dispatch
 /// paths, so they cannot disagree about what an outcome means.
 ///
@@ -2591,7 +3206,20 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             app.backups.url_input.clear();
             app.backups.name_input.clear();
             app.errors.remove(&Page::Backups);
+            app.backups.dest_paint_seq += 1;
+            app.backups.dest_read_error = None;
         }
+        Outcome::SnapshotHalfOnly {
+            error,
+            snapshots_page,
+        } => {
+            // The snapshot fold first: it writes (or clears) `error-message`
+            // from the machine's own error, and the failed half's message must
+            // be the one left standing.
+            fold_snapshots_page(app, *snapshots_page);
+            apply_outcome(app, Outcome::Failed(error));
+        }
+        Outcome::DestinationsReread { seq, read } => fold_destinations_reread(app, seq, read),
         Outcome::Audited(records) => {
             if let Some(records) = records {
                 app.backups.audit = records;
@@ -2611,14 +3239,24 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             if app.backups.reseed == ReseedView::Running {
                 app.backups.reseed = ReseedView::Closed;
             }
+            if app.backups.recover == RecoverView::Running {
+                app.backups.recover = RecoverView::Closed;
+            }
+            app.backups.failure_seq += 1;
             app.errors.insert(Page::Backups, msg);
         }
+        Outcome::Refreshed { since, page } => fold_refresh(app, since, *page),
         Outcome::Reseeded { result, page } => {
             // The page read first, so its fold cannot clear the result; the
             // result lands whether or not that read succeeded, because the
             // ceremony's effect on the nest already happened.
             apply_outcome(app, *page);
             app.backups.reseed = ReseedView::Done(result);
+        }
+        Outcome::Recovered { result, page } => {
+            // Same order as the re-seed's, for the same reason.
+            apply_outcome(app, *page);
+            app.backups.recover = RecoverView::Done(result);
         }
         Outcome::Reclaimed(orphaned_store) => {
             app.backups.orphaned_store = orphaned_store;
@@ -2752,7 +3390,10 @@ pub fn elements(app: &App) -> Vec<Element> {
     // § Audit-alert surface — linux mounts them above its page scroller for the
     // same reason; a terminal's equivalent of "outside the scroller" is "first
     // in the frame").
-    audit_alert_elements(st, &mut out);
+    audit_alert_elements(st, app.sync_agent.custodian_store().device_id(), &mut out);
+    // The recovery's dialog and result sit directly under the banners whose
+    // button opens them.
+    recover_elements(st, &mut out);
 
     // Section chrome — ui.yaml scopes no id to the destinations heading or its
     // explanatory line, so both paint untagged (the honest way to render real UI
@@ -3518,7 +4159,9 @@ fn reclaim_confirm_elements(out: &mut Vec<Element>) {
 /// drift into alerting on, say, a
 /// transient `Unreachable` — the laptop-on-a-plane case the loop deliberately
 /// keeps quiet.
-fn audit_alert_elements(st: &BackupsState, out: &mut Vec<Element>) {
+fn audit_alert_elements(st: &BackupsState, this_device_id: Option<&str>, out: &mut Vec<Element>) {
+    // The banner's occurrence index, for the recover button scoped inside it.
+    let mut banner = 0usize;
     // A client-device custodian reporting its OWN copy as failing — the only
     // failure signal that exists for a kind the owner-side loop can never
     // sample. Withholding it silences the row, and silence reads as the
@@ -3539,8 +4182,10 @@ fn audit_alert_elements(st: &BackupsState, out: &mut Vec<Element>) {
                     &destination_label(dest),
                 ),
             ));
+            banner += 1;
         }
     }
+    let recoverable = recover_targets(st, this_device_id, crate::backup_audit::now_secs());
     // Every reason the shared door yields — the standing verdict's, then an
     // accepted source regression's self-expiring recovery notice while its
     // window is open (`backups.md` § Audit-alert surface, the fifth reason).
@@ -3559,10 +4204,77 @@ fn audit_alert_elements(st: &BackupsState, out: &mut Vec<Element>) {
             .map(destination_label)
             .unwrap_or_else(|| record.state.destination_id.clone());
         for reason in reasons {
+            let regressed = matches!(
+                reason,
+                fauna_core::format::BackupAuditAlertReason::SourceRegressed { .. }
+            );
             out.push(Element::label(
                 ids::BACKUP_AUDIT_ALERT,
                 crate::format::backup_audit_alert(reason, &dest_label),
             ));
+            // The gesture sits on the fifth reason's own banner, beside its
+            // text (the 2026-09-30 rule-A answer), and only where the leg can
+            // reach the copy ([`recover_targets`]).
+            if regressed && recoverable.contains(&record.state.destination_id) {
+                out.push(
+                    Element::gesture_button(
+                        ids::BACKUP_AUDIT_RECOVER_BUTTON,
+                        t::BACKUP_AUDIT_RECOVER_BUTTON,
+                        st.recover != RecoverView::Running,
+                        Gesture::Backups(Action::OpenRecoverConfirm {
+                            destination_id: record.state.destination_id.clone(),
+                        }),
+                    )
+                    .within(ids::BACKUP_AUDIT_ALERT, banner),
+                );
+            }
+            banner += 1;
+        }
+    }
+}
+
+/// The recovery's confirm modal and result view — the re-seed gesture's
+/// shape ([`reseed_elements`]). The result's lines are the shared
+/// `fauna_client_backup::recover::result_lines`, verdict first.
+fn recover_elements(st: &BackupsState, out: &mut Vec<Element>) {
+    match &st.recover {
+        RecoverView::Closed => {}
+        RecoverView::Confirming(_) => {
+            out.push(Element::label(
+                ids::BACKUP_AUDIT_RECOVER_CONFIRM_MODAL,
+                t::BACKUP_RECOVER_CONFIRM_TITLE,
+            ));
+            out.push(Element::chrome(t::BACKUP_RECOVER_CONFIRM_BODY));
+            out.push(
+                Element::gesture_button(
+                    ids::BACKUP_AUDIT_RECOVER_CONFIRM_BUTTON,
+                    t::BACKUP_RECOVER_CONFIRM_BUTTON,
+                    true,
+                    Gesture::Backups(Action::ConfirmRecover),
+                )
+                .within(ids::BACKUP_AUDIT_RECOVER_CONFIRM_MODAL, 0),
+            );
+            out.push(
+                Element::gesture_button(
+                    ids::BACKUP_AUDIT_RECOVER_CANCEL_BUTTON,
+                    t::BACKUP_RECOVER_CANCEL_BUTTON,
+                    true,
+                    Gesture::Backups(Action::CancelRecover),
+                )
+                .within(ids::BACKUP_AUDIT_RECOVER_CONFIRM_MODAL, 0),
+            );
+        }
+        RecoverView::Running => out.push(Element::label(
+            ids::BACKUP_AUDIT_RECOVER_RESULT,
+            t::BACKUP_RECOVER_RUNNING,
+        )),
+        RecoverView::Done(result) => {
+            let text = fauna_client_backup::recover::result_lines(result)
+                .iter()
+                .map(|line| line.resolve_nested(fauna_i18n::strings::lookup))
+                .collect::<Vec<_>>()
+                .join("\n");
+            out.push(Element::label(ids::BACKUP_AUDIT_RECOVER_RESULT, text));
         }
     }
 }
@@ -3941,6 +4653,70 @@ mod tests {
     use crate::app::tests::authed_app;
     use fauna_backups_machine::RowIntegrity;
     use fauna_client_backup::audit::{AuditVerdict, DestinationAuditState};
+
+    /// A shared file named `.bashrc` lands as `_bashrc`, never a dotfile, and a
+    /// separator can't steer the write out of the directory.
+    #[test]
+    fn a_dot_leading_name_never_lands_as_a_dotfile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = save_into(dir.path(), ".bashrc", b"x").unwrap();
+        assert_eq!(path, dir.path().join("_bashrc"));
+        assert_eq!(sanitize_download_name("../../etc/.profile"), "_profile");
+        assert_eq!(sanitize_download_name("a\\b/report.pdf"), "report.pdf");
+        assert_eq!(sanitize_download_name("//"), "download");
+        assert_eq!(sanitize_download_name(""), "download");
+    }
+
+    /// A second download of the same name is a new file, never a replacement.
+    #[test]
+    fn a_second_download_of_the_same_name_gets_a_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = save_into(dir.path(), "report.pdf", b"one").unwrap();
+        let second = save_into(dir.path(), "report.pdf", b"two").unwrap();
+        let third = save_into(dir.path(), "report.pdf", b"three").unwrap();
+        assert_eq!(first, dir.path().join("report.pdf"));
+        assert_eq!(second, dir.path().join("report (2).pdf"));
+        assert_eq!(third, dir.path().join("report (3).pdf"));
+        assert_eq!(std::fs::read(&first).unwrap(), b"one");
+    }
+
+    /// A missing downloads dir is created, and the parent (`$HOME`) is never
+    /// written to.
+    #[test]
+    fn a_missing_downloads_dir_is_created_and_home_is_untouched() {
+        let home = tempfile::tempdir().unwrap();
+        let downloads = home.path().join("Downloads");
+        let path = save_into(&downloads, "a.txt", b"x").unwrap();
+        assert_eq!(path, downloads.join("a.txt"));
+        let entries: Vec<_> = std::fs::read_dir(home.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("Downloads")]);
+    }
+
+    /// The production resolution never lands on bare `$HOME` (the precondition of
+    /// the dotfile scenario on a headless box with no `~/Downloads`), whatever is
+    /// or isn't on disk. Pure over its inputs: no process environment is touched.
+    #[test]
+    fn download_dir_resolution_never_falls_back_to_bare_home() {
+        use std::ffi::OsString;
+        use std::path::PathBuf;
+        let home = || Some(OsString::from("/home/u"));
+        assert_eq!(
+            resolve_download_dir(None, home()),
+            Some(PathBuf::from("/home/u/Downloads"))
+        );
+        assert_eq!(
+            resolve_download_dir(Some(OsString::new()), home()),
+            Some(PathBuf::from("/home/u/Downloads"))
+        );
+        assert_eq!(
+            resolve_download_dir(Some(OsString::from("/x/dl")), home()),
+            Some(PathBuf::from("/x/dl"))
+        );
+        assert_eq!(resolve_download_dir(None, None), None);
+    }
 
     fn dummy_nest() -> Arc<NestClient> {
         NestClient::new(
@@ -5099,6 +5875,7 @@ mod tests {
                     held: 40,
                     served: 0,
                     observed_at: crate::backup_audit::now_secs(),
+                    floored_at: None,
                 }],
             },
         );
@@ -5118,6 +5895,270 @@ mod tests {
         app.backups.audit = vec![regressed_record("d1", crate::backup_audit::now_secs() - 1)];
 
         assert_eq!(count_id(&app, "backup-audit-alert"), 0);
+        assert_eq!(count_id(&app, "backup-audit-recover-button"), 0);
+    }
+
+    // ── the recovery gesture on the fifth reason (row-A answer 2026-09-30) ──
+
+    /// A nest destination's fifth-reason banner carries the recover button
+    /// INSIDE itself — scoped to that banner's own occurrence index, so with a
+    /// standing verdict's banner ahead of it the button is in banner [1], and
+    /// the verdict's banner carries none.
+    #[test]
+    fn a_nest_destinations_regression_banner_carries_the_recover_button_inside_it() {
+        let mut app = backups_app();
+        app.backups.destinations = vec![destination("d1", "https://a.example", Some("Attic"))];
+        let mut record = regressed_record("d1", crate::backup_audit::now_secs() + 3 * 24 * 60 * 60);
+        record.verdict = Some(AuditVerdict::Overdue {
+            since_secs: 9 * 24 * 60 * 60,
+        });
+        app.backups.audit = vec![record];
+
+        assert_eq!(count_id(&app, "backup-audit-alert"), 2);
+        assert_eq!(count_id(&app, "backup-audit-recover-button"), 1);
+        assert_eq!(
+            count_scoped_in(&app, "backup-audit-recover-button", "backup-audit-alert", 1),
+            1,
+            "the button sits in the fifth reason's own banner"
+        );
+        assert_eq!(
+            count_scoped_in(&app, "backup-audit-recover-button", "backup-audit-alert", 0),
+            0,
+            "the standing verdict's banner offers no recovery"
+        );
+    }
+
+    /// A client-device custodian's folded regression, deadline-less.
+    fn device_regressed_record(id: &str) -> DestinationAuditRecord {
+        let mut record = DestinationAuditRecord::never(id);
+        record.state.accepted_regressions.insert(
+            "__mail/manifest.mail".into(),
+            fauna_client_backup::audit::AcceptedRegression {
+                pinned: 40,
+                served: 0,
+                observed_at: crate::backup_audit::now_secs(),
+                floored_at: None,
+                recoverable_until: None,
+            },
+        );
+        record
+    }
+
+    /// This device's own custodian row — the one whose assignment names the
+    /// sync id the agent registers under — carries the button on its
+    /// fifth-reason banner, opens the same confirm, and the confirm runs the
+    /// recovery for that row (`ui/backups.md`, the client-device arm).
+    #[test]
+    fn this_devices_own_custodian_row_carries_the_recover_button() {
+        let mut app = backups_app();
+        app.sync_agent.test_device_id = Some("dead".repeat(16));
+        app.backups.destinations = vec![custodian("d1", "Laptop", None)];
+        app.backups.audit = vec![device_regressed_record("d1")];
+
+        assert_eq!(count_id(&app, "backup-audit-alert"), 1);
+        assert_eq!(
+            count_scoped_in(&app, "backup-audit-recover-button", "backup-audit-alert", 0),
+            1,
+            "the button sits in this device's own row's banner"
+        );
+        assert!(
+            apply_local(
+                &mut app,
+                Action::OpenRecoverConfirm {
+                    destination_id: "d1".into()
+                }
+            )
+            .is_none()
+        );
+        assert_eq!(app.backups.recover, RecoverView::Confirming("d1".into()));
+        for id in [
+            "backup-audit-recover-confirm-button",
+            "backup-audit-recover-cancel-button",
+        ] {
+            assert_eq!(
+                count_scoped_in(&app, id, "backup-audit-recover-confirm-modal", 0),
+                1,
+                "{id}"
+            );
+        }
+        match apply_local(&mut app, Action::ConfirmRecover) {
+            Some(Op::Recover { destination, .. }) => {
+                assert_eq!(destination.destination_id, "d1");
+                assert_eq!(
+                    fauna_client_backup::recover::recover_leg(&destination, &"dead".repeat(16)),
+                    Some(fauna_client_backup::recover::RecoverLeg::OwnStore),
+                    "the confirm on this device's row runs the store leg"
+                );
+            }
+            _ => panic!("the confirm runs the recovery"),
+        }
+        assert_eq!(app.backups.recover, RecoverView::Running);
+        let button = elements(&app)
+            .into_iter()
+            .find(|e| e.id == "backup-audit-recover-button")
+            .expect("the button stays painted while the run is in flight");
+        assert!(!button.enabled, "a running recovery disarms every button");
+    }
+
+    /// Another device's custodian row paints its banner but no button: its
+    /// copy is not on this device, and the notice is that device's to act on.
+    #[test]
+    fn another_devices_custodian_row_carries_no_recover_button() {
+        for this_device in [None, Some("beef".repeat(16))] {
+            let mut app = backups_app();
+            app.sync_agent.test_device_id = this_device.clone();
+            app.backups.destinations = vec![custodian("d1", "Laptop", None)];
+            app.backups.audit = vec![device_regressed_record("d1")];
+
+            assert_eq!(count_id(&app, "backup-audit-alert"), 1, "{this_device:?}");
+            assert_eq!(
+                count_id(&app, "backup-audit-recover-button"),
+                0,
+                "{this_device:?}"
+            );
+            assert!(
+                apply_local(
+                    &mut app,
+                    Action::OpenRecoverConfirm {
+                        destination_id: "d1".into()
+                    }
+                )
+                .is_none()
+            );
+            assert_eq!(
+                app.backups.recover,
+                RecoverView::Closed,
+                "no button, no modal"
+            );
+        }
+    }
+
+    /// The confirm opens only for a destination whose banner carries the
+    /// button, and runs only from the open modal; cancelling closes it and
+    /// issues nothing.
+    #[test]
+    fn the_recover_confirm_arms_only_over_a_painted_button_and_cancels_cleanly() {
+        let mut app = backups_app();
+        app.backups.destinations = vec![destination("d1", "https://a.example", Some("Attic"))];
+        assert!(
+            apply_local(&mut app, Action::ConfirmRecover).is_none(),
+            "no modal, no run"
+        );
+        assert!(
+            apply_local(
+                &mut app,
+                Action::OpenRecoverConfirm {
+                    destination_id: "d1".into()
+                }
+            )
+            .is_none()
+        );
+        assert_eq!(app.backups.recover, RecoverView::Closed, "no notice stands");
+
+        app.backups.audit = vec![regressed_record(
+            "d1",
+            crate::backup_audit::now_secs() + 86_400,
+        )];
+        apply_local(
+            &mut app,
+            Action::OpenRecoverConfirm {
+                destination_id: "d1".into(),
+            },
+        );
+        assert_eq!(app.backups.recover, RecoverView::Confirming("d1".into()));
+        for id in [
+            "backup-audit-recover-confirm-button",
+            "backup-audit-recover-cancel-button",
+        ] {
+            assert_eq!(
+                count_scoped_in(&app, id, "backup-audit-recover-confirm-modal", 0),
+                1,
+                "{id}"
+            );
+        }
+        assert!(apply_local(&mut app, Action::CancelRecover).is_none());
+        assert_eq!(app.backups.recover, RecoverView::Closed);
+        assert_eq!(count_id(&app, "backup-audit-recover-confirm-modal"), 0);
+    }
+
+    /// Confirming starts the run for the pressed destination and disarms the
+    /// button until it ends; a failed run hands it back.
+    #[test]
+    fn a_confirmed_recovery_runs_once_and_says_so() {
+        let mut app = backups_app();
+        app.backups.destinations = vec![destination("d1", "https://a.example", Some("Attic"))];
+        app.backups.audit = vec![regressed_record(
+            "d1",
+            crate::backup_audit::now_secs() + 86_400,
+        )];
+        apply_local(
+            &mut app,
+            Action::OpenRecoverConfirm {
+                destination_id: "d1".into(),
+            },
+        );
+        match apply_local(&mut app, Action::ConfirmRecover) {
+            Some(Op::Recover { destination, .. }) => assert_eq!(destination.destination_id, "d1"),
+            _ => panic!("the confirm runs the recovery"),
+        }
+        assert_eq!(app.backups.recover, RecoverView::Running);
+        assert_eq!(
+            text_of(&app, "backup-audit-recover-result"),
+            t::BACKUP_RECOVER_RUNNING
+        );
+        let button = elements(&app)
+            .into_iter()
+            .find(|e| e.id == "backup-audit-recover-button")
+            .expect("the button stays painted");
+        assert!(!button.enabled, "a running recovery disarms its button");
+        assert!(
+            apply_local(
+                &mut app,
+                Action::OpenRecoverConfirm {
+                    destination_id: "d1".into()
+                }
+            )
+            .is_none()
+        );
+        assert_eq!(app.backups.recover, RecoverView::Running);
+
+        apply_outcome(&mut app, Outcome::Failed("boom".into()));
+        assert_eq!(app.backups.recover, RecoverView::Closed);
+    }
+
+    /// The result view renders the shared lines, verdict first, and survives
+    /// the whole-page read it arrives with.
+    #[test]
+    fn a_finished_recovery_paints_the_shared_result_lines() {
+        use fauna_client_backup::recover::{
+            RecoveredCounts, RecoveryOutcome, RecoverySetOutcome, RecoverySetResult,
+        };
+        let mut app = backups_app();
+        app.backups.recover = RecoverView::Running;
+        let result = RecoveryOutcome {
+            sets: vec![RecoverySetResult {
+                set_name: "__mail".into(),
+                outcome: RecoverySetOutcome::Recovered {
+                    counts: RecoveredCounts {
+                        recovered: 7,
+                        filed: 7,
+                        ..Default::default()
+                    },
+                },
+                duties_unfinished: None,
+            }],
+        };
+        apply_outcome(
+            &mut app,
+            Outcome::Recovered {
+                result: result.clone(),
+                page: Box::new(Outcome::Reclaimed(None)),
+            },
+        );
+        assert_eq!(app.backups.recover, RecoverView::Done(result));
+        let text = text_of(&app, "backup-audit-recover-result");
+        assert!(text.starts_with(t::RECOVER_RESULT_WHOLE), "{text:?}");
+        assert!(text.contains("Mail: 7 recovered"), "{text:?}");
     }
 
     /// A standing alerting verdict and an open window are two reasons: both
@@ -5365,6 +6406,97 @@ mod tests {
         assert_eq!(count_id(&app, "backup-destination-remove-confirm-modal"), 0);
     }
 
+    /// The store-change re-read's level rule (`account-runtime.md` § Multi-
+    /// instance concurrency, part 4): an unchanged answer paints nothing — the
+    /// dialog the user is typing in stays open with its buffers, and a
+    /// gesture's message stays on `error-message`.
+    #[test]
+    fn an_unchanged_destinations_reread_paints_nothing() {
+        let mut app = backups_app();
+        app.backups.destinations = vec![destination("d1", "https://a.example", Some("A"))];
+        apply_local(&mut app, Action::OpenAddForm);
+        app.backups.url_input = "https://half".into();
+        app.errors.insert(Page::Backups, "resolve failed".into());
+        apply_outcome(
+            &mut app,
+            Outcome::DestinationsReread {
+                seq: 0,
+                read: Ok(None),
+            },
+        );
+        assert_eq!(app.backups.form, Some(FormMode::Add));
+        assert_eq!(app.backups.url_input, "https://half");
+        assert_eq!(
+            app.errors.get(&Page::Backups).map(String::as_str),
+            Some("resolve failed")
+        );
+    }
+
+    /// A changed answer replaces the rows but keeps the dialog; a remove
+    /// confirm armed for a row that is gone disarms; and the re-read's own
+    /// error is the only one it retires.
+    #[test]
+    fn a_changed_destinations_reread_replaces_only_the_list() {
+        let mut app = backups_app();
+        app.backups.destinations = vec![
+            destination("d1", "https://a.example", Some("A")),
+            destination("d2", "https://b.example", Some("B")),
+        ];
+        app.backups.removing = Some("d2".into());
+        apply_outcome(
+            &mut app,
+            Outcome::DestinationsReread {
+                seq: 0,
+                read: Err("not ready".into()),
+            },
+        );
+        assert_eq!(
+            app.errors.get(&Page::Backups).map(String::as_str),
+            Some("not ready")
+        );
+        let fresh = vec![destination("d1", "https://a.example", Some("A renamed"))];
+        apply_outcome(
+            &mut app,
+            Outcome::DestinationsReread {
+                seq: 0,
+                read: Ok(Some(Box::new(DestinationsRead {
+                    destinations: fresh.clone(),
+                    unattested_destination_marks: Vec::new(),
+                    statuses: BTreeMap::new(),
+                    audit: None,
+                    orphaned_store: None,
+                }))),
+            },
+        );
+        assert_eq!(app.backups.destinations, fresh);
+        assert_eq!(app.backups.removing, None, "d2 is gone");
+        assert!(app.errors.get(&Page::Backups).is_none());
+    }
+
+    /// A whole-page fold landing between dispatch and answer painted fresher
+    /// rows: the re-read is dropped.
+    #[test]
+    fn a_destinations_reread_overtaken_by_a_page_fold_is_dropped() {
+        let mut app = backups_app();
+        let painted = vec![destination("d1", "https://a.example", Some("A"))];
+        app.backups.destinations = painted.clone();
+        app.backups.dest_paint_seq = 1;
+        apply_outcome(
+            &mut app,
+            Outcome::DestinationsReread {
+                seq: 0,
+                read: Ok(Some(Box::new(DestinationsRead {
+                    destinations: Vec::new(),
+                    unattested_destination_marks: Vec::new(),
+                    statuses: BTreeMap::new(),
+                    audit: None,
+                    orphaned_store: None,
+                }))),
+            },
+        );
+        assert_eq!(app.backups.destinations, painted);
+    }
+
     /// Cancelling the add dialog drops the buffers, so a later add never
     /// inherits an abandoned URL.
     #[test]
@@ -5426,6 +6558,94 @@ mod tests {
         assert_eq!(app.backups.form, None);
         assert_eq!(count_id(&app, "backup-destination-add-modal"), 0);
         assert_eq!(count_id(&app, "backup-destination-status-row"), 1);
+    }
+
+    /// A refused enroll stays on `error-message`, its dialog open, when the
+    /// nav-enter read dispatched BEFORE the gesture lands AFTER its refusal.
+    /// Entering the page and pressing add at once races the two, and a slow
+    /// read (an account store still assembling) used to land last and fold as
+    /// a success: the message cleared and the dialog closed, so the user saw
+    /// nothing at all — `error-message: ''` on a live box whose enroll had
+    /// been refused as too quick. The read's rows still land.
+    #[test]
+    fn a_read_dispatched_before_a_refused_enroll_does_not_wipe_its_message() {
+        let mut app = backups_app();
+        let read = nav_enter_op(&app.backups, Default::default());
+        let Some(Op::Refresh { since, .. }) = read else {
+            panic!("an authenticated page refreshes on entry");
+        };
+        apply_local(&mut app, Action::OpenAddForm);
+        apply_local(
+            &mut app,
+            Action::SelectDestinationKind(DestinationKindChoice::ClientDevice.label()),
+        );
+        set_field(&mut app.backups, BackupsField::Name, "This device".into());
+        apply_outcome(&mut app, Outcome::Failed("nest refused".to_string()));
+
+        apply_outcome(
+            &mut app,
+            Outcome::Refreshed {
+                since,
+                page: Box::new(Outcome::Loaded {
+                    destinations: vec![destination("d1", "https://a.example", Some("A"))],
+                    unattested_destination_marks: Vec::new(),
+                    statuses: BTreeMap::new(),
+                    restore: RestoreData::default(),
+                    audit: None,
+                    restored: None,
+                    snapshots_page: None,
+                    orphaned_store: None,
+                }),
+            },
+        );
+        assert_eq!(
+            app.errors.get(&Page::Backups).map(String::as_str),
+            Some("nest refused"),
+            "the refusal must outlive a read that was in flight before it"
+        );
+        assert_eq!(app.backups.form, Some(FormMode::Add));
+        assert_eq!(
+            app.backups.name_input, "This device",
+            "the input survives too"
+        );
+        assert_eq!(count_id(&app, "backup-destination-status-row"), 1);
+
+        // A stale read that itself failed does not replace the gesture's message.
+        apply_outcome(
+            &mut app,
+            Outcome::Refreshed {
+                since,
+                page: Box::new(Outcome::Failed("read failed".to_string())),
+            },
+        );
+        assert_eq!(
+            app.errors.get(&Page::Backups).map(String::as_str),
+            Some("nest refused")
+        );
+
+        // A read dispatched AFTER the refusal is the user's next action: it
+        // folds as ever, clearing the message and closing the dialog.
+        let Some(Op::Refresh { since, .. }) = nav_enter_op(&app.backups, Default::default()) else {
+            panic!("an authenticated page refreshes on entry");
+        };
+        apply_outcome(
+            &mut app,
+            Outcome::Refreshed {
+                since,
+                page: Box::new(Outcome::Loaded {
+                    destinations: Vec::new(),
+                    unattested_destination_marks: Vec::new(),
+                    statuses: BTreeMap::new(),
+                    restore: RestoreData::default(),
+                    audit: None,
+                    restored: None,
+                    snapshots_page: None,
+                    orphaned_store: None,
+                }),
+            },
+        );
+        assert!(!app.errors.contains_key(&Page::Backups));
+        assert_eq!(app.backups.form, None);
     }
 
     /// `attach_backup_destination_folder` clones the enrolled row
@@ -5530,6 +6750,60 @@ mod tests {
         ));
         // Pre-auth there is nothing to read and no secret to read it with.
         assert!(nav_enter_op(&BackupsState::default(), Default::default()).is_none());
+    }
+
+    /// The two halves fail independently (`backups.md` § Errors & edge cases):
+    /// the nav-enter op's destination read failing — the account store not
+    /// ready yet just after sign-in, or a throttled `fauna.nest.info` — must
+    /// still land the snapshot machine's render, so the folder selector lists
+    /// the owner's sets and stays enabled, with the destination failure in
+    /// `error-message`. Before the fix the op returned early and the selector
+    /// painted disabled until the user left and re-entered the page.
+    #[tokio::test]
+    async fn a_failed_destination_read_still_lands_the_snapshot_half() {
+        let fake = Arc::new(fauna_backups_machine::FakeBackupsNestApi::new());
+        fake.set_folders(vec![fauna_protocol::folders::FolderSummary {
+            name: "photos".to_string(),
+            ..Default::default()
+        }]);
+        let api: Arc<dyn fauna_backups_machine::BackupsNestApi> = fake;
+        let mut app = backups_app();
+        app.backups.machine = Some(BackupsMachine::new(Arc::new(NoopObserver), api));
+
+        // `dummy_nest` answers nothing, so `load_destinations` fails.
+        let op = nav_enter_op(&app.backups, Default::default()).expect("authenticated");
+        let outcome = op.run().await;
+        apply_outcome(&mut app, outcome);
+
+        assert!(
+            enabled_of(&app, "backup-folder-selector"),
+            "the snapshot half must land although the destination half failed"
+        );
+        assert!(text_of(&app, "backup-folder-selector").contains("photos"));
+        assert!(
+            app.errors.get(&Page::Backups).is_some(),
+            "the destination failure reaches error-message"
+        );
+    }
+
+    /// A failed snapshot-half fold must not hide the destination half's own
+    /// failure: when both fail, the page shows the destination read's message,
+    /// and the selector still paints the machine's (empty, disabled) render.
+    #[test]
+    fn a_partial_read_shows_the_page_error_over_the_snapshot_fold() {
+        let mut app = backups_app();
+        apply_outcome(
+            &mut app,
+            Outcome::SnapshotHalfOnly {
+                error: "the account store is not ready yet".to_string(),
+                snapshots_page: Box::new(loaded_page(vec![snap_row(7)])),
+            },
+        );
+        assert_eq!(
+            app.errors.get(&Page::Backups).map(String::as_str),
+            Some("the account store is not ready yet")
+        );
+        assert!(app.backups.snap.is_some());
     }
 
     // ── the restore half ─────────────────────────────────────────────────────
@@ -6026,6 +7300,8 @@ mod tests {
         let mut page = loaded_page(vec![snap_row(7)]);
         page.detail = Some(fauna_backups_machine::SnapshotDetail {
             snapshot_id: 7,
+            folder: "docs".to_string(),
+            folder_hash: None,
             files: vec![
                 fauna_backups_machine::SnapshotFileRow {
                     path: "docs/a.txt".to_string(),
@@ -6067,6 +7343,8 @@ mod tests {
         let mut page = loaded_page(vec![snap_row(7)]);
         page.detail = Some(fauna_backups_machine::SnapshotDetail {
             snapshot_id: 7,
+            folder: "docs".to_string(),
+            folder_hash: None,
             files: vec![fauna_backups_machine::SnapshotFileRow {
                 path: "docs".to_string(),
                 size_bytes: 0,

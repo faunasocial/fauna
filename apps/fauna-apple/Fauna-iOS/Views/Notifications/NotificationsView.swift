@@ -6,7 +6,9 @@ struct NotificationsView: View {
     @Environment(AppState.self) private var appState
     /// The Post arm's destination seam — `pendingPostOpen` is the same
     /// cross-page deep-link slot a `search-result-item` activation uses.
+    #if !FAUNA_KIDS
     @Environment(FeedVM.self) private var feedVM
+    #endif
     @State private var vm = NotificationsVM()
 
     var body: some View {
@@ -110,8 +112,13 @@ struct NotificationsView: View {
     private func open(_ destination: FfiNotificationDestination) {
         switch destination {
         case .post(let postId):
+            // The Fauna Kids build has no feed to open a post on.
+            #if FAUNA_KIDS
+            _ = postId
+            #else
             appState.selectedTab = "feed"
             feedVM.pendingPostOpen = postId
+            #endif
         case .knock(let senderId):
             appState.selectedTab = "contacts"
             appState.pendingKnockSenderId = senderId

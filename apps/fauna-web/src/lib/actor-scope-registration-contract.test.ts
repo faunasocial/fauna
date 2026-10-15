@@ -37,7 +37,7 @@
 // ── The rule ──────────────────────────────────────────────────────────────
 //
 // Inside an `onMount(async …)`, no `await` may precede the first
-// `registerActorScopedReset(` / `onActorChange(`. A page whose registration is
+// `registerActorScopedReset(` / `onActorChange(` (or `onSignedInActorChange(`). A page whose registration is
 // module-level or in a synchronous `onMount` satisfies this trivially — that is
 // the shape `media/+page.svelte` and `+layout.svelte` already have, and the one
 // the others are held to.
@@ -76,7 +76,9 @@ const SURFACES: Record<string, URL> = {
   ),
 };
 
-const REGISTRATION = /\b(?:registerActorScopedReset|onActorChange)\s*\(/;
+// `onSignedInActorChange` is `onActorChange` held back while the actor has no
+// home nest (`store.ts`) — the same registration, so it counts.
+const REGISTRATION = /\b(?:registerActorScopedReset|onActorChange|onSignedInActorChange)\s*\(/;
 
 /** The body of the first `onMount(async …)` in `src`, or `null` when the file
  *  has no async mount (a synchronous `onMount`, or a module-level

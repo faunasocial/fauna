@@ -309,14 +309,16 @@ fn policy_refused_commit_key(channel_id: &ChannelId) -> Vec<u8> {
 }
 
 /// Provider-KV key prefix for the **at-rest folder park**: the canonical
-/// `SignedIdentitySuccession` bytes of a succession statement this seat's
-/// witness refused on a folder channel whose recorded owner
-/// ([`FOLDER_CHANNEL_OWNER_PREFIX`]) it names — mirrored here by the
-/// conversations backend so the folder commit walk's hold behind it survives
+/// bytes of the bounded set of `SignedIdentitySuccession`s this seat's witness
+/// refused on a folder channel whose recorded owner
+/// ([`FOLDER_CHANNEL_OWNER_PREFIX`]) they name — mirrored here whole by the
+/// conversations backend, which owns the set's replacement policy
+/// (`identity-succession.md` § The succession statement (wire) → *The slot's
+/// replacement policy*), so the folder commit walk's hold behind it survives
 /// the session (`federation.md` § Cross-nest shared folders + channel append →
-/// *The folder commit walk inherits the harvest wait*). One slot per channel,
-/// latest wins; forgotten when the harvest speaks for the owner and with the
-/// group ([`MlsEngine::forget_group`]). Derived, recreatable state — the
+/// *The folder commit walk inherits the harvest wait*). One value per channel,
+/// each write replacing the last; forgotten when the harvest speaks for the
+/// owner and with the group ([`MlsEngine::forget_group`]). Derived, recreatable state — the
 /// statement rides the channel log whether or not this seat consumed it, and
 /// losing the slot only reopens the pre-park residual. Additive at-rest, like
 /// every key above.
@@ -2414,9 +2416,9 @@ impl MlsEngine {
         moved
     }
 
-    /// Rest `statement` (canonical `SignedIdentitySuccession` bytes, opaque
-    /// here) in `channel_id`'s at-rest folder park
-    /// ([`PARKED_FOLDER_SUCCESSION_PREFIX`]), replacing any earlier one.
+    /// Rest `statement` (the backend's canonical park-set bytes, opaque here)
+    /// in `channel_id`'s at-rest folder park
+    /// ([`PARKED_FOLDER_SUCCESSION_PREFIX`]), replacing any earlier value.
     /// Persists the provider snapshot on native — the park exists to survive
     /// a relaunch.
     pub fn park_folder_succession(&self, channel_id: &ChannelId, statement: &[u8]) {
@@ -4593,7 +4595,7 @@ mod tests {
         );
     }
 
-    /// The at-rest folder park: one slot per channel, latest wins, listed by
+    /// The at-rest folder park: one value per channel, latest write wins, listed by
     /// channel, forgotten on demand — and dropped with the group.
     #[test]
     fn the_folder_park_rests_per_channel_and_goes_with_the_group() {
@@ -4610,7 +4612,7 @@ mod tests {
         assert_eq!(
             alice.parked_folder_succession(&channel).as_deref(),
             Some(&b"latest"[..]),
-            "one slot per channel, latest wins"
+            "one value per channel, latest write wins"
         );
         let mut listed = alice.parked_folder_successions();
         listed.sort_by_key(|(c, _)| c.0);

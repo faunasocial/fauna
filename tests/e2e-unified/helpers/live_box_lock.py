@@ -2,7 +2,7 @@
 
 The live-nest tests (`FAUNA_LIVE_NEST_URL` set — believable-mail, CalDAV, port-25
 inbound, mail-enable) **factory-reset and re-claim the single shared box** (e.g.
-example.com). That box is a singleton with no server-side cross-session lock, so
+the dev nest). That box is a singleton with no server-side cross-session lock, so
 two sessions running live tests against it at once clobber each other's
 claim/reset state — observed 2026-06-03, when two sessions both drove the live
 box and one's onboarding client died mid-factory-reset (memory

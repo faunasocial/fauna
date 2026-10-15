@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use super::calendar_view::CalendarViewState;
 use crate::client::FaunaClient;
-use crate::i18n::strings::{common, events as events_strings};
+use crate::i18n::strings::{common, events as events_strings, media as media_strings};
 use crate::rows::CalendarRow;
 
 // ---------------------------------------------------------------------------
@@ -148,15 +148,66 @@ pub fn build_calendar_sidebar(
     }
     outer.append(&new_btn);
 
-    // ICS Import/Export buttons row.
+    // ICS Import/Export controls (goal/ui/events.md § Import / Export): a typed
+    // path entry (`calendar-import-file`) a native picker beside it fills, then
+    // Import and Export. The picker carries no test ID — the native dialog is
+    // not e2e-driveable, so every e2e import types the path (the media
+    // `file-upload` shape, `views/media/mod.rs`).
+    let ics_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    ics_box.set_margin_top(4);
+
+    let file_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let file_entry = gtk::Entry::builder()
+        .placeholder_text(media_strings::CHOOSE_FILE)
+        .hexpand(true)
+        .width_chars(12)
+        .build();
+    crate::testid::set_test_id(&file_entry, ids::CALENDAR_IMPORT_FILE);
+    let browse_btn = gtk::Button::builder()
+        .icon_name("document-open-symbolic")
+        .tooltip_text(media_strings::CHOOSE_FILE)
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    {
+        let file_entry = file_entry.clone();
+        browse_btn.connect_clicked(move |btn| {
+            let parent = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            let dialog = gtk::FileDialog::builder()
+                .title(events_strings::IMPORT_CALENDAR_TITLE)
+                .build();
+            let filter = gtk::FileFilter::new();
+            filter.set_name(Some("iCalendar files (*.ics)"));
+            filter.add_pattern("*.ics");
+            let filters = gio::ListStore::new::<gtk::FileFilter>();
+            filters.append(&filter);
+            dialog.set_filters(Some(&filters));
+            dialog.set_default_filter(Some(&filter));
+            let file_entry = file_entry.clone();
+            let browse_btn = btn.clone();
+            browse_btn.set_sensitive(false);
+            dialog.open(parent.as_ref(), gio::Cancellable::NONE, move |result| {
+                browse_btn.set_sensitive(true);
+                if let Ok(file) = result
+                    && let Some(path) = file.path()
+                {
+                    file_entry.set_text(&path.display().to_string());
+                }
+            });
+        });
+    }
+    file_row.append(&file_entry);
+    file_row.append(&browse_btn);
+    ics_box.append(&file_row);
+
     let ics_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    ics_row.set_margin_top(4);
 
     // --- Export ICS button ---
     let export_btn = gtk::Button::with_label(events_strings::EXPORT_ICS);
     export_btn.add_css_class("flat");
     export_btn.set_hexpand(true);
     export_btn.set_tooltip_text(Some(events_strings::EXPORT_ICS_TOOLTIP));
+    crate::testid::set_test_id(&export_btn, ids::CALENDAR_EXPORT_BUTTON);
     {
         let lb = list_box.clone();
         let c = Rc::clone(client);
@@ -178,6 +229,21 @@ pub fn build_calendar_sidebar(
                     }
                 }
             };
+            // Under e2e automation the native save dialog is bypassed and the
+            // file lands, never overwriting an earlier export, in the
+            // harness-provided downloads dir (the media download's seam,
+            // `views/media/detail.rs::start_download`: the `#[cfg]` is
+            // convention 15's outer boundary, `e2e_mode_enabled()` the inner
+            // switch).
+            #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+            if crate::e2e_mode_enabled()
+                && let Some(dir) =
+                    std::env::var_os("FAUNA_E2E_DOWNLOAD_DIR").filter(|v| !v.is_empty())
+            {
+                let path = unused_export_path(std::path::Path::new(&dir));
+                c.export_calendar_ics(&cal_id, &path.to_string_lossy());
+                return;
+            }
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
             show_export_dialog(window.as_ref(), &cal_id, &c);
         });
@@ -189,11 +255,13 @@ pub fn build_calendar_sidebar(
     import_btn.add_css_class("flat");
     import_btn.set_hexpand(true);
     import_btn.set_tooltip_text(Some(events_strings::IMPORT_ICS_TOOLTIP));
+    crate::testid::set_test_id(&import_btn, ids::CALENDAR_IMPORT_BUTTON);
     {
         let lb = list_box.clone();
         let c = Rc::clone(client);
         let st = Rc::clone(state);
-        import_btn.connect_clicked(move |btn| {
+        let file_entry = file_entry.clone();
+        import_btn.connect_clicked(move |_| {
             // Import lands in the currently selected calendar — same rule as
             // export above (goal/ui/events.md § Import / Export).
             let cal_id = st.borrow().authoring_target();
@@ -207,13 +275,22 @@ pub fn build_calendar_sidebar(
                     }
                 }
             };
-            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
-            show_import_dialog(window.as_ref(), &cal_id, &c);
+            // No file chosen is said on `error-message`, never a silent no-op.
+            let chosen = file_entry.text().trim().to_string();
+            if chosen.is_empty() {
+                c.report_localized_error(events_strings::ICS_FILE_REQUIRED.to_string());
+                return;
+            }
+            match std::fs::read(&chosen) {
+                Ok(data) => c.import_calendar_ics(&cal_id, data),
+                Err(e) => c.report_localized_error(format!("{chosen}: {e}")),
+            }
         });
     }
     ics_row.append(&import_btn);
 
-    outer.append(&ics_row);
+    ics_box.append(&ics_row);
+    outer.append(&ics_box);
 
     // Initial population (empty — will be filled by update_calendar_sidebar).
     let _ = state;
@@ -235,9 +312,7 @@ pub fn update_calendar_sidebar(
     on_select: impl Fn(String) + Clone + 'static,
 ) {
     // Clear existing rows.
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(list_box);
 
     // Assign colors.
     let mut colors = load_calendar_colors();
@@ -450,36 +525,18 @@ fn show_export_dialog(window: Option<&gtk::Window>, calendar_id: &str, client: &
     });
 }
 
-/// Show a GTK FileDialog for picking an .ics file to import.
-fn show_import_dialog(window: Option<&gtk::Window>, calendar_id: &str, client: &Rc<FaunaClient>) {
-    let dialog = gtk::FileDialog::builder()
-        .title(events_strings::IMPORT_CALENDAR_TITLE)
-        .build();
-
-    // Add .ics filter.
-    let filter = gtk::FileFilter::new();
-    filter.set_name(Some("iCalendar files (*.ics)"));
-    filter.add_pattern("*.ics");
-    let filters = gio::ListStore::new::<gtk::FileFilter>();
-    filters.append(&filter);
-    dialog.set_filters(Some(&filters));
-    dialog.set_default_filter(Some(&filter));
-
-    let c = Rc::clone(client);
-    let cal_id = calendar_id.to_string();
-    let win = window.cloned();
-    dialog.open(win.as_ref(), gio::Cancellable::NONE, move |result| {
-        if let Ok(file) = result
-            && let Some(path) = file.path()
-        {
-            match std::fs::read(&path) {
-                Ok(data) => c.import_calendar_ics(&cal_id, data),
-                Err(e) => {
-                    tracing::error!("Failed to read ICS file: {e}");
-                }
-            }
-        }
-    });
+/// The first `calendar.ics` / `calendar-N.ics` in `dir` that does not exist, so
+/// a second export never overwrites the first.
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+fn unused_export_path(dir: &std::path::Path) -> std::path::PathBuf {
+    let first = dir.join("calendar.ics");
+    if !first.exists() {
+        return first;
+    }
+    (1u32..)
+        .map(|n| dir.join(format!("calendar-{n}.ics")))
+        .find(|p| !p.exists())
+        .expect("an unbounded counter finds a free name")
 }
 
 /// Build a transient dialog for creating a new calendar.

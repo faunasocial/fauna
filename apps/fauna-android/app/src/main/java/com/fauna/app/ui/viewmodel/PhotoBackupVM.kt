@@ -20,8 +20,10 @@ class PhotoBackupVM @Inject constructor(
     val syncedCount: Flow<Int> = photoBackupDao.getSyncedCount()
 
     val isSyncing: StateFlow<Boolean> = photoBackupEngine.isSyncing
-    val uploadedCount: StateFlow<Int> = photoBackupEngine.uploadedCount
-    val totalScanned: StateFlow<Int> = photoBackupEngine.totalScanned
+
+    /** The in-flight pass's countdown and size (0 when no pass runs) — per pass, never a session total. */
+    val pendingCount: StateFlow<Int> = photoBackupEngine.progress.pendingCount
+    val passTotal: StateFlow<Int> = photoBackupEngine.progress.passTotal
     val lastError: StateFlow<String?> = photoBackupEngine.lastError
 
     val autoBackup = MutableStateFlow(secureStorage.autoPhotoBackup)

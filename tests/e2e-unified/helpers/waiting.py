@@ -451,7 +451,10 @@ MESSAGE_BANNERS_KEY = "message_banners"
 def message_banners(driver):
     """Read this app's fired-banner log, or ``None`` if it publishes none.
 
-    Returns ``{"started": int, "completed": int, "fired": [dict, …]}``.
+    Returns ``{"started": int, "completed": int, "fired": [dict, …],
+    "seeded_with": [thread_id, …] | None}`` — the last is the snapshot the
+    tracker seeded on (empty until it has; ``None`` from an app whose build
+    predates the field).
 
     ``None`` is a refusal, not "no banners fired" — the distinction is the whole
     point here (convention 11). Every assertion built on this key is really about
@@ -472,7 +475,13 @@ def message_banners(driver):
         return None
     if not isinstance(fired, list):
         return None
-    return {"started": started, "completed": completed, "fired": fired}
+    seeded_with = value.get("seeded_with")
+    return {
+        "started": started,
+        "completed": completed,
+        "fired": fired,
+        "seeded_with": seeded_with if isinstance(seeded_with, list) else None,
+    }
 
 
 def require_message_banners(driver):
@@ -864,6 +873,14 @@ def account_pump_role(driver):
     An app that publishes the counters without the role (not elected) reads as
     ``(True, False)`` — the conservative answer, which makes a caller decline
     to wait rather than hang.
+
+    **On a desktop whose sync agent is up, the settled holder is the agent, by
+    rule** (``account-runtime.md`` § Multi-instance concurrency → *The agent
+    holds the role when present*): the app may read ``(True, True)`` at sign-in
+    until its agent mounts, then yields and reads ``(True, False)``, and the
+    agent takes the role at once on the app's nudge. So a test may wait for the
+    settled role, but must still not assume the role at any one instant — the
+    first seconds after sign-in are the app's.
     """
     value = driver.get_state(ACCOUNT_PUMP_CYCLES_KEY)
     if not isinstance(value, dict):
@@ -987,6 +1004,35 @@ def await_pump_cycle_after(driver, baseline, *, budget_s, what="the pump work"):
     )
 
 
+# The custody owner's send-again poke + the host's ceremony-ingest tally that
+# is its barrier. ``fauna_e2e_agent::CUSTODY_OWNER_RESEND_NOW`` /
+# ``CUSTODY_CEREMONY_INGEST_KEY`` own both contracts.
+CUSTODY_OWNER_RESEND_NOW = "custody_owner_resend_now"
+CUSTODY_CEREMONY_INGEST_KEY = "custody_ceremony_ingest"
+
+
+def custody_ceremony_ingest(driver):
+    """Read what this app's custody ceremony sink did with every received
+    offer / accept / deliver — ``{"seen", "moved", "duplicate", "refused",
+    "uncaptured"}``, each monotone from 0 at process start — or ``None`` when
+    the app does not publish the key (convention 11: a refusal, never zeros)."""
+    value = driver.get_state(CUSTODY_CEREMONY_INGEST_KEY)
+    if not isinstance(value, dict) or not isinstance(value.get("seen"), int):
+        return None
+    return value
+
+
+def poke_custody_owner_resend(driver, *, timeout=20):
+    """Ask this app — a custody OWNER — to post every ceremony it granted
+    once more: a delivered ceremony's deliver re-signed through the
+    production signing site, an unanswered offer verbatim. Records nothing.
+
+    Fire-and-forget by contract: read the HOST's ``custody_ceremony_ingest``
+    before the poke and poll the host's receive cycles until the outcome you
+    expect is counted past that baseline."""
+    driver.call_command(CUSTODY_OWNER_RESEND_NOW, timeout=timeout)
+
+
 def await_account_runtime_assembled(driver, *, budget_s=budgets.ACCOUNT_RUNTIME_ASSEMBLY_S):
     """Wait until this app has an assembled W3 account-store runtime — role,
     not counters (``account_pump_role``'s ``runtime_up``).
@@ -1030,8 +1076,8 @@ def await_device_removal_ready(driver):
     """The barrier before a ``device-remove-button`` click: on an app that
     hosts an account runtime the removal is REFUSED until that runtime has
     assembled (it resolves which fleet member the row names from the account
-    store — `account-data-taxonomy.md` § The generation machinery →
-    *Fleet-scope reclamation*, clause (4)), and assembly is a task spawned off
+    store — `fleet-scope-reclamation.md`
+    *§ *Fleet-scope reclamation*, clause (4)), and assembly is a task spawned off
     the login path. Without this a prompt click reads the refusal on
     ``error-message`` — which a test expecting a *different* refusal there
     would pass on for the wrong reason.
@@ -1065,8 +1111,33 @@ def serving_enablement(driver):
     return value
 
 
+def serving_enablement_completed_runs(driver, actor_id_hex):
+    """How many COMPLETED serving-enablement runs the app process holds for
+    ``actor_id_hex`` right now (``0`` if the key is unreadable or absent).
+
+    The baseline for a test that drives a SECOND handoff of one identity — a
+    sign-in after a claim: read it just before the second drive and pass it to
+    :func:`await_serving_enablement_for` as ``prior_runs``. Read it after any
+    ``driver.reset()``, since a relaunch resets the process's records."""
+    actor_id_hex = actor_id_hex.lower()
+    try:
+        value = serving_enablement(driver)
+    except Exception:  # noqa: BLE001 — a read mid-relaunch legitimately fails.
+        return 0
+    return sum(
+        1
+        for run in (value or {}).get("runs", [])
+        if str(run.get("actor_id", "")).lower() == actor_id_hex and run.get("completed")
+    )
+
+
 def await_serving_enablement_for(
-    driver, actor_id_hex, *, budget_s=budgets.SERVING_ENABLEMENT_S, what="the onboarding"
+    driver,
+    actor_id_hex,
+    *,
+    budget_s=budgets.SERVING_ENABLEMENT_S,
+    what="the onboarding",
+    prior_runs=0,
 ):
     """Wait until the post-claim serving-enablement run for ``actor_id_hex`` —
     the identity the test onboarded — has finished, and return the intents it
@@ -1086,6 +1157,11 @@ def await_serving_enablement_for(
     measured on tui 2026-09-23, where a baseline of 1 met a fresh process's
     ``(1, 1)`` and the wait could never release). Every test mints a fresh admin
     identity, so its run is unambiguous in any process.
+
+    A test that hands the SAME identity off twice in one process (a claim, then
+    a sign-in) passes ``prior_runs`` = :func:`serving_enablement_completed_runs`
+    read just before the second drive; the wait then releases on the run past
+    those, not on the first leg's.
 
     ⚠ Proves the glue **ran to the end**, never that a step succeeded (every
     step logs its own failure and the run still completes). Assert the
@@ -1116,10 +1192,12 @@ def await_serving_enablement_for(
 
     def landed():
         value = reading()
-        for run in (value or {}).get("runs", []):
-            if str(run.get("actor_id", "")).lower() == actor_id_hex and run.get("completed"):
-                return run
-        return None
+        done = [
+            run
+            for run in (value or {}).get("runs", [])
+            if str(run.get("actor_id", "")).lower() == actor_id_hex and run.get("completed")
+        ]
+        return done[prior_runs] if len(done) > prior_runs else None
 
     run = wait_until(
         landed,

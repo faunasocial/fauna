@@ -57,12 +57,12 @@ from helpers.client_metadata_server import (
     sign_manifest,
 )
 from helpers.oauth_client import OAuthClient
-from tests.api.test_third_party_session import (
+from helpers.principal_session import (
     CLOSE_AUTH_EXPIRED,
-    _alice,
-    _refusal_code,
-    _Session,
-    _upgrade,
+    alice_client,
+    PrincipalSession,
+    refusal_code,
+    upgrade,
 )
 
 pytestmark = pytest.mark.tier_3
@@ -122,7 +122,7 @@ def _approve_with_grant(
     browser_code, flow_token = client.open_consent_page(request_uri)
     alice = nest["user"]
     now = int(time.time())
-    with _alice(nest) as ws:
+    with alice_client(nest) as ws:
         pending = ws.call("fauna.bridges.atproto.list_pending_consents", {})["consents"]
         consent = next((c for c in pending if c["code"] == browser_code), None)
         assert consent, f"no pending consent carries {browser_code!r}: {pending!r}"
@@ -187,7 +187,7 @@ def test_a_connected_app_writes_and_reads_exactly_its_own_kinds(
     grant_id = secrets.token_bytes(16)
     tokens = _approve_with_grant(nest, client, holder_pub, writer_pub, grant_id)
 
-    with _alice(nest) as ws:
+    with alice_client(nest) as ws:
         rows = [
             p for p in ws.call("fauna.principals.list", {})["principals"]
             if p["client_id"] == client.client_id
@@ -202,7 +202,7 @@ def test_a_connected_app_writes_and_reads_exactly_its_own_kinds(
     assert principal.get("service_auth") == SERVICE_AUTH, principal
 
     # ── The principal's side: its grant, its pair, its row. ──
-    session = _Session(_upgrade(nest, client, tokens["access_token"]))
+    session = PrincipalSession(upgrade(nest, client, tokens["access_token"]))
     ok, reply = session.call("fauna.capabilities.fetch", {})
     assert ok, reply
     grants = [bytes(g) for g in reply.get("grants", [])]
@@ -232,20 +232,20 @@ def test_a_connected_app_writes_and_reads_exactly_its_own_kinds(
         1, int(time.time() * 1000),
     )
     ok, reply = _put(session, notes_scope, _raw(stranger.public_key()), s_key, s_env)
-    assert not ok and _refusal_code(reply).endswith("permission_denied"), (
+    assert not ok and refusal_code(reply).endswith("permission_denied"), (
         f"a principal writes only as the writer key it attested: {reply!r}"
     )
     ok, reply = session.call("fauna.sync.changes.list", {"scope": "state", "item_class": STATE_FEED})
-    assert not ok and _refusal_code(reply).endswith("permission_denied"), (
+    assert not ok and refusal_code(reply).endswith("permission_denied"), (
         f"the account's own state is outside every records scope: {reply!r}"
     )
     ok, reply = _put(session, "ext:ext.other.org.thing", writer_pub, item_key, envelope, seq=2)
-    assert not ok and _refusal_code(reply).endswith("permission_denied"), (
+    assert not ok and refusal_code(reply).endswith("permission_denied"), (
         f"another publisher's kind is outside this grant: {reply!r}"
     )
 
     # ── Revoke: the session closes; the owner still reads the row. ──
-    with _alice(nest) as ws:
+    with alice_client(nest) as ws:
         revoked = ws.call(
             "fauna.principals.revoke", {"principal_id": bytes(principal["principal_id"])}
         )
@@ -293,4 +293,40 @@ def test_a_remote_principal_cannot_ask_for_the_accounts_mail(
     )
     assert "can grant" in body.get("error_description", ""), (
         f"refused for the scope, after the client authenticated — not for its assertion: {body!r}"
+    )
+
+
+@pytest.mark.feature("connected-apps")
+def test_a_remote_principal_cannot_ask_for_the_accounts_personalization(
+    consent_nest, consent_bridge, metadata_server
+):
+    """The fifth arm is form-gated (``authorization-server.md`` § Scope grammar
+    → *The fifth arm*): TP4 reserves personalization models for device apps
+    and nest-hosted code, so a confidential client whose document declares
+    ``fauna:personalization:rw`` and whose assertion is valid is still
+    answered ``invalid_scope`` at the push — by the form rule, not the
+    grammar: the string is an arm a public client is granted."""
+    nest = consent_nest
+    arm = "fauna:personalization:rw"
+    path = "/remote-personalization-client.json"
+    client = OAuthClient(
+        base=nest["url"],
+        htu_origin=f"https://{HANDLE_DOMAIN}",
+        redirect_uri=REDIRECT_URI,
+        scope=arm,
+        holder_x25519=_raw(x25519.X25519PrivateKey.generate().public_key()),
+        client_id_url=metadata_server.client_id(path),
+        assertion_key=ec.generate_private_key(ec.SECP256R1()),
+        assertion_kid="k1",
+        issuer=_issuer(nest),
+    )
+    metadata_server.documents[path] = client_document(
+        client.client_id, REDIRECT_URI, arm, jwk=client.assertion_jwk()
+    )
+    status, body = client.push_authorization_request_expecting_refusal()
+    assert status == 400 and body.get("error") == "invalid_scope", (
+        f"a remote principal is refused the personalization arm at the push: {status} {body!r}"
+    )
+    assert "user's own device" in body.get("error_description", ""), (
+        f"refused by the form rule, after the client authenticated: {body!r}"
     )

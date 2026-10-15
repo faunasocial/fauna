@@ -55,12 +55,15 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
     case memberReview
     case privacy
     case mutedWords
+    #if !FAUNA_KIDS
     case personalization
     case labelerCatalog
+    #endif
     case general
     case encryption
     case devices
     case folders
+    #if !FAUNA_KIDS
     case nostr
     case atproto
     case mail
@@ -71,10 +74,13 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
     case mailLists
     case mailListMembers
     case web
+    #endif
     case subscriptions
     case linkedNests
     case taskDelegation
+    #if !FAUNA_KIDS
     case connectedApps
+    #endif
     case logs
 
     public var id: String { rawValue }
@@ -87,12 +93,15 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case .memberReview: "member-review"
         case .privacy: "privacy"
         case .mutedWords: "muted-words"
+        #if !FAUNA_KIDS
         case .personalization: "personalization"
         case .labelerCatalog: "labeler-catalog"
+        #endif
         case .general: "general"
         case .encryption: "encryption"
         case .devices: "devices"
         case .folders: "folders"
+        #if !FAUNA_KIDS
         case .nostr: "nostr"
         case .atproto: "atproto"
         case .mail: "mail-settings"
@@ -103,10 +112,13 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case .mailLists: "mail-lists"
         case .mailListMembers: "mail-list-members"
         case .web: "web"
+        #endif
         case .subscriptions: "subscription-settings"
         case .linkedNests: "nests"
         case .taskDelegation: "task-delegation"
+        #if !FAUNA_KIDS
         case .connectedApps: "connected-apps"
+        #endif
         case .logs: "logs"
         }
     }
@@ -135,12 +147,15 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case "member-review": self = .memberReview
         case "privacy": self = .privacy
         case "muted-words": self = .mutedWords
+        #if !FAUNA_KIDS
         case "personalization": self = .personalization
         case "labeler-catalog": self = .labelerCatalog
+        #endif
         case "general": self = .general
         case "encryption": self = .encryption
         case "devices": self = .devices
         case "folders": self = .folders
+        #if !FAUNA_KIDS
         case "nostr": self = .nostr
         case "atproto": self = .atproto
         case "mail-settings": self = .mail
@@ -151,10 +166,13 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case "mail-lists": self = .mailLists
         case "mail-list-members": self = .mailListMembers
         case "web": self = .web
+        #endif
         case "subscription-settings": self = .subscriptions
         case "nests": self = .linkedNests
         case "task-delegation": self = .taskDelegation
+        #if !FAUNA_KIDS
         case "connected-apps": self = .connectedApps
+        #endif
         case "logs": self = .logs
         default: return nil
         }
@@ -167,12 +185,15 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case .memberReview: L.settings.memberReviewPage.title
         case .privacy: L.settings.privacy
         case .mutedWords: L.mutedWords.title
+        #if !FAUNA_KIDS
         case .personalization: L.personalization.title
         case .labelerCatalog: L.labelerCatalog.title
+        #endif
         case .general: L.settings.general
         case .encryption: L.settings.encryptionPage.title
         case .devices: L.devices.title
         case .folders: L.folders.title
+        #if !FAUNA_KIDS
         case .nostr: L.nostr.title
         case .atproto: L.atprotoSettings.title
         case .mail: L.mailSettings.title
@@ -183,10 +204,13 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case .mailLists: L.mailLists.title
         case .mailListMembers: L.mailLists.membersTitle
         case .web: L.webSettings.title
+        #endif
         case .subscriptions: L.subscriptions.title
         case .linkedNests: L.nests.title
         case .taskDelegation: L.taskDelegation.title
+        #if !FAUNA_KIDS
         case .connectedApps: L.connectedApps.title
+        #endif
         case .logs: L.logs.title
         }
     }
@@ -198,12 +222,15 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case .memberReview: "person.crop.circle.badge.questionmark"
         case .privacy: "hand.raised"
         case .mutedWords: "speaker.slash"
+        #if !FAUNA_KIDS
         case .personalization: "sparkles"
         case .labelerCatalog: "shield.checkerboard"
+        #endif
         case .general: "gearshape"
         case .encryption: "lock.shield"
         case .devices: "desktopcomputer"
         case .folders: "folder"
+        #if !FAUNA_KIDS
         case .nostr: "antenna.radiowaves.left.and.right"
         case .atproto: "at"
         case .mail: "envelope"
@@ -214,10 +241,13 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case .mailLists: "list.bullet.rectangle"
         case .mailListMembers: "person.2"
         case .web: "globe"
+        #endif
         case .subscriptions: "star"
         case .linkedNests: "link"
         case .taskDelegation: "gearshape.2"
+        #if !FAUNA_KIDS
         case .connectedApps: "puzzlepiece.extension"
+        #endif
         case .logs: "doc.text.magnifyingglass"
         }
     }
@@ -268,9 +298,17 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
     /// `platform_elements`; media.md § Apple photo-backup reframe), so they no longer
     /// need their own rail entry.
     public static var built: [SettingsPage] {
+        #if FAUNA_KIDS
+        // The Fauna Kids build's reduced settings (family-safety.md § The account
+        // age band, the kids-app bullet, item (4)): the excised planes' pages do
+        // not exist in this build at all.
+        [.status, .account, .memberReview, .privacy, .mutedWords, .general, .encryption,
+         .devices, .folders, .subscriptions, .linkedNests, .taskDelegation, .logs]
+        #else
         [.status, .account, .memberReview, .privacy, .mutedWords, .personalization, .labelerCatalog, .general, .encryption,
          .devices, .folders, .nostr, .atproto,
          .mail, .mailAliases, .mailSpam, .mailExport, .mailImport, .mailLists, .mailListMembers, .web,
          .subscriptions, .linkedNests, .taskDelegation, .connectedApps, .logs]
+        #endif
     }
 }

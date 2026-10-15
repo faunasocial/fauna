@@ -51,20 +51,20 @@ Stamped 2026-10-01 at 308c995169.
    - `tests/e2e-unified/tests/api/test_web_host_routing.py::test_no_user_site_answers_at_the_reserved_hosts_and_paths`
    - `tests/e2e-unified/tests/platform/docker/test_spa_shadow_by_user_site.py::test_a_user_site_never_shadows_the_mounted_spa_at_app`
 12. [nest] A script on someone's published site can never take control of pages beyond that site's own address — `docs/goal/behavior/web-content-hosting.md` § Invariants this model relies on
-   - (none)
+   - `tests/e2e-unified/tests/api/test_web_served_headers.py::test_a_members_script_is_never_given_a_wider_scope`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+72d6a508 standalone |
-| linux | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| windows | ⚠ partial | 0.1.2-dev+c04c2468 standalone |
+| web | ✅ full | 0.1.2-dev+72d6a508 standalone |
+| linux | ✅ full | 0.1.2-dev+b3cb40c5 docker |
+| windows | ✅ full | 0.1.2-dev+c04c2468 standalone |
 | macos | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
 | ios | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
+| tui | ✅ full | 0.1.2-dev+b3cb40c5 docker |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -83,12 +83,12 @@ Stamped 2026-10-01 at 308c995169.
 | 5 | nest | `tests/e2e-unified/tests/api/test_web_subdomain_hosting.py::test_subdomain_opt_in_is_per_actor` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_web_subdomain_hosting.py::test_subdomain_opt_in_is_user_class` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_web_publish_projections.py::test_publish_list_joins_the_gated_tier` | nest (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_a_site_the_nest_took_dark_tells_its_author` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_a_site_the_nest_took_dark_tells_its_author` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/api/test_web_revoke_durability.py::test_an_unpublished_or_deleted_page_stays_gone_across_a_restart` | nest (linux): passed |
 | 8 | nest | `tests/e2e-unified/tests/api/test_web_revoke_durability.py::test_a_blanked_site_comes_back_at_the_next_boot` | nest (linux): passed |
 | 9 | nest | `tests/e2e-unified/tests/api/test_web_host_routing.py::test_a_verified_custom_domain_serves_the_site_and_stops_when_withdrawn` | nest (linux): passed |
 | 10 | nest | `tests/e2e-unified/tests/api/test_web_host_routing.py::test_publishing_alone_gives_a_front_page_and_a_feed` | nest (linux): passed |
 | 11 | nest | `tests/e2e-unified/tests/api/test_web_host_routing.py::test_no_user_site_answers_at_the_reserved_hosts_and_paths` | nest (linux): passed |
 | 11 | nest | `tests/e2e-unified/tests/platform/docker/test_spa_shadow_by_user_site.py::test_a_user_site_never_shadows_the_mounted_spa_at_app` | nest (linux): passed |
-| 12 | nest | (none) | — |
+| 12 | nest | `tests/e2e-unified/tests/api/test_web_served_headers.py::test_a_members_script_is_never_given_a_wider_scope` | nest (linux): passed |
 <!-- features-render:end -->

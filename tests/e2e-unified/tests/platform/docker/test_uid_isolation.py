@@ -3,7 +3,8 @@ Docker image (security.md § Co-resident process trust boundary).
 
 Slice 1 of the user-decided (2026-06-24) UID/container split: each network-facing
 s6 service runs under its OWN non-root UID — nest=`fauna`(1000),
-MTA=`fauna-mta`(1001), MDA=`fauna-mda`(1002), router=`fauna-router`(1003) — so a
+MTA=`fauna-mta`(1001), MDA=`fauna-mda`(1002), router=`fauna-router`(1003),
+iroh relay=`fauna-relay`(1004), ATProto bridge=`fauna-atproto`(1005) — so a
 compromised process (notably the hostile-MIME-parsing MDA) cannot read another
 role's key material or nest's sealed store. Only tier_4 catches this: the UID
 wiring lives entirely in the Dockerfile + entrypoint + s6 run-scripts, which the
@@ -11,7 +12,8 @@ binary-spawning tier_3 fixtures bypass.
 
 What this asserts:
   A. Each service's running process has the expected distinct real-UID
-     (s6-svstat pid → /proc/<pid>/status `Uid:`).
+     (s6-svstat pid → /proc/<pid>/status `Uid:`) — the always-up iroh relay and
+     the down-by-default ATProto bridge (switched on by the fixture) included.
   B. Cross-UID reads are DENIED: a bridge UID cannot read the peer bridge's
      keyfile, nest's sealed store (nest.db / blobs), or the inbound-deliver-key.
   C. Each bridge CAN read what it legitimately needs: its own keyfile + the
@@ -38,6 +40,11 @@ What this asserts:
      kernels report here empirically — an ABI-negotiation artifact, with the
      denials provably working; the BEHAVIORAL probes are the authority, the
      status line only rules out the silent-off state.)
+  H. The nest's ffmpeg transcode domain (`fauna-sandbox transcode`) denies the
+     sealed store to the nest's OWN uid — where DAC cannot help — while the
+     image's ffmpeg still transcodes inside it; and the same profile, wrapped
+     round the ATProto bridge's mp4 remux, denies the PDS signing key to the
+     bridge's own uid while the remux still runs inside it.
 
 The bring-up (enable → auto-approve → keypairs) mirrors test_mail_deploy_lifecycle
 — the same supervisor-socket + zero-touch-enrollment path — so a regression that
@@ -61,6 +68,7 @@ from .helpers import (
     bridge_diag as _bridge_diag,
     claim_admin_api,
     docker_build,
+    enable_atproto_bridge,
     find_free_ports,
     flag_present as _flag_present,
     get_repo_root,
@@ -95,6 +103,8 @@ EXPECTED_UID = {
     "fauna-mail-bridge-mta": 1001,
     "fauna-mail-bridge-mda": 1002,
     "fauna-sni-router": 1003,
+    "fauna-iroh-relay": 1004,
+    "fauna-atproto-bridge": 1005,
 }
 MTA_UID = 1001
 MDA_UID = 1002
@@ -207,11 +217,14 @@ def serving_nest(docker_image):
             # under its own UID) — deterministic nudge, re-enroll is idempotent.
             for r in ROLES:
                 _restart_service(name, f"fauna-mail-bridge-{r}")
+        # The ATProto bridge is down by default; switch it on so its UID drop is
+        # observable (A). Approval is not needed: an unapproved bridge stays up,
+        # polling its pending enrollment under its own UID.
+        enable_atproto_bridge(name)
         # Settle: wait until every network-facing service reports a LIVE pid (not
         # merely "want up"), so the per-UID/process assertions see a stable state
         # and the MTA has re-bound its listeners under fauna-mta.
-        services = ("fauna-nest", "fauna-sni-router",
-                    "fauna-mail-bridge-mta", "fauna-mail-bridge-mda")
+        services = tuple(EXPECTED_UID)
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             if all(re.search(r"\(pid \d+\)", _svstat(name, s)) for s in services):
@@ -228,7 +241,8 @@ def serving_nest(docker_image):
 
 @pytest.mark.feature("nest-hardening")
 def test_each_service_runs_under_its_own_uid(serving_nest):
-    """(A) The four network-facing services run under distinct real-UIDs."""
+    """(A) Every network-facing service — the nest, both mail bridges, the SNI
+    router, the iroh relay and the ATProto bridge — runs under its own real-UID."""
     name = serving_nest["name"]
     for service, want in EXPECTED_UID.items():
         pid = _service_pid(name, service)
@@ -436,12 +450,136 @@ def test_landlock_denies_node_db_in_real_bridge_context(serving_nest):
 
 
 @pytest.mark.feature("nest-hardening")
+def test_transcode_domain_denies_the_nests_secrets_to_its_own_uid(serving_nest):
+    """(H) The nest's ffmpeg runs as the nest's OWN uid under `fauna-sandbox
+    transcode --job-dir <dir>` (`bins/fauna-nest/src/video/transcode.rs`;
+    deployment-threat-model.md § Concern 1b, item 2). DAC cannot separate the
+    two — uid `fauna` owns nest.db — so the Landlock domain is the ONLY denier,
+    and this is the probe that it holds in the shipped image, from the exact
+    identity a decoder bug would run as.
+
+    Controls, as in (G): uid `fauna` reads nest.db unconfined (so a lenient
+    profile goes red), the domain reads its own job directory, the image's
+    ffmpeg actually transcodes inside the domain (the profile's RO trees and
+    rlimits suffice for the real binary), and the wrapper reports an enforced
+    ruleset."""
+    name = serving_nest["name"]
+    nest_uid = EXPECTED_UID["fauna-nest"]
+    job = "/tmp/transcode-probe"
+
+    rc, out, err = _exec_as(name, nest_uid, "head", "-c", "16", "/data/nest.db")
+    assert rc == 0 and out.startswith(b"SQLite format 3"), \
+        f"control: unconfined uid {nest_uid} must read nest.db; rc={rc} err={err!r}"
+    rc, _, err = _exec_as(name, nest_uid, "mkdir", "-p", job)
+    assert rc == 0, f"control: uid {nest_uid} must create the job dir; err={err!r}"
+
+    def in_domain(*cmd: str):
+        return _exec_as(
+            name, nest_uid, "fauna-sandbox", "transcode", "--job-dir", job, "--", *cmd
+        )
+
+    rc, _, err = in_domain(
+        "ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi",
+        "-i", "color=c=blue:s=64x64:d=1", "-c:v", "libx264", "-preset",
+        "ultrafast", "-f", "mpegts", f"{job}/seg000.ts",
+    )
+    assert rc == 0, f"the image's ffmpeg must transcode inside the domain; err={err!r}"
+    _assert_landlock_enforced(err, "transcode ffmpeg control")
+
+    rc, out, err = in_domain("head", "-c", "4", f"{job}/seg000.ts")
+    assert rc == 0 and out, f"the domain must read its own job dir; err={err!r}"
+
+    for cmd, path in (
+        ("cat", "/data/nest.db"),
+        ("ls", "/data/blobs"),
+        ("ls", "/data/acme"),
+    ):
+        rc, out, err = in_domain(cmd, path)
+        assert rc != 0 and not out, \
+            f"{path} must be Landlock-denied to the transcode domain; rc={rc} " \
+            f"out={out[:64]!r}"
+        assert "Permission denied" in err, \
+            f"{path} denial must be EACCES (the Landlock deny); stderr={err!r}"
+        _assert_landlock_enforced(err, f"transcode denied {path}")
+
+
+@pytest.mark.feature("nest-hardening")
+def test_transcode_domain_denies_the_pds_key_to_the_atproto_bridges_remux(serving_nest):
+    """(H) The ATProto bridge's MPEG-TS → mp4 remux runs ffmpeg as the bridge's
+    own uid `fauna-atproto` — the owner of the PDS signing key — under the same
+    `fauna-sandbox transcode --job-dir <dir>` profile as the nest's ffmpeg
+    (`bins/fauna-bridges/internal/atprotorepo/video.go` remuxCommand;
+    deployment-threat-model.md § Concern 1b, item 2). DAC grants that uid the
+    key, so the Landlock domain is the ONLY denier, and this proves it holds in
+    the shipped image from the identity a demuxer bug would run as.
+
+    Controls: uid `fauna-atproto` reads the key unconfined (a lenient profile
+    goes red), the image's ffmpeg performs the bridge's exact remux inside the
+    domain (the profile's RO trees and rlimits suffice for it), and the wrapper
+    reports an enforced ruleset. The key exists whether or not the bridge is
+    enabled: the entrypoint mints it at every boot."""
+    name = serving_nest["name"]
+    uid = EXPECTED_UID["fauna-atproto-bridge"]
+    key = "/data/keys/atproto/atproto.pds.key"
+    job = "/tmp/remux-probe"
+
+    rc, out, err = _exec_as(name, uid, "head", "-c", "1", key)
+    assert rc == 0 and out, \
+        f"control: unconfined uid {uid} must read its own PDS key; rc={rc} err={err!r}"
+    rc, _, err = _exec_as(name, uid, "mkdir", "-p", "-m", "0700", job)
+    assert rc == 0, f"control: uid {uid} must create the job dir; err={err!r}"
+
+    def in_domain(*cmd: str):
+        return _exec_as(
+            name, uid, "fauna-sandbox", "transcode", "--job-dir", job, "--", *cmd
+        )
+
+    # The input the nest hands the bridge: h264 + aac in MPEG-TS.
+    rc, _, err = in_domain(
+        "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "color=c=blue:s=64x64:d=1",
+        "-f", "lavfi", "-i", "sine=d=1",
+        "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+        "-f", "mpegts", f"{job}/in.ts",
+    )
+    assert rc == 0, f"control: build the MPEG-TS input inside the domain; err={err!r}"
+
+    # The bridge's remux, flag for flag (video.go remuxCommand).
+    rc, _, err = in_domain(
+        "ffmpeg", "-nostdin", "-loglevel", "error",
+        "-protocol_whitelist", "file", "-format_whitelist", "mpegts",
+        "-f", "mpegts", "-i", f"{job}/in.ts",
+        "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart",
+        "-y", f"{job}/out.mp4",
+    )
+    assert rc == 0, f"the image's ffmpeg must remux inside the domain; err={err!r}"
+    _assert_landlock_enforced(err, "atproto remux control")
+
+    rc, out, err = in_domain("head", "-c", "8", f"{job}/out.mp4")
+    assert rc == 0 and out[4:8] == b"ftyp", \
+        f"the remux must write an mp4 into its job dir; out={out!r} err={err!r}"
+
+    for cmd, path in (
+        ("cat", key),
+        ("ls", "/data/keys/atproto"),
+        ("ls", "/data/atproto"),
+    ):
+        rc, out, err = in_domain(cmd, path)
+        assert rc != 0 and not out, \
+            f"{path} must be Landlock-denied to the bridge's remux domain; rc={rc} " \
+            f"out={out[:64]!r}"
+        assert "Permission denied" in err, \
+            f"{path} denial must be EACCES (the Landlock deny); stderr={err!r}"
+        _assert_landlock_enforced(err, f"atproto remux denied {path}")
+
+
+@pytest.mark.feature("nest-hardening")
 def test_bridges_self_report_their_confinement_over_the_wire(serving_nest):
     """(H) The no-SSH observable: every fact tests (A)–(G) establish by running
     `docker exec` against the container must ALSO be readable over admin WS-RPC,
     because that is the only channel a *deployed* box offers — a provisioned box
     carries no ssh key (`testing.md` § Gap 3), and the 2026-07-22 verification of
-    these same facts on example.com needed a human, an SSH key, and a
+    these same facts on the live nest needed a human, an SSH key, and a
     production-shell approval.
 
     This is deliberately the *weak* proof of the same properties: it asks the

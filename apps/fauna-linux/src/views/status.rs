@@ -1,7 +1,9 @@
-use crate::i18n::strings::{admin, common, devices, features, photo_backup, status};
+use crate::i18n::strings::{admin, common, devices, features, settings, status};
 use adw::prelude::*;
 use fauna_ui_ids as ids;
 use gtk::glib;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// Widget handles for status view rows that need dynamic updates.
 pub struct StatusHandles {
@@ -40,9 +42,40 @@ pub struct StatusHandles {
     // Node-info rows.
     pub node_domain_row: adw::ActionRow,
     pub node_version_row: adw::ActionRow,
-    // Sync-section rows.
+    // Sync-section rows. `files_row` is the nest-side files-synced summary
+    // (untagged); `last_sync_row` carries `status-sync-last` off the local leg.
     pub files_row: adw::ActionRow,
     pub last_sync_row: adw::ActionRow,
+    /// The snapshot-painted sections' groups, the pending row and the shared
+    /// leg state — see [`LegHandles`].
+    pub legs: LegHandles,
+}
+
+/// What the shared Status snapshot paints (`ui/status.md` § State & data shape):
+/// the Node, Encryption and Build groups, the local `status-sync-pending` row,
+/// and the legs fetched so far. **A section whose leg is not loaded is hidden**
+/// — no placeholder, no zero — so a driver's wait lands on the real value.
+/// Cloning shares the leg state (one `Rc`), which is what lets the flat
+/// `WidgetHandles` copy rebuild a `StatusHandles` per message.
+#[derive(Clone)]
+pub struct LegHandles {
+    pub node_group: adw::PreferencesGroup,
+    pub sync_pending_row: adw::ActionRow,
+    pub mls_group: adw::PreferencesGroup,
+    pub key_packages_row: adw::ActionRow,
+    pub channels_row: adw::ActionRow,
+    pub build_group: adw::PreferencesGroup,
+    pub build_sha_row: adw::ActionRow,
+    legs: Rc<RefCell<LoadedLegs>>,
+}
+
+/// The legs fetched so far; the build leg is a compile-time constant and the
+/// channel count is read from the live conversations manager at paint.
+#[derive(Default)]
+struct LoadedLegs {
+    node: Option<fauna_client_status::NodeLeg>,
+    sync: Option<fauna_client_status::SyncLeg>,
+    key_packages: Option<u64>,
 }
 
 /// Build the status view: a single `adw::PreferencesPage` with identity,
@@ -167,9 +200,21 @@ pub fn build_status_view() -> (gtk::Box, StatusHandles) {
         .build();
     sync_group.add(&files_row);
 
+    // The LOCAL sync agent's backlog and last pass (`status-sync-pending` /
+    // `status-sync-last`, the snapshot's sync leg) — hidden until the agent's
+    // first `GetServiceStatus` answer, like windows, macos and tui.
+    let sync_pending_row = adw::ActionRow::builder()
+        .title(common::PENDING)
+        .subtitle("")
+        .visible(false)
+        .build();
+    crate::testid::set_test_id(&sync_pending_row, ids::STATUS_SYNC_PENDING);
+    sync_group.add(&sync_pending_row);
+
     let last_sync_row = adw::ActionRow::builder()
-        .title(photo_backup::LAST_SYNC)
-        .subtitle(common::NEVER)
+        .title(status::sync::LAST_SYNC)
+        .subtitle("")
+        .visible(false)
         .build();
     crate::testid::set_test_id(&last_sync_row, ids::STATUS_SYNC_LAST);
     sync_group.add(&last_sync_row);
@@ -335,12 +380,16 @@ pub fn build_status_view() -> (gtk::Box, StatusHandles) {
     page.add(&region_group);
 
     // --- Node info group ---
+    // The Node, Encryption and Build groups paint the shared snapshot
+    // (`paint_legs`) and are hidden until their leg is known (`status.md` §
+    // State & data shape — "a section whose leg is None is not rendered").
     let node_group = adw::PreferencesGroup::new();
     node_group.set_title(status::node::TITLE);
+    node_group.set_visible(false);
 
     let node_domain_row = adw::ActionRow::builder()
         .title(common::DOMAIN)
-        .subtitle("—")
+        .subtitle("")
         .subtitle_selectable(true)
         .build();
     crate::testid::set_test_id(&node_domain_row, ids::STATUS_NODE_DOMAIN);
@@ -348,12 +397,48 @@ pub fn build_status_view() -> (gtk::Box, StatusHandles) {
 
     let node_version_row = adw::ActionRow::builder()
         .title(admin::dashboard::VERSION)
-        .subtitle("—")
+        .subtitle("")
         .build();
     crate::testid::set_test_id(&node_version_row, ids::STATUS_NODE_VERSION);
     node_group.add(&node_version_row);
 
     page.add(&node_group);
+
+    // --- Encryption group (read-only MLS counts) ---
+    let mls_group = adw::PreferencesGroup::new();
+    mls_group.set_title(settings::encryption_page::TITLE);
+    mls_group.set_visible(false);
+
+    let key_packages_row = adw::ActionRow::builder()
+        .title(status::encryption::KEY_PACKAGES)
+        .subtitle("")
+        .build();
+    crate::testid::set_test_id(&key_packages_row, ids::STATUS_MLS_KEY_PACKAGES);
+    mls_group.add(&key_packages_row);
+
+    let channels_row = adw::ActionRow::builder()
+        .title(status::encryption::DM_CHANNELS)
+        .subtitle("")
+        .build();
+    crate::testid::set_test_id(&channels_row, ids::STATUS_MLS_CHANNELS);
+    mls_group.add(&channels_row);
+
+    page.add(&mls_group);
+
+    // --- Build group (absent on an unstamped build) ---
+    let build_group = adw::PreferencesGroup::new();
+    build_group.set_title(status::build::TITLE);
+    build_group.set_visible(false);
+
+    let build_sha_row = adw::ActionRow::builder()
+        .title(status::build::COMMIT)
+        .subtitle("")
+        .subtitle_selectable(true)
+        .build();
+    crate::testid::set_test_id(&build_sha_row, ids::STATUS_BUILD_SHA);
+    build_group.add(&build_sha_row);
+
+    page.add(&build_group);
 
     // NOTE: the privacy / mail / mail-aliases / mail-spam / mail-export /
     // mail-lists / mail-list-members / linked-nests pages used to be embedded
@@ -386,7 +471,19 @@ pub fn build_status_view() -> (gtk::Box, StatusHandles) {
         node_version_row,
         files_row,
         last_sync_row,
+        legs: LegHandles {
+            node_group,
+            sync_pending_row,
+            mls_group,
+            key_packages_row,
+            channels_row,
+            build_group,
+            build_sha_row,
+            legs: Rc::default(),
+        },
     };
+    // The build leg is a compile-time constant: paint it now.
+    paint_legs(&handles);
 
     wrapper.append(&page);
     (wrapper, handles)
@@ -439,6 +536,46 @@ pub fn update_quota(handles: &StatusHandles, quota: &serde_json::Value) {
 /// is written once (priority #2). Mirrors tui's `feature_limits_elements`
 /// (`apps/fauna-tui/src/settings/root.rs`) field-for-field.
 pub fn update_features(handles: &StatusHandles, rows: &[fauna_client_features::FeatureRow]) {
+    LAST_FEATURES.with_borrow_mut(|last| {
+        *last = Some(LastFeatures {
+            rows_box: handles.feature_limits_rows_box.clone(),
+            section_marker: handles.feature_limits_section_marker.clone(),
+            rows: rows.to_vec(),
+        });
+    });
+    repaint_features();
+}
+
+/// What the last transparency read painted, kept so the self-limits control
+/// (`crate::feature_editor`, `Host::SelfTier`) can repaint the rows when its
+/// own state changes — opening the editor, typing, a save — without a re-read.
+struct LastFeatures {
+    rows_box: gtk::Box,
+    section_marker: gtk::Label,
+    rows: Vec<fauna_client_features::FeatureRow>,
+}
+
+thread_local! {
+    static LAST_FEATURES: std::cell::RefCell<Option<LastFeatures>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Repaint the feature-limits rows from the last read (a no-op before the first).
+pub fn repaint_features() {
+    let Some((rows_box, section_marker, rows)) = LAST_FEATURES.with_borrow(|last| {
+        last.as_ref()
+            .map(|l| (l.rows_box.clone(), l.section_marker.clone(), l.rows.clone()))
+    }) else {
+        return;
+    };
+    paint_features(&rows_box, &section_marker, &rows);
+}
+
+fn paint_features(
+    rows_box: &gtk::Box,
+    section_marker: &gtk::Label,
+    rows: &[fauna_client_features::FeatureRow],
+) {
     // Rebuild: clear `feature_limits_rows_box`'s own children — a plain
     // `gtk::Box` this function owns outright, safe to blind-clear-and-rebuild.
     // NEVER clear `feature_limits_group` itself: `AdwPreferencesGroup::add()`
@@ -451,8 +588,8 @@ pub fn update_features(handles: &StatusHandles, rows: &[fauna_client_features::F
     // group's OWN `first_child()` chain hit its title/header furniture too
     // and corrupted the widget outright (wedged every automation command on
     // the app — see the construction site's comment).
-    while let Some(child) = handles.feature_limits_rows_box.first_child() {
-        handles.feature_limits_rows_box.remove(&child);
+    while let Some(child) = rows_box.first_child() {
+        rows_box.remove(&child);
     }
 
     // A `hidden` row means this nest build does not carry the feature at all
@@ -465,7 +602,7 @@ pub fn update_features(handles: &StatusHandles, rows: &[fauna_client_features::F
         let empty = gtk::Label::new(Some(features::EMPTY));
         empty.set_halign(gtk::Align::Start);
         crate::testid::set_test_id(&empty, ids::FEATURE_LIMITS_EMPTY);
-        handles.feature_limits_rows_box.append(&empty);
+        rows_box.append(&empty);
     } else {
         for row in &visible {
             let row_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -523,12 +660,67 @@ pub fn update_features(handles: &StatusHandles, rows: &[fauna_client_features::F
                 row_box.append(&cell_box);
             }
 
-            handles.feature_limits_rows_box.append(&row_box);
+            append_own_limit(&row_box, &row.feature);
+
+            rows_box.append(&row_box);
         }
     }
 
     // Reveal the section anchor now that the read has resolved.
-    handles.feature_limits_section_marker.set_visible(true);
+    section_marker.set_visible(true);
+}
+
+/// The self-limits control on one row (`dynamic-features.md` § Authoring
+/// surfaces; `settings.md` § Layout & flow item 2b): the bearer's own AUTHORED
+/// document in words, the edit button, and — while open for this member — the
+/// shared `feature-policy-editor`, in place, right under its row. Mirrors tui's
+/// `own_limit_elements`.
+///
+/// Absent while the authored read has not resolved: a summary painted without
+/// its data would say "No limit set" with no basis.
+fn append_own_limit(row_box: &gtk::Box, feature: &str) {
+    use crate::feature_editor::{Host, build_editor, open, with_state};
+
+    let Some((summary, editing)) = with_state(Host::SelfTier, |s| {
+        let row = s
+            .surface
+            .as_ref()?
+            .rows()
+            .into_iter()
+            .find(|r| r.feature == feature)?;
+        let editing = s
+            .editor
+            .as_ref()
+            .is_some_and(|e| e.feature_key() == feature);
+        Some((row.summary, editing))
+    }) else {
+        return;
+    };
+
+    let own_label = gtk::Label::new(Some(features::OWN_LABEL));
+    own_label.set_halign(gtk::Align::Start);
+    own_label.add_css_class("dim-label");
+    row_box.append(&own_label);
+
+    let summary_label = gtk::Label::new(Some(&summary.resolve(crate::i18n::strings::lookup)));
+    summary_label.set_halign(gtk::Align::Start);
+    crate::testid::set_test_id(&summary_label, ids::FEATURE_LIMITS_OWN_SUMMARY);
+    row_box.append(&summary_label);
+
+    let edit = gtk::Button::with_label(features::OWN_EDIT);
+    edit.set_halign(gtk::Align::Start);
+    crate::testid::set_test_id(&edit, ids::FEATURE_LIMITS_OWN_EDIT_BUTTON);
+    let feature_key = feature.to_string();
+    edit.connect_clicked(move |_| {
+        open(Host::SelfTier, &feature_key);
+        // The button is rebuilt by the repaint: do it off its own handler.
+        glib::idle_add_local_once(repaint_features);
+    });
+    row_box.append(&edit);
+
+    if editing && let Some(editor) = build_editor(Host::SelfTier, Rc::new(repaint_features)) {
+        row_box.append(&editor);
+    }
 }
 
 /// Format a `{used_bytes, max_bytes}` usage object as "used / max"; empty when
@@ -546,37 +738,83 @@ fn format_usage_bytes(usage: Option<&serde_json::Value>) -> String {
     )
 }
 
-/// Update node-info rows from a JSON node-info response.
-pub fn update_nest_info(handles: &StatusHandles, info: &serde_json::Value) {
-    if let Some(domain) = info.get("domain").and_then(|v| v.as_str()) {
-        handles.node_domain_row.set_subtitle(domain);
-    }
-    if let Some(version) = info.get("version").and_then(|v| v.as_str()) {
-        handles.node_version_row.set_subtitle(version);
+/// The snapshot the Status page paints from the legs fetched so far
+/// (`ui/status.md` § State & data shape). `channels` is the conversations
+/// manager's live count, read at paint (no fetch owns it); the build leg is the
+/// compile-time stamp.
+fn legs_text(loaded: &LoadedLegs, channels: u64, now_ms: i64) -> fauna_client_status::StatusText {
+    let snapshot = fauna_client_status::StatusSnapshot {
+        node: loaded.node.clone(),
+        sync: loaded.sync,
+        mls: loaded
+            .key_packages
+            .map(|key_packages| fauna_client_status::MlsLeg {
+                key_packages,
+                channels,
+            }),
+        build: fauna_client_status::BuildLeg::from_stamp(option_env!("FAUNA_BUILD_COMMIT")),
+    };
+    fauna_client_status::render(&snapshot, now_ms, crate::i18n::strings::lookup)
+}
+
+/// Paint one snapshot-backed row: show it with the projection's bare value, or
+/// hide it when the leg has none (the absent-until-known rule).
+fn paint_row(row: &adw::ActionRow, text: Option<&str>) {
+    match text {
+        Some(value) => {
+            row.set_subtitle(value);
+            row.set_visible(true);
+        }
+        None => row.set_visible(false),
     }
 }
 
-/// Decide the "Last Sync" row text: `None`/`0` → [`common::NEVER`] ("no sync
-/// recorded yet" — the same convention as
-/// `fauna_core::format::backup_last_upload_label`); otherwise the shared
-/// relative-time display for `last_sync_at` (epoch **seconds**). `now_ms` is a
-/// parameter (not read internally) so this stays a pure, GTK-free unit.
-fn last_sync_text(last_sync_at: Option<i64>, now_ms: i64) -> String {
-    match last_sync_at {
-        Some(secs) if secs > 0 => crate::i18n::relative_time(secs.saturating_mul(1000), now_ms),
-        _ => common::NEVER.to_string(),
-    }
-}
-
-/// Update the Sync section from a `fetch_sync_status_summary` aggregate
-/// (`status.md` footnote 4 — the section used to render a permanent "0"/
-/// "Never" placeholder, never wired to live data after initial paint).
-pub fn update_sync_status(handles: &StatusHandles, files_synced: u64, last_sync_at: Option<i64>) {
-    handles.files_row.set_subtitle(&files_synced.to_string());
+/// Repaint every snapshot-backed element from the legs held so far. Nothing
+/// here derives a value — each text is `fauna_client_status::render`'s.
+fn paint_legs(handles: &StatusHandles) {
+    let legs = &handles.legs;
+    let channels = crate::conversations::manager().secure_channel_count();
     let now_ms = fauna_core::data::Timestamp::now_millis_or_zero() as i64;
-    handles
-        .last_sync_row
-        .set_subtitle(&last_sync_text(last_sync_at, now_ms));
+    let text = legs_text(&legs.legs.borrow(), channels, now_ms);
+
+    paint_row(&handles.node_domain_row, text.node_domain.as_deref());
+    paint_row(&handles.node_version_row, text.node_version.as_deref());
+    legs.node_group.set_visible(text.node_domain.is_some());
+    paint_row(&legs.sync_pending_row, text.sync_pending.as_deref());
+    paint_row(&handles.last_sync_row, text.sync_last.as_deref());
+    paint_row(&legs.key_packages_row, text.mls_key_packages.as_deref());
+    paint_row(&legs.channels_row, text.mls_channels.as_deref());
+    legs.mls_group.set_visible(text.mls_key_packages.is_some());
+    paint_row(&legs.build_sha_row, text.build_sha.as_deref());
+    legs.build_group.set_visible(text.build_sha.is_some());
+}
+
+/// The node leg arrived (`StatusClient::node`).
+pub fn update_node_leg(handles: &StatusHandles, node: &fauna_client_status::NodeLeg) {
+    handles.legs.legs.borrow_mut().node = Some(node.clone());
+    paint_legs(handles);
+}
+
+/// The local sync agent's latest `GetServiceStatus` answer — or `None` when it
+/// did not answer (an agent that is down is `sync-agent-status`'s to report,
+/// not a zero backlog here).
+pub fn update_sync_leg(handles: &StatusHandles, sync: Option<fauna_client_status::SyncLeg>) {
+    handles.legs.legs.borrow_mut().sync = sync;
+    paint_legs(handles);
+}
+
+/// The bearer's published key-package count arrived; the secure-channel count
+/// is re-read from the conversations manager in the same repaint.
+pub fn update_key_packages(handles: &StatusHandles, key_packages: u64) {
+    handles.legs.legs.borrow_mut().key_packages = Some(key_packages);
+    paint_legs(handles);
+}
+
+/// Update the nest-side "Files Synced" row from a `fetch_sync_status_summary`
+/// aggregate (`status.md` footnote 4). Untagged: the canonical `status-sync-*`
+/// IDs carry the local agent's leg, a complementary fact.
+pub fn update_files_synced(handles: &StatusHandles, files_synced: u64) {
+    handles.files_row.set_subtitle(&files_synced.to_string());
 }
 
 /// Decide the P2P tunnel row's subtitle from a `get_tunnel_status_summary()`
@@ -650,27 +888,40 @@ mod p2p_tunnel_tests {
 }
 
 #[cfg(test)]
-mod sync_status_tests {
+mod legs_text_tests {
     use super::*;
+    use fauna_client_status::{NodeLeg, SyncLeg};
 
     const NOW_MS: i64 = 1_700_000_000_000;
 
     #[test]
-    fn no_recorded_sync_reads_never() {
-        assert_eq!(last_sync_text(None, NOW_MS), common::NEVER);
-        // The `0` sentinel (never-synced epoch) is also "Never", matching
-        // `backup_last_upload_label`'s `secs > 0` guard.
-        assert_eq!(last_sync_text(Some(0), NOW_MS), common::NEVER);
+    fn unloaded_legs_render_nothing() {
+        let text = legs_text(&LoadedLegs::default(), 3, NOW_MS);
+        assert_eq!(text.node_domain, None);
+        assert_eq!(text.sync_pending, None);
+        assert_eq!(text.sync_last, None);
+        // The channel count is only shown once the key-package read resolves.
+        assert_eq!(text.mls_key_packages, None);
+        assert_eq!(text.mls_channels, None);
     }
 
     #[test]
-    fn recent_sync_renders_relative_time_not_never() {
-        let just_now_secs = NOW_MS / 1000;
-        let text = last_sync_text(Some(just_now_secs), NOW_MS);
-        assert_ne!(text, common::NEVER);
-        assert_eq!(
-            text,
-            crate::i18n::relative_time(just_now_secs * 1000, NOW_MS)
-        );
+    fn loaded_legs_render_the_bare_values() {
+        let loaded = LoadedLegs {
+            node: Some(NodeLeg {
+                domain: "nest.example".into(),
+                version: "0.1.2".into(),
+            }),
+            sync: Some(SyncLeg::default()),
+            key_packages: Some(20),
+        };
+        let text = legs_text(&loaded, 3, NOW_MS);
+        assert_eq!(text.node_domain.as_deref(), Some("nest.example"));
+        assert_eq!(text.node_version.as_deref(), Some("0.1.2"));
+        assert_eq!(text.mls_key_packages.as_deref(), Some("20"));
+        assert_eq!(text.mls_channels.as_deref(), Some("3"));
+        // A fresh device: nothing pending, never synced.
+        assert_eq!(text.sync_pending.unwrap().split(' ').next(), Some("0"));
+        assert_eq!(text.sync_last.as_deref(), Some(common::NEVER));
     }
 }

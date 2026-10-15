@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The Feed page's empty state — `feed-empty-state` (no posts, no search) or
@@ -25,3 +28,4 @@ public struct FeedEmptyStateView: View {
         .foregroundStyle(.secondary)
     }
 }
+#endif // !FAUNA_KIDS

@@ -4,7 +4,9 @@ Every test here drives a real `fauna-nest` binary and a real mail-bridge MDA
 over the CalDAV wire (and, for scheduling, the IMAP wire) with a scripted
 client — the shape a stock calendar app speaks. No Fauna app participates, so
 each is a `[nest]` witness (`docs/goal/architecture/feature-catalog.md` § The
-two surfaces) for `docs/features/calendar-in-standard-apps.md`.
+two surfaces) for `docs/features/calendar-in-standard-apps.md` — and, at the
+end, for the admin's per-service switches on
+`docs/features/admin-calendar-contacts-files.md`.
 
 Goal doc: `docs/goal/behavior/caldav-server.md` — each test names its section.
 
@@ -20,7 +22,7 @@ import time
 import pytest
 
 from helpers import budgets
-from helpers.caldav_client import CalDAVClient, build_invite_vevent
+from helpers.caldav_client import CalDAVClient, CalDAVError, build_invite_vevent
 from helpers.waiting import wait_until
 from helpers.mail_wire import (
     _imap_auth_plain,
@@ -702,4 +704,148 @@ def test_no_one_else_on_the_nest_can_read_or_change_your_calendar(
 
     assert "SUMMARY:Private appointment" in (mine.get_event(cal, uid) or ""), (
         "the owner's event must be untouched by every refused attempt"
+    )
+
+
+# ── admin-calendar-contacts-files 4, 6 and 7 ─────────────────────────────────
+#
+# The admin's per-service switches, witnessed at the running MDA. Each test
+# stands up its own `dav_toggle_venue` (a dedicated nest + MDA) so no switch is
+# flipped under the shared session nest's other mail tests. A switch flipped
+# after boot makes the MDA exit for a rebind; the test plays the supervisor
+# (`venue.rebind()`), as s6 does in production.
+
+
+def _apex_dav(nest, protocol: str) -> tuple[int, str | None]:
+    """GET the nest's apex `/.well-known/<protocol>`, no redirect-following."""
+    import urllib.error
+    import urllib.request
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    try:
+        resp = urllib.request.build_opener(NoRedirect).open(
+            f"{nest['url']}/.well-known/{protocol}", timeout=budgets.RPC_ROUNDTRIP_S)
+        return resp.status, resp.headers.get("Location")
+    except urllib.error.HTTPError as err:
+        return err.code, err.headers.get("Location")
+
+
+def _switch(nest, kind: str, enabled: bool) -> None:
+    """The admin flips one per-service switch over its own wire call."""
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    admin = nest["admin"]
+    with WsRpcAdminClient(
+        nest["url"], actor_id=bytes(admin["signing_key"].verify_key),
+        signing_key=bytes(admin["signing_key"]),
+    ) as admin_ws:
+        admin_ws.call(f"fauna.bridges.set_{kind}_enabled", {"enabled": enabled})
+
+
+def _calendars_served(app: CalDAVClient) -> list[str]:
+    """The calendar collections the home set lists — empty when the server
+    refuses the home set outright (no CalDAV mount answers it)."""
+    try:
+        return app.list_calendars()
+    except CalDAVError:
+        return []
+
+
+@pytest.mark.feature("admin-calendar-contacts-files")
+def test_switching_calendar_off_shuts_calendar_apps_out_and_on_lets_them_back(
+    dav_toggle_venue,
+):
+    """`admin.md` § 8. Calendar: flipping the calendar switch starts and stops
+    the bridge's calendar listener; `caldav-server.md` § Network exposure &
+    discovery: with calendar explicitly off the apex `/.well-known/caldav`
+    answers 503. A calendar app that worked is shut out when the admin switches
+    calendar off, and let back in — its calendar intact — when it is switched on
+    again."""
+    venue = dav_toggle_venue(mail=True, caldav=True)
+    nest = venue.nest_instance
+    app = _caldav(venue, venue.recipient_username, venue.recipient_password)
+    cal = app.personal_calendar()
+    uid = f"switch-{secrets.token_hex(4)}"
+    app.put_event(cal, uid, _event(uid, "Before the switch"))
+    href = app.href_for_uid(cal, uid)
+    assert href, "calendar on: the event just written must be listed"
+    status, location = _apex_dav(nest, "caldav")
+    assert status == 301 and location, f"calendar on: the apex must direct a calendar app on; got {status}"
+
+    _switch(nest, "caldav", False)
+    venue.rebind()
+    status, location = _apex_dav(nest, "caldav")
+    assert status == 503, f"calendar switched off must 503 at the apex; got {status} → {location}"
+    app.wait_until_serving()  # the shared DAV listener stays up for contacts and files
+    assert _calendars_served(app) == [], "with calendar switched off no calendar may be served"
+    got = app.raw("GET", href)
+    assert got.status_code != 200 and "Before the switch" not in got.text, (
+        f"with calendar switched off its events must be unreachable; got {got.status_code}"
+    )
+
+    _switch(nest, "caldav", True)
+    venue.rebind()
+    status, location = _apex_dav(nest, "caldav")
+    assert status == 301 and location, f"calendar switched back on: the apex must direct on again; got {status}"
+    app.wait_until_serving()
+    assert cal in _calendars_served(app), "switched back on, the calendar must be served again"
+    assert "SUMMARY:Before the switch" in (app.get_event(cal, uid) or ""), (
+        "switched back on, the event made before the switch must still be there"
+    )
+
+
+@pytest.mark.feature("admin-calendar-contacts-files")
+def test_mail_keeps_working_with_calendar_switched_off(dav_toggle_venue):
+    """`caldav-server.md` § Independent enablement: each service gates on its
+    own switch. With calendar switched off and mail on, the calendar surface is
+    gone (apex 503, no calendar served) while a mail app still signs in over
+    IMAP and opens its inbox."""
+    venue = dav_toggle_venue(mail=True, caldav=False)
+    status, location = _apex_dav(venue.nest_instance, "caldav")
+    assert status == 503, f"calendar off must 503 at the apex; got {status} → {location}"
+    app = _caldav(venue, venue.recipient_username, venue.recipient_password)
+    assert _calendars_served(app) == [], "with calendar off no calendar may be served"
+
+    deadline = time.monotonic() + budgets.RPC_ROUNDTRIP_S
+    sock, buf = _imaps_connect(venue, deadline)
+    try:
+        assert _imap_auth_plain(sock, buf, "a1", venue.recipient_username,
+                                venue.recipient_password, deadline) == "OK", (
+            "with calendar off, a mail app must still sign in over IMAP"
+        )
+        status, _ = _imap_cmd(sock, buf, "a2", "SELECT INBOX", deadline)
+        assert status == "OK", "with calendar off, a mail app must still open its inbox"
+    finally:
+        sock.close()
+
+
+@pytest.mark.feature("admin-calendar-contacts-files")
+def test_switching_files_off_shuts_file_apps_out_of_members_files(dav_toggle_venue):
+    """`webdav-server.md` § Independent enablement: `webdav_enabled` gates the
+    MDA's `/webdav/` mount. A file app that reached a member's files root is
+    shut out once the admin switches files off — the mount is gone from the
+    listener, which stays up for calendars and contacts. (The standard-address
+    half is outcome 5's witness.)"""
+    from helpers.webdav_client import WebDAVClient
+
+    venue = dav_toggle_venue(mail=True)  # files unset: follows mail, so on
+    files = WebDAVClient(f"https://127.0.0.1:{venue.caldav_port}", venue.recipient_username,
+                         venue.recipient_password, verify=False)
+    files.wait_until_serving()
+    before = files.propfind_raw("", depth="0")
+    assert before.status_code == 207, (
+        f"files on: a file app must reach the member's files root; got "
+        f"{before.status_code}:\n{before.text[:600]}"
+    )
+
+    _switch(venue.nest_instance, "webdav", False)
+    venue.rebind()
+    files.wait_until_serving()
+    after = files.propfind_raw("", depth="0")
+    assert after.status_code != 207 or "/webdav/" not in after.text, (
+        f"files switched off: the member's files root must not be served; got "
+        f"{after.status_code}:\n{after.text[:600]}"
     )

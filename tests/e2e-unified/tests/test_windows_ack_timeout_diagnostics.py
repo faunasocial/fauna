@@ -427,3 +427,159 @@ def test_the_get_path_actually_appends_it(monkeypatch):
         "the driver raised the bridge's error without the app's own last words — "
         f"the crash still does not diagnose itself: {caught.value}"
     )
+
+
+# ── every ack-polling command carries it, and the crash report rides WHOLE ────
+#
+# The hook is only as good as its callers. Two of the five ack-polling commands
+# (`call_command`, `call_machine_method`) appended it; `set_state`, `reset` and
+# `logout` raised a bare `TimeoutError` — and `set_state` is the sign-in every
+# `logged_in_app` fixture performs. Measured 2026-10-08 on Windows: a re-sign-in died on the UI thread, the live tee showed the one
+# `[fauna] FATAL (UI thread) — Cannot access a disposed object.` header it is
+# built to show, and the exception, its stack and the reporting thread's live
+# stack — all captured in `_bridge_log` — never reached the failure, which said
+# only that `set_state` went unacknowledged for 60 s.
+#
+# And a 40-line TAIL is not enough to carry them even once wired: `ReportFatal`
+# writes the exception's `ToString()` AND `Environment.StackTrace`, a dying app's
+# pumps keep logging after it, and the bridge narrates the teardown — so the one
+# block that names the cause is the first to scroll out.
+
+
+def _disposed_object_fatal(stack_frames: int = 60) -> list[str]:
+    """The shape `App.xaml.cs::ReportFatal` writes, as the drain tags it."""
+    return [
+        "[err] [fauna] FATAL (UI thread) — Cannot access a disposed object.",
+        "[err] System.ObjectDisposedException: Cannot access a disposed object.",
+        "[err] Object name: 'FaunaApp.Core.FfiNestClient'.",
+        "[err]    at FaunaApp.Core.FfiObject.CallWithHandle()",
+        "[err]    at FaunaApp.ViewModels.MainViewModel.OnConnectionStateChanged(FfiConnectionState state)",
+        "[err] --- reporting thread's live stack (the exception above may carry none of its own) ---",
+    ] + [f"[err]    at Microsoft.UI.Xaml.Frame{i}()" for i in range(stack_frames)]
+
+
+def _tail_after_the_crash(lines: int = 80) -> list[str]:
+    """What follows a fatal in a real buffer: pump warnings and bridge narration."""
+    return [
+        (
+            f"[err] 2026-10-08T01:00:{i % 60:02d}.000000Z  WARN fauna_client: "
+            "connection-state pump exited: Cannot access a disposed object."
+        )
+        if i % 2
+        else f"[bridge] GET /app/state #{i}"
+        for i in range(lines)
+    ]
+
+
+def test_a_fatal_report_rides_whole_past_the_tail(monkeypatch):
+    """The exception and the faulting frame survive any amount of later output."""
+    d = _driver(
+        monkeypatch,
+        status={"running": False, "exit_code": -1073741189},
+        log=["[bridge] launch epoch=4 pid=5150"]
+        + _disposed_object_fatal()
+        + _tail_after_the_crash(),
+    )
+
+    out = d.ack_timeout_diagnostics()
+
+    assert "System.ObjectDisposedException" in out, (
+        "the exception scrolled out of the tail — the header-only failure the "
+        f"re-sign-in crash produced: {out!r}"
+    )
+    assert "MainViewModel.OnConnectionStateChanged" in out, (
+        f"the frame naming the faulting method never reached the message: {out!r}"
+    )
+    assert "reporting thread's live stack" in out, (
+        f"the reporting thread's own live stack was cut off: {out!r}"
+    )
+
+
+def test_a_wedge_with_no_crash_report_adds_no_crash_section(monkeypatch):
+    """Only a captured fatal earns the whole-block section; a wedge stays a tail."""
+    d = _driver(
+        monkeypatch,
+        status={"running": True, "exit_code": None},
+        log=["[bridge] launch epoch=4 pid=5150"] + _tail_after_the_crash(),
+    )
+
+    out = d.ack_timeout_diagnostics()
+
+    assert "crash report" not in out, (
+        f"a wedge with no fatal in the buffer grew a crash section: {out!r}"
+    )
+
+
+def _never_acking(monkeypatch, log):
+    """A windows driver whose app is DEAD and never acks — the measured shape."""
+    d = _driver(
+        monkeypatch,
+        status={"running": False, "exit_code": -1073741189},
+        log=log,
+    )
+    monkeypatch.setattr(d, "_post", lambda *a, **k: {})
+    return d
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param(
+            lambda d: d.set_state({"nav": {"page": "feed"}}, timeout=0.3),
+            id="set_state",
+        ),
+        pytest.param(lambda d: d.reset(timeout=0.3), id="reset"),
+        pytest.param(lambda d: d.logout(timeout=0.3), id="logout"),
+    ],
+)
+def test_every_ack_timeout_carries_the_apps_last_words(monkeypatch, command):
+    """The flow, not the helper: each command's own ``raise`` must append it."""
+    d = _never_acking(
+        monkeypatch,
+        ["[bridge] launch epoch=4 pid=5150"] + _disposed_object_fatal(stack_frames=5),
+    )
+
+    with pytest.raises(TimeoutError) as caught:
+        command(d)
+
+    message = str(caught.value)
+    assert "System.ObjectDisposedException" in message, (
+        "this command's ack timeout raised without the driver's diagnostics — the "
+        f"crash that caused it is in the buffer and not in the failure: {message}"
+    )
+    assert "DEAD" in message, f"the liveness verdict never reached the failure: {message}"
+
+
+def test_a_reset_acked_but_still_signed_in_carries_them_too(monkeypatch):
+    """`reset`'s second raise: the ack arrived, the sign-out never did."""
+    d = _driver(
+        monkeypatch,
+        status={"running": True, "exit_code": None},
+        log=_disposed_object_fatal(stack_frames=5),
+    )
+    posted: dict = {}
+
+    def _post(path, body, *a, **k):
+        posted.update(body)
+        return {}
+
+    def _get(path, *a, **k):
+        if path == "/app/state":
+            return {
+                "last_command_id": posted.get("id"),
+                "ready": True,
+                "state": {"session": {"authenticated": True}},
+            }
+        return {"running": True, "exit_code": None}
+
+    monkeypatch.setattr(d, "_post", _post)
+    monkeypatch.setattr(d, "_get", _get)
+
+    with pytest.raises(TimeoutError) as caught:
+        d.reset(timeout=0.3)
+
+    message = str(caught.value)
+    assert "still authenticated" in message
+    assert "System.ObjectDisposedException" in message, (
+        f"the acked-but-signed-in reset raised without the diagnostics: {message}"
+    )

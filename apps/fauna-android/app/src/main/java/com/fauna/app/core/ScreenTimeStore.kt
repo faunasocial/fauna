@@ -8,7 +8,8 @@ import com.fauna.ffi.FfiScreenTimePolicy
 import com.fauna.ffi.FfiUsageHeartbeat
 import com.fauna.ffi.screenLockMessage
 import dagger.hilt.android.qualifiers.ApplicationContext
-import java.time.LocalTime
+import java.time.Instant
+import java.time.ZoneId
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -122,9 +123,11 @@ class ScreenTimeStore @Inject constructor(
 
     /** The device's local clock as minutes from local midnight — the unit
      *  [FfiScreenTimePolicy] stores its window bounds in. The window half is
-     *  pure local clock, so this needs no wire traffic at all. */
+     *  pure local clock, so this needs no wire traffic at all. Derived from
+     *  [nowSecs] (skewed), never a fresh OS read, so the e2e fake clock moves
+     *  the window verdict too, not only the budget one. */
     private fun localMinutesFromMidnight(): Int {
-        val now = LocalTime.now()
+        val now = Instant.ofEpochSecond(nowSecs()).atZone(ZoneId.systemDefault()).toLocalTime()
         return now.hour * 60 + now.minute
     }
 
@@ -189,7 +192,10 @@ class ScreenTimeStore @Inject constructor(
     private suspend fun heartbeatStep(active: Boolean) {
         val now = nowSecs()
         heartbeat.setActive(active, now)
-        val minutes = heartbeat.takeDue(now) ?: return
+        val minutes = heartbeat.takeDue(now) ?: run {
+            recompute()
+            return
+        }
         val offset = DeviceOffset.utcOffsetMinutes()
         try {
             val reply = api.familyUsageReport(minutes, offset)
@@ -203,7 +209,13 @@ class ScreenTimeStore @Inject constructor(
     /** The one-minute tick (also the shared engine's own accrual-step
      *  requirement of a caller — a slower tick would silently under-count). */
     private suspend fun tick() {
-        if (!heartbeat.isAccounting()) return
+        if (!heartbeat.isAccounting()) {
+            // The window half is pure local clock and needs no accounting —
+            // re-evaluate every tick so bedtime engages without a status read
+            // (windows `TickAsync`'s shape).
+            recompute()
+            return
+        }
         val foregrounded = ProcessLifecycleOwner.get().lifecycle.currentState
             .isAtLeast(Lifecycle.State.STARTED)
         heartbeatStep(foregrounded && lockMessage.value == null)

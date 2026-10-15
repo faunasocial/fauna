@@ -28,6 +28,11 @@ public record DmMessageView(
     bool Encrypted,
     string Timestamp,
     bool IsOwn,
+    // MessageSnapshot.canDelete: whether THIS viewer may delete this message — the
+    // shared manager folds in the thread's supports_message_delete capability and
+    // the viewer's role (own message, or owner/admin delete-any), so the bubble
+    // never branches on a role (conversation-rooms.md § Delete any message).
+    bool CanDelete,
     bool Deleted,
     IReadOnlyList<ReactionGroupVm> Reactions,
     // Set (non-null) iff the nest took this message down under a legal obligation
@@ -150,15 +155,6 @@ public sealed partial class DmMessageBubble : UserControl
     /// </summary>
     public bool SupportsReactions { get; set; }
 
-    /// <summary>
-    /// Whether this thread supports sender-only message delete — set by the page
-    /// to the thread's <c>supports_message_delete</c> capability (FaunaMls = true).
-    /// Combined with <see cref="DmMessageView.IsOwn"/>, gates the
-    /// <c>dm-message-delete-button</c> + its confirm. NEVER branches on the rail
-    /// enum (conversations.md § Architectural rules #5).
-    /// </summary>
-    public bool SupportsMessageDelete { get; set; }
-
     /// <summary>Raised when the user picks an emoji to toggle on this message —
     /// from a quick-set <c>dm-reaction-option</c>, the more-grid, or a tap on an
     /// existing <c>dm-reaction-pill</c>. The page dispatches to
@@ -169,10 +165,10 @@ public sealed partial class DmMessageBubble : UserControl
     /// delete.</summary>
     public Action<(DmMessageView msg, string emoji)>? ReactionToggleRequested;
 
-    /// <summary>Raised when the user confirms deleting this (own) message
+    /// <summary>Raised when the user confirms deleting this message
     /// (<c>dm-message-delete-confirm-button</c>). The page dispatches to
-    /// <c>ConversationsManager.delete_message</c> (sender-only; the manager
-    /// rejects a non-own target); the manager tombstones + re-emits and Refresh
+    /// <c>ConversationsManager.delete_message</c> (the manager re-checks the
+    /// viewer's authorization); the manager tombstones + re-emits and Refresh
     /// re-binds this bubble showing the deleted placeholder. Mirrors
     /// <see cref="ReplyRequested"/>.</summary>
     public Action<DmMessageView>? DeleteRequested;
@@ -579,16 +575,17 @@ public sealed partial class DmMessageBubble : UserControl
     /// (<c>dm-message-actions-menu</c>) for this message: the fixed-6 quick-set
     /// <c>dm-reaction-option</c> items + the <c>dm-reaction-more-button</c> (both gated on
     /// <see cref="SupportsReactions"/>), then EITHER the <c>dm-message-delete-button</c>
-    /// (gated on <see cref="SupportsMessageDelete"/> &amp; <c>msg.IsOwn</c>) OR the
+    /// (gated on <see cref="DmMessageView.CanDelete"/> alone — the snapshot already
+    /// folds in the capability and the viewer's role) plus the
     /// <c>dm-message-mark-as-spam-button</c> (gated <c>!msg.IsOwn</c> — a received
-    /// message; mail-spam.md § Wire shapes, no capability gate — mutually exclusive
-    /// with delete by construction). The ⋯ button itself is shown iff ≥1 action is
+    /// message; mail-spam.md § Wire shapes, no capability gate — so an owner or admin
+    /// sees both on a received message). The ⋯ button itself is shown iff ≥1 action is
     /// available; capability-gated off → Collapsed (no UIA peer). Rebuilt each Bind so
     /// a capability/own change re-gates it. Items are <c>MenuFlyoutItem</c>s with the
     /// indexed ids set on each (UIA-realized when the flyout opens).</summary>
     private void BuildActionsFlyout(DmMessageView msg)
     {
-        var showDelete = SupportsMessageDelete && msg.IsOwn;
+        var showDelete = msg.CanDelete;
         var showMarkAsSpam = !msg.IsOwn;
         var showReport = !msg.IsOwn && msg.CanReport;
         var anyAction = SupportsReactions || showDelete || showMarkAsSpam || showReport;

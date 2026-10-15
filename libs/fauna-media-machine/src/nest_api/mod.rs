@@ -102,7 +102,9 @@ pub(crate) fn map_content_api_err(e: fauna_nest_http::ApiError, action: &str) ->
         // their blocking route is the connection path too.
         e @ (fauna_nest_http::ApiError::NestIdentityChanged { .. }
         | fauna_nest_http::ApiError::SignInRefused
-        | fauna_nest_http::ApiError::Superseded { .. }) => MediaApiError::Transient {
+        | fauna_nest_http::ApiError::Superseded { .. }
+        | fauna_nest_http::ApiError::NestOutdated
+        | fauna_nest_http::ApiError::SubprotocolMismatch) => MediaApiError::Transient {
             detail: e.to_string(),
         },
     }
@@ -160,22 +162,24 @@ pub trait MediaNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
     /// proves the link itself by the statement walk.
     fn set_reader_predecessors(&self, _predecessors: Vec<[u8; 32]>) {}
 
-    /// `fauna.folders.list` (owner-scoped) — the caller's **own** folders as
-    /// the control plane reports them, including sets that hold no media yet.
-    /// This is what makes a brand-new empty set choosable in Media
-    /// (`media.md` § Layout & flow — the filter scopes over folders, and the
-    /// upload targets "the selected folder"); deriving the options from the
-    /// item aggregate alone left a fresh set permanently unreachable, so its
-    /// first upload could never happen.
+    /// `fauna.folders.list` with the member-visible projection — the caller's
+    /// own folders and the sets shared with it, as the control plane reports
+    /// them, including sets that hold no media yet. This is what makes a
+    /// brand-new empty set choosable in Media (`media.md` § Layout & flow — the
+    /// filter scopes over folders, and the upload targets "the selected
+    /// folder"); deriving the options from the item aggregate alone left a
+    /// fresh set permanently unreachable, so its first upload could never
+    /// happen. A member row carries what the items do not: the set's row, its
+    /// owner (the option label) and the caller's `writer` grant (the upload
+    /// target) — `media.md` § Encryption at rest → *The filter and the upload
+    /// target address the row*, (c).
     ///
-    /// **Owner-scoped on purpose** (`list`, not `list_owned_and_shared`). The
-    /// member-visible projection returns rows that are only *rostered* nest-side
-    /// — the nest cannot observe an MLS join — so rendering it requires the
-    /// client-side join-filter (`fauna_devices_machine::MlsQuery`), and without
-    /// one a stranger's un-accepted knock would appear unbidden in Media's
-    /// filter. Shared sets keep reaching Media exactly as they do today — through
-    /// `fauna.media.list`'s own readable-set scope, once they hold media — so
-    /// this narrower list adds an option without widening any exposure.
+    /// The member rows are only *rostered* nest-side — the nest cannot observe
+    /// an MLS join — so the machine runs the client-side join-filter over this
+    /// reply (`fauna_protocol::member_rows`, `MediaMachine::set_mls_query`)
+    /// before any row is offered; unwired, every member row is dropped, so a
+    /// stranger's un-accepted knock never appears in Media's filter. A
+    /// member row's declassification verdict is judged under its owner.
     ///
     /// Mode is carried per row because Media's two option lists differ:
     /// Sync + Backup browse, Sync alone may be an upload target
@@ -208,10 +212,17 @@ pub trait MediaNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
     /// the name (`docs/goal/behavior/file-sync.md` § Sealed names & paths). The
     /// upload gesture computes it where the key already is
     /// (`MediaMachine::do_upload`), because this seam is deliberately keyless.
+    ///
+    /// `folder_id` is the target set's row — `SyncChangeRecordRequest`'s
+    /// additive `folder_id`, which the nest resolves under the record kind's
+    /// writer gate and never by `folder`'s name forms when present
+    /// (`set-addressing.md` § The row form); `None` for an item-only set this
+    /// page knows by name alone.
     #[allow(clippy::too_many_arguments)]
     async fn record_member(
         &self,
         folder: &str,
+        folder_id: Option<i64>,
         device_id: &str,
         path: &str,
         manifest_hash: String,
@@ -233,9 +244,14 @@ pub trait MediaNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
     /// `path_sealed`, so a tombstone that records unsealed can never be
     /// re-sealed later — sealing at the gesture is the only chance this row
     /// gets.
+    ///
+    /// `folder_id` is the row the tombstone lands in, sent as the record's
+    /// `folder_id` — never a same-named set the name resolves to first
+    /// (`set-addressing.md` § The row form); `None` sends the name forms alone.
     async fn delete_member(
         &self,
         folder: &str,
+        folder_id: Option<i64>,
         device_id: &str,
         path: &str,
         path_sealed: Option<Vec<u8>>,
@@ -252,9 +268,14 @@ pub trait MediaNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
     ///
     /// Every version is one the shared judge admitted, carried with whether
     /// it was signed as the seat's current identity ([`ListedVersion`]).
+    ///
+    /// `folder_id` is the row the list narrows to, sent as the request's
+    /// `folder_id` — never a same-named set the name resolves to first
+    /// (`set-addressing.md` § The row form); `None` sends the name forms alone.
     async fn file_versions(
         &self,
         folder: &str,
+        folder_id: Option<i64>,
         path: &str,
         include_pruned: bool,
     ) -> Result<Vec<ListedVersion>, MediaApiError>;
@@ -278,10 +299,17 @@ pub trait MediaNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
     ///
     /// `path_sealed`: same contract as [`Self::delete_member`] — machine-minted,
     /// best-effort, carried verbatim.
+    ///
+    /// `folder_id` is the restored version's own row
+    /// (`FileVersionSummary::folder_id`), sent as the record's `folder_id` so
+    /// the re-point lands in the set the version belongs to — never in a
+    /// same-named own set the name resolves to first (`set-addressing.md`
+    /// § The row form); `None` sends the name forms alone.
     #[allow(clippy::too_many_arguments)]
     async fn restore_member(
         &self,
         folder: &str,
+        folder_id: Option<i64>,
         device_id: &str,
         path: &str,
         manifest_hash: String,

@@ -60,7 +60,7 @@ public enum ConversationsSendTestCommand {
 
     /// `conversations_real_resolve_send_new` — drive a **real** FaunaMls send the way
     /// the GUI does: type the recipient, resolve it through the real backend probe
-    /// (`fauna.conversations.keypackage.count` promotes a 64-hex actor id to a Fauna
+    /// (the `fauna.conversations.keypackage.addressable` boolean promotes a 64-hex actor id to a Fauna
     /// address), commit the chip, then `sendNewThread` bootstraps the group (fetch key
     /// package → create MLS group → deliver Welcome → post Application envelope). The
     /// one gesture that WRITES the MLS state store (the account-scoped

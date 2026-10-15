@@ -59,7 +59,7 @@ const DefaultRefreshInterval = 12 * time.Hour
 // Refresh error — same short tail as the TLS provider (the fetch is cheap and
 // the scheduled tick is long). refreshsched.NextDelay guarantees a > 0 delay so
 // a persistently-failing refresh retries at the 15m cap forever rather than
-// busy-spinning (the bug that filled example.com's disk on 2026-06-01).
+// busy-spinning (the bug that filled the live nest's disk on 2026-06-01).
 var backoffSchedule = []time.Duration{
 	1 * time.Minute,
 	5 * time.Minute,

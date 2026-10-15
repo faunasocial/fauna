@@ -151,6 +151,61 @@ public partial class AdminSettingsViewModel : ViewModelBase
         }
     }
 
+    // The add-a-tier form's drafts (admin-settings-tier-add-*, admin.md § 3 →
+    // Defining a new tier): a name plus the same five raw-i64 cap texts a row edits,
+    // empty until typed. Two-way bound to the page's inputs.
+    [ObservableProperty] private string _addTierName = string.Empty;
+    [ObservableProperty] private string _addMaxInboxBytesText = string.Empty;
+    [ObservableProperty] private string _addMaxStorageBytesText = string.Empty;
+    [ObservableProperty] private string _addMaxDevicesText = string.Empty;
+    [ObservableProperty] private string _addMaxBlobSizeText = string.Empty;
+    [ObservableProperty] private string _addMaxFeedsText = string.Empty;
+
+    /// <summary>Define a new tier via <c>fauna.admin.tiers.create</c> (admin.md § 3 →
+    /// <i>Defining a new tier</i>). The name is trimmed and must be non-empty; every
+    /// cap goes through the shared <c>parse_cap</c> (a blank or fractional cap is
+    /// refused, a negative clamps to 0) — both refused locally on the banner before
+    /// any wire call. A nest refusal (empty/duplicate name →
+    /// <c>fauna.admin.conflict</c>) is worded through <c>add_tier_error</c>. The form
+    /// clears only after the create lands, so a refused name keeps what was typed.
+    /// Mirrors web <c>addTier</c> / android <c>AdminSettingsVM.addTier</c>.</summary>
+    public async Task AddTierAsync()
+    {
+        var name = AddTierName.Trim();
+        if (name.Length == 0)
+        {
+            SetError(Strings.Get("admin/settings_page/add_tier_error_empty_name"));
+            return;
+        }
+        var caps = new[]
+        {
+            AddMaxInboxBytesText, AddMaxStorageBytesText, AddMaxDevicesText,
+            AddMaxBlobSizeText, AddMaxFeedsText,
+        }.Select(FaunaFfiMethods.ParseCap).ToArray();
+        if (caps.Any(c => c is null))
+        {
+            SetError(Strings.Get("admin/settings_page/add_tier_error_invalid_cap"));
+            return;
+        }
+        ErrorMessage = null;
+        try
+        {
+            await _rpc.AdminTiersCreateAsync(
+                name, caps[0]!.Value, caps[1]!.Value, caps[2]!.Value, caps[3]!.Value, caps[4]!.Value);
+            AddTierName = string.Empty;
+            AddMaxInboxBytesText = string.Empty;
+            AddMaxStorageBytesText = string.Empty;
+            AddMaxDevicesText = string.Empty;
+            AddMaxBlobSizeText = string.Empty;
+            AddMaxFeedsText = string.Empty;
+            await ReloadTiersAsync();
+        }
+        catch (Exception ex)
+        {
+            SetError(Strings.Get("admin/settings_page/add_tier_error").Replace("{message}", Strings.Error(ex)));
+        }
+    }
+
     /// <summary>Designate or re-point one membership row via
     /// <c>fauna.admin.membership_tiers.set</c> (an upsert — no delete-then-create
     /// dance), then refetch so the row re-renders from persisted state. Save sends the

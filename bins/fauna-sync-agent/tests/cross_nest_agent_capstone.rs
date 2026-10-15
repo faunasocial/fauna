@@ -23,7 +23,7 @@
 //!   folder-key custody itself (the account plane's `fauna.state.folder-keys`,
 //!   through the store it mounts as the machine's enrolled principal) and
 //!   resolves the foreign set from its `ForeignFolder` custody record
-//!   (`on-demand-files.md` § Shared sets on a capability host → *One
+//!   (`on-demand-files-shared-sets.md` § Shared sets on a capability host → *One
 //!   mechanism*). The test runs the same producer over the same custody to name
 //!   what the agent will serve; a hand-built `FolderEngineKeys` fixture would
 //!   re-commit the exact substitution this task exists to catch.
@@ -94,7 +94,7 @@
 //! the machine principal his app enrolled — the capability host's shape,
 //! custody read through a throwaway fleet replica (decision 1′) — and hydrates
 //! and writes the foreign set from his custody record alone
-//! (`on-demand-files.md` § Shared sets on a capability host → *One mechanism*,
+//! (`on-demand-files-shared-sets.md` § Shared sets on a capability host → *One mechanism*,
 //! question 2). The reader tests build the same host over a `reader` share
 //! (decision 3): read-only, enumerating, refusing every write, and hydrating
 //! under the read token its byte plane takes in place of the write token.
@@ -266,6 +266,14 @@ impl Owner {
             )),
             Some(set_nonce),
         );
+        // Her reader judges the served rows it pulls — a member's among them —
+        // against the set's nonce and its owner, as an owner's host binds it.
+        engine.set_reader_binding(fauna_protocol::sync_row_verify::ReaderBinding {
+            set_nonce: Some(set_nonce),
+            owner: Some(keypair.actor_id().0),
+            account: Some(keypair.actor_id().0),
+            ..Default::default()
+        });
         engine
     }
 
@@ -398,6 +406,7 @@ impl Owner {
 /// owner's seed already recorded on H (order is load-bearing — module docs).
 struct Staged {
     h_base: String,
+    h_state: Arc<AppState>,
     f_base: String,
     f_state: Arc<AppState>,
     bob_secret: [u8; 32],
@@ -416,14 +425,41 @@ struct Staged {
     /// The owner's seed, recorded on H before any member host starts.
     rel: &'static str,
     owner_payload: Vec<u8>,
+    /// The owner's engine that recorded the seed — in a metadata-only folder
+    /// the seed's only holder, and so the seat its readers are served from.
+    owner_engine: Option<fauna_sync_engine::engine::SyncEngine>,
     /// Kept alive for the test's length: the owner's watch dir.
-    _owner_watch: tempfile::TempDir,
+    owner_watch: tempfile::TempDir,
+}
+
+/// The owner's row of the set, off her own folder list. Matched by its name
+/// hash on the wire listing: a sealed set rests no plaintext name, and the
+/// rendering list omits a row its client holds no label keys for.
+async fn owners_set_row(
+    alice_nest: &Arc<fauna_client::NestClient>,
+) -> fauna_protocol::folders::FolderSummary {
+    let hash = fauna_core::path_crypto::set_name_hash(SET_NAME);
+    fauna_client_folders::FoldersClient::new(Arc::clone(alice_nest))
+        .list_owned_and_shared_wire()
+        .await
+        .expect("list the owner's folders")
+        .folders
+        .into_iter()
+        .find(|fs| fs.name_hash.as_ref().map(|h| h.to_vec()) == Some(hash.to_vec()))
+        .expect("the owner's set is listed")
 }
 
 /// Stage L1–L3: the owner's cross-nest share under `access` (`"writer"` or
 /// `"reader"`), the member's accept, the seedless resolution naming the
 /// foreign set, and the owner's seed on H.
 async fn stage(access: &'static str) -> Staged {
+    stage_with(access, false).await
+}
+
+/// [`stage`], over a folder the owner turned **metadata-only** before she
+/// shared it when `metadata_only` — so the Welcome stamps the residency onto
+/// the member's record and the seed rests on her disk alone.
+async fn stage_with(access: &'static str, metadata_only: bool) -> Staged {
     use fauna_client_conversations::NestConversationsRpc;
     use fauna_client_folders::orchestration::FoldersAuthor;
     use fauna_client_folders::{FoldersClient, NestFolderCustodySink, custody};
@@ -498,6 +534,16 @@ async fn stage(access: &'static str) -> Staged {
     )
     .await
     .expect("alice creates the set");
+    if metadata_only {
+        FoldersClient::new(Arc::clone(&alice_nest))
+            .update(fauna_protocol::folders::FolderUpdateRequest {
+                name: SET_NAME.to_string(),
+                residency: Some("metadata_only".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("alice keeps the set's content off the nest");
+    }
     let alice_author = FoldersAuthor::new(
         FoldersClient::new(Arc::clone(&alice_nest)),
         ActorKeypair::from_secret(alice_secret),
@@ -575,6 +621,15 @@ async fn stage(access: &'static str) -> Staged {
         "the grant must be recorded durably, not just observed in flight"
     );
     let group_id = foreign_record.mls_group_id.clone();
+    if metadata_only {
+        // Step (1): the member's seat arms its upload skip from this reading.
+        assert_eq!(
+            foreign_record.residency.as_ref().map(|r| r.metadata_only),
+            Some(true),
+            "the member's record must state the folder's residency, or its seat uploads \
+             the bytes the folder keeps off the nest"
+        );
+    }
 
     // ── L2: the agent's own resolution, by the producer it runs ─────────
     // A foreign set is in NO nest projection, so the producer must union the
@@ -625,9 +680,26 @@ async fn stage(access: &'static str) -> Staged {
         group_id: group_id.clone(),
     };
     let owner_watch = tempfile::tempdir().unwrap();
-    let alice_sync = owner
+    let mut alice_sync = owner
         .engine(&h_state, owner_watch.path().to_path_buf())
         .await;
+    if metadata_only {
+        // Bound by her row's ref, as a resident host binds it: the engine reads
+        // the residency off that row, and an unbound engine reads none — it
+        // would upload the bytes this folder keeps off the nest.
+        let row = owners_set_row(&alice_nest).await;
+        alice_sync = alice_sync.with_binding_edge(fauna_sync_engine::binding_edge::BindingEdge {
+            folder_ref: fauna_core::folder_keys::FolderRef::Local(row.id),
+            basis: fauna_sync_engine::binding_edge::BindingBasis::of(&row),
+            on_rebuild: Arc::new(|| {}),
+        });
+        alice_sync.refresh_sync_mode().await;
+        assert!(
+            alice_sync.is_metadata_only_residency(),
+            "the owner's engine must read the folder's residency, or its upload rests the \
+             bytes this folder keeps off the nest"
+        );
+    }
 
     let owner_payload: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
     let rel = "from-alice.bin";
@@ -639,6 +711,7 @@ async fn stage(access: &'static str) -> Staged {
 
     Staged {
         h_base,
+        h_state,
         f_base,
         f_state,
         bob_secret,
@@ -652,7 +725,125 @@ async fn stage(access: &'static str) -> Staged {
         owner,
         rel,
         owner_payload,
-        _owner_watch: owner_watch,
+        owner_engine: Some(alice_sync),
+        owner_watch,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// The member's real agent, bound to the foreign set
+// ─────────────────────────────────────────────────────────────────────────
+
+/// The member's real `fauna-sync-agent` process on a machine of its own,
+/// enrolled, provisioned with no content key, and bound to the foreign set —
+/// its engine serving.
+struct MemberAgent {
+    socket: PathBuf,
+    /// The bound folder on the member's disk.
+    location: PathBuf,
+    _agent: common::KillOnDrop,
+    _world: AgentWorld,
+}
+
+impl MemberAgent {
+    async fn bind(prefix: &str, st: &Staged) -> Self {
+        let Staged {
+            f_base,
+            f_state,
+            bob_secret,
+            bob_id,
+            bob_hex,
+            bob_nest,
+            bob_app,
+            entry,
+            ..
+        } = st;
+        let (bob_secret, bob_id) = (*bob_secret, *bob_id);
+        let bob_backup_key = fauna_core::crypto::BackupKey::derive(&bob_secret);
+        let world = AgentWorld::new(prefix);
+        let socket = world.socket_path();
+        let member_location = world.root().join("bob-bound");
+        std::fs::create_dir_all(&member_location).unwrap();
+
+        // The member's app enrols this machine first, so the agent loads a
+        // `SyncWrite` writer key as its change signer and reads his custody as the
+        // machine's enrolled principal — which his other machine's next pass keys
+        // for the account's generation. The enrolling app is gone before the agent
+        // starts.
+        common::enroll_as_w5_app(
+            bob_secret,
+            &world,
+            f_base,
+            bob_hex,
+            None,
+            hex::encode(MEMBER_DEVICE),
+        )
+        .await;
+        bob_app.sync().await;
+        let _agent = world.spawn_agent_trusting(&[f_base.as_str()]);
+        await_agent(&socket);
+
+        // The member's bearer is on his OWN nest F: every control-plane call rides
+        // F and F relays the federated ones to H. That is the whole cross-nest shape.
+        let bob_http_token = f_state.auth.token_store.insert(bob_id, 3600).await;
+        // The member's own BackupKey: it is what opens the account's state rows —
+        // his custody among them, which is where the agent finds the foreign set
+        // and its keys.
+        let cap = SyncCapability::new(
+            bob_backup_key.to_bytes().to_vec(),
+            bob_id.0.to_vec(),
+            f_base.to_string(),
+            hex::encode(MEMBER_DEVICE),
+            BearerToken::new(bob_http_token, 4_000_000_000),
+        );
+        expect_ok(&socket, RequestMethod::ProvisionCapability(cap));
+
+        // Register the member's write device on his own nest (the app does this at
+        // login; `changes.record` keys its device gate on the connection actor).
+        let _: fauna_protocol::sync::SyncRegisterReply = {
+            use fauna_protocol::RpcRequester;
+            bob_nest
+                .request(
+                    "fauna.sync.register",
+                    fauna_protocol::sync::SyncRegisterRequest {
+                        device_id: hex::encode(MEMBER_DEVICE),
+                        label: "bob-agent".into(),
+                        capabilities: "read,write".into(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("register the member's device")
+        };
+
+        // The bind gesture, exactly as the provisioner performs it.
+        expect_ok(
+            &socket,
+            RequestMethod::AddLocation {
+                path: member_location.display().to_string(),
+            },
+        );
+        expect_ok(
+            &socket,
+            RequestMethod::SetLocationFolder {
+                path: member_location.display().to_string(),
+                folder: SET_NAME.to_string(),
+                // The ref the shared resolver stamps on the foreign entry — what
+                // `folder_ref_for_row` hands every app's bind gesture.
+                folder_id: entry.folder_id.clone(),
+            },
+        );
+
+        // The agent keys the set from its own custody read, which the provision
+        // above started (every reconcile is a content-key edge) and which lands
+        // asynchronously — so wait, bounded, for the engine it names to serve.
+        await_serving_engine(&socket, SET_NAME, SYNC_WINDOW);
+        MemberAgent {
+            socket,
+            location: member_location,
+            _agent,
+            _world: world,
+        }
     }
 }
 
@@ -664,102 +855,18 @@ async fn stage(access: &'static str) -> Staged {
 async fn cross_nest_writer_binds_round_trips_and_parks_through_the_agent() {
     use fauna_client_folders::FoldersClient;
 
+    let staged = stage("writer").await;
+    // ── L4: the real agent process, provisioned with no content key ─────
+    let member = MemberAgent::bind("fauna-xnest-capstone-", &staged).await;
+    let (socket, member_location) = (&member.socket, &member.location);
     let Staged {
-        f_base,
-        f_state,
-        bob_secret,
-        bob_id,
         bob_hex,
-        bob_nest,
-        bob_app,
         alice_nest,
-        entry,
         owner,
         rel,
         owner_payload,
         ..
-    } = stage("writer").await;
-    let bob_backup_key = fauna_core::crypto::BackupKey::derive(&bob_secret);
-
-    // ── L4: the real agent process, provisioned with no content key ─────
-    let world = AgentWorld::new("fauna-xnest-capstone-");
-    let socket = world.socket_path();
-    let member_location = world.root().join("bob-bound");
-    std::fs::create_dir_all(&member_location).unwrap();
-
-    // The member's app enrols this machine first, so the agent loads a
-    // `SyncWrite` writer key as its change signer and reads his custody as the
-    // machine's enrolled principal — which his other machine's next pass keys
-    // for the account's generation. The enrolling app is gone before the agent
-    // starts.
-    common::enroll_as_w5_app(
-        bob_secret,
-        &world,
-        &f_base,
-        &bob_hex,
-        None,
-        hex::encode(MEMBER_DEVICE),
-    )
-    .await;
-    bob_app.sync().await;
-    let _agent = world.spawn_agent_trusting(&[&f_base]);
-    await_agent(&socket);
-
-    // The member's bearer is on his OWN nest F: every control-plane call rides
-    // F and F relays the federated ones to H. That is the whole cross-nest shape.
-    let bob_http_token = f_state.auth.token_store.insert(bob_id, 3600).await;
-    // The member's own BackupKey: it is what opens the account's state rows —
-    // his custody among them, which is where the agent finds the foreign set
-    // and its keys.
-    let cap = SyncCapability::new(
-        bob_backup_key.to_bytes().to_vec(),
-        bob_id.0.to_vec(),
-        f_base.clone(),
-        hex::encode(MEMBER_DEVICE),
-        BearerToken::new(bob_http_token, 4_000_000_000),
-    );
-    expect_ok(&socket, RequestMethod::ProvisionCapability(cap));
-
-    // Register the member's write device on his own nest (the app does this at
-    // login; `changes.record` keys its device gate on the connection actor).
-    let _: fauna_protocol::sync::SyncRegisterReply = {
-        use fauna_protocol::RpcRequester;
-        bob_nest
-            .request(
-                "fauna.sync.register",
-                fauna_protocol::sync::SyncRegisterRequest {
-                    device_id: hex::encode(MEMBER_DEVICE),
-                    label: "bob-agent".into(),
-                    capabilities: "read,write".into(),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("register the member's device")
-    };
-
-    // The bind gesture, exactly as the provisioner performs it.
-    expect_ok(
-        &socket,
-        RequestMethod::AddLocation {
-            path: member_location.display().to_string(),
-        },
-    );
-    expect_ok(
-        &socket,
-        RequestMethod::SetLocationFolder {
-            path: member_location.display().to_string(),
-            folder: SET_NAME.to_string(),
-            // The ref the shared resolver stamps on the foreign entry — what
-            // `folder_ref_for_row` hands every app's bind gesture.
-            folder_id: entry.folder_id.clone(),
-        },
-    );
-
-    // The agent keys the set from its own custody read, which the provision
-    // above started (every reconcile is a content-key edge) and which lands
-    // asynchronously — so wait, bounded, for the engine it names to serve.
-    await_serving_engine(&socket, SET_NAME, SYNC_WINDOW);
+    } = staged;
 
     // ── The eager pull must deliver the pre-bind seed (foreign READ leg) ─
     // This is `set_foreign_routing`'s `changes.list` half — built,
@@ -816,7 +923,7 @@ async fn cross_nest_writer_binds_round_trips_and_parks_through_the_agent() {
     let deadline = Instant::now() + BACKSTOP_WINDOW;
     let mut parked = false;
     while Instant::now() < deadline {
-        if list_locations(&socket)
+        if list_locations(socket)
             .iter()
             .any(|f| f.folder.as_deref() == Some(SET_NAME) && f.access_revoked)
         {
@@ -840,6 +947,178 @@ async fn cross_nest_writer_binds_round_trips_and_parks_through_the_agent() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Relay serving across nests — a metadata-only folder, both directions
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Whether `state`'s store holds any of `keys` — the residency assertion names
+/// the file's own store keys, never the store's size: the blob root also holds
+/// the nest's own backups (`file-sync.md` § Content residency's status
+/// paragraph).
+async fn store_holds_any(state: &AppState, keys: &[[u8; 32]]) -> bool {
+    let store = state
+        .backup_service
+        .as_ref()
+        .expect("the test nest has a store")
+        .local_blob_store();
+    for key in keys {
+        if store
+            .exists(&fauna_core::data::ContentHash::from_digest_raw(*key))
+            .await
+            .unwrap()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// **The cross-nest leg of relay serving, end to end** (`file-sync.md`
+/// § Relay serving → *A member on another nest*, all six steps): a
+/// metadata-only folder's bytes move both ways between the owner on its home
+/// nest and a writer on another nest, through the member's REAL agent, and
+/// neither nest's store holds a chunk of either file at the end.
+///
+/// - **Owner → member.** Alice records a file and uploads no chunk; her seat
+///   announces on H. The member's agent binds, its eager pull `GET`s each chunk
+///   on H under its write token, the miss arm admits it (step (5)), H asks
+///   Alice's seat, and the file materializes on the member's disk.
+/// - **Member → owner.** The member writes a file; its engine records the
+///   manifest and uploads no chunk (step (1): the residency reached its
+///   record). Its agent announces the folder to F by its foreign ref and home
+///   nest, F forwards the announce to H (step (2)); Alice's pull misses on H,
+///   H asks through F, F pushes the ask to the agent (step (3)), whose engine
+///   serves the range off the file and `POST`s it to H under its write token
+///   (step (4)), and Alice's file materializes.
+///
+/// The owner's seat is the shared [`fauna_sync_engine::relay_seat::RelaySeat`]
+/// in process — the same seat the agent wires, proven through the shipped
+/// processes on one nest by `test_filesync_metadata_only_relay.py`; what this
+/// test adds is the member's agent serving a folder homed on another nest.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_metadata_only_folder_serves_both_ways_across_nests_through_the_agent() {
+    use fauna_core::folder_keys::FolderRef;
+    use fauna_sync_engine::relay_seat::RelaySeat;
+
+    let mut staged = stage_with("writer", true).await;
+    let owner_rel = staged.rel;
+    let owner_payload = staged.owner_payload.clone();
+    let engine = staged.owner_engine.take().expect("the staged owner engine");
+    let owner_keys = engine.db().held_store_keys(owner_rel).unwrap();
+    assert!(
+        !owner_keys.is_empty(),
+        "the owner's upload indexes the chunks it kept on her disk"
+    );
+    assert!(
+        !store_holds_any(&staged.h_state, &owner_keys).await,
+        "a metadata-only folder's owner uploads no chunk bytes"
+    );
+
+    // ── The owner's seat: announce on H, serve beside her engine ────────
+    // On a thread of its own, on the test's runtime: the engine is not
+    // `Sync`, so its serve and its pulls share one task, and the agent waits
+    // below block this one.
+    let member_rel = "from-bob.bin";
+    let member_payload: Vec<u8> = (0..30_000u32)
+        .map(|i| (i.wrapping_mul(7) % 251) as u8)
+        .collect();
+    let folder_ref = FolderRef::Local(owners_set_row(&staged.alice_nest).await.id);
+    let wire = folder_ref.to_wire();
+    let (admitted_tx, admitted_rx) = std::sync::mpsc::channel::<()>();
+    let (pulled_tx, pulled_rx) = std::sync::mpsc::channel::<Vec<[u8; 32]>>();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let owner_seat = {
+        let runtime = tokio::runtime::Handle::current();
+        let nest = Arc::clone(&staged.alice_nest);
+        let watch = staged.owner_watch.path().to_path_buf();
+        let member_payload = member_payload.clone();
+        std::thread::spawn(move || {
+            runtime.block_on(async move {
+                let seat = RelaySeat::new();
+                let mut inbox = seat.register(&folder_ref, None);
+                let mut admitted = seat.subscribe_admitted();
+                let device_hex = hex::encode([0x0au8; 32]);
+                let drive = async {
+                    let _ = admitted.wait_for(|a| a.contains(&wire)).await;
+                    let _ = admitted_tx.send(());
+                    // Her pulls run beside her serve until the member's file
+                    // lands: that pull is what asks H for the member's chunks.
+                    let deadline = Instant::now() + BACKSTOP_WINDOW;
+                    while Instant::now() < deadline {
+                        if let Err(e) = engine.pull_remote_changes().await {
+                            eprintln!("[relay-xnest] owner pull: {e:#}");
+                        }
+                        if std::fs::read(watch.join(member_rel)).ok().as_deref()
+                            == Some(&member_payload[..])
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                    let _ = pulled_tx.send(engine.db().held_store_keys(member_rel).unwrap());
+                    std::future::pending::<()>().await;
+                };
+                tokio::select! {
+                    _ = async {
+                        tokio::join!(seat.run(&nest, &device_hex), inbox.serve(&engine), drive)
+                    } => {}
+                    _ = stop_rx => {}
+                }
+            });
+        })
+    };
+    admitted_rx
+        .recv_timeout(SYNC_WINDOW)
+        .expect("H admits the owner's announce");
+
+    // ── Owner → member: the eager pull is served by the owner's seat ────
+    let member = MemberAgent::bind("fauna-xnest-relay-", &staged).await;
+    await_file_content_within(
+        &member.location.join(owner_rel),
+        &owner_payload,
+        SYNC_WINDOW,
+        "the owner's metadata-only file never reached the member on another nest",
+        "relay-xnest",
+        "The member's read misses on H (no chunk rests there), so it is served only by \
+         relay: suspect the read door (the member's write token on the miss arm) or the \
+         owner's seat (its announce on H).",
+    );
+
+    // ── Member → owner: the agent's seat serves through its own nest ────
+    let tmp = member.location.join(format!("{member_rel}.tmp"));
+    std::fs::write(&tmp, &member_payload).unwrap();
+    std::fs::rename(&tmp, member.location.join(member_rel)).unwrap();
+    let member_keys = pulled_rx
+        .recv_timeout(BACKSTOP_WINDOW + SYNC_WINDOW)
+        .expect("the owner's puller reports");
+    assert_eq!(
+        std::fs::read(staged.owner_watch.path().join(member_rel)).ok(),
+        Some(member_payload.clone()),
+        "the member's file never materialized on the owner's disk. Its chunks rest on no \
+         nest, so only the member's agent can serve them: suspect its announce (a foreign \
+         folder named by its ref and home nest, forwarded by F) or its answer (POSTed to \
+         H's byte plane under its write token)."
+    );
+    assert!(
+        !member_keys.is_empty(),
+        "the owner's apply indexed the member's chunks"
+    );
+
+    // ── Neither nest's store holds a chunk of either file ───────────────
+    let all_keys: Vec<[u8; 32]> = owner_keys.iter().chain(&member_keys).copied().collect();
+    assert!(
+        !store_holds_any(&staged.h_state, &all_keys).await,
+        "a chunk of a metadata-only folder rests on its home nest"
+    );
+    assert!(
+        !store_holds_any(&staged.f_state, &all_keys).await,
+        "a chunk of a metadata-only folder rests on the member's nest"
+    );
+
+    let _ = stop_tx.send(());
+    owner_seat.join().expect("the owner's seat thread");
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // The in-process twin — one builder, custody is the row
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -855,7 +1134,7 @@ struct InProcessHost {
 }
 
 /// Build the member's cross-nest set the way an in-process capability host
-/// does (`on-demand-files.md` § Shared sets on a capability host → *One
+/// does (`on-demand-files-shared-sets.md` § Shared sets on a capability host → *One
 /// mechanism*, question 2): handed only the member's `BackupKey`, a bearer on
 /// his OWN nest and the machine principal his app enrolled — no content key,
 /// no identity seed — through the one builder (`build_engine`), from his
@@ -1045,7 +1324,7 @@ impl InProcessHost {
     }
 }
 
-/// The capstone's in-process twin (`on-demand-files.md` § Shared sets on a
+/// The capstone's in-process twin (`on-demand-files-shared-sets.md` § Shared sets on a
 /// capability host → *One mechanism*, question 2): a capability host
 /// ([`in_process_host`]) builds the cross-nest set from the member's custody
 /// record alone, hydrates the owner's file off the HOME nest, and writes one

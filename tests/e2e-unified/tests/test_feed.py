@@ -91,7 +91,11 @@ def test_post_body_renders_markdown(logged_in_app):
     feed body walks the document on every app that adopted it (linux + web here;
     windows/apple legs run on their machines)."""
     suffix = uuid.uuid4().hex[:8]
-    logged_in_app.feed.create_post(text=f"**bold{suffix}**")
+    # The rendered card carries `bold<suffix>` (markers consumed), so the new-post
+    # wait keys on that, not the raw body (`create_post`'s `expect_top`).
+    logged_in_app.feed.create_post(
+        text=f"**bold{suffix}**", expect_top=f"bold{suffix}"
+    )
     # Deadline-poll rather than reading index 0 once (convention 14): the new post
     # reaching the top of the re-queried feed and its body being decoded for render
     # are both asynchronous and neither is ordered with respect to `create_post`.
@@ -289,6 +293,7 @@ def test_like_moves_its_own_count(logged_in_app):
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("feed-interactions")
 def test_quote_creates_a_post_and_moves_its_own_count(logged_in_app):
     """Tapping ``feed-quote-button`` **creates a quote post** and moves the
@@ -344,6 +349,7 @@ def test_quote_creates_a_post_and_moves_its_own_count(logged_in_app):
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("feed-interactions")
 def test_reply_creates_a_post_and_moves_its_own_count(logged_in_app):
     """Tapping ``feed-reply-button``, typing text, and submitting **creates a
@@ -1662,9 +1668,11 @@ def _blob_c2pa_header(nest_url: str, blob_hash: str) -> str:
 
 
 @pytest.mark.tui
+@pytest.mark.linux
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.web
 @pytest.mark.feature("feed-images-and-video")
 def test_a_forged_c2pa_assertion_paints_no_provenance_badge(
     logged_in_app, nest_instance, test_user
@@ -1697,14 +1705,15 @@ def test_a_forged_c2pa_assertion_paints_no_provenance_badge(
     under test is the **viewer's** — the badge read — and that stays entirely in
     the app (e2e-conventions.md conventions 5 and 8).
 
-    **tui, macos, ios and windows so far.** tui is the lead app and the first leg
-    of the correction (`ui/media.md` § C2PA provenance, per-app bullets); macos
-    and ios followed together, as one shared `FaunaKit` change; windows takes
-    its verdict in `PostMediaOpen` (`FaunaApp.Core`) over the bytes the image
-    load already holds. linux and android paint from the header still, and web
-    has its own JS re-parse whose leg is untested here. Each app's mark joins
-    this test as its leg lands — the badge IDs and the assertions are already
-    app-agnostic.
+    **tui, linux, macos, ios, windows and web carry the mark.** tui is the lead
+    app and the first leg of the correction (`ui/media.md` § C2PA provenance,
+    per-app bullets); macos and ios followed together, as one shared `FaunaKit`
+    change; windows takes its verdict in `PostMediaOpen` (`FaunaApp.Core`) over
+    the bytes the image load already holds; web re-parses the manifest in JS
+    behind the header pre-filter (`apps/fauna-web/src/lib/c2pa.ts`). android's
+    leg is compile+Robolectric-verified only, and its mark joins this test the
+    day android e2e is reachable (`ui/media.md` § C2PA provenance) — the badge
+    IDs and the assertions are already app-agnostic.
     """
     if not C2PA_TEST_IMAGE.exists():
         pytest.skip("c2pa-signed.png fixture not found")
@@ -1722,12 +1731,15 @@ def test_a_forged_c2pa_assertion_paints_no_provenance_badge(
 
     # Both uploaded claiming provenance. Only the second one is telling the
     # truth, and the nest cannot tell the difference — that is the premise.
+    from conftest import live_user_token
+
+    token = live_user_token(nest_instance, test_user)
     forged_hash = upload_blob(
-        port, test_user["token"], plain_png,
+        port, token, plain_png,
         audience_class="PublicPost", mime="image/png", has_c2pa=True,
     )
     honest_hash = upload_blob(
-        port, test_user["token"], signed_png,
+        port, token, signed_png,
         audience_class="PublicPost", mime="image/png", has_c2pa=True,
     )
     assert forged_hash != honest_hash, "the two uploads must be different blobs"

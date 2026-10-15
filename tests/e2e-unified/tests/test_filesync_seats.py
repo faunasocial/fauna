@@ -21,7 +21,7 @@ mode)`` fills the slot with:
   and ride the client transport's loopback trust short-circuit — a red naming
   TLS here is a real finding about that short-circuit, not harness noise.)
 * ``--nest live[:URL]``: the **deployed** nest on the shared live box (default
-  example.com) — the only mode with real DNS, a real CA-issued cert, a real
+  the live nest) — the only mode with real DNS, a real CA-issued cert, a real
   network path and accumulated state, so the only one that fails a
   works-on-a-fresh-box-only bug.
 
@@ -133,6 +133,7 @@ from common.auth import UNBINDING_MAX_DEVICES, set_tier_caps, user_create_folder
 from helpers import convergence_legs
 from common.accounts import actor_id_hex
 from helpers import nest_mode as nm
+from helpers import seat_ignore
 from helpers import seat_scenarios
 from helpers import sync_seats
 
@@ -404,12 +405,21 @@ class SeatRun:
 
 
 @contextlib.contextmanager
-def _seat_run(seat_set, nest_mode, tmp_path_factory, request):
+def _seat_run(seat_set, nest_mode, tmp_path_factory, request, *, seed=None, seat_dir=None):
     """Bring up this cell's nest, account, set and seats; yield a :class:`SeatRun`.
 
     One setup for every test body in this module, so the convergence legs and
     the scenario legs can never drift apart on how a seat gets syncing, which
     nest mode it rides, or how the live box is cleaned up after it.
+
+    ``seed(seat_roots, run_token)`` — ``{name: watch dir}`` — runs before any
+    seat starts, for a body that needs files on disk before an engine is
+    built (``.faunaignore`` is read once, at construction).
+
+    ``seat_dir`` is the directory the seat trees are made under (default: the
+    temp dir) — a body that turns a linux seat on-demand passes ``/tmp``, the
+    one temp location a confined ``fusermount3`` mounts over
+    (``helpers.folder_content.mountable_location`` says why).
     """
     seat_count = len(seat_set)
     set_name = _set_name_for(seat_count)
@@ -419,7 +429,7 @@ def _seat_run(seat_set, nest_mode, tmp_path_factory, request):
     # cleanup below is its to run. mkdtemp (not `tmp_path`): the watch dirs are
     # torn down in the same `finally` that stops the nest, and a fixture-managed
     # tree would outlive the process teardown order on some platforms.
-    tmp = Path(tempfile.mkdtemp(prefix=f"fauna-{set_name}-"))
+    tmp = Path(tempfile.mkdtemp(prefix=f"fauna-{set_name}-", dir=seat_dir))
     run_token = sync_seats.new_run_token(seats=seat_count)
 
     provider = nm.provider_for(nest_mode)
@@ -492,6 +502,13 @@ def _seat_run(seat_set, nest_mode, tmp_path_factory, request):
             actor_id=actor_id,
             handle=handle,
         )
+
+        if seed is not None:
+            # `make_seat` binds each seat to `<root>/watch`; the same rule here.
+            seed(
+                {n: tmp / n / "watch" for n in sync_seats.seat_names(seat_count)},
+                run_token,
+            )
 
         with contextlib.ExitStack() as stack:
             seats = sync_seats.start_seats(
@@ -612,3 +629,43 @@ def test_seat_scenarios(seat_set, nest_mode, tmp_path_factory, request):
             run.run_token,
             window=WINDOW,
         )
+
+
+def _ignore_timeout(seat_count: int) -> int:
+    """The ignore cell's ceiling: start-up, the barrier and one delivery."""
+    return int(seat_count * STARTUP_WINDOW + 2 * WINDOW + 300)
+
+
+@pytest.mark.parametrize(
+    "seat_set",
+    [
+        pytest.param(
+            seat_set,
+            id=sync_seats.seat_set_param_id(seat_set),
+            marks=pytest.mark.timeout(_ignore_timeout(len(seat_set))),
+        )
+        # Pairs only: a writer→peer fact, like the scenario cell.
+        for seat_set in sync_seats.seat_sets_for_platform(
+            sys.platform,
+            sync_seats.seat_sets_from_env() or sync_seats.DEFAULT_PAIRS,
+        )
+    ],
+)
+@pytest.mark.feature("local-folder-sync")
+def test_seat_ignore(seat_set, nest_mode, tmp_path_factory, request):
+    """A writer seat's engine never takes up what its ignore rules exclude —
+    a ``.faunaignore`` pattern, a built-in default and a dotfile — while a
+    kept file beside them reaches the peer (``helpers/seat_ignore.py``; owner
+    `sync-engine-deployments.md` § Built-in default ignores).
+
+    The absence rests on the writer's first clean converge pass, a causal
+    barrier: the files were seeded before its engine was built, so that pass
+    scanned them all (convention 14).
+    """
+
+    def seed(watch_dirs, run_token):
+        writer = sync_seats.seat_names(len(seat_set))[0]
+        seat_ignore.seed(watch_dirs[writer], seat_ignore.build_plan(run_token))
+
+    with _seat_run(seat_set, nest_mode, tmp_path_factory, request, seed=seed) as run:
+        seat_ignore.run_ignore_scenario(run.seats, run.run_token, window=WINDOW)

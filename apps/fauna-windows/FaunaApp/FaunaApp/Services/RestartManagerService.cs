@@ -183,14 +183,13 @@ internal static class RestartManagerService
                 // and agree to the shutdown (return TRUE). Vetoing would make the
                 // installer/RM force-kill us — the opposite of cooperative.
                 SessionEnding = true;
-                // Both draft rails are nest-backed (draft-persistence v2): flush the
-                // latest (already live-forwarded into the manager) to the nest before
-                // the system may terminate us. Bounded; SaveNowAsync is
+                // Every draft rail is nest-backed (draft-persistence v2): flush the
+                // latest (already live-forwarded into the managers) to the nest before
+                // the system may terminate us — the shared leave-flush body,
+                // App.FlushDraftRailsAsync. Bounded; every rail's save is
                 // ConfigureAwait(false) so the wait can't deadlock the message-pump
                 // thread. Best-effort.
-                try { FaunaApp.App.ConvDrafts?.SaveNowAsync().Wait(1500); } catch { }
-                try { FaunaApp.App.FeedDrafts?.FlushIfPendingAsync().Wait(1500); } catch { }
-                try { FaunaApp.App.EventDrafts?.FlushIfPendingAsync().Wait(1500); } catch { }
+                try { FaunaApp.App.FlushDraftRailsAsync().Wait(1500); } catch { }
                 return new IntPtr(1); // TRUE — allow the session to end
             }
 

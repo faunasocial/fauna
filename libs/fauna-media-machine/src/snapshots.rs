@@ -46,12 +46,23 @@ pub struct MediaItemSummary {
     /// state, never per-app logic (`share-links.md` § Which files can be
     /// linked). `false` for a followed-scope item (not the caller's file).
     pub share_link_eligible: bool,
+    /// The `media-folder-filter` value that scopes the browse to this item's
+    /// own set — an own set's name, a shared set's `local:<id>`, an item-only
+    /// set's name, a followed scope's value (`MediaSnapshot::filter_value`).
+    /// What a search deep-link or a detail close hands `set_filter` instead of
+    /// [`folder`](Self::folder), so it lands in this item's set and never in a
+    /// same-named one (`media.md` § Encryption at rest → *The filter and the
+    /// upload target address the row*, (b)).
+    pub filter_value: String,
 }
 
 impl From<MediaItem> for MediaItemSummary {
     fn from(it: MediaItem) -> Self {
         let name = display_name(&it).to_string();
         Self {
+            // The set's name until the machine, which holds the rows, stamps
+            // the row's value.
+            filter_value: it.folder.clone(),
             folder: it.folder,
             path: it.path,
             name,
@@ -183,6 +194,15 @@ pub struct FileVersionSummary {
     /// Epoch seconds after which the purge may run — the recovery deadline the
     /// `file-version-pruned-badge` renders. `None` on a live row.
     pub purge_after: Option<i64>,
+    /// The version's set **row** (`folders.id`), nest-stamped: a by-name
+    /// listing interleaves a same-named pair's versions, and this keys the
+    /// version's custody, its signer verdict and the row its restore records
+    /// into (`media.md` § Encryption at rest → *A set is addressed by its
+    /// row*). `None` from a nest that stamps none — the version then resolves
+    /// through the item at its path. Carried back verbatim on restore.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub folder_id: Option<i64>,
 }
 
 /// The `media-folder-filter` picker's raw value standing for the all-media
@@ -202,7 +222,8 @@ pub const FILTER_ALL_VALUE: &str = "__all__";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct MediaFolderOption {
-    /// The set name — the filter key.
+    /// The set name. Two options may share one (an own set and a shared set
+    /// of the same name); [`value`](Self::value) tells them apart.
     pub name: String,
     /// The set's `FolderRef` wire string (`local:<id>`), the key every
     /// per-set local read takes (`FfiSyncEngineHost::file_states`,
@@ -210,6 +231,14 @@ pub struct MediaFolderOption {
     /// shared-with-me set the caller's own list does not carry), which this
     /// device hosts nowhere.
     pub folder_id: Option<String>,
+    /// The select value — an own set's name, a shared set's `local:<id>`, an
+    /// item-only set's name. Hand it back to `set_filter` verbatim; never parse
+    /// it (`media.md` § Encryption at rest → *The filter and the upload target
+    /// address the row*, (a)).
+    pub value: String,
+    /// The display label — the name, or `<name> (<owner>)` on a set the caller
+    /// does not own (ibid., (b)).
+    pub label: String,
 }
 
 /// The whole renderable Media page in one record — the content-plane analogue of
@@ -228,10 +257,13 @@ pub struct MediaPageSnapshot {
     /// (`fauna_client_media::MediaSnapshot::folders`). Independent of the
     /// active filter.
     pub folders: Vec<String>,
-    /// [`folders`](Self::folders) with each set's identity beside its label —
-    /// same entries, same order ([`MediaFolderOption`]). What an app keys a
-    /// **local-state read** on: the per-file sync badges read the set's
-    /// `fsid-<ref>.db` by this id, never by the name.
+    /// One option per offered set, its identity beside its label
+    /// ([`MediaFolderOption`]) — what an app renders `media-folder-filter`
+    /// from. A same-named pair is two entries here and one in
+    /// [`folders`](Self::folders), which deduplicates by name for the apps
+    /// that still render names. Also what an app keys a **local-state read**
+    /// on: the per-file sync badges read the set's `fsid-<ref>.db` by this id,
+    /// never by the name.
     pub folder_options: Vec<MediaFolderOption>,
     /// Followed public folders offered as browse **scopes** in
     /// `media-folder-filter`, after the own-set options
@@ -250,9 +282,14 @@ pub struct MediaPageSnapshot {
     pub sort: String,
     /// Whether the active sort is descending (the desktop column-header toggle).
     pub descending: bool,
-    /// The active `media-folder-filter`: a set name, or `None` for the all-media
-    /// default view.
+    /// The active `media-folder-filter` value as given (an option's
+    /// [`MediaFolderOption::value`] or a followed scope's), or `None` for the
+    /// all-media default view.
     pub filter: Option<String>,
+    /// The active option's label — the set's name, a shared set's
+    /// `<name> (<owner>)`, a followed scope's label — so no app re-derives it;
+    /// `None` in all-media.
+    pub filter_label: Option<String>,
     /// The active `media-view-toggle`: `true` = thumbnail grid, `false` = list.
     pub view_grid: bool,
     /// The page-level `error-message` (last refresh failure), localized

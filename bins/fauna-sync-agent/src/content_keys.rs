@@ -2,7 +2,7 @@
 //! comes from the account's folder-key custody (`fauna.state.folder-keys`), read
 //! in-process through the account store [`crate::account_host`] mounts
 //! ([`SyncServiceState::folder_keys`]), never from the app
-//! (`on-demand-files.md` § Shared sets on a capability host → *One mechanism —
+//! (`on-demand-files-shared-sets.md` § Shared sets on a capability host → *One mechanism —
 //! the agent converges*, decision 1′; `sync-agent-credentials.md` § Credential
 //! model, *Content keys are not provisioned*). With no store mounted custody is
 //! unreadable, and every bound set builds keyless.

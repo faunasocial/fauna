@@ -82,6 +82,14 @@ fn residency_update(name: &str, residency: &str) -> FolderUpdateRequest {
     }
 }
 
+fn audience_update(name: &str, audience: &str) -> FolderUpdateRequest {
+    FolderUpdateRequest {
+        name: name.into(),
+        audience: Some(audience.into()),
+        ..Default::default()
+    }
+}
+
 async fn listed(router: &RpcRouter, state: &Arc<AppState>, name: &str) -> FolderSummary {
     let reply: FoldersListReply = decode(
         &dispatch(
@@ -105,9 +113,12 @@ async fn listed(router: &RpcRouter, state: &Arc<AppState>, name: &str) -> Folder
         .expect("set listed")
 }
 
-fn refused(result: Result<Bytes, RpcError>, needle: &str) {
+/// Asserts the refusal's typed `code` — the serving pairs each carry their own
+/// (`RpcError::CODE_FOLDERS_*`), so the apps render the repair through
+/// `localized()` — and that its log-only `details` names `needle`.
+fn refused(result: Result<Bytes, RpcError>, code: &str, needle: &str) {
     let err = result.expect_err("must be refused");
-    assert_eq!(err.code, "fauna.folders.invalid_request", "{err:?}");
+    assert_eq!(err.code, code, "{err:?}");
     // The refusal text rides `details` as a CBOR string — the debug render is
     // enough to name which refusal fired.
     let detail = err
@@ -196,6 +207,7 @@ async fn unknown_residency_values_are_refused() {
     for bad in ["metadata", "META_ONLY", "none", ""] {
         refused(
             update(&router, &state, residency_update("vault", bad)).await,
+            "fauna.folders.invalid_request",
             "unknown residency",
         );
     }
@@ -207,6 +219,7 @@ async fn reserved_rails_refuse_residency() {
     state.db.create_folder("__mail", &ACTOR).await.unwrap();
     refused(
         update(&router, &state, residency_update("__mail", "metadata_only")).await,
+        "fauna.folders.invalid_request",
         "belong to the nest",
     );
 }
@@ -230,6 +243,7 @@ async fn a_website_serving_folder_refuses_metadata_only_and_vice_versa() {
     .expect("website on");
     refused(
         update(&router, &state, residency_update("site", "metadata_only")).await,
+        RpcError::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_WEBSITE,
         "website",
     );
 
@@ -249,6 +263,7 @@ async fn a_website_serving_folder_refuses_metadata_only_and_vice_versa() {
             },
         )
         .await,
+        RpcError::CODE_FOLDERS_METADATA_ONLY_CANNOT_SERVE,
         "metadata-only",
     );
 
@@ -266,6 +281,7 @@ async fn a_website_serving_folder_refuses_metadata_only_and_vice_versa() {
             },
         )
         .await,
+        RpcError::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_WEBSITE,
         "metadata-only",
     );
 }
@@ -287,6 +303,7 @@ async fn a_webdav_served_folder_refuses_metadata_only_and_vice_versa() {
     .expect("webdav on");
     refused(
         update(&router, &state, residency_update("dav", "metadata_only")).await,
+        RpcError::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_WEBDAV,
         "WebDAV",
     );
 
@@ -305,6 +322,7 @@ async fn a_webdav_served_folder_refuses_metadata_only_and_vice_versa() {
             },
         )
         .await,
+        RpcError::CODE_FOLDERS_METADATA_ONLY_CANNOT_SERVE,
         "metadata-only",
     );
 }
@@ -332,6 +350,7 @@ async fn a_metadata_only_folder_refuses_a_paywall_and_a_paywalled_one_refuses_th
             }),
         )
         .await,
+        RpcError::CODE_FOLDERS_METADATA_ONLY_CANNOT_SERVE,
         "metadata-only",
     );
 
@@ -372,15 +391,119 @@ async fn a_metadata_only_folder_refuses_a_paywall_and_a_paywalled_one_refuses_th
     // refusal names the FIRST serving surface it meets — the website.
     refused(
         update(&router, &state, residency_update("zine", "metadata_only")).await,
+        RpcError::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_WEBSITE,
         "website",
     );
 }
 
-// ── The interim cross-nest refusal (`file-sync.md` § Relay serving → *Until
-// that leg is built, the pair is refused*) — this direction: the flip moves
-// second onto a folder whose roster already holds a member on another nest.
+#[tokio::test]
+async fn a_public_folder_is_never_metadata_only_in_either_direction() {
+    let (router, state) = router_and_state().await;
+
+    // Public first, then the flip: refused, row untouched.
+    create_set(&router, &state, "open").await;
+    update(&router, &state, audience_update("open", "public"))
+        .await
+        .expect("declassify");
+    refused(
+        update(&router, &state, residency_update("open", "metadata_only")).await,
+        RpcError::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_PUBLIC,
+        "public folder",
+    );
+    let row = listed(&router, &state, "open").await;
+    assert_eq!(
+        (row.audience.as_str(), row.residency.as_str()),
+        ("public", "")
+    );
+
+    // A folder born public refuses the flip too (create takes no residency).
+    dispatch(
+        &router,
+        Arc::clone(&state),
+        ACTOR,
+        "fauna.folders.create",
+        encode(&FolderCreateRequest {
+            name: "born".into(),
+            audience: Some("public".into()),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("born public");
+    refused(
+        update(&router, &state, residency_update("born", "metadata_only")).await,
+        RpcError::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_PUBLIC,
+        "public folder",
+    );
+
+    // The repair works: leave public, then the flip goes through.
+    update(&router, &state, audience_update("open", "private"))
+        .await
+        .expect("back to private");
+    update(&router, &state, residency_update("open", "metadata_only"))
+        .await
+        .expect("flip after repair");
+
+    // Metadata-only first, then public: refused, row untouched.
+    refused(
+        update(&router, &state, audience_update("open", "public")).await,
+        RpcError::CODE_FOLDERS_METADATA_ONLY_CANNOT_GO_PUBLIC,
+        "metadata-only folder",
+    );
+    let row = listed(&router, &state, "open").await;
+    assert_eq!(row.residency, "metadata_only");
+    assert_ne!(row.audience, "public");
+
+    // The repair works: back to full, then public goes through.
+    update(&router, &state, residency_update("open", "full"))
+        .await
+        .expect("back to full");
+    update(&router, &state, audience_update("open", "public"))
+        .await
+        .expect("public after repair");
+
+    // Same-request orders cannot smuggle the pair through.
+    create_set(&router, &state, "both").await;
+    refused(
+        update(
+            &router,
+            &state,
+            FolderUpdateRequest {
+                name: "both".into(),
+                audience: Some("public".into()),
+                residency: Some("metadata_only".into()),
+                ..Default::default()
+            },
+        )
+        .await,
+        RpcError::CODE_FOLDERS_METADATA_ONLY_CANNOT_GO_PUBLIC,
+        "metadata-only folder",
+    );
+    // Leaving public and going metadata-only in one request is allowed.
+    update(
+        &router,
+        &state,
+        FolderUpdateRequest {
+            name: "open".into(),
+            audience: Some("private".into()),
+            residency: Some("metadata_only".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("leave public + flip in one request");
+    assert_eq!(
+        listed(&router, &state, "open").await.residency,
+        "metadata_only"
+    );
+}
+
+// ── A member on another nest is no bar to metadata-only (`file-sync.md`
+// § Relay serving → *A member on another nest*): the interim refusal that held
+// the pair while the cross-nest leg was unbuilt is gone, in both directions.
 // The other direction (the member moves second) is pinned beside the Welcome
-// relay in `conformance_cross_nest_conversations_client`. ────────────────────
+// relay in `conformance_cross_nest_conversations_client`; the leg itself is
+// witnessed end to end by `fauna-sync-agent`'s `cross_nest_agent_capstone`. ──
 
 /// Bind `name` to a group and seat one `channel_foreign_members` row on its
 /// derived channel, exactly as the Welcome relay writes it. Returns the channel
@@ -409,95 +532,27 @@ async fn bind_with_foreign_member(state: &Arc<AppState>, name: &str) -> ([u8; 32
 }
 
 #[tokio::test]
-async fn a_folder_with_a_member_on_another_nest_refuses_metadata_only() {
-    let (router, state) = router_and_state().await;
-    create_set(&router, &state, "shared").await;
-    bind_with_foreign_member(&state, "shared").await;
-
-    refused(
-        update(&router, &state, residency_update("shared", "metadata_only")).await,
-        "another nest",
-    );
-    assert_eq!(
-        listed(&router, &state, "shared").await.residency,
-        "",
-        "a refused flip leaves the folder full"
-    );
-
-    // A same-nest member alone never trips it: the relay serves them today.
-    create_set(&router, &state, "local").await;
-    let local_group = b"raw-group-id-local".as_slice();
-    state
-        .db
-        .set_folder_mls_group("local", &ACTOR, Some(local_group))
-        .await
-        .unwrap();
-    let member = [24u8; 32];
-    common::seed_dispatch_actor(&state.db, &member).await;
-    state
-        .db
-        .register_actor_channel(
-            &member,
-            &fauna_mls::types::ChannelId::from_group_id(local_group).0,
-        )
-        .await
-        .unwrap();
-    update(&router, &state, residency_update("local", "metadata_only"))
-        .await
-        .expect("a folder whose members all live on this nest still flips");
-}
-
-#[tokio::test]
-async fn the_flip_is_allowed_again_once_the_member_on_another_nest_has_left() {
+async fn a_folder_with_a_member_on_another_nest_goes_metadata_only() {
     let (router, state) = router_and_state().await;
     create_set(&router, &state, "shared").await;
     let (channel, foreign_member) = bind_with_foreign_member(&state, "shared").await;
-    refused(
-        update(&router, &state, residency_update("shared", "metadata_only")).await,
-        "another nest",
-    );
 
-    assert!(
-        state
-            .db
-            .remove_foreign_channel_member(&channel, &foreign_member)
-            .await
-            .unwrap()
-    );
     update(&router, &state, residency_update("shared", "metadata_only"))
         .await
-        .expect("no member on another nest is left, so the flip commits");
+        .expect("a member on another nest is served by relay, so the flip commits");
     assert_eq!(
         listed(&router, &state, "shared").await.residency,
         "metadata_only"
     );
-}
-
-#[tokio::test]
-async fn an_existing_metadata_only_pair_is_left_as_it_is() {
-    // A pair that already exists (the two refusals are separate requests, not
-    // one transaction): nothing is evicted or flipped back, and
-    // a re-sent residency — the state the folder already holds — still commits.
-    let (router, state) = router_and_state().await;
-    create_set(&router, &state, "old").await;
-    update(&router, &state, residency_update("old", "metadata_only"))
+    update(&router, &state, residency_update("shared", "metadata_only"))
         .await
-        .expect("flip");
-    let (channel, foreign_member) = bind_with_foreign_member(&state, "old").await;
-
-    update(&router, &state, residency_update("old", "metadata_only"))
-        .await
-        .expect("re-sending the state the folder already holds is not a flip");
-    assert_eq!(
-        listed(&router, &state, "old").await.residency,
-        "metadata_only"
-    );
+        .expect("re-sending the state the folder already holds commits");
     assert!(
         state
             .db
             .foreign_channel_member_exists(&channel, &foreign_member)
             .await
             .unwrap(),
-        "the existing member is not evicted"
+        "the member on another nest stays on the roster"
     );
 }

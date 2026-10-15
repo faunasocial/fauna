@@ -5,13 +5,12 @@
 //! sync agent, and any file a Media page recorded before the flip — opens
 //! through the mount.
 //!
-//! **Why here.** The walk moves exactly the two at-rest shapes this crate
-//! already reads and writes: a Media blob primary (a pre-serve upload sealed
-//! under the owner's bare `BackupKey`, [`MediaMachine::download_file`]'s blob
-//! arm) and an owner-keyed chunk manifest (its walk arm). The byte seams it
-//! needs — the blob-store GET, the chunk/manifest GETs, the chunk/manifest
-//! POSTs — and the signed record through the seat's own writer key are the
-//! Media seam's, on both targets, so nothing is re-bound per app.
+//! **Why here.** The walk moves the one at-rest shape a folder's file has, an
+//! owner-keyed chunk manifest ([`MediaMachine::download_file`]'s owner walk;
+//! `media.md` § Encryption at rest → *One at-rest shape*). The byte seams it
+//! needs — the chunk/manifest GETs and POSTs — and the signed record through
+//! the seat's own writer key are the Media seam's, on both targets, so
+//! nothing is re-bound per app.
 //!
 //! **Scope: a served, group-less set only.** A set bound to a sharing group is
 //! the M2 pre-bind pass's (`mls-group-key-material.md` § M2 → *Pre-bind re-seal
@@ -35,11 +34,9 @@
 //!   from another of the owner's sets. Anything less — unsigned, no nonce,
 //!   another writer — is skipped, since the owner root would open it and the
 //!   re-seal would publish it to the mount.
-//! - **The byte move.** A blob primary is fetched, address-checked, opened and
-//!   re-sealed whole through [`fauna_core::blob_seal::seal_blob`]; a manifest is
-//!   re-sealed a window at a time through the shared
-//!   [`fauna_core::nest_reseal::reseal_nest_copy_windowed`], the same function
-//!   the engine's nest-bytes source runs. Either way the artifacts are
+//! - **The byte move.** The manifest is re-sealed a window at a time through
+//!   the shared [`fauna_core::nest_reseal::reseal_nest_copy_windowed`], the
+//!   same function the engine's nest-bytes source runs. The artifacts are
 //!   byte-identical to what the engine, the MDA and a content-keyed Media upload
 //!   produce for the same bytes — so the agent's own pass, where one runs too,
 //!   converges on the same store keys: dedup, never conflict.
@@ -53,23 +50,20 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use fauna_client_sync::SyncClient;
 use fauna_client_sync::row_judge::{ProjectedRow, ReaderSeat};
-use fauna_core::crypto::{BackupKey, decrypt_backup_chunk};
+use fauna_core::crypto::BackupKey;
 use fauna_core::data::ContentHash;
 use fauna_core::file_download::{BlobFetcher, FileDownloadKeys, RecordSigner};
 use fauna_core::folder_keys::FolderKeyResolver;
-use fauna_core::nest_reseal::{ChunkStoreSink, ServedSetConvergence};
+use fauna_core::nest_reseal::ServedSetConvergence;
 use fauna_protocol::sync::SyncChange;
 use fauna_protocol::sync_row_verify::RowVerdict;
 use fauna_protocol::{RpcErrorClass, RpcRequester};
 
-use crate::blob_fetcher::MediaBlobFetcher;
 use crate::blob_uploader::{MediaBlobUploader, UploaderSink};
-use crate::nest_api::MediaApiError;
 
 /// One served set's walk, over one seat's session: the change log and the
 /// signed record through `sync`, the verified-row judge through `nest`, the
-/// set's custody through `resolver`, the bytes through the three Media byte
-/// seams. Built per target by the `served_set_walk` builders below.
+/// set's custody through `resolver`, the bytes through the Media byte seams. Built per target by the `served_set_walk` builders below.
 pub struct ServedSetWalk<R: RpcRequester> {
     nest: R,
     /// Signs every record it writes (the seat's own writer key, each record's
@@ -86,7 +80,6 @@ pub struct ServedSetWalk<R: RpcRequester> {
     /// under).
     device_id: String,
     fetcher: Arc<dyn BlobFetcher>,
-    primaries: Arc<dyn MediaBlobFetcher>,
     uploader: Arc<dyn MediaBlobUploader>,
 }
 
@@ -115,7 +108,6 @@ where
         resolver: Arc<dyn FolderKeyResolver>,
         device_id: String,
         fetcher: Arc<dyn BlobFetcher>,
-        primaries: Arc<dyn MediaBlobFetcher>,
         uploader: Arc<dyn MediaBlobUploader>,
     ) -> Self {
         let nonces = fauna_client_sync::SetNonceSource::Resolver(resolver.clone());
@@ -138,7 +130,6 @@ where
             owner: BackupKey::derive(keypair.secret_bytes()),
             device_id,
             fetcher,
-            primaries,
             uploader,
         }
     }
@@ -201,6 +192,7 @@ where
                 .map(|row| ProjectedRow {
                     folder,
                     folder_hash: None,
+                    folder_id: None,
                     row: Some(row.clone()),
                 })
                 .collect();
@@ -245,7 +237,7 @@ where
         loop {
             let page = self
                 .sync
-                .changes_list(Some(folder.to_string()), None, since)
+                .changes_list(Some(folder.to_string()), None, since, None)
                 .await
                 .map_err(|e| anyhow::anyhow!("served-set walk: fauna.sync.changes.list: {e}"))?;
             let Some(top) = page.changes.iter().map(|c| c.seq).max() else {
@@ -361,39 +353,26 @@ where
         seal_root: ([u8; 32], Option<u64>),
     ) -> Result<()> {
         let sink = UploaderSink(self.uploader.as_ref());
-        let resealed = match self.primary_bytes(&head).await? {
-            Some(plaintext) => {
-                let sealed = fauna_core::blob_seal::seal_blob(&plaintext, Some(seal_root))
-                    .context("sealing the pre-serve upload under the served key")?;
-                sink.put_chunks(sealed.chunks, &head.path).await?;
-                sink.put_manifest(sealed.manifest_hash, sealed.manifest_bytes)
-                    .await?;
-                (sealed.manifest_hash, sealed.manifest.total_size)
-            }
-            None => {
-                let record_keys = FileDownloadKeys {
-                    owner_signed_record: head.owner_signed,
-                    record_signer: if head.owner_signed {
-                        RecordSigner::Current
-                    } else {
-                        RecordSigner::Other
-                    },
-                    ..keys.clone()
-                };
-                let resealed = fauna_core::nest_reseal::reseal_nest_copy_windowed(
-                    self.fetcher.as_ref(),
-                    &record_keys,
-                    head.manifest_hash,
-                    head.row.content_key_version,
-                    &head.path,
-                    Some(seal_root),
-                    &sink,
-                )
-                .await?;
-                (resealed.manifest_hash, resealed.manifest.total_size)
-            }
+        let record_keys = FileDownloadKeys {
+            owner_signed_record: head.owner_signed,
+            record_signer: if head.owner_signed {
+                RecordSigner::Current
+            } else {
+                RecordSigner::Other
+            },
+            ..keys.clone()
         };
-        let (manifest_hash, total_size) = resealed;
+        let resealed = fauna_core::nest_reseal::reseal_nest_copy_windowed(
+            self.fetcher.as_ref(),
+            &record_keys,
+            head.manifest_hash,
+            head.row.content_key_version,
+            &head.path,
+            Some(seal_root),
+            &sink,
+        )
+        .await?;
+        let (manifest_hash, total_size) = (resealed.manifest_hash, resealed.manifest.total_size);
         let generation = seal_root.1;
 
         // Verified under the served generation alone — what the mount holds.
@@ -433,12 +412,15 @@ where
                 // whose frontier already passed the head skips it.
                 Some(head.row.seq),
                 Some(true),
+                None,
             )
             .await
             .map_err(|e| anyhow::anyhow!("recording the re-sealed head: {e}"))?;
 
         // Reclaim — best-effort: the pre-serve rows' chunks become garbage only
-        // now that the re-sealed copy verified and recorded.
+        // now that the re-sealed copy verified and recorded. The source is the
+        // nest head this walk re-sealed, so a peer's edit recorded between the
+        // walk's read and its record makes the nest refuse rather than bury it.
         if let Err(e) = self
             .sync
             .changes_supersede(
@@ -446,40 +428,14 @@ where
                 self.device_id.clone(),
                 head.path.clone(),
                 manifest_hex,
+                hex::encode(head.manifest_hash.digest()),
+                None,
             )
             .await
         {
             tracing::warn!(error = %e, "served-set walk: supersede failed; reclaim deferred");
         }
         Ok(())
-    }
-
-    /// A pre-serve Media blob primary's plaintext, or `None` when the head
-    /// names a chunk manifest instead (the blob store answers not-found). Only
-    /// an unstamped, owner-signed head can be a primary — a stamped head was
-    /// written by a content-key writer, which records manifests.
-    async fn primary_bytes(&self, head: &OwedHead) -> Result<Option<Vec<u8>>> {
-        if head.row.content_key_version.is_some() || !head.owner_signed {
-            return Ok(None);
-        }
-        let hash_hex = hex::encode(head.manifest_hash.digest());
-        let sealed = match self.primaries.fetch_blob(hash_hex.clone()).await {
-            Ok(sealed) => sealed,
-            Err(MediaApiError::NotFound { .. }) => return Ok(None),
-            Err(e) => anyhow::bail!("fetching the pre-serve upload: {e}"),
-        };
-        // The address check first: the backup-chunk frame carries no AAD, so
-        // only the address proves *this* blob.
-        if !blake3::hash(&sealed)
-            .to_hex()
-            .as_str()
-            .eq_ignore_ascii_case(&hash_hex)
-        {
-            anyhow::bail!("the nest served a different blob for the pre-serve upload");
-        }
-        decrypt_backup_chunk(&self.owner, &sealed)
-            .map(Some)
-            .map_err(|e| anyhow::anyhow!("opening the pre-serve upload under the owner key: {e}"))
     }
 }
 
@@ -496,7 +452,7 @@ mod native {
         }
     }
 
-    /// The walk over `nest`'s authenticated session, with the same three byte
+    /// The walk over `nest`'s authenticated session, with the same byte
     /// seams [`crate::build_media_machine_with_folder_keys`] injects.
     pub fn served_set_walk(
         nest: Arc<NestClient>,
@@ -506,12 +462,8 @@ mod native {
     ) -> ServedSetWalk<Arc<NestClient>> {
         let uploader: Arc<dyn MediaBlobUploader> =
             Arc::new(crate::blob_uploader::NativeBlobUploader::new(&nest));
-        let primaries: Arc<dyn MediaBlobFetcher> =
-            Arc::new(crate::blob_fetcher::NativeBlobFetcher::new(&nest));
         let fetcher: Arc<dyn BlobFetcher> = Arc::new(NestPublicChunkFetcher::new(&nest));
-        ServedSetWalk::new(
-            nest, keypair, resolver, device_id, fetcher, primaries, uploader,
-        )
+        ServedSetWalk::new(nest, keypair, resolver, device_id, fetcher, uploader)
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -540,14 +492,10 @@ mod wasm {
     ) -> ServedSetWalk<WsRpcClient> {
         let uploader: Arc<dyn MediaBlobUploader> =
             Arc::new(crate::blob_uploader::WasmBlobUploader::new(nest.clone()));
-        let primaries: Arc<dyn MediaBlobFetcher> =
-            Arc::new(crate::blob_fetcher::WasmBlobFetcher::new(nest.clone()));
         let fetcher: Arc<dyn BlobFetcher> = Arc::new(
             fauna_core::file_download::WasmPublicChunkFetcher::new(nest.nest_url()),
         );
-        ServedSetWalk::new(
-            nest, keypair, resolver, device_id, fetcher, primaries, uploader,
-        )
+        ServedSetWalk::new(nest, keypair, resolver, device_id, fetcher, uploader)
     }
 }
 #[cfg(target_arch = "wasm32")]
@@ -559,6 +507,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
+    use crate::nest_api::MediaApiError;
     use fauna_client_testkit::{ClassifiedError, block_on};
     use fauna_core::folder_keys::{FolderContentKeys, ResolvedCustody, ResolvedFolderKeys};
     use fauna_core::identity::ActorKeypair;
@@ -630,7 +579,7 @@ mod tests {
 
     /// The nest's two byte stores in memory: the chunk/manifest store (read by
     /// the walk and by the MDA's walk, written by the re-seal) and the blob
-    /// store (the Media primaries).
+    /// store (the uploader seam's thumbnail POST; the walk never reads it).
     #[derive(Default)]
     struct Store {
         manifests: Mutex<HashMap<ContentHash, Vec<u8>>>,
@@ -659,20 +608,6 @@ mod tests {
                 .iter()
                 .map(|k| chunks.get(k).cloned().context("no such chunk"))
                 .collect()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl MediaBlobFetcher for Store {
-        async fn fetch_blob(&self, hash: String) -> Result<Vec<u8>, MediaApiError> {
-            self.blobs
-                .lock()
-                .unwrap()
-                .get(&hash)
-                .cloned()
-                .ok_or(MediaApiError::NotFound {
-                    detail: "no such blob".into(),
-                })
         }
     }
 
@@ -730,6 +665,14 @@ mod tests {
                 home_nest_url: None,
                 home_nest_actor_id: None,
             }))
+        }
+
+        /// Keyed by name: no answer by identity.
+        async fn resolve_ref(
+            &self,
+            _folder_ref: &fauna_core::folder_keys::FolderRef,
+        ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+            anyhow::bail!("no set with that identity")
         }
 
         async fn set_nonce(&self, _folder: &str) -> anyhow::Result<Option<[u8; 32]>> {
@@ -797,16 +740,6 @@ mod tests {
         hex::encode(sealed.manifest_hash.digest())
     }
 
-    /// Put a Media blob primary of `bytes` (Library audience, the owner's bare
-    /// key) into the blob store; its hash.
-    fn owner_primary(store: &Store, bytes: &[u8]) -> String {
-        let backup = BackupKey::derive(owner().secret_bytes());
-        let sealed = fauna_core::crypto::encrypt_backup_chunk(&backup, bytes).expect("seal");
-        let hash = blake3::hash(&sealed).to_hex().to_string();
-        store.blobs.lock().unwrap().insert(hash.clone(), sealed);
-        hash
-    }
-
     fn nest_over(rows: Vec<SyncChange>) -> Arc<TableNest> {
         Arc::new(
             TableNest::default()
@@ -847,8 +780,8 @@ mod tests {
     }
 
     /// `webdav-server.md` § Key model (c): after the flip, the walk re-seals the
-    /// owner's own pre-serve files — a Media blob primary and an owner-keyed
-    /// manifest — under the served generation, records each stamped and signed,
+    /// owner's own pre-serve files — a Media upload and an engine-recorded
+    /// file, both owner-keyed manifests — under the served generation, records each stamped and signed,
     /// and the MDA's walk (the content keys ALONE, no owner root) opens both
     /// byte-identically. An unsigned head and one signed under another set's
     /// nonce are skipped, never re-sealed: the owner root would open them, and
@@ -870,7 +803,7 @@ mod tests {
             head(
                 1,
                 "before.txt",
-                owner_primary(&store, &uploaded),
+                owner_manifest(&store, &uploaded),
                 Some((&owner, NONCE)),
             ),
             head(
@@ -892,7 +825,6 @@ mod tests {
             &owner,
             Arc::new(ServedResolver(keys.clone())),
             DEVICE.into(),
-            store.clone(),
             store.clone(),
             store.clone(),
         );
@@ -1010,7 +942,6 @@ mod tests {
                 DEVICE.into(),
                 store.clone(),
                 store.clone(),
-                store.clone(),
             )
             .with_predecessors(vec![predecessor.actor_id().0]);
             (block_on(walk.converge(SET)).expect("walk"), nest)
@@ -1076,7 +1007,6 @@ mod tests {
             Arc::new(ServedResolver(keys)),
             DEVICE.into(),
             store.clone(),
-            store.clone(),
             store,
         );
 
@@ -1110,6 +1040,14 @@ mod tests {
                     home_nest_actor_id: None,
                 }))
             }
+
+            /// Keyed by name: no answer by identity.
+            async fn resolve_ref(
+                &self,
+                _folder_ref: &fauna_core::folder_keys::FolderRef,
+            ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+                anyhow::bail!("no set with that identity")
+            }
         }
         let nest = nest_over(Vec::new());
         let store = Arc::new(Store::default());
@@ -1118,7 +1056,6 @@ mod tests {
             &owner(),
             Arc::new(Bound),
             DEVICE.into(),
-            store.clone(),
             store.clone(),
             store,
         );

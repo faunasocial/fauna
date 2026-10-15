@@ -926,10 +926,13 @@ impl CacheDb {
             //     uid_validity. uid_next + highestmodseq reset to 1
             //     per the plan (cleaner semantics than continuing
             //     pre-rename counters; RFC §6.3.6 leaves it to
-            //     implementation choice).
+            //     implementation choice). The prune floor resets too: the
+            //     fresh UIDVALIDITY has no incomplete expunge history, and
+            //     the manifest's re-seeding `Create` starts INBOX at 0.
             tx.execute(
                 "UPDATE bridge_imap_mailbox_state \
-                     SET uid_validity = ?1, uid_next = 1, highestmodseq = 1 \
+                     SET uid_validity = ?1, uid_next = 1, highestmodseq = 1, \
+                         pruned_modseq = 0 \
                      WHERE actor_id = ?2 AND mailbox = 'INBOX'",
                 rusqlite::params![inbox_uid_validity as i64, &actor[..]],
             )
@@ -1818,6 +1821,44 @@ impl CacheDb {
             .context("query list_bridge_imap_quota_size_refs")?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collect list_bridge_imap_quota_size_refs")?;
+        Ok(rows)
+    }
+
+    /// Return `(mailbox, segment_id, record_cid)` for every live
+    /// (non-tombstoned) mail placement the actor owns — the
+    /// `list_bridge_imap_quota_size_refs` join with the placement's mailbox
+    /// kept, so `fauna.bridges.list_own_mailboxes` can size every mailbox in
+    /// ONE `segments::record_sizes` pass (each segment's index opened once,
+    /// not once per mailbox) and bucket the sizes by name.
+    pub async fn list_bridge_imap_mailbox_size_refs(
+        &self,
+        actor: &[u8; 32],
+    ) -> Result<Vec<(String, u32, Cid)>> {
+        let actor = *actor;
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.mailbox, sr.segment_id, sr.record_cid \
+                 FROM bridge_imap_messages m \
+                 JOIN segment_records sr \
+                   ON sr.kind = 'mail' \
+                  AND sr.scope_id = m.actor_id \
+                  AND substr(sr.record_cid, 5) = m.message_id \
+                  AND sr.tombstoned = 0 \
+                 WHERE m.actor_id = ?1",
+            )
+            .context("prepare list_bridge_imap_mailbox_size_refs")?;
+        let rows = stmt
+            .query_map(rusqlite::params![&actor[..]], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)? as u32,
+                    cid_from_col(row.get::<_, Vec<u8>>(2)?, 2)?,
+                ))
+            })
+            .context("query list_bridge_imap_mailbox_size_refs")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collect list_bridge_imap_mailbox_size_refs")?;
         Ok(rows)
     }
 
@@ -3899,6 +3940,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(at, Some(vec![5, 7]), "at the floor the log is complete");
+    }
+
+    /// An INBOX rename re-seeds INBOX with a fresh UIDVALIDITY, so the
+    /// restore-carried prune floor of the old INBOX no longer applies: the
+    /// manifest's re-seeding `Create` starts INBOX at floor 0.
+    #[tokio::test]
+    async fn inbox_rename_reseed_resets_prune_floor() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let actor = make_actor(39);
+        db.ensure_bridge_imap_mailboxes(&actor).await.unwrap();
+        db.conn()
+            .await
+            .execute(
+                "UPDATE bridge_imap_mailbox_state SET pruned_modseq = 9 \
+                 WHERE actor_id = ?1 AND mailbox = 'INBOX'",
+                rusqlite::params![&actor[..]],
+            )
+            .unwrap();
+        assert_eq!(
+            db.list_bridge_imap_expunged_since(&actor, "INBOX", 1)
+                .await
+                .unwrap(),
+            None,
+            "precondition: the stale floor refuses the list"
+        );
+
+        let outcome = db
+            .rename_bridge_imap_mailbox(&actor, "INBOX", "Archive-old", 7777, 8888)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RenameMailboxDbOutcome::Renamed));
+
+        assert_eq!(
+            db.list_bridge_imap_expunged_since(&actor, "INBOX", 1)
+                .await
+                .unwrap(),
+            Some(vec![]),
+            "the re-seeded INBOX has a fresh UIDVALIDITY and no prune floor"
+        );
     }
 
     // ── C.3 DB tests ──────────────────────────────────────────────────────────

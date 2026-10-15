@@ -8,7 +8,7 @@
 //! throwaway replicas: the box-recovery **cold read**'s (`nest/box-recovery.md`
 //! § The plane-era recovery floor, *(b)*), which walks a nest's fleet scope
 //! into memory, folds one kind and drops the whole store, and the capability
-//! host's fleet-scope read (`on-demand-files.md` § Shared sets on a capability
+//! host's fleet-scope read (`on-demand-files-shared-sets.md` § Shared sets on a capability
 //! host, decision 1′), which holds the same replica in memory for the host
 //! process's life, keyed by the machine principal's wraps, and publishes
 //! nothing. Both are `fauna_account_plane::cold_replica::ColdFleetReplica`,
@@ -42,7 +42,7 @@ use anyhow::{Context, Result, bail};
 use fauna_core::data::ContentHash;
 
 use crate::backend::{
-    ReadSeek, RelayEvicted, RelayScopeMeter, RetiredCompaction, ScopeDropCounts, SegmentScopeMeter,
+    RelayEvicted, RelayScopeMeter, RetiredCompaction, ScopeDropCounts, SegmentScopeMeter,
     SegmentStaging, StoreBackend,
 };
 use crate::physical::{ascii_u64, entry_moved, fits_i64, nest_watermark_key, rising_meta_integer};
@@ -70,6 +70,8 @@ impl SegmentSink for MemoryStaging {
 }
 
 impl SegmentStaging for MemoryStaging {
+    type DatReader<'a> = fauna_carv2::SeekReadAt<std::io::Cursor<&'a [u8]>>;
+
     fn len(&self, half: SegmentHalf) -> u64 {
         match half {
             SegmentHalf::Dat => self.dat.len() as u64,
@@ -81,16 +83,19 @@ impl SegmentStaging for MemoryStaging {
         Ok(self.meta.clone())
     }
 
-    async fn dat_reader(&mut self) -> Result<Box<dyn ReadSeek + '_>> {
-        Ok(Box::new(std::io::Cursor::new(self.dat.as_slice())))
+    async fn dat_reader(&mut self) -> Result<Self::DatReader<'_>> {
+        Ok(fauna_carv2::SeekReadAt(std::io::Cursor::new(
+            self.dat.as_slice(),
+        )))
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
     async fn abandon_as_crash(self) {}
 }
 use crate::types::{
-    InsertOutcome, IntentDrainer, IntentStatus, IssuedRetire, ItemRef, JournalOp, JournalRow,
-    NewOutboxIntent, OutboxIntent, RecordIndexEntry, RelayRow, StateEntry, WriterId,
+    CustodiedRecovery, InsertOutcome, IntentDrainer, IntentStatus, IssuedRetire, ItemRef,
+    JournalOp, JournalRow, NewOutboxIntent, OutboxIntent, RecordIndexEntry, RelayRow, StateEntry,
+    WriterId,
 };
 
 /// A journal slot's occupant: `(op, encoded item)`, compared bytewise exactly
@@ -146,6 +151,10 @@ struct Tables {
     outbox: BTreeMap<[u8; 16], OutboxStored>,
     /// The retire record, keyed by its order token (the SQLite arm's `ord`).
     issued_retires: BTreeMap<u64, IssuedRetire>,
+    /// The custodied recovery material — the SQLite arm's three
+    /// `custodied_recovery_*` tables, held as the one value they are read and
+    /// replaced as.
+    custodied_recovery: CustodiedRecovery,
 }
 
 /// A handle on one in-memory store medium (see the module doc).
@@ -631,6 +640,18 @@ impl StoreBackend for MemoryBackend {
         while t.issued_retires.len() > cap as usize {
             t.issued_retires.pop_first();
         }
+        Ok(())
+    }
+
+    async fn custodied_recovery(&self) -> Result<CustodiedRecovery> {
+        Ok(self.tx()?.custodied_recovery.clone())
+    }
+
+    async fn custodied_recovery_put(&self, material: &CustodiedRecovery) -> Result<()> {
+        if let Some(escrow) = &material.escrow {
+            fits_i64(escrow.head_seq, "custodied head_seq")?;
+        }
+        self.tx()?.custodied_recovery = material.clone();
         Ok(())
     }
 

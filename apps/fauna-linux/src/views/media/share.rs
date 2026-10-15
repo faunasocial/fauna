@@ -231,6 +231,13 @@ impl ShareSurfaces {
         set_test_id(&outer, ids::SHARE_LINK_CREATE_MODAL);
         outer.append(&heading(&sl::create_title(&create.name)));
         outer.append(&wrapped(sl::CREATE_BODY));
+        // A sealed file's link carries its key: the notice exists only then,
+        // off the shared snapshot's bit (absent on a public file).
+        if create.key_in_fragment {
+            let notice = wrapped(sl::KEY_NOTICE);
+            set_test_id(&notice, ids::SHARE_LINK_KEY_NOTICE);
+            outer.append(&notice);
+        }
 
         let expiry_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         expiry_row.append(

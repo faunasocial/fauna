@@ -144,16 +144,25 @@ background transition, never the kill), quitting the terminal app, and on web th
 the browser actually delivers (`pagehide`/visibility change — a browser grants no reliable async
 work after that, so web's door is best-effort by platform fact, stated here rather than hidden).
 The door differs per platform; the promise does not, and no app adds a second choice or knob around
-it. **Windows is the worked example, e2e-proven**: `TrayIconService.QuitApplication()` flushes both
-door-crossing rails — `ConvDrafts.SaveNowAsync()` + `FeedDrafts.FlushIfPendingAsync()` — with the
-`RestartManagerService` end-session twin, witnessed nest-side by
-`tests/e2e-unified/tests/test_windows_window_close_flush.py`. The events rail is flush-safe by
+it. **Signing out, and switching to another account, is a leave door too, on every app** (named
+2026-10-09): it takes
+away the session the debounced save would ride, so the outgoing session's rails flush before its
+transport is torn down, and the next sign-in — on this device or another — restores the draft as
+the user left it, never the one from before their last edit. A teardown that disposes the client
+first does not merely lose that edit: the restore brings back the previous draft whole, audience
+included, so a composer the user had set back to Public can return still holding an earlier sale.
+**Windows is the worked example, e2e-proven**: one body, `App.FlushDraftRailsAsync()`, flushes all
+three rails at every door — `TrayIconService.QuitApplication()`, the `RestartManagerService`
+end-session twin, and every session teardown (`SignOutHandler`, and `DisposeNestClients` for the
+account switch and the e2e reset/logout, whose client disposal waits for it) — the quit door
+witnessed nest-side by `tests/e2e-unified/tests/test_windows_window_close_flush.py`. The events rail is flush-safe by
 construction on every app (the autosave channel carries the value itself, per the three-shapes
 ruling above).
 
 **Implementation status today (2026-09-01):** windows has a full leave-door flush (all rails).
 **linux, tui and web joined the same day** — linux (`conversations`/`feed`/`events`, via the shared
-`blocking_flush` worker wired into `connect_close_request`'s sign-out and no-tray-quit branches),
+`blocking_flush` worker wired into `connect_close_request`'s hide-to-tray and quit branches, and
+into every session teardown — the sign-out door below),
 tui (`conversations`/`feed` via `drafts_autosave::flush_now`, plus `events`' own, both awaited
 before process exit), and web (`conversations`/`feed`/`events` via `flushDraftsNow()`/
 `flushEventDraftNow()`, wired to `visibilitychange`/`pagehide`) — each with its own real-quit/
@@ -174,6 +183,28 @@ gap** (the census in the correction paragraph above is the current per-app truth
 [`docs/features/drafts-survive.md`](../../features/drafts-survive.md)'s leave-flush outcome, and
 the remaining legs are read off `just features-parity drafts-survive` rather than tracked as
 rows.
+
+**The sign-out door (2026-10-10):** windows flushes at every session teardown (above).
+**linux** flushes all three ahead of the first clear on every teardown that keeps talking to the
+same nest — sign-out, the account switch, and the e2e logout/reset and actor switch — through one
+body, `blocking_flush::flush_leave_door`, which the window-close/quit door shares. It must run
+first: the sign-out continuation follows the account runtime's stop, by which time the nest has
+revoked the session and the managers are cleared, so a later flush could only upload an emptied
+draft. Two teardowns skip it on purpose: the identity-changed verdict (the nest refused the
+identity) and the factory reset (the nest the rails live on was just wiped).
+**tui** flushes all three in `session::sign_out` — every session teardown reaches it, so sign-out,
+account switch and the e2e reset alike — capturing each rail's snapshot before the teardown drops
+the managers and saving it on the stop task ahead of the client's disconnect, so the erase and the
+next sign-in's restore queue behind it. tui's quit and sign-out doors share one body
+(`drafts_autosave::LeaveFlush`, each rail bounded on its own). The witness is
+`tests/e2e-unified/tests/test_drafts_sign_out_flush.py`, `drafts-survive` outcome 13: type a post,
+sign out through the app's own gesture with the autosave window re-timed past the whole test,
+read the draft off the nest, sign in again and find it in the composer by value. It drives the
+user's gesture, never the harness reset, because linux's e2e reset tears its windows down without
+passing the sign-out branch; it is green on tui and linux (Linux, 2026-10-10). web,
+android and apple are not yet audited for this door and stay
+unmarked, so `just features-parity drafts-survive` reads them as gaps like the quit door's; web
+also cannot take the window seam (no process environment), so its leg needs a witness of its own.
 
 ## Contacts Sync
 

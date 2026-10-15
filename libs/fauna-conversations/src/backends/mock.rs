@@ -546,6 +546,12 @@ impl crate::backend::ConversationsRpc for InertConversationsRpc {
     async fn keypackage_count(&self, _a: String) -> Result<u64, crate::backend::ConvRpcError> {
         Ok(0)
     }
+    async fn keypackage_addressable(
+        &self,
+        _a: String,
+    ) -> Result<bool, crate::backend::ConvRpcError> {
+        Ok(false)
+    }
     async fn actor_by_handle(
         &self,
         _h: String,

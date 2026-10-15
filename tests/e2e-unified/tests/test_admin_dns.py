@@ -25,8 +25,27 @@ import time
 
 import pytest
 
+from helpers.admin_wire import (
+    admin_user,
+    catch_all_actor_for,
+    dmarc_policy_for,
+    dns_matrix_for,
+    dns_verdicts_for,
+    picker_option,
+    role_overrides_for,
+    seed_local_domain,
+)
+from helpers.app_surface import app_name, skip_unbuilt
 from helpers.budgets import PROVIDER_VERIFY_S, RPC_ROUNDTRIP_S, UI_SETTLE_S
+from helpers.dns_recheck import require_dns_background_recheck
 from helpers.waiting import wait_until
+from i18n.strings import S
+
+# The app's own record of each DNS-page read (`fauna_client_dns`'s
+# `MATRIX_LOAD_LOG_LINE` / `RECHECK_LOG_LINE` / `BACKGROUND_RECHECK_LOG_LINE`).
+MATRIX_LOAD_LINE = "loaded the DNS record matrix:"
+RECHECK_LINE = "re-checked DNS records against public DNS:"
+BACKGROUND_LINE = "background re-check of the DNS page"
 
 pytestmark = [pytest.mark.tier_3]
 
@@ -422,8 +441,9 @@ def test_admin_dns_rename_sheet_opens_and_cancels(admin_app, nest_instance):
 
     Side-effect-free by design: it never submits, so the shared session nest's
     primary is never flipped. The wire path for ``start`` is proven separately in
-    ``test_primary_domain_rename.py``; the pre-flip start→abort round-trip is left
-    to CI (it must run on a nest not shared with assertions about the primary)."""
+    ``test_primary_domain_rename.py``; the start→abort round-trip runs in
+    ``test_admin_dns_domain_lifecycle.py`` on a dedicated nest, because it must not
+    share a nest with assertions about the primary."""
     # Seed a unique non-primary domain so the two-step rule is satisfied and the
     # "Rename primary" affordance enables (snapshot.rename_available == true).
     rename_domain = f"rename-{secrets.token_hex(4)}.test"
@@ -462,4 +482,434 @@ def test_admin_dns_rename_sheet_opens_and_cancels(admin_app, nest_instance):
     assert not admin_app.admin.rename_sheet_open(), "Cancel must close the sheet"
     assert not admin_app.admin.rename_banner_present(), (
         "cancelling must not start a rename (no admin-dns-rename-banner)"
+    )
+
+
+# ── The record half of the page, read back row by row (tui leads; the
+#    cross-app lift is a separate row). ──
+
+# The label the page paints for each wire verdict — the shared
+# `fauna_core::format::dns_verdict_label` keys. A mismatch carries what public
+# DNS served after the word, so only its start is fixed.
+_VERDICT_LABEL = {
+    "ok": S.admin.dns.status_ok,
+    "missing": S.admin.dns.status_missing,
+    "mismatch": S.admin.dns.status_mismatch,
+    "checking": S.admin.dns.status_checking,
+}
+
+
+def _label_matches(label: str, wire_status: str) -> bool:
+    expected = _VERDICT_LABEL.get(wire_status, S.admin.dns.status_checking)
+    if wire_status == "mismatch":
+        return label.startswith(expected)
+    return label == expected
+
+
+def _open_domain(admin_app, nest_instance, domain: str) -> int:
+    """Seed ``domain``, open admin-dns, and return the domain's section index."""
+    seed_local_domain(nest_instance, domain)
+    admin_app.admin.navigate_dns()
+    wait_until(
+        lambda: domain in admin_app.admin.dns_domain_names() or None,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            f"seeded domain {domain!r} not rendered on admin-dns; got "
+            f"{admin_app.admin.dns_domain_names()!r}"
+        ),
+    )
+    return admin_app.admin.dns_domain_names().index(domain)
+
+
+@pytest.mark.feature("admin-dns-and-certificates")
+def test_admin_dns_lists_every_record_with_type_value_and_live_status(
+    admin_app, nest_instance
+):
+    """Every record a hosted domain needs is listed under that domain, each with
+    its type, the exact value to publish and whether public DNS serves it
+    (``dns-management.md`` § Manual + live verification):
+
+    1. The rows under the domain's own section are exactly the nest's matrix
+       for it (``fauna.dns.list_records``) — the same (name, type, value)
+       triples, none missing, none extra, paired by the row and not by position
+       across the page.
+    2. Each row's status reads the nest's live verdict for that record
+       (``fauna.dns.verify_records``) — live, missing, wrong value, or still
+       checking — in the words the page uses for it.
+    3. No public DNS serves a ``.test`` name, so the records are not live — and
+       that never stops the admin adding another domain from the same page.
+    """
+    domain = f"rows-{secrets.token_hex(4)}.test"
+    idx = _open_domain(admin_app, nest_instance, domain)
+    matrix = dns_matrix_for(nest_instance, domain)
+    want = sorted((r["name"], r["record_type"], r["expected"]) for r in matrix)
+    assert want, f"the nest lists no records for {domain!r}"
+
+    def rows_match_the_nest():
+        idx_now = admin_app.admin.dns_domain_names().index(domain)
+        rows = admin_app.admin.dns_records(idx_now)
+        got = sorted((r["name"], r["type"], r["value"]) for r in rows)
+        if got != want:
+            return None
+        verdicts = dns_verdicts_for(nest_instance, domain)
+        if all(
+            _label_matches(r["status"], verdicts.get((r["name"], r["type"]), "checking"))
+            for r in rows
+        ):
+            return rows
+        return None
+
+    rows = wait_until(
+        rows_match_the_nest,
+        PROVIDER_VERIFY_S,
+        diagnose=lambda: (
+            f"admin-dns rows under {domain!r} never matched the nest:\n"
+            f"  page: {admin_app.admin.dns_records(idx)!r}\n"
+            f"  nest matrix: {want!r}\n"
+            f"  nest verdicts: {dns_verdicts_for(nest_instance, domain)!r}"
+        ),
+    )
+    assert {r["type"] for r in rows} >= {"MX", "TXT"}, (
+        f"a hosted domain's matrix carries at least its MX and TXT records: {rows!r}"
+    )
+
+    # --- 3. a record that is not live never blocks the admin ---
+    assert any(r["status"] != S.admin.dns.status_ok for r in rows), (
+        f"no public DNS serves {domain!r}, so some record must read not-live: {rows!r}"
+    )
+    another = f"next-{secrets.token_hex(4)}.test"
+    admin_app.admin.add_domain(another)
+    wait_until(
+        lambda: another in admin_app.admin.dns_domain_names() or None,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            f"adding {another!r} while {domain!r}'s records are not live must "
+            f"succeed; rows {admin_app.admin.dns_domain_names()!r} (error: "
+            f"{admin_app.driver.get_text('error-message') if admin_app.has_error() else 'none'})"
+        ),
+    )
+
+
+#: The owner name a DNS-01 issuance publishes its one-shot TXT under
+#: (RFC 8555 § 8.4) — transient by design, never a steady-state record.
+ACME_CHALLENGE_LABEL = "_acme-challenge."
+
+
+@pytest.mark.feature("admin-dns-and-certificates")
+def test_admin_dns_never_lists_the_issuance_challenge_record_as_a_standing_record(
+    admin_app, nest_instance
+):
+    """The temporary TXT a certificate issuance publishes is not a record the
+    domain needs between issuances, so the records page never lists it — and so
+    never shows it as missing (``tls-certificates.md`` § B. Trusted-cert
+    acquisition: the transient ``_acme-challenge`` TXT is deliberately not a
+    steady-state ``list_records`` row; its absence between renewals is correct).
+
+    Read once every row the nest lists for a freshly added domain has rendered,
+    across every domain section on the page — the primary one included, which
+    is the one an issuance orders for — and checked against the nest's own
+    matrix too (convention 5). No issuance runs in this environment (no CA),
+    so this is the steady state between issuances; the paste card a manual
+    issuance shows (``admin-dns-cert-*``) is where the TXT appears while one is
+    in flight, and is not a records-page row.
+    """
+    domain = f"acme-{secrets.token_hex(4)}.test"
+    idx = _open_domain(admin_app, nest_instance, domain)
+    want = sorted(
+        (r["name"], r["record_type"], r["expected"])
+        for r in dns_matrix_for(nest_instance, domain)
+    )
+
+    def all_rendered():
+        idx_now = admin_app.admin.dns_domain_names().index(domain)
+        rows = admin_app.admin.dns_records(idx_now)
+        got = sorted((r["name"], r["type"], r["value"]) for r in rows)
+        return rows if got == want else None
+
+    wait_until(
+        all_rendered,
+        PROVIDER_VERIFY_S,
+        diagnose=lambda: (
+            f"admin-dns rows under {domain!r} never matched the nest:\n"
+            f"  page: {admin_app.admin.dns_records(idx)!r}\n  nest matrix: {want!r}"
+        ),
+    )
+
+    names = admin_app.admin.dns_domain_names()
+    for i, section in enumerate(names):
+        challenge = [
+            r for r in admin_app.admin.dns_records(i)
+            if r["name"].startswith(ACME_CHALLENGE_LABEL)
+        ]
+        assert not challenge, (
+            f"the records page lists an issuance challenge record under {section!r} "
+            f"as a standing record (status shown: "
+            f"{[r['status'] for r in challenge]!r}): {challenge!r}"
+        )
+        nest_rows = [
+            r for r in dns_matrix_for(nest_instance, section)
+            if r["name"].startswith(ACME_CHALLENGE_LABEL)
+        ]
+        assert not nest_rows, (
+            f"fauna.dns.list_records carries an issuance challenge record for "
+            f"{section!r}: {nest_rows!r}"
+        )
+
+
+@pytest.mark.feature("admin-dns-and-certificates")
+def test_admin_dns_record_value_copies_to_the_clipboard(admin_app, nest_instance):
+    """Each record's copy button puts that record's exact value on the
+    clipboard, ready to paste at a DNS provider — checked on the first and the
+    last record of the domain, so the button copies its own row's value. Polls
+    for the value itself, so the first copy left on the clipboard can never
+    pass for the second."""
+    domain = f"copy-{secrets.token_hex(4)}.test"
+    _open_domain(admin_app, nest_instance, domain)
+    want = {r["expected"] for r in dns_matrix_for(nest_instance, domain)}
+
+    def all_rendered():
+        rows = admin_app.admin.dns_records(admin_app.admin.dns_domain_names().index(domain))
+        return rows if {r["value"] for r in rows} == want else None
+
+    rows = wait_until(
+        all_rendered,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"the records of {domain!r} never all rendered",
+    )
+    first, last = 0, len(rows) - 1
+    assert rows[first]["value"] != rows[last]["value"], f"two distinct values to copy: {rows!r}"
+    reads_clipboard = admin_app.driver.is_tui() or admin_app.driver.is_windows()
+    for i in (first, last):
+        scope = f"admin-dns-domain[{admin_app.admin.dns_domain_names().index(domain)}]"
+        admin_app.admin.copy_dns_record(
+            admin_app.admin.dns_domain_names().index(domain), i
+        )
+
+        def copied(i=i, scope=scope):
+            if reads_clipboard:
+                return admin_app.driver.get_clipboard_text()
+            return admin_app.driver.get_attr(
+                "admin-dns-record-copy-button", "copied", i, scope=scope
+            )
+
+        wait_until(
+            lambda i=i, copied=copied: copied() == rows[i]["value"] or None,
+            UI_SETTLE_S,
+            diagnose=lambda i=i, copied=copied: (
+                f"copying {rows[i]['type']} {rows[i]['name']} left {copied()!r}, "
+                f"not its value {rows[i]['value']!r}"
+            ),
+        )
+
+
+def _count(admin_app, line: str) -> int:
+    return sum(1 for ln in admin_app.driver.app_stderr_text().splitlines() if line in ln)
+
+
+@pytest.mark.feature("admin-dns-and-certificates")
+def test_admin_dns_rechecks_on_demand_and_by_itself_while_open(admin_app, nest_instance):
+    """The page re-checks every record against public DNS when the admin asks
+    and, while it stays open, by itself on a slow cadence
+    (``dns-management.md`` § Manual + live verification). The verdicts of a
+    ``.test`` name never change, so the witness is the app's own record of each
+    re-check (``fauna_client_dns``'s log lines):
+
+    1. On demand: the re-check button reloads the matrix (a load that is not a
+       background tick's) and verifies it.
+    2. By itself: with no gesture at all, background ticks re-read and
+       re-verify the page — each tick names itself before its load.
+
+    The e2e launch compresses the cadence (``FAUNA_DNS_RECHECK_SECS``); the
+    journey polls for the lines, never a fixed delay.
+    """
+    if admin_app.driver.log_scope_across_relaunch() == "none":
+        skip_unbuilt(
+            admin_app.driver,
+            surface="app-log reader in the e2e driver",
+            detail="a re-check is witnessed by the app's own log line",
+        )
+    domain = f"recheck-{secrets.token_hex(4)}.test"
+    _open_domain(admin_app, nest_instance, domain)
+
+    # --- 1. on demand ---
+    def foreground_loads() -> int:
+        return _count(admin_app, MATRIX_LOAD_LINE) - _count(admin_app, BACKGROUND_LINE)
+
+    loads, checks = foreground_loads(), _count(admin_app, RECHECK_LINE)
+    admin_app.admin.refresh_dns()
+    wait_until(
+        lambda: (
+            foreground_loads() > loads and _count(admin_app, RECHECK_LINE) > checks
+        )
+        or None,
+        PROVIDER_VERIFY_S,
+        diagnose=lambda: (
+            f"the re-check button never reloaded and re-verified the records "
+            f"(foreground loads {loads} → {foreground_loads()}, re-checks {checks} → "
+            f"{_count(admin_app, RECHECK_LINE)})"
+        ),
+    )
+
+    # --- 2. by itself ---
+    require_dns_background_recheck(admin_app.driver)
+    ticks, checks = _count(admin_app, BACKGROUND_LINE), _count(admin_app, RECHECK_LINE)
+    wait_until(
+        lambda: (
+            _count(admin_app, BACKGROUND_LINE) >= ticks + 2
+            and _count(admin_app, RECHECK_LINE) >= checks + 2
+        )
+        or None,
+        PROVIDER_VERIFY_S,
+        diagnose=lambda: (
+            f"the open page did not re-check by itself (background ticks {ticks} → "
+            f"{_count(admin_app, BACKGROUND_LINE)}, re-checks {checks} → "
+            f"{_count(admin_app, RECHECK_LINE)})"
+        ),
+    )
+
+
+@pytest.mark.feature("admin-dns-and-certificates")
+def test_admin_dns_row_shows_where_catch_all_and_role_addresses_go(
+    admin_app, nest_instance
+):
+    """A domain's row shows who its catch-all and each role address currently
+    go to (``mail-multidomain.md`` § Per-domain role-address routing): the
+    admin chooses on the row, the page is opened afresh — so every value is
+    read back from the nest — and the row names the chosen member, while the
+    roles left alone still read the admin default."""
+    domain = f"routes-{secrets.token_hex(4)}.test"
+    _open_domain(admin_app, nest_instance, domain)
+    option = picker_option(admin_user(nest_instance))
+    idx = admin_app.admin.dns_domain_names().index(domain)
+    admin_app.admin.set_catch_all(option, index=idx)
+    admin_app.admin.set_role_address("abuse", option, index=idx)
+    wait_until(
+        lambda: role_overrides_for(nest_instance, domain).get("abuse")
+        and catch_all_actor_for(nest_instance, domain)
+        or None,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"the choices on {domain!r}'s row never reached the nest",
+    )
+
+    # Open the page afresh: nothing below is the picker remembering a click.
+    admin_app.driver.set_state({"nav": {"stack": [{"view": "admin"}]}})
+    admin_app.admin.navigate_dns()
+
+    def row_reads_back():
+        names = admin_app.admin.dns_domain_names()
+        if domain not in names:
+            return None
+        i = names.index(domain)
+        shown = {
+            "catch-all": admin_app.admin.catch_all_selected(index=i),
+            "abuse": admin_app.driver.get_text(
+                "admin-dns-domain-role-address-abuse-select", index=i
+            ),
+            "postmaster": admin_app.driver.get_text(
+                "admin-dns-domain-role-address-postmaster-select", index=i
+            ),
+        }
+        ok = (
+            shown["catch-all"] == option
+            and shown["abuse"] == option
+            and shown["postmaster"] == S.admin.dns.role_address_admin_default
+        )
+        return shown if ok else None
+
+    wait_until(
+        row_reads_back,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            f"{domain!r}'s row does not show where its mail goes: expected the "
+            f"catch-all and abuse@ on {option!r}, postmaster@ on the admin default"
+        ),
+    )
+
+
+# The apps that render `admin-dns-domain-dmarc-policy-select` (tui leads; each
+# app's trickle-down lift adds itself here).
+_DMARC_POLICY_BUILT_APPS = {"tui", "windows", "linux", "android", "web"}
+
+
+@pytest.mark.feature("admin-dns-and-certificates")
+def test_admin_softens_one_domains_dmarc_policy_from_its_row(admin_app, nest_instance):
+    """An admin softens one domain's DMARC policy from its row on the Domains
+    page, and sets it back (``dmarc-reporting.md`` § Multi-domain deployments):
+
+    1. A freshly added domain's picker reads the default, ``reject``.
+    2. Choosing ``quarantine`` reaches the nest — the stored override holds it
+       and the domain's published ``_dmarc`` record carries ``p=quarantine;
+       sp=quarantine`` — while another domain's record stays ``reject``.
+    3. The page opened afresh still shows ``quarantine`` on that row: the value
+       is read back from the nest, not the picker remembering a click.
+    4. Choosing ``reject`` again clears the override rather than storing it.
+    """
+    if app_name(admin_app.driver) not in _DMARC_POLICY_BUILT_APPS:
+        skip_unbuilt(
+            admin_app.driver,
+            surface="admin-dns-domain-dmarc-policy-select",
+            detail="the per-domain DMARC policy picker; tui leads",
+            tracked="",
+        )
+    soft = f"dmarc-soft-{secrets.token_hex(4)}.test"
+    strict = f"dmarc-strict-{secrets.token_hex(4)}.test"
+    seed_local_domain(nest_instance, strict)
+    _open_domain(admin_app, nest_instance, soft)
+
+    def picker_for(domain):
+        names = admin_app.admin.dns_domain_names()
+        if domain not in names:
+            return None
+        return admin_app.admin.dmarc_policy_selected(index=names.index(domain))
+
+    wait_until(
+        lambda: picker_for(soft) == "reject" or None,
+        UI_SETTLE_S,
+        diagnose=lambda: (
+            f"a fresh domain's DMARC picker should read the default 'reject'; "
+            f"got {picker_for(soft)!r}"
+        ),
+    )
+
+    admin_app.admin.set_dmarc_policy(
+        "quarantine", index=admin_app.admin.dns_domain_names().index(soft)
+    )
+    softened = {"stored": "quarantine", "published": ("quarantine", "quarantine")}
+    wait_until(
+        lambda: dmarc_policy_for(nest_instance, soft) == softened or None,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            f"choosing 'quarantine' on {soft!r}'s row never reached the nest: "
+            f"{dmarc_policy_for(nest_instance, soft)!r}; page error: "
+            f"{admin_app.driver.get_text('error-message')!r}"
+        ),
+    )
+    assert dmarc_policy_for(nest_instance, strict) == {
+        "stored": None,
+        "published": ("reject", "reject"),
+    }, f"softening {soft!r} changed another domain's DMARC policy"
+
+    # Open the page afresh: what the row shows now is read back from the nest.
+    admin_app.driver.set_state({"nav": {"stack": [{"view": "admin"}]}})
+    admin_app.admin.navigate_dns()
+    wait_until(
+        lambda: picker_for(soft) == "quarantine" or None,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            f"{soft!r}'s row does not show its softened policy after reopening the "
+            f"page; the picker reads {picker_for(soft)!r}"
+        ),
+    )
+
+    admin_app.admin.set_dmarc_policy(
+        "reject", index=admin_app.admin.dns_domain_names().index(soft)
+    )
+    restored = {"stored": None, "published": ("reject", "reject")}
+    wait_until(
+        lambda: dmarc_policy_for(nest_instance, soft) == restored or None,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            f"choosing 'reject' on {soft!r}'s row did not clear the override: "
+            f"{dmarc_policy_for(nest_instance, soft)!r}"
+        ),
     )

@@ -3,17 +3,20 @@
 //!
 //! Usage:
 //!   fauna-sandbox <profile> -- <command> [args...]
+//!   fauna-sandbox transcode --job-dir <dir> -- <command> [args...]
 //!
-//! Profiles: bridge, bridge-imap, dns
+//! Profiles: bridge, bridge-imap, dns, transcode
 
 #[cfg(test)]
 mod fork_probe;
 mod landlock;
+mod rlimits;
 mod seccomp;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use std::ffi::CString;
+use std::path::PathBuf;
 
 /// Environment variable carrying the Landlock enforcement status from this
 /// wrapper to the binary it execs (`fully` / `partial` / `off`; absent = the
@@ -54,6 +57,16 @@ pub enum Profile {
     Bridge,
     BridgeImap,
     Dns,
+    /// Every ffmpeg the image runs: the nest's transcode
+    /// (`bins/fauna-nest/src/video/transcode.rs`), a native parser over bytes an
+    /// authenticated user chose, and the ATProto bridge's mp4 remux
+    /// (`bins/fauna-bridges/internal/atprotorepo/video.go`), the same parser run
+    /// as the uid that owns the bridge's PDS signing key. Landlock grants
+    /// only the per-job directory (`--job-dir`) read-write plus the system
+    /// trees read-only, so `nest.db`, `acme` and `keys` are kernel-denied;
+    /// [`rlimits`] bounds memory, CPU, file size and descriptors
+    /// (`deployment-threat-model.md` § Concern 1b, item 2).
+    Transcode,
 }
 
 impl Profile {
@@ -63,6 +76,12 @@ impl Profile {
     /// profile is a pure client and needs no bind capability.
     fn needs_net_bind(self) -> bool {
         matches!(self, Profile::Bridge | Profile::BridgeImap)
+    }
+
+    /// Profiles whose writable directory is per-invocation, named by
+    /// `--job-dir`, rather than a fixed `/data` path baked into the profile.
+    fn takes_job_dir(self) -> bool {
+        matches!(self, Profile::Transcode)
     }
 }
 
@@ -75,6 +94,12 @@ struct Args {
     /// Sandbox profile to apply
     #[arg(value_enum)]
     profile: Profile,
+
+    /// The one directory the `transcode` profile may write (and the only
+    /// non-system path it may read). Required by that profile, refused by
+    /// every other.
+    #[arg(long)]
+    job_dir: Option<PathBuf>,
 
     /// Command and arguments to exec (after --)
     #[arg(trailing_var_arg = true, required = true)]
@@ -91,6 +116,12 @@ fn main() -> Result<()> {
 
     if args.command.is_empty() {
         bail!("no command specified after --");
+    }
+
+    match (args.profile.takes_job_dir(), &args.job_dir) {
+        (true, None) => bail!("profile {:?} requires --job-dir", args.profile),
+        (false, Some(_)) => bail!("profile {:?} takes no --job-dir", args.profile),
+        _ => {}
     }
 
     let binary = &args.command[0];
@@ -117,7 +148,8 @@ fn main() -> Result<()> {
     set_no_new_privs().context("PR_SET_NO_NEW_PRIVS")?;
 
     // 3. Apply Landlock filesystem restrictions
-    let landlock_status = landlock::apply(args.profile).context("landlock")?;
+    let landlock_status =
+        landlock::apply(args.profile, args.job_dir.as_deref()).context("landlock")?;
 
     // 3b. Hand the enforcement status forward to the wrapped binary, which
     //     self-reports it to nest as a provisioning diagnostic
@@ -144,10 +176,14 @@ fn main() -> Result<()> {
     // 4. Apply seccomp syscall filter
     seccomp::apply(args.profile).context("seccomp")?;
 
-    // 5. Close all FDs > 2
+    // 5. Resource limits (only the transcode profile sets any). Lowering a
+    //    limit needs no privilege, and the limits survive `execvp`.
+    rlimits::apply(args.profile).context("rlimits")?;
+
+    // 6. Close all FDs > 2
     close_excess_fds();
 
-    // 6. Exec the target binary
+    // 7. Exec the target binary
     let c_binary = CString::new(binary.as_bytes()).context("binary path contains null byte")?;
     let c_argv: Vec<CString> = argv
         .iter()

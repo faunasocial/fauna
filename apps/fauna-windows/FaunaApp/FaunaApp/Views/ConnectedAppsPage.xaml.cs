@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
+using FaunaApp.Core.Helpers;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
 using FaunaApp.Helpers;
@@ -299,11 +300,13 @@ public sealed partial class ConnectedAppsPage : Page, IAsyncLoadedPage
     {
         var item = NewCard(Ids.ConnectedAppsItem, "connected app");
         var burned = row.@mail is { @revoked: true };
-        if (burned)
-        {
-            // The burned state as a value a reader can count, beside the words.
-            AutomationProperties.SetHelpText(item, "true");
-        }
+        // Two attributes (`revoked`, `status`) share the one HelpText the bridge maps any
+        // non-name attr to, so they are always packed; an empty `revoked` is not a burned
+        // row. `status` is `paused` (the account's external-apps switch is OFF), `connected`
+        // or `not_connected`, as a value a reader can count beside the words.
+        AutomationProperties.SetHelpText(item, AutomationAttributePack.Pack(
+            ("revoked", burned ? "true" : ""),
+            ("status", row.@paused ? "paused" : row.@connected ? "connected" : "not_connected")));
         AddRow(item, new TextBlock
         {
             Text = ConnectedAppsViewModel.RowText(row),

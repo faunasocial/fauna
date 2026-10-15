@@ -139,11 +139,22 @@ pub struct BackupDestinationStatusItem {
     /// surface.
     #[serde(default)]
     pub last_audit_passed_at: Option<u64>,
+    /// Nest rows only: [`WRITER_STATE_OK`] or [`WRITER_STATE_REFUSED`] — whether
+    /// the destination's writer gate let this box's last pass through
+    /// (`docs/goal/behavior/backup-destinations.md` § Per-destination status
+    /// read → *A refused writer is a state, never a lag*). `refused` from the
+    /// first pass the gate answers with its typed `fauna.backup.writer_not_seated`
+    /// until the next accepted one; an unreachable destination changes nothing.
+    /// A refused box must never read as an ordinary lag — a stale upload time
+    /// and a backlog are also what a busy box shows. `None` on a client-device
+    /// row, which has no writer gate.
+    #[serde(default)]
+    pub writer_state: Option<String>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
 
-/// The cap-state and audit-state wire values, defined one layer down in
+/// The cap-state, audit-state and writer-state wire values, defined one layer down in
 /// `fauna-core` beside the destination-kind discriminators and re-exported here
 /// so this crate stays the place a wire reader looks for them.
 ///
@@ -152,7 +163,10 @@ pub struct BackupDestinationStatusItem {
 /// compare against the canonical value and `fauna-core` cannot name this crate —
 /// see the constants' own docs for why a duplicated string would be worse than
 /// the indirection.
-pub use fauna_core::data::{AUDIT_STATE_FAILED, AUDIT_STATE_OK, CAP_STATE_OK, CAP_STATE_REACHED};
+pub use fauna_core::data::{
+    AUDIT_STATE_FAILED, AUDIT_STATE_OK, CAP_STATE_OK, CAP_STATE_REACHED, WRITER_STATE_OK,
+    WRITER_STATE_REFUSED,
+};
 
 /// **T** — the destination-side custody grace window: how long a *superseded* or
 /// *tombstoned* backup generation is retained before its chunks may be reclaimed

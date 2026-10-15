@@ -364,6 +364,13 @@ class WsRpcAdminClient(_WsRpcClientBase):
             token=token, expires_at=expires_at, token_id=str(verify_data.get("token_id") or "")
         )
 
+    def mint_bearer(self) -> _BearerToken:
+        """A fresh bearer for this actor that this client does not hold — what
+        an app hands its sync agent (`ProvisionCapability`'s bearer), on which
+        the agent dials the nest as this actor. Opens no WebSocket of its own
+        beyond the transient anonymous one the mint rides."""
+        return self._mint_bearer()
+
     @property
     def own_token_id(self) -> str:
         """The session id of THIS client's bearer (minting one if none is held)

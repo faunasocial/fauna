@@ -70,8 +70,27 @@ class SessionsActions:
             return None
         return self.driver.get_text("session-this-mark-badge", scope=scope)
 
+    def detail(self, index: int) -> str:
+        """The card's ``session-detail`` line — its times and address."""
+        return self.driver.get_text("session-detail", scope=f"session-card[{index}]")
+
     def has_revoke_button(self, index: int) -> bool:
         return not self.driver.is_absent("session-revoke-button", scope=f"session-card[{index}]")
+
+    def revoke_note(self) -> str:
+        """``sessions-revoke-note`` — the honest bound beside the controls."""
+        return self.driver.get_text("sessions-revoke-note")
+
+    def lockout_warning(self) -> str:
+        """``sessions-lockout-warning`` — REQUIRED copy, never behind the confirm."""
+        return self.driver.get_text("sessions-lockout-warning")
+
+    def revoke_others_armed(self) -> bool:
+        """The two-press confirm's second press is showing."""
+        return not self.driver.is_absent("sessions-revoke-others-confirm-button")
+
+    def lock_enabled(self) -> bool:
+        return self.driver.is_enabled("sessions-lockout-button")
 
     def error_text(self) -> str:
         if self.driver.is_absent("error-message"):
@@ -82,14 +101,29 @@ class SessionsActions:
     def revoke(self, index: int) -> None:
         self.driver.click("session-revoke-button", scope=f"session-card[{index}]")
 
-    def sign_out_everywhere_else(self) -> None:
-        """Both presses of the inline confirm."""
+    def arm_sign_out_everywhere_else(self) -> None:
+        """The first press: the confirm/cancel pair appears, nothing is ended."""
         self.driver.click("sessions-revoke-others-button")
         self.driver.wait_for("sessions-revoke-others-confirm-button", timeout=10.0)
+
+    def cancel_sign_out_everywhere_else(self) -> None:
+        self.driver.click("sessions-revoke-others-cancel-button")
+        wait_until(
+            lambda: not self.revoke_others_armed(),
+            10.0,
+            diagnose=lambda: "Cancel never disarmed the sign-out-everywhere-else confirm",
+        )
+
+    def sign_out_everywhere_else(self) -> None:
+        """Both presses of the inline confirm."""
+        self.arm_sign_out_everywhere_else()
         self.driver.click("sessions-revoke-others-confirm-button")
 
-    def lock(self, word: str = "LOCK") -> None:
+    def type_lock_word(self, word: str) -> None:
         self.driver.fill("sessions-lockout-confirm-field", word)
+
+    def lock(self, word: str = "LOCK") -> None:
+        self.type_lock_word(word)
         self.driver.click("sessions-lockout-button")
 
     # ── the locked surface (leg 2; ui.yaml `launch_account_locked`) ───────

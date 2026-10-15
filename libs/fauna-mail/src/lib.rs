@@ -32,6 +32,21 @@ pub mod dns;
 // identical body. Distinct from `auth::DmarcPolicy` (inbound verify side).
 #[cfg(feature = "dmarc-policy")]
 pub mod dmarc_publish;
+// DMARC aggregate-report receive (docs/goal/behavior/dmarc-reporting.md
+// § Aggregate-report receive): bounded unpack + a strict, DOCTYPE-refusing XML
+// reader for the RFC 7489 §A.1 fields + the per-report summary.
+#[cfg(feature = "dmarc-report")]
+pub mod dmarc_report;
+// DMARC forensic-report receive (dmarc-reporting.md § Forensic-report receive):
+// classify a `dmarc-report@` message, check its RFC 5965 wrapper strictly and
+// extract a best-effort index that names no recipient.
+#[cfg(feature = "dmarc-report")]
+pub mod dmarc_forensic;
+// TLSRPT inbound report receive (docs/goal/behavior/smtp-server.md § TLSRPT
+// inbound report listener): bounded unpack + the RFC 8460 JSON fields + the
+// per-report summary. The DMARC receive leg's twin.
+#[cfg(feature = "tlsrpt-report")]
+pub mod tlsrpt_report;
 // Primary-domain-rename state vocabulary (mail-primary-domain-rename.md): the
 // pure `RenameState` enum + grace-window bounds + Let's Encrypt SAN cap + the
 // TLS-posture monotonicity comparator, shared by the nest storage/RPC layer and
@@ -229,7 +244,7 @@ pub use bodystructure::{BodyStructure, MimeParam, derive_body_structure};
 #[cfg(feature = "dmarc-policy")]
 pub use dmarc_publish::{
     DmarcAlignment, DmarcForensicOptions, DmarcMode, DmarcOverrides, DmarcPublishPolicy,
-    apply_overrides, apply_overrides_json,
+    DmarcReportingPolicy, apply_overrides, apply_overrides_json,
 };
 #[cfg(feature = "domain-rename")]
 pub use domain_rename::{

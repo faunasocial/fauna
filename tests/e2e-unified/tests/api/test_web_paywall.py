@@ -37,9 +37,12 @@ the E2E rules' setup carve-out (b); the mutation under test is the SERVING
 behavior, which is exactly what a browser visitor exercises.
 """
 
+import hashlib
+import hmac
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import pytest
@@ -260,5 +263,178 @@ def test_web_paywall_teaser_token_and_revoke(nest_instance):
         )
     finally:
         # Leave the shared session nest apex-clean for sibling tests.
+        with admin_ws:
+            admin_ws.call("fauna.web.set_apex_actor", {"actor_id": None})
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Surface a 3xx as the response instead of following it — the door's
+    `303` and its `Location` are the assertion."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _request(url: str, path: str, data: bytes | None = None) -> tuple[int, str, dict]:
+    """GET (or form-POST when `data` is given) without following redirects."""
+    req = urllib.request.Request(
+        url.rstrip("/") + path, data=data, method="POST" if data is not None else "GET"
+    )
+    if data is not None:
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        resp = opener.open(req)
+        return resp.status, resp.read().decode("utf-8", "replace"), dict(resp.headers)
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace"), dict(e.headers)
+
+
+def _redeem(url: str, code: str, path: str) -> tuple[int, str, dict]:
+    form = urllib.parse.urlencode({"code": code, "path": path}).encode()
+    return _request(url, "/api/v1/paywall/redeem", form)
+
+
+@pytest.mark.feature("paid-posts-and-tips")
+def test_anonymous_visitor_pays_or_redeems_on_the_teaser(nest_instance):
+    """Outcome 17 — an anonymous web visitor gets past the teaser with no
+    Fauna account (`monetization.md` § Pillar 2 → *Visitor entitlement
+    doors*): the teaser carries a claim-code form whose redeem door answers
+    `303` to the ordinary short-lived `?token=` URL and never consumes the
+    code (it works again, and stays bindable in an app); a wrong code is a
+    `403` page; and a paying visitor whom the provider redirects to the return
+    door is shown the code the webhook minted for their checkout.
+    """
+    url = nest_instance["url"]
+    port = nest_instance["port"]
+    admin_sk = nest_instance["admin"]["signing_key"]
+
+    creator = create_actor_and_register(port, admin_signing_key=admin_sk)
+    creator_id: bytes = bytes(creator["actor_id_bytes"])
+    creator_secret = bytes(creator["signing_key"])
+    now = int(time.time())
+    tier, slug, marker = "door-gold", "door-premium", "the-door-opened-marker"
+    period_key = bytes(range(1, 33))
+
+    # ── Fixture: a tier, a gated web-published post, the holder grant (the
+    # same client-side setup as the teaser/token test above). ──
+    with _actor_client(url, creator) as ws:
+        ws.call(
+            "fauna.subscriptions.tiers.create",
+            {
+                "name": tier,
+                "rank": 2,
+                "description": None,
+                "price_hint": PRICE,
+                "payment_url": PAY_URL,
+                "auto_approve": False,
+                "encrypted_upload": fauna_ffi.build_tier_birth_upload(
+                    creator_secret, tier, period_key
+                ),
+            },
+        )
+    post_bytes, encrypted_blob = fauna_ffi.build_gated_post(
+        creator_secret, PREVIEW, f"Door Post\n\nHere is {marker}.", tier, 2,
+        b"\x12" * 32, period_key,
+    )
+    _upload_sealed_blob(port, creator["token"], encrypted_blob)
+    post_id = ws_api.create_post(port, creator, post_bytes)
+    with _actor_client(url, creator) as ws:
+        ws.call("fauna.web.publish.set", {"post_id": bytes.fromhex(post_id), "slug": slug})
+        holder = ws.call(
+            "fauna.bridges.fetch_bridge_pubkey",
+            {"bridge_role": "content-processor", "bridge_id": "web-serve"},
+        )
+        grant_blob = fauna_ffi.build_post_grant(
+            creator_id, b"\x08" * 16, bytes(holder["x25519_pubkey"]),
+            bytes(holder["mlkem_ek"]) if holder.get("mlkem_ek") else None,
+            now, now + 3600, tier, period_key,
+        )
+        assert ws.call("fauna.capabilities.mint", {"grant_blob": grant_blob}).get("ok") is True
+        code = ws.call("fauna.payments.claims.mint", {"tier": tier})["code"]
+
+    admin_ws = WsRpcAdminClient(
+        url, actor_id=bytes(admin_sk.verify_key), signing_key=bytes(admin_sk)
+    )
+    with admin_ws:
+        admin_ws.call("fauna.web.set_apex_actor", {"actor_id": creator_id})
+
+    page = f"/post/{slug}.html"
+    resource = f"post/{slug}.html"
+    try:
+        # ── The teaser carries the code form. ──
+        status, body, _ = _request(url, page)
+        assert status == 200, body
+        assert marker not in body
+        assert 'action="/api/v1/paywall/redeem"' in body, (
+            f"the teaser must carry the claim-code form: {body}"
+        )
+
+        # ── A wrong code: the one nest-owned 403 page, no cookie. ──
+        status, body, headers = _redeem(url, "WRONGCODE9", resource)
+        assert status == 403, (status, body)
+        _assert_no_cookie(headers, "refused redeem")
+        assert marker not in body
+
+        # ── The right code: 303 to the token URL, which opens the post. ──
+        def redeem_and_open(c: str) -> None:
+            status, body, headers = _redeem(url, c, resource)
+            assert status == 303, (status, body)
+            _assert_no_cookie(headers, "redeem")
+            location = {k.lower(): v for k, v in headers.items()}["location"]
+            assert location.startswith(f"/{resource}?token="), location
+            status, body, headers = _request(url, location)
+            assert status == 200, body
+            _assert_no_cookie(headers, "token serve")
+            assert marker in body, f"the redeemed token must open the post: {body}"
+
+        redeem_and_open(code)
+        # Durable: the same code works again (a browser presentation is not a
+        # redemption), and the claim stays unredeemed for a later app binding.
+        redeem_and_open(code)
+        with _actor_client(url, creator) as ws:
+            claims = ws.call("fauna.payments.claims.list", {})["claims"]
+        row = next(c for c in claims if c["code"] == code)
+        assert row.get("redeemed_at") is None and row.get("redeemed_by") is None, row
+
+        # ── The paid half: an unbound checkout's webhook mints a claim keyed
+        # by its return reference; the provider's redirect lands the buyer on
+        # the return door, which shows the code; the code opens the post. ──
+        secret = "whsec_door_fake"
+        with _actor_client(url, creator) as ws:
+            saved = ws.call(
+                "fauna.payments.providers.set",
+                {"kind": "fake", "webhook_secret": secret, "tier": tier},
+            )
+            assert saved.get("saved") is True, saved
+        return_ref = "cs_test_door_1"
+        webhook = json.dumps(
+            {"id": "pay_door_1", "event": "payment", "return_ref": return_ref}
+        ).encode()
+        req = urllib.request.Request(
+            f"{url}/api/v1/payments/webhook/{creator_id.hex()}/fake",
+            data=webhook, method="POST",
+        )
+        req.add_header("Content-Type", "application/json")
+        req.add_header(
+            "X-Fauna-Signature", hmac.new(secret.encode(), webhook, hashlib.sha256).hexdigest()
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            minted = json.loads(resp.read())
+        assert minted.get("status") == "claim_minted", minted
+        paid_code = minted["claim_code"]
+
+        status, body, _ = _request(url, f"/api/v1/paywall/return/fake?ref={return_ref}")
+        assert status == 200, body
+        assert paid_code in body, f"the return door must show the minted code: {body}"
+        redeem_and_open(paid_code)
+
+        # Not yet confirmed → 202 with a refresh; `manual` is never served.
+        status, body, _ = _request(url, "/api/v1/paywall/return/fake?ref=unknown")
+        assert status == 202, (status, body)
+        assert 'http-equiv="refresh"' in body
+        status, _, _ = _request(url, "/api/v1/paywall/return/manual?ref=x")
+        assert status == 403
+    finally:
         with admin_ws:
             admin_ws.call("fauna.web.set_apex_actor", {"actor_id": None})

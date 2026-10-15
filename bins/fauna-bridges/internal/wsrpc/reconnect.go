@@ -62,23 +62,30 @@ type rpcConn interface {
 // reconnectDeps is the internal (interface-typed) dependency set the loop
 // runs on, so the loop logic is unit-testable with fake conns.
 type reconnectDeps struct {
-	dial      func(context.Context) (rpcConn, error)
-	onConnect func(context.Context, rpcConn) error
-	backoff   func(int) time.Duration
-	logger    *slog.Logger
+	dial         func(context.Context) (rpcConn, error)
+	onConnect    func(context.Context, rpcConn) error
+	checkRevoked func(context.Context) bool
+	backoff      func(int) time.Duration
+	logger       *slog.Logger
 }
 
 // ReconnectConfig is the public (concrete-typed) configuration main.go
 // supplies. Dial re-establishes the WS + bearer auth (a fresh [Dial]);
 // OnConnect runs the per-connect application step on the new connection —
 // re-`whoami` (return [ErrBridgeRevoked] if nest reports the service user
-// was revoked) and re-`fetch_config`. Backoff defaults to [BackoffSchedule]
-// when nil.
+// was revoked) and re-`fetch_config`. CheckRevoked, when set, is asked after
+// a dial the nest refused at the upgrade for a fresh bearer
+// ([ErrUpgradeRefused]) — the shape a revoked service user's reconnect takes,
+// since the bearer validator refuses it before any `whoami` can run — and
+// reports whether the pre-identity status surface says this bridge was
+// revoked; true stops the loop with [ErrBridgeRevoked]. Backoff defaults to
+// [BackoffSchedule] when nil.
 type ReconnectConfig struct {
-	Dial      func(context.Context) (*Client, error)
-	OnConnect func(context.Context, Caller) error
-	Backoff   func(int) time.Duration
-	Logger    *slog.Logger
+	Dial         func(context.Context) (*Client, error)
+	OnConnect    func(context.Context, Caller) error
+	CheckRevoked func(context.Context) bool
+	Backoff      func(int) time.Duration
+	Logger       *slog.Logger
 }
 
 // ErrReconnecting is returned by [ReconnectingClient.Call] while there is no
@@ -114,8 +121,9 @@ func NewReconnectingClient(ctx context.Context, initial *Client, cfg ReconnectCo
 			// conn (rpcConn) satisfies the narrower Caller the hook wants.
 			return cfg.OnConnect(c, conn)
 		},
-		backoff: cfg.Backoff,
-		logger:  cfg.Logger,
+		checkRevoked: cfg.CheckRevoked,
+		backoff:      cfg.Backoff,
+		logger:       cfg.Logger,
 	}
 	return newReconnectingClient(ctx, initial, deps)
 }
@@ -338,6 +346,11 @@ func (r *ReconnectingClient) reconnect() bool {
 		}
 		nc, err := r.deps.dial(r.ctx)
 		if err != nil {
+			if errors.Is(err, ErrUpgradeRefused) && r.deps.checkRevoked != nil && r.deps.checkRevoked(r.ctx) {
+				r.log().Warn("wsrpc reconnect: upgrade refused and nest reports service user revoked; shutting down")
+				r.finish(ErrBridgeRevoked)
+				return false
+			}
 			r.log().Warn("wsrpc reconnect: dial failed; will retry", "attempt", attempt, "err", err)
 			attempt++
 			continue

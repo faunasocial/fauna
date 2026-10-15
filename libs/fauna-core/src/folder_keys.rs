@@ -642,7 +642,7 @@ impl FolderRef {
     /// staging root (`FileProvider/roots/<actor-id-hex>/<component>`) and
     /// android's two owned-tree roots (`on-demand/<actor-id-hex>/<component>`)
     /// — so the identifier's ref half and the directory it stages into are one
-    /// spelling (`on-demand-files.md` § Apple File Provider binding, *the
+    /// spelling (`on-demand-files-apple.md` § Apple File Provider binding, *the
     /// actor-scoped device identity*). Not a wire form: [`parse`](Self::parse)
     /// refuses it.
     #[must_use]
@@ -699,7 +699,7 @@ fn percent_decode_component(value: &str) -> Option<String> {
 /// Provider domain identifier, its staging root, its on-demand-toggle
 /// preference and its domain-owner record are the four such registries, and
 /// android's SAF document id is the same key with a path appended
-/// (`on-demand-files.md` § Apple File Provider binding, *the actor-scoped
+/// (`on-demand-files-apple.md` § Apple File Provider binding, *the actor-scoped
 /// device identity*); the per-set state DB is not one — it already lives
 /// under the account's scoped state dir.
 ///
@@ -1148,6 +1148,20 @@ pub trait FolderKeyResolver: crate::MaybeSendSync {
     /// "positively owner-only" licenses the owner root at every seal site.
     async fn resolve(&self, name_hash: &[u8; 32]) -> anyhow::Result<ResolvedCustody>;
 
+    /// The custody of the set **by its identity** — [`Self::resolve`]'s required
+    /// twin for a reader that holds the set's row (`mls-group-key-material.md`
+    /// § M2 → *Resolving custody — by the set's identity, never by its name*).
+    /// The same three-valued answer, picked by [`FolderRef`] instead of by name
+    /// hash: [`FolderRef::Local`] is the roster row with that `id` (no
+    /// owner-first search — a member row resolves even beside the reader's own
+    /// same-named set), [`FolderRef::Foreign`] the live foreign record at that
+    /// channel. A ref naming neither is `Err`, never owner-only.
+    ///
+    /// Required, with no default on purpose: a default falling back to the
+    /// name hash IS the shadowing bug this method exists to end, and one
+    /// answering `Err` would let a production resolver forget it.
+    async fn resolve_ref(&self, folder_ref: &FolderRef) -> anyhow::Result<ResolvedCustody>;
+
     /// The set's nonce — the binding a writer-signed change record for
     /// `folder` covers (`mls-group-key-material.md` § M2 → *Writer-signed
     /// change records* (2)) — from the same roster + custody read [`Self::resolve`]
@@ -1155,6 +1169,19 @@ pub trait FolderKeyResolver: crate::MaybeSendSync {
     /// out unsigned, loudly). The default answers `None` — a resolver that
     /// cannot see custody signs nothing.
     async fn set_nonce(&self, _folder: &str) -> anyhow::Result<Option<[u8; 32]>> {
+        Ok(None)
+    }
+
+    /// [`Self::set_nonce`] **by the set's identity** — the nonce of the row a
+    /// record names (`SyncChangeRecordRequest::folder_id`), which is the one
+    /// the nest verifies it under. [`FolderRef::Local`] is the roster row with
+    /// that `id` (a member row resolves beside the caller's own same-named
+    /// set, where a name lookup picks one of the two), [`FolderRef::Foreign`]
+    /// the foreign record at that channel (`set-addressing.md` § The row form).
+    /// The default answers `None` like [`Self::set_nonce`]'s; the record
+    /// funnel then falls back to the name, so a resolver that keys by name
+    /// alone signs as it always did.
+    async fn set_nonce_ref(&self, _folder_ref: &FolderRef) -> anyhow::Result<Option<[u8; 32]>> {
         Ok(None)
     }
 
@@ -1176,6 +1203,23 @@ pub trait FolderKeyResolver: crate::MaybeSendSync {
             live: self.set_nonce(folder).await?,
             ..Default::default()
         })
+    }
+
+    /// [`Self::set_lineage`] **by the set's identity** — the lineage of the
+    /// row a projected row names (`MediaItem::folder_id`,
+    /// `FileVersionInfo::folder_id`), the nonces that row's records were
+    /// signed under. [`FolderRef::Local`] is the roster row with that `id` (a
+    /// member row resolves beside the reader's own same-named set, where the
+    /// by-hash lookup picks the own one), [`FolderRef::Foreign`] the foreign
+    /// record at that channel (`set-addressing.md` § The row form).
+    /// `Ok(None)`: no by-row answer — the default, for a resolver that keys by
+    /// name alone; the reader then falls back to [`Self::set_lineage`], as
+    /// [`Self::set_nonce_ref`]'s callers fall back to the name.
+    async fn set_lineage_ref(
+        &self,
+        _folder_ref: &FolderRef,
+    ) -> anyhow::Result<Option<SetNonceLineage>> {
+        Ok(None)
     }
 }
 

@@ -183,7 +183,7 @@ public class FaunaClient {
     /// `long-term-store.md` § Multi-account evolution), so there is exactly one
     /// meaningful value at a time — and consumed by `syncStateDir` so every
     /// session-scoped engine resolves the account's **own** scoped state dir
-    /// (`file-sync.md` § Multi-account × File Provider, consequence 3).
+    /// (`on-demand-files-apple.md` § Multi-account × File Provider, consequence 3).
     /// `nonisolated(unsafe)`: the serialized switch path is the only writer.
     ///
     /// ⚠ **Never resolve a per-instance credential off this** — the switch
@@ -337,7 +337,7 @@ public class FaunaClient {
     ///
     /// Production: the active account's scoped dir in the **app's own consent
     /// domain** (`SyncStateDir.resolve(actorIdHex:in:)` with
-    /// `SyncStateDir.appDomain` — `on-demand-files.md` § Apple File Provider
+    /// `SyncStateDir.appDomain` — `on-demand-files-apple.md` § Apple File Provider
     /// binding, *state unification* + Multi-account × File Provider
     /// consequence 3). On iOS that is the app-group container, shared with the
     /// File Provider extension. On macOS it is the **user domain**
@@ -644,7 +644,9 @@ public class FaunaClient {
             // current epoch. A no-op when mail isn't enabled — see
             // `refreshMailEpochSchedule`. The reconnect leg lives in
             // `startReconnectObserver` (the "(re)" half of once-per-(re)connect).
+            #if !FAUNA_KIDS
             Self.refreshMailEpochSchedule(api: api)
+            #endif
 
             // The post-succession aftermath (`succession-aftermath.md` § Re-key
             // scope's `BackupKey` corpus row: "started at first successor
@@ -783,11 +785,11 @@ public class FaunaClient {
             // and `deviceId` here is the ACCOUNT REGISTRY's device slot, which
             // is a free-form string by contract: linux defaults it to
             // "test-device", `fauna_client_accounts`' own tests use "dev-b" /
-            // "dev-legacy", and a session patch may carry anything. The
-            // 32-byte-hex sync device id is a DIFFERENT store — `device.db`,
-            // which linux (`sync::device_id`) and tui (`media::device_id_hex`)
-            // both read for this very argument, and which apple has no reader
-            // for yet.
+            // "dev-legacy", and a session patch may carry anything. Both app
+            // shells therefore build the client with `FaunaAccounts
+            // .sessionDeviceId` — the shared get-or-create, which only ever
+            // serves a 32-byte-hex sync id — so this screen is the backstop
+            // for a direct `FaunaClient` caller, not the normal path.
             //
             // Unscreened, one wrong-store value takes the WHOLE W3 account
             // plane down — every preference surface back on the blob rail,
@@ -885,7 +887,9 @@ public class FaunaClient {
                 // Refresh the mail epoch schedule on each reconnect too
                 // (best-effort, log-only) — the "(re)" half of
                 // once-per-(re)connect; the initial-connect leg fires in `start()`.
+                #if !FAUNA_KIDS
                 Self.refreshMailEpochSchedule(api: api)
+                #endif
             }
         }
     }
@@ -913,6 +917,7 @@ public class FaunaClient {
         }
     }
 
+#if !FAUNA_KIDS
     /// Best-effort, log-only refresh of the mail content-sealing **epoch
     /// schedule**, fired once per successful (re)connect — the macOS/iOS leg of
     /// `encryption-at-rest.md` § Capability tiering → Content-sealing epochs
@@ -921,8 +926,8 @@ public class FaunaClient {
     /// mail isn't enabled, so it is always safe to call unconditionally —
     /// fire-and-forget (linux
     /// `FaunaClient::refresh_mail_epoch_schedule`, wired in the `AuthSuccess` arm;
-    /// android
-    /// `MailEnableGlueVM.refreshMailEpochSchedule`; web's one-shot-per-session
+    /// android (`KidsExcisedApi.startMailEpochRefresh`, the shared UniFFI trigger on every connect);
+    /// web's one-shot-per-session
     /// `$effect`). Static + `api`-only so the reconnect observer (which captures
     /// `api`, never `self`) can call it without retaining `FaunaClient`.
     static func refreshMailEpochSchedule(api: APIClient) {
@@ -933,6 +938,7 @@ public class FaunaClient {
             }
         }
     }
+#endif
 
     /// The S8 D1 + D3 client-driven seal backfill (file-sync.md § Sealed names
     /// & paths → Implementation status today). Fire-and-forget, best-effort —

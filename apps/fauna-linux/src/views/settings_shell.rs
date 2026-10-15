@@ -124,6 +124,7 @@ pub fn build_settings_shell(
     // where a verdict another device recorded must not be re-asked.
     let (member_review_page, member_review_refresh) =
         crate::settings::member_review::build_member_review_page(client);
+    let member_review_refresh: Rc<dyn Fn()> = Rc::new(member_review_refresh);
     stack.add_titled(
         &member_review_page,
         Some("member-review"),
@@ -202,6 +203,17 @@ pub fn build_settings_shell(
     let (devices_page, folders_page, devices_folders_handles) =
         crate::views::devices_folders::build_devices_and_folders_pages(client);
     stack.add_titled(&devices_page, Some("devices"), devices::TITLE);
+    // Sessions — "sign-ins live now" directly after Devices' "machines
+    // enrolled" (`ui/sessions.md` § The ruling, 1). Rows are nest state read
+    // on every visit; the roster input is the Devices pages' own machine.
+    let (sessions_page, sessions_refresh) = crate::settings::sessions::build_sessions_page(
+        Arc::clone(&devices_folders_handles.devices_machine),
+    );
+    stack.add_titled(
+        &sessions_page,
+        Some("sessions"),
+        crate::settings::sessions::TITLE,
+    );
     stack.add_titled(&folders_page, Some("folders"), folders::TITLE);
     stack.add_titled(
         &crate::settings::p2p_tab::build_p2p_page(),
@@ -346,19 +358,33 @@ pub fn build_settings_shell(
         let linked_nests_refresh = Rc::clone(&linked_nests_refresh);
         let devices_refresh = Rc::clone(&devices_refresh);
         let devices_nav_refresh = Rc::clone(&devices_nav_refresh);
+        let folders_serve_refresh = Rc::clone(&devices_folders_handles.folders_serve_refresh);
+        let privacy_refresh = Rc::clone(&privacy_refresh);
+        let member_review_refresh = Rc::clone(&member_review_refresh);
+        let trained_topics_refresh = Rc::clone(&personalization_handles.trained_topics_refresh);
         Rc::new(move |surface| match surface {
             StoreSurface::MutedWords => muted_words_refresh(),
             StoreSurface::TaskDelegation => task_delegation_refresh(),
-            // Followed folders and foreign sets ride the machine's refresh.
-            StoreSurface::Folders => devices_refresh(),
+            // Followed folders and foreign sets ride the machine's refresh;
+            // the WebDAV serve capability is the page's own read.
+            StoreSurface::Folders => {
+                devices_refresh();
+                folders_serve_refresh();
+            }
             StoreSurface::Devices => {
                 devices_refresh();
                 devices_nav_refresh();
             }
             StoreSurface::Nests => linked_nests_refresh(),
-            // A top-level page, not a sub-page of this shell: `app.rs`
-            // re-drives it.
-            StoreSurface::Feed => {}
+            // The filter list and its inherited-rule marks.
+            StoreSurface::Privacy => privacy_refresh(),
+            StoreSurface::MemberReview => member_review_refresh(),
+            // The registry + example counts; the rest of the Personalization
+            // home reads nest state, not the store.
+            StoreSurface::TrainedTopics => trained_topics_refresh(),
+            // Top-level pages, not sub-pages of this shell: `app.rs`
+            // re-drives them.
+            StoreSurface::Feed | StoreSurface::Backups | StoreSurface::Events => {}
         })
     };
     stack.connect_visible_child_name_notify(move |s| {
@@ -386,6 +412,8 @@ pub fn build_settings_shell(
             Some("nests") => linked_nests_refresh(),
             // The Connected apps roster is nest state read on every visit.
             Some("connected-apps") => connected_apps_refresh(),
+            // The Sessions list is nest state read on every visit.
+            Some("sessions") => sessions_refresh(),
             Some("account") => account_refresh(),
             // The permanent review page's nav-edge read: opened rarely, and
             // exactly where a verdict another device recorded must not be
@@ -584,7 +612,25 @@ pub fn build_settings_shell(
             false,
         ),
     ];
-    let settings_sidebar = crate::views::nav_rail::build_nav_rail(&nav_back, &nav, &stack);
+    // Row ids are `settings-nav-row[<page key>]`. Three child names differ from
+    // their ui.yaml page keys; the Account row stays untagged (its
+    // `account-settings-link` lives on the Status page — a second one here
+    // would duplicate the id, as on web).
+    let settings_sidebar = crate::views::nav_rail::build_nav_rail(
+        &nav_back,
+        &nav,
+        &stack,
+        fauna_ui_ids::SETTINGS_NAV_ROW,
+        |child| {
+            Some(match child {
+                "account" => return None,
+                "member-review" => "member_review",
+                "web" => "web-settings",
+                "logs" => "settings-logs",
+                other => nav.iter().map(|e| e.0).find(|n| *n == other)?,
+            })
+        },
+    );
 
     let handles = SettingsShellHandles {
         nav_back,

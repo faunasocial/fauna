@@ -50,7 +50,7 @@ required-features = ["tier3-nest"]
 name = "same_nest_push_nudge"
 required-features = ["tier3-nest"]
 
-# The agent resolves its own content keys (`on-demand-files.md` § Shared sets on
+# The agent resolves its own content keys (`on-demand-files-shared-sets.md` § Shared sets on
 # a capability host → *One mechanism*). Same real-binary / real-socket /
 # real-nest shape and gate: an owner's rotation from another seat re-keys the
 # agent with no app push, and a member's agent HOLDS its writes behind the
@@ -79,7 +79,7 @@ p2p-share = ["fauna-sync-engine/p2p-share"]
 # enables neither and compiles the whole surface out (testing.md convention 15).
 # Forwards the wire half rather than declaring a sibling gate, so the variant and
 # its handler can never be present on only one side of the seam.
-test-helpers = ["fauna-ipc/test-helpers"]
+test-helpers = ["fauna-ipc/test-helpers", "fauna-ws-substrate/test-helpers"]
 
 # Opt-in, heavy tier_3 harness (like tier_4): pulls the whole `fauna-nest` crate
 # so `src/versions_tier3.rs` can drive the Version-history + Restore path against
@@ -146,12 +146,14 @@ fauna-core.workspace = true
 # while no app runs"). The feature pulls the preference bridge + the T10
 # credential slot + the delegation/personalization registry surfaces.
 # `engine-lifecycle` is the one builder every agent engine is built through
-# (`on-demand-files.md` § Shared sets on a capability host → *One mechanism*);
+# (`on-demand-files-shared-sets.md` § Shared sets on a capability host → *One mechanism*);
 # it takes only the base, fauna-mls-free `fauna-client-folders` resolvers, so
 # the bearer-only agent still links no conversations/MLS graph
 # (`crate::account_host` holds that line, and its MLS-carve-out pin is what
 # proves the outbox drain here refuses MLS-sealed intents).
-fauna-sync-engine = { workspace = true, features = ["account-runtime", "engine-lifecycle"] }
+# `web`: the agent hosts the always-resident engines whose website
+# convergence ends in the web plane's sealed-file prune.
+fauna-sync-engine = { workspace = true, features = ["account-runtime", "engine-lifecycle", "web"] }
 # The peer-leg transport (the agent is the machine's steady-state
 # engine-singleton, so once it carries a factory the listener + dial pass run
 # app-dead too; `account_host.rs` wraps `fauna_iroh::peer_leg_transport`, the
@@ -177,7 +179,7 @@ fauna-client-folders = { path = "../../libs/fauna-client-folders" }
 fauna-client-config = { path = "../../libs/fauna-client-config" }
 # `PlaneFolderKeys` — the account's folder-key custody (`fauna.state.folder-keys`)
 # read through the store the account host mounts: the agent resolves every
-# set's content keys itself (`content_keys.rs`; `on-demand-files.md` § Shared
+# set's content keys itself (`content_keys.rs`; `on-demand-files-shared-sets.md` § Shared
 # sets on a capability host, decision 1′).
 fauna-account-seams = { path = "../../libs/fauna-account-seams" }
 # The shared `fauna.backup.*` call surface. The custodian host reads this
@@ -185,11 +187,19 @@ fauna-account-seams = { path = "../../libs/fauna-account-seams" }
 # (`crate::custodian`) — the only source a bearer-only process can reach, and
 # the one `sync-agent.md` § Control plane split prescribes for destinations.
 fauna-client-backup = { path = "../../libs/fauna-client-backup" }
-fauna-protocol.workspace = true
+# `feed` / `search` / `web`: the agent drives the account plane's outbox drain,
+# which resolves every queued intent's kind through the catalog and PARKS the
+# scope on one it cannot resolve — so this never-excised host carries every
+# plane's catalog entries, not only those of the planes it sends itself
+# (`dynamic-features.md` § Compile-time excision; fauna-protocol's features).
+fauna-protocol = { workspace = true, features = ["feed", "search", "web"] }
 tokio-util.workspace = true
 # `BearerSource` / `ApiError` for `CapabilityBearer` (path, not a workspace alias —
 # every other consumer references fauna-nest-http by path too).
 fauna-nest-http = { path = "../../libs/fauna-nest-http" }
+# The process dial budget's e2e seam: an un-provision gives an e2e agent a whole
+# burst, as an app's per-test reset gives the app (`pipe_server::unprovision_now`).
+fauna-ws-substrate = { workspace = true }
 async-trait = "0.1"
 tokio.workspace = true
 # `FuturesUnordered` — the on-demand root's hydration batch runs several
@@ -314,8 +324,8 @@ windows = { workspace = true, features = ["Foundation_Collections"] }
 # Notifications → *Transports*): the freedesktop notification daemon. The same
 # crate fauna-linux and fauna-tui already link (approved by the user
 # 2026-09-26, crates.io, under `cargo vet`); linux-only here because the agent's
-# windows sink is the WinRT toast through its existing `windows` crate and its
-# macOS sink is not built.
+# windows sink is the WinRT toast through its existing `windows` crate and
+# macOS has no sink (a declared absence: macOS refuses the crate's post).
 [target.'cfg(target_os = "linux")'.dependencies]
 # The on-demand root's FUSE binding (`src/fuse_host.rs`; `on-demand-files.md`
 # § Linux FUSE binding): the pure-Rust `/dev/fuse` protocol. Approved by the user

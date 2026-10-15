@@ -53,6 +53,20 @@
         <StackPanel x:Name="AttachmentChips" Visibility="Collapsed"
                     Orientation="Horizontal" Spacing="4" Margin="0,2" />
 
+        <!-- List-send texts — painted only while the shared ComposeState.list_send
+             carries the matching LocalizedText (mail-mass-mailing.md § Composing a
+             list message). Collapsed → no UIA peer, so an off-list compose counts 0.
+             The id sits on the TextBlock itself (UIA-collapse lesson). -->
+        <TextBlock x:Name="ListSendWarning" Visibility="Collapsed" FontSize="12"
+                   TextWrapping="Wrap"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.DmComposeListSendWarning}" />
+        <TextBlock x:Name="ListQuotaWarning" Visibility="Collapsed" FontSize="12"
+                   TextWrapping="Wrap"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.DmComposeListQuotaWarning}" />
+        <TextBlock x:Name="ListSendProgress" Visibility="Collapsed" FontSize="12"
+                   TextWrapping="Wrap"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.DmComposeListSendProgress}" />
+
         <!-- Compose bar -->
         <Grid ColumnSpacing="8">
             <Grid.ColumnDefinitions>

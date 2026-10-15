@@ -73,6 +73,10 @@ pub struct FakeNestApi {
     /// must be the bare local part (the nest stores handles without `@domain`,
     /// the same trap the register path already shipped once).
     pub(crate) restore_escrowed_seed_args: Mutex<Vec<RestoreSeedArgs>>,
+    /// The signed-out door's canned answer, and each `(base_url, secret_hex)`
+    /// it was called with.
+    pub(crate) lock_account_response: Mutex<Option<Result<i64, LockAccountError>>>,
+    pub(crate) lock_account_args: Mutex<Vec<(String, String)>>,
     /// `(method_name, base_url)` for EVERY call to EVERY method, in call
     /// order — the general twin of `calls` (which drops the URL) and of
     /// `restore_escrowed_seed_args` (which threads it for one method only).
@@ -138,6 +142,15 @@ impl FakeNestApi {
         r: Result<RestoredIdentity, RestoreSeedError>,
     ) {
         *self.restore_escrowed_seed_response.lock().unwrap() = Some(r);
+    }
+
+    pub fn set_lock_account_response(&self, r: Result<i64, LockAccountError>) {
+        *self.lock_account_response.lock().unwrap() = Some(r);
+    }
+
+    /// The `(base_url, secret_hex)` pairs passed to `lock_account_with_seed`.
+    pub fn lock_account_args(&self) -> Vec<(String, String)> {
+        self.lock_account_args.lock().unwrap().clone()
     }
 
     /// The ordinary success fixture: a seed with no predecessor section, which
@@ -366,6 +379,7 @@ impl super::NestApi for FakeNestApi {
                 Ok(InviteCodeVerification {
                     invite_id: "inv-1".into(),
                     supervised_by: None,
+                    age_band: None,
                 })
             })
     }
@@ -465,5 +479,31 @@ impl super::NestApi for FakeNestApi {
             // blob rests until a signed-in device has put one. A test that
             // wants a success fixtures one.
             .unwrap_or(Err(RestoreSeedError::NoEscrow))
+    }
+
+    async fn lock_account_with_seed(
+        &self,
+        base_url: &str,
+        secret_hex: &str,
+    ) -> Result<i64, LockAccountError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push("lock_account_with_seed".into());
+        self.base_url_calls
+            .lock()
+            .unwrap()
+            .push(("lock_account_with_seed".into(), base_url.to_string()));
+        self.lock_account_args
+            .lock()
+            .unwrap()
+            .push((base_url.to_string(), secret_hex.to_string()));
+        self.lock_account_response
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(Err(LockAccountError::Transient {
+                reason: "no lock_account response fixtured".into(),
+            }))
     }
 }

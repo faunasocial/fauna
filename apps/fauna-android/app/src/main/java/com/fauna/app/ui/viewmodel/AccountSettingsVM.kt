@@ -10,20 +10,23 @@ import com.fauna.app.core.HexUtil
 import com.fauna.app.core.OnboardingHost
 import com.fauna.app.core.SecureStorage
 import com.fauna.app.core.SignOutCredentialEraser
+import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.widget.WidgetDataWorker
 import com.fauna.ffi.FfiAccountEntry
 import com.fauna.ffi.FfiAccountRegistry
-import com.fauna.ffi.FfiFeatureRow
+import com.fauna.ffi.FfiEraseRemoveBlocked
+import com.fauna.ffi.FfiException
 import com.fauna.ffi.FfiPendingActionSummary
-import com.fauna.ffi.FfiQuotaGetReply
 import com.fauna.ffi.accountDisplayLabel
 import com.fauna.ffi.onboarding.WizardOutcome
 import com.fauna.ffi.actorIdFromSecret
 import com.fauna.ffi.validateHandle
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @HiltViewModel
@@ -62,8 +65,6 @@ class AccountSettingsVM @Inject constructor(
     // plays for the sibling verb.
     val deleteAccountSuccess = MutableStateFlow(false)
 
-    val quota = MutableStateFlow<FfiQuotaGetReply?>(null)
-
     // Pending actions (`settings.md` § Pending actions) — the STANDING
     // account-page section listing the cancellable window the three delayed
     // verbs (handle change, account delete, snapshot delete) open. tui/linux/
@@ -74,12 +75,6 @@ class AccountSettingsVM @Inject constructor(
     val pendingActions = MutableStateFlow<List<FfiPendingActionSummary>?>(null)
     val pendingActionsError = MutableStateFlow<String?>(null)
 
-    // `feature-limits-section` — null (not `emptyList()`) is the "read hasn't
-    // resolved yet" state, so the screen renders nothing until the real
-    // `fauna.features.status` reply arrives (`settings.md` § Layout & flow
-    // item 2b: "renders only once the transparency read resolves").
-    val features = MutableStateFlow<List<FfiFeatureRow>?>(null)
-
     // ── Multi-account switcher (long-term-store.md § Multi-account evolution,
     // Stage 1) ── Holds no identity state of its own beyond a snapshot of the
     // registry read: every mutation re-reads via [reloadAccounts], mirroring
@@ -89,18 +84,8 @@ class AccountSettingsVM @Inject constructor(
     val switchError = MutableStateFlow<String?>(null)
 
     init {
-        loadQuota()
-        loadFeatures()
         loadPendingActions()
         reloadAccounts()
-        // Re-fetch account quota on each WS reconnect (transport.md § Push
-        // events), part of the linux WsEvent::Reconnected re-fetch set.
-        viewModelScope.launch {
-            api.reconnectTick.collect {
-                loadQuota()
-                loadFeatures()
-            }
-        }
     }
 
     /** Re-read the registry — called on init and after every add/remove/switch, so
@@ -128,11 +113,24 @@ class AccountSettingsVM @Inject constructor(
         try {
             registry.setRequireConfirm(actorId, require)
         } catch (e: Exception) {
-            switchError.value = e.message
+            switchError.value = switcherErrorLine(e)
             return
         }
         reloadAccounts()
     }
+
+    /**
+     * The line the Account page paints for a registry call the switcher made
+     * that failed. A refusal from the registry is `FfiException.General`, whose
+     * `msg` is already the user-facing line — for a refused switch, the shared
+     * `switch_refused_copy` (`long-term-store.md` § Multi-account evolution,
+     * "Activating refuses an account it cannot launch as") — while the generated
+     * exception's `message` is the aggregated `"msg=…"` form. So the field is
+     * unwrapped, never the `message` painted (windows' `Strings.Error` and
+     * apple's `DisplayError.message` are the same unwrap).
+     */
+    private fun switcherErrorLine(e: Exception): String? =
+        (e as? FfiException.General)?.msg ?: e.message
 
     /** Row title — the shared FFI fn, never a hand-rolled "handle, else short actor
      *  id" fallback (linux/web once drifted on the empty-handle case;
@@ -163,7 +161,7 @@ class AccountSettingsVM @Inject constructor(
         try {
             if (confirmed) registry.setActiveConfirmed(actorId) else registry.setActive(actorId)
         } catch (e: Exception) {
-            switchError.value = e.message
+            switchError.value = switcherErrorLine(e)
             return
         }
         // Drop everything scoped to the OUTGOING account — the session rails,
@@ -181,25 +179,36 @@ class AccountSettingsVM @Inject constructor(
         onComplete()
     }
 
-    /** Drop a NON-active account from this install (its per-actor slots + index
-     *  entry) — offered only for non-active rows, matching linux/apple (removing
-     *  the active one would need an immediate re-route, out of Stage-1 scope). No
-     *  confirmation dialog: the identity itself is not destroyed, only forgotten
-     *  here; re-adding it re-imports the same secret. */
+    /** Drop a NON-active account from this install — offered only for
+     *  non-active rows, matching linux/apple (removing the active one would need
+     *  an immediate re-route, out of Stage-1 scope). No confirmation dialog: the
+     *  identity itself is not destroyed, only forgotten here; re-adding it
+     *  re-imports the same secret.
+     *
+     *  One shared call does the whole gesture ([AccountStores.removeAccount]):
+     *  the refusal, the registry removal, this phone's retirement from the
+     *  account's nest (as a sign-out retires it) and the erase of that actor's
+     *  stores (account-scoping.md § Erasure follows scope). A refusal paints
+     *  its own line, because the remedies differ. */
     fun removeAccount(actorId: String) {
         switchError.value = null
-        try {
-            registry.remove(actorId)
-        } catch (e: Exception) {
-            switchError.value = e.message
-            return
+        viewModelScope.launch {
+            val blocked = try {
+                withContext(Dispatchers.IO) { accountStores.removeAccount(actorId) }
+            } catch (e: Exception) {
+                switchError.value = switcherErrorLine(e)
+                return@launch
+            }
+            if (blocked != null) {
+                val line = when (blocked) {
+                    is FfiEraseRemoveBlocked.ServedHere -> blocked.line
+                    is FfiEraseRemoveBlocked.ServedElsewhere -> blocked.line
+                }
+                switchError.value = resolveLocalized(context, line)
+                return@launch
+            }
+            reloadAccounts()
         }
-        // ...and that actor's content stores, not only its credential slots
-        // (account-scoping.md § Erasure follows scope — *removing one account
-        // erases that actor's stores*). Only ever a non-active account here, so
-        // this never touches the live session's own stores.
-        accountStores.eraseAccount(actorId)
-        reloadAccounts()
     }
 
     /** "Add account" entry — reset the shared onboarding machine so the append
@@ -239,7 +248,7 @@ class AccountSettingsVM @Inject constructor(
         val newActorId = try {
             registry.addAccount(secretHex, nestUrl, secureStorage.deviceIdFor(secretHex))
         } catch (e: Exception) {
-            switchError.value = e.message
+            switchError.value = switcherErrorLine(e)
             return
         }
         // A phrase restore's predecessor seeds, BEFORE the switch builds the
@@ -252,26 +261,6 @@ class AccountSettingsVM @Inject constructor(
         // A freshly added account is never require-confirm-flagged (the flag
         // defaults off), so the append switch is the unconfirmed path — no re-auth.
         switchAccount(newActorId, confirmed = false, onComplete)
-    }
-
-    private fun loadQuota() {
-        viewModelScope.launch {
-            try {
-                quota.value = api.fetchQuota()
-            } catch (_: Exception) {
-                // Quota display is non-critical
-            }
-        }
-    }
-
-    private fun loadFeatures() {
-        viewModelScope.launch {
-            try {
-                features.value = api.fetchFeatures()
-            } catch (_: Exception) {
-                // Feature-limits display is non-critical, same as quota above.
-            }
-        }
     }
 
     /** Fired on init, and after either delayed verb this screen hosts
@@ -312,7 +301,7 @@ class AccountSettingsVM @Inject constructor(
 
     fun nodeUrl(): String? = api.nodeUrl.ifEmpty { null }
 
-    fun deviceId(): String? = secureStorage.deviceId
+    fun deviceId(): String? = secureStorage.resolveDeviceId()
 
     /**
      * The 64-hex identity secret, for the identity-export QR (settings.md § Identity

@@ -113,7 +113,9 @@ public class AppState {
     /// read/write through this ONE store, so they can never disagree about a
     /// creator's serving origin (`web-content-hosting.md` § Published-post
     /// management). Mirrors `contentPolicy` above.
+    #if !FAUNA_KIDS
     public let webPublish = WebPublishStore()
+    #endif
     /// The active Settings sub-page, or `nil` for the settings root (the page
     /// list itself). iOS keeps idiomatic settings nav (settings.md:28), so this
     /// drives the `SettingsView` `NavigationStack` path rather than a sidebar
@@ -315,7 +317,9 @@ public class AppState {
     /// beside `pushManager`/`appState` keeps one reachability shape rather than
     /// two. Mirrors macOS `MacAppState.conversationsVM`/`feedVM`.
     public var conversationsVM: ConversationsVM?
+    #if !FAUNA_KIDS
     public var feedVM: FeedVM?
+    #endif
 
     public init() {
         // Convention 11's MOUNTED-SHELL derivation for iOS, installed once and

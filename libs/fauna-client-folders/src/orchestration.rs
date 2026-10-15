@@ -704,6 +704,19 @@ impl<E: core::fmt::Display + core::fmt::Debug, GE: core::fmt::Display + core::fm
 {
 }
 
+/// What one set's envelope reconcile came to
+/// ([`FoldersAuthor::converge_envelope`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvelopeConvergence {
+    /// Nothing owed — or nothing this device may publish.
+    Current,
+    /// The envelope was re-published at the group's current epoch.
+    Republished,
+    /// A fault decided nothing: the nest read went unanswered, or the
+    /// publish failed.
+    Unsettled,
+}
+
 /// The owner-side shared-folder content-key orchestration. Bundles the thin
 /// `fauna.folders.*` call surface ([`FoldersClient`]) with the owner-private
 /// state it mutates (a [`FolderKeyStore`] — the content-key custody +
@@ -927,14 +940,23 @@ where
 
     /// Create a set through the one create helper
     /// ([`crate::set_lifecycle::create_set`] — its nonce minted into custody
-    /// before the nest sees the set).
+    /// before the nest sees the set), sealed from birth under the owner's root.
+    /// `self.files` carries no label custody, so the root is passed explicitly
+    /// ([`crate::set_lifecycle::create_set_with_owner_root`]) — never as label
+    /// custody, which would seal a later bound set's labels under the wrong root.
     pub async fn create_set(
         &self,
         req: fauna_protocol::folders::FolderCreateRequest,
     ) -> AuthorResult<fauna_protocol::folders::FolderCreateReply, R, G> {
-        crate::set_lifecycle::create_set(&self.files, &*self.custody, req)
-            .await
-            .map_err(FoldersAuthorError::from_lifecycle)
+        let owner = fauna_core::crypto::BackupKey::derive(self.keypair.secret_bytes());
+        crate::set_lifecycle::create_set_with_owner_root(
+            &self.files,
+            &*self.custody,
+            req,
+            Some(owner),
+        )
+        .await
+        .map_err(FoldersAuthorError::from_lifecycle)
     }
 
     /// Delete a set through the one delete helper
@@ -2272,58 +2294,121 @@ where
             .load_for_write()
             .await
             .map_err(FoldersAuthorError::CustodyStore)?;
-        let identity = self.keypair.actor_id();
         let mut republished = 0;
         for (name, channel) in custody::owned_bound_sets(&cfg) {
-            if !self.group.holds_group(&channel).unwrap_or(false)
-                || cfg.pending_removals.iter().any(|r| r.channel_id == channel)
+            if self.converge_set_envelope(&cfg, &name, &channel).await
+                == EnvelopeConvergence::Republished
             {
-                continue;
-            }
-            let Some(keys) = custody::content_keys(&cfg, &channel) else {
-                continue;
-            };
-            let expected = custody::envelope_payload(&cfg, Some(&name), &channel, keys);
-            let current = self.group.envelope_epoch(&channel).ok();
-            let stored = self
-                .files
-                .content_key_get(fauna_protocol::folders::ContentKeyGetRequest {
-                    name: name.clone(),
-                    ..Default::default()
-                })
-                .await;
-            let publish = match stored {
-                Ok(reply) => {
-                    let signed = hex::decode(reply.sealed.trim()).ok().and_then(|blob| {
-                        fauna_protocol::folder_envelope_sig::verify(&blob, &channel).ok()
-                    });
-                    // Ruling (11): an envelope a member cannot use is re-sealed.
-                    let reseal = current.is_some_and(|c| (reply.epoch as u64) < c)
-                        || !signed.as_ref().is_some_and(|v| v.signer == identity);
-                    match signed.and_then(|v| self.group.open_envelope(&channel, &v.sealed).ok()) {
-                        Some(published) => custody::envelope_join(&published, &expected)
-                            .and_then(|(joined, ahead)| (ahead || reseal).then_some(joined)),
-                        None => reseal.then_some(expected),
-                    }
-                }
-                // Answered: nothing published — publish. A transport fault
-                // decides nothing.
-                Err(e) if e.is_rejection() => Some(expected),
-                Err(_) => None,
-            };
-            let Some(payload) = publish else {
-                continue;
-            };
-            match self.publish_payload(&name, &channel, &payload).await {
-                Ok(_) => republished += 1,
-                Err(e) => tracing::warn!(
-                    folder = %fauna_core::log_redact::log_folder_name(&name),
-                    "folders: re-publishing a stale content-key envelope failed (retried at the \
-                     next launch): {e}"
-                ),
+                republished += 1;
             }
         }
         Ok(republished)
+    }
+
+    /// [`Self::converge_envelopes`] for one channel — the mid-session arm
+    /// the owner's folder commit walk drives through
+    /// [`fauna_conversations::backend::FolderEnvelopeOwner`] whenever the
+    /// group's epoch moved (`mls-group-key-material.md` § Admitting a member,
+    /// *Envelope ordering*: a takeover commit, a member's or this device's
+    /// own, leaves the published envelope sealed behind the epoch, and only
+    /// the owner can re-seal it). A channel that is not one of this account's
+    /// owned bound sets settles with no write and no nest call — the custody
+    /// read that decides it is the cached one. Answers whether the channel is
+    /// settled: `false` only for a fault (an unanswered read, a failed
+    /// publish), which the next ask retries.
+    pub async fn converge_envelope(&self, channel: &[u8; 32]) -> AuthorResult<bool, R, G> {
+        let owns = |cfg: &FoldersConfig| {
+            custody::owned_bound_sets(cfg)
+                .into_iter()
+                .find(|(_, c)| c == channel)
+                .map(|(name, _)| name)
+        };
+        let cached = self
+            .custody
+            .load()
+            .await
+            .map_err(FoldersAuthorError::CustodyStore)?;
+        if owns(&cached).is_none() {
+            return Ok(true);
+        }
+        let cfg = self
+            .custody
+            .load_for_write()
+            .await
+            .map_err(FoldersAuthorError::CustodyStore)?;
+        let Some(name) = owns(&cfg) else {
+            return Ok(true);
+        };
+        Ok(
+            self.converge_set_envelope(&cfg, &name, channel).await
+                != EnvelopeConvergence::Unsettled,
+        )
+    }
+
+    /// One owned bound set's envelope reconcile — the body
+    /// [`Self::converge_envelopes`] runs per set and
+    /// [`Self::converge_envelope`] runs for one. Best-effort: a failed
+    /// publish is logged and answers [`EnvelopeConvergence::Unsettled`].
+    async fn converge_set_envelope(
+        &self,
+        cfg: &FoldersConfig,
+        name: &str,
+        channel: &[u8; 32],
+    ) -> EnvelopeConvergence {
+        if !self.group.holds_group(channel).unwrap_or(false)
+            || cfg
+                .pending_removals
+                .iter()
+                .any(|r| r.channel_id == *channel)
+        {
+            return EnvelopeConvergence::Current;
+        }
+        let Some(keys) = custody::content_keys(cfg, channel) else {
+            return EnvelopeConvergence::Current;
+        };
+        let identity = self.keypair.actor_id();
+        let expected = custody::envelope_payload(cfg, Some(name), channel, keys);
+        let current = self.group.envelope_epoch(channel).ok();
+        let stored = self
+            .files
+            .content_key_get(fauna_protocol::folders::ContentKeyGetRequest {
+                name: name.to_string(),
+                ..Default::default()
+            })
+            .await;
+        let publish = match stored {
+            Ok(reply) => {
+                let signed = hex::decode(reply.sealed.trim()).ok().and_then(|blob| {
+                    fauna_protocol::folder_envelope_sig::verify(&blob, channel).ok()
+                });
+                // Ruling (11): an envelope a member cannot use is re-sealed.
+                let reseal = current.is_some_and(|c| (reply.epoch as u64) < c)
+                    || !signed.as_ref().is_some_and(|v| v.signer == identity);
+                match signed.and_then(|v| self.group.open_envelope(channel, &v.sealed).ok()) {
+                    Some(published) => custody::envelope_join(&published, &expected)
+                        .and_then(|(joined, ahead)| (ahead || reseal).then_some(joined)),
+                    None => reseal.then_some(expected),
+                }
+            }
+            // Answered: nothing published — publish. A transport fault
+            // decides nothing.
+            Err(e) if e.is_rejection() => Some(expected),
+            Err(_) => return EnvelopeConvergence::Unsettled,
+        };
+        let Some(payload) = publish else {
+            return EnvelopeConvergence::Current;
+        };
+        match self.publish_payload(name, channel, &payload).await {
+            Ok(_) => EnvelopeConvergence::Republished,
+            Err(e) => {
+                tracing::warn!(
+                    folder = %fauna_core::log_redact::log_folder_name(name),
+                    "folders: re-publishing a stale content-key envelope failed (retried at the \
+                     next epoch move or launch): {e}"
+                );
+                EnvelopeConvergence::Unsettled
+            }
+        }
     }
 
     /// **The succession's content-key rotation** (`succession-aftermath.md`
@@ -4237,6 +4322,8 @@ mod tests {
         served_rows: Mutex<Vec<fauna_protocol::sync::SyncChange>>,
         /// Recorded `fauna.folders.served_rows.adopt` pages.
         adopts: Mutex<Vec<fauna_protocol::folders::ServedRowsAdoptRequest>>,
+        /// Recorded `fauna.folders.create` requests.
+        creates: Mutex<Vec<fauna_protocol::folders::FolderCreateRequest>>,
         /// Refuse the next N flips OFF `served_rows_unadopted` — a DAV write
         /// landing between the sweep and the flip.
         refuse_next_flips_off: Mutex<usize>,
@@ -4630,6 +4717,20 @@ mod tests {
                     .unwrap()
                     .to_vec()
                 }
+                "fauna.folders.create" => {
+                    let req: fauna_protocol::folders::FolderCreateRequest =
+                        fauna_protocol::decode_strict(&bytes).expect("decode create");
+                    let name = req.name.clone();
+                    self.creates.lock().unwrap().push(req);
+                    fauna_protocol::encode_canonical(&fauna_protocol::folders::FolderCreateReply {
+                        id: 1,
+                        name,
+                        retention_policy: None,
+                        extra: Default::default(),
+                    })
+                    .unwrap()
+                    .to_vec()
+                }
                 other => panic!("FakeNest: unexpected kind {other}"),
             };
             Ok(fauna_protocol::decode_strict(&out).expect("decode reply"))
@@ -4798,6 +4899,37 @@ mod tests {
         );
     }
 
+    /// The author's create seals the set from birth (`path-sealing.md` § the
+    /// set-name plane: every production create seals): its `FoldersClient`
+    /// carries no label custody, so the owner's root is passed explicitly —
+    /// without it the set is born with a plaintext name and no `name_sealed`.
+    #[test]
+    fn create_set_seals_the_name_under_the_owner_root() {
+        let nest = Arc::new(FakeNest::default());
+        let a = author(nest.clone(), FakeGroup::with_members(&[]));
+
+        block_on(a.create_set(fauna_protocol::folders::FolderCreateRequest {
+            name: "docs".into(),
+            ..Default::default()
+        }))
+        .expect("create");
+
+        let creates = nest.creates.lock().unwrap();
+        let root = fauna_core::file_download::FileDownloadKeys::owner(
+            fauna_core::crypto::BackupKey::derive(
+                ActorKeypair::from_secret([0xA0; 32]).secret_bytes(),
+            ),
+        )
+        .label_seal_root()
+        .unwrap()
+        .expect("an owner root");
+        assert_eq!(
+            creates[0].name_sealed.as_ref().map(|b| b.to_vec()),
+            fauna_core::label_custody::seal_set_name(&root, "docs").unwrap(),
+            "sealed under the owner's root at birth"
+        );
+    }
+
     /// Ruling (11)(a)/(b): a cut that crashed after its custody write — before
     /// its push and its re-publish — is finished by the next launch pass: the
     /// pick pushed to the nest, and an envelope published that the owner
@@ -4888,6 +5020,41 @@ mod tests {
         let puts = nest.puts.lock().unwrap();
         assert_eq!(puts.len(), 2);
         assert_eq!(puts[1].epoch, 2);
+    }
+
+    /// The mid-session arm of the same re-seal (`mls-group-key-material.md`
+    /// § Admitting a member, *Envelope ordering*): the folder commit walk asks
+    /// for one channel once a takeover moved its epoch. Behind the epoch →
+    /// re-sealed at it and settled; current → settled with no publish; a
+    /// channel this account does not own → settled with no nest call.
+    #[cfg(feature = "mls")]
+    #[test]
+    fn converge_envelope_re_seals_one_owned_channel_behind_the_epoch() {
+        let nest = Arc::new(FakeNest::default());
+        let group = FakeGroup::with_members(&[]);
+        let a = author(nest.clone(), group.clone());
+        block_on(a.bind_set("docs", CH)).expect("bind");
+        assert_eq!(nest.puts.lock().unwrap().len(), 1);
+
+        assert!(block_on(a.converge_envelope(&CH)).expect("current"));
+        assert_eq!(nest.puts.lock().unwrap().len(), 1, "current — left alone");
+
+        // A member's takeover moved the group's epoch past the seal.
+        *group.epoch.lock().unwrap() += 1;
+        assert!(block_on(a.converge_envelope(&CH)).expect("behind"));
+        {
+            let puts = nest.puts.lock().unwrap();
+            assert_eq!(puts.len(), 2, "re-sealed");
+            assert_eq!(puts[1].epoch, 2, "at the group's epoch");
+        }
+
+        let before = nest.calls.lock().unwrap().len();
+        assert!(block_on(a.converge_envelope(&[0x6B; 32])).expect("not owned"));
+        assert_eq!(
+            nest.calls.lock().unwrap()[before..],
+            [] as [&str; 0],
+            "a channel this account does not own costs no nest call"
+        );
     }
 
     /// A bound set a predecessor minted and keyed at `CH` under `[7; 32]`,

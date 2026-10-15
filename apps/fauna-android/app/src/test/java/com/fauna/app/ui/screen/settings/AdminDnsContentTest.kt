@@ -177,6 +177,7 @@ class AdminDnsContentTest {
         onAbortRename: (ByteArray) -> Unit = {},
         onSetCatchAll: (String, String?) -> Unit = { _, _ -> },
         onSetRoleAddress: (String, RoleAddressKind, String?) -> Unit = { _, _, _ -> },
+        onSetDmarcPolicy: (String, DomainDmarcPolicy) -> Unit = { _, _ -> },
         onSetMode: (String, Boolean) -> Unit = { _, _ -> },
         onSetManageAll: (Boolean) -> Unit = {},
         onPutCredential: (String, List<DnsCredentialField>, String) -> Unit = { _, _, _ -> },
@@ -216,6 +217,7 @@ class AdminDnsContentTest {
                 onAbortRename = onAbortRename,
                 onSetCatchAll = onSetCatchAll,
                 onSetRoleAddress = onSetRoleAddress,
+                onSetDmarcPolicy = onSetDmarcPolicy,
                 onSetMode = onSetMode,
                 onSetManageAll = onSetManageAll,
                 onPutCredential = onPutCredential,
@@ -283,6 +285,25 @@ class AdminDnsContentTest {
         composeTestRule.onNodeWithTag("admin-dns-domain-role-address-postmaster-select").performScrollTo().performClick()
         composeTestRule.onNodeWithText("Alice").performClick()
         assertEquals(Triple("extra.org", RoleAddressKind.POSTMASTER, "aabb"), got)
+    }
+
+    @Test
+    fun dmarcPolicyPickerRendersCurrentPolicyAndDispatches() {
+        // Each domain row carries the DMARC policy select, painted from
+        // LocalDomainView.dmarcPolicy; picking Quarantine dispatches UpdateConfig's
+        // policy for that domain (dmarc-reporting.md § Multi-domain deployments).
+        var got: Pair<String, DomainDmarcPolicy>? = null
+        render(
+            activeDomains = listOf(localDomain(domain = "extra.org", primary = false)),
+            dnsDomains = listOf(dnsDomain(domain = "extra.org")),
+            onSetDmarcPolicy = { d, p -> got = d to p },
+        )
+        composeTestRule.onNodeWithTag("admin-dns-domain-dmarc-policy-select").performScrollTo().assertExists()
+        composeTestRule.onNodeWithText("Reject (default)").assertExists()
+
+        composeTestRule.onNodeWithTag("admin-dns-domain-dmarc-policy-select").performClick()
+        composeTestRule.onNodeWithText("Quarantine").performClick()
+        assertEquals("extra.org" to DomainDmarcPolicy.QUARANTINE, got)
     }
 
     @Test

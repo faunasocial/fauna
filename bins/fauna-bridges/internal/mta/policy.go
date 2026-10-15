@@ -7,7 +7,7 @@
 //     Exhausting the bucket returns 421 4.7.0 at NewSession.
 //  2. DNSBL lookup — query each configured RBL for the peer IP's
 //     reversed-zone A record; Spamhaus-style 127.0.0.2-9 codes reject
-//     (550 5.7.1), PBL codes (127.0.0.10/.11) score-only, resolver
+//     (554 5.7.1 at connect), PBL codes (127.0.0.10/.11) score-only, resolver
 //     errors fail open.
 //  3. Greylist — first-seen tuples tempfail with 451 4.7.1. Enforced
 //     **nest-side** (`fauna.bridges.check_greylist`); the state is not in
@@ -159,7 +159,7 @@ func (rl *RateLimiter) Allow(ip string) bool {
 type DNSBLAction int
 
 const (
-	// DNSBLActionReject — definite badness; reject the session at 550 5.7.1.
+	// DNSBLActionReject — definite badness; refuse the session at connect, 554 5.7.1.
 	DNSBLActionReject DNSBLAction = iota
 	// DNSBLActionScore — soft signal; accept the session, surface the
 	// reason to the scorer (Phase C.7).
@@ -398,6 +398,7 @@ func ParseFCrDNSMode(s string) FCrDNSMode {
 // FCrDNSResult is the structured outcome of FCrDNSChecker.Check.
 type FCrDNSResult struct {
 	Passed   bool   // forward A includes the peer IP
+	NoPTR    bool   // the peer IP has no PTR at all (a definite answer)
 	PTRName  string // first PTR returned, trailing dot stripped
 	Reason   string // human-readable failure description; empty on pass
 	FailOpen bool   // resolver error — sessionn always accepted
@@ -428,14 +429,14 @@ func (c *FCrDNSChecker) Check(ip string) FCrDNSResult {
 	if err != nil {
 		var dnsErr *net.DNSError
 		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
-			return FCrDNSResult{Passed: false, Reason: "no PTR record"}
+			return FCrDNSResult{Passed: false, NoPTR: true, Reason: "no PTR record"}
 		}
 		slog.Warn("FCrDNS PTR lookup failed; failing open",
 			"client_ip", ip, "error", err.Error())
 		return FCrDNSResult{Passed: false, FailOpen: true, Reason: "resolver error: " + err.Error()}
 	}
 	if len(ptrs) == 0 {
-		return FCrDNSResult{Passed: false, Reason: "no PTR record"}
+		return FCrDNSResult{Passed: false, NoPTR: true, Reason: "no PTR record"}
 	}
 	ptrName := strings.TrimSuffix(ptrs[0], ".")
 
@@ -720,11 +721,15 @@ func isDNSNotFound(err error) bool {
 // C.1 skeleton. Tests construct a Policy directly with fake clocks
 // and resolvers; production constructs it via NewPolicyFromSnapshot.
 type Policy struct {
-	RateLimiter          *RateLimiter
-	DNSBL                *DNSBLChecker
-	FCrDNS               *FCrDNSChecker
-	FCrDNSMode           FCrDNSMode
-	RejectFCrDNSFail     bool
+	RateLimiter      *RateLimiter
+	DNSBL            *DNSBLChecker
+	FCrDNS           *FCrDNSChecker
+	FCrDNSMode       FCrDNSMode
+	RejectFCrDNSFail bool
+	// RejectNoRDNS is the admin's `reject_no_rdns` alone-reject
+	// (mail-policy-config.md § Inbound perimeter): a peer with no PTR at
+	// all is refused at MAIL FROM, whatever the FCrDNS mode.
+	RejectNoRDNS         bool
 	HELOIdentityRequired bool
 	HELOResolver         DNSResolver
 	HELOLookupTimeout    time.Duration

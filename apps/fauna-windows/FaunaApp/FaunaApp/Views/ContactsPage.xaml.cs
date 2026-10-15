@@ -53,12 +53,25 @@ public sealed partial class ContactsPage : Page
                 _rpc.AddressBookPushChanged += OnAddressBookPushChanged;
                 _rpc.Reconnected += OnAddressBookReconnected;
             }
+            // Re-read the names when the private overlay's projection moves (a late
+            // load after a relaunch, a sibling device's edit, this device's Save).
+            ContactOverlayNames.Moved += OnOverlayMoved;
+            // The ward's durable asks moved (a status read landed): repaint the find
+            // result's ask pair. App-lifetime static → unsubscribed in OnNavigatedFrom.
+            WardAsksCache.Changed += OnWardAsksChanged;
         }
     }
+
+    private void OnOverlayMoved() =>
+        DispatcherQueue.TryEnqueue(() => _viewModel?.RefreshNamesIfMoved());
+
+    private void OnWardAsksChanged() => DispatcherQueue.TryEnqueue(PaintFindAsk);
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
         base.OnNavigatedFrom(e);
+        ContactOverlayNames.Moved -= OnOverlayMoved;
+        WardAsksCache.Changed -= OnWardAsksChanged;
         // Unsubscribe the knock-roster handler + the VM's reconnect re-hydrate
         // handler (the INestRpcClient seam is app-lifetime, so leaving them attached
         // would leak this page).
@@ -69,6 +82,29 @@ public sealed partial class ContactsPage : Page
             _rpc.Reconnected -= OnAddressBookReconnected;
         }
         _viewModel?.CleanupReconnect();
+        if (_viewModel is not null)
+        {
+            _viewModel.CleanupStoreChange();
+            _viewModel.StoreResynced -= RepaintUnattestedMarks;
+        }
+    }
+
+    /// <summary>The store-change re-read moved the review roster: repaint the
+    /// <c>contact-unattested-mark</c> on every realized row (a row reads the roster
+    /// when it is realized, so an already-realized one needs this).</summary>
+    private void RepaintUnattestedMarks()
+    {
+        if (_viewModel is null) return;
+        foreach (var item in ContactsList.Items)
+        {
+            if (item is not ContactRow c) continue;
+            if (ContactsList.ContainerFromItem(item) is not Microsoft.UI.Xaml.Controls.ListViewItem container) continue;
+            if (container.ContentTemplateRoot is not Microsoft.UI.Xaml.FrameworkElement root) continue;
+            if (root.FindName("UnattestedMarkText") is not Microsoft.UI.Xaml.Controls.TextBlock mark) continue;
+            var reviewed = _viewModel.MemberReviewRoster.Any(r =>
+                System.Convert.ToHexString(r.person).Equals(c.ActorId, System.StringComparison.OrdinalIgnoreCase));
+            mark.Visibility = reviewed ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
+        }
     }
 
     private async void Page_Loaded(object sender, RoutedEventArgs e)
@@ -80,8 +116,8 @@ public sealed partial class ContactsPage : Page
 
         await _viewModel.LoadCommand.ExecuteAsync(null);
 
-        KnocksList.ItemsSource = _viewModel.Knocks;
-        ContactsList.ItemsSource = _viewModel.Contacts;
+        KnocksList.ItemsSource = _viewModel.KnockRows;
+        ContactsList.ItemsSource = _viewModel.Rows;
         AppDataSnapshot.SetContacts(_viewModel.Contacts.Select(c =>
             new AppDataSnapshot.ContactSnapshot(c.ActorId, c.Handle, c.Status.ToString())));
         AppDataSnapshot.SetKnocks(_viewModel.Knocks.Select(k =>
@@ -89,6 +125,13 @@ public sealed partial class ContactsPage : Page
 
         NoKnocksText.Visibility = _viewModel.Knocks.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         NoMatchesText.Visibility = Visibility.Collapsed;
+
+        // The shared store-change notice (account-runtime.md § A runtime's own pump
+        // is a source of the notice too): the review roster's badges re-read while
+        // this page is open.
+        _viewModel.StoreResynced -= RepaintUnattestedMarks;
+        _viewModel.StoreResynced += RepaintUnattestedMarks;
+        _viewModel.WatchStore();
 
         LoadProgress.IsActive = false;
         LoadProgress.Visibility = Visibility.Collapsed;
@@ -145,7 +188,51 @@ public sealed partial class ContactsPage : Page
                 LoadProgress.IsActive = _viewModel.IsLoading;
                 LoadProgress.Visibility = _viewModel.IsLoading ? Visibility.Visible : Visibility.Collapsed;
                 break;
+            case nameof(ContactsViewModel.KnockAsk):
+                PaintFindAsk();
+                break;
         }
+    }
+
+    // ── The ward's in-place ask on the find-user result ──────────────────────
+    // (family-safety.md § Child-initiated contact requests → App affordance.) The
+    // template carries the button + pending label Collapsed; the VM's render verdict
+    // (durable pending first, else the ask after a TYPED refusal this lookup saw)
+    // decides which one shows. No supervision test here (rule (h)).
+
+    private void SearchResultsList_ContainerContentChanging(
+        ListViewBase sender, ContainerContentChangingEventArgs args)
+    {
+        if (args.ItemContainer.ContentTemplateRoot is FrameworkElement root)
+            PaintAsk(root);
+    }
+
+    /// <summary>Repaint the (single) find result's ask pair after the VM's state or
+    /// the durable asks moved.</summary>
+    private void PaintFindAsk()
+    {
+        if (SearchResultsList.ContainerFromIndex(0) is ListViewItem container
+            && container.ContentTemplateRoot is FrameworkElement root)
+            PaintAsk(root);
+    }
+
+    private void PaintAsk(FrameworkElement root)
+    {
+        var render = _viewModel?.ContactAskRenderNow();
+        if (root.FindName("AskGuardianButton") is Button ask)
+        {
+            ask.Visibility = render == ContactAskRender.Ask ? Visibility.Visible : Visibility.Collapsed;
+            ask.IsEnabled = _viewModel is { KnockAsk.AskInFlight: false };
+        }
+        if (root.FindName("AskPendingText") is TextBlock pending)
+            pending.Visibility = render == ContactAskRender.Pending ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private async void AskGuardian_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null) return;
+        if (sender is Button btn && btn.Tag is string actorId)
+            await _viewModel.AskGuardianCommand.ExecuteAsync(actorId);
     }
 
     private async void AcceptKnock_Click(object sender, RoutedEventArgs e)
@@ -184,8 +271,8 @@ public sealed partial class ContactsPage : Page
         // contacts-search-field is a LOCAL roster filter (matching linux
         // views/contacts/list.rs), not a nest search — full-text search returns opaque
         // FTS keys, not actor ids. The match predicate is the shared
-        // fauna_core::format::contact_matches_filter (handle + domain + actor-id), via
-        // ContactsViewModel.FilterRoster. Live-as-you-type (TextChanged, not
+        // overlay face's matches_filter (handle + domain + actor-id + the viewer's
+        // nickname and labels), via ContactsViewModel.FilterRows. Live-as-you-type (TextChanged, not
         // QuerySubmitted — an AutoSuggestBox's QuerySubmitted only fires on Enter/a
         // suggestion pick, never on a plain ValuePattern.SetValue, so a
         // submit-triggered filter here was structurally undrivable by the e2e harness
@@ -193,15 +280,15 @@ public sealed partial class ContactsPage : Page
         var query = (sender.Text ?? string.Empty).Trim();
         if (query.Length == 0)
         {
-            ContactsList.ItemsSource = _viewModel.Contacts;
+            ContactsList.ItemsSource = _viewModel.Rows;
             NoMatchesText.Visibility = Visibility.Collapsed;
             return;
         }
-        var filtered = ContactsViewModel.FilterRoster(_viewModel.Contacts, query);
+        var filtered = _viewModel.FilterRows(query);
         ContactsList.ItemsSource = filtered;
         // case (c) search-no-results (contacts.md § Errors & edge cases): only when a
         // NON-EMPTY roster narrowed to zero — never the true-empty-roster state.
-        NoMatchesText.Visibility = _viewModel.Contacts.Count > 0 && filtered.Count == 0
+        NoMatchesText.Visibility = _viewModel.Rows.Count > 0 && filtered.Count == 0
             ? Visibility.Visible
             : Visibility.Collapsed;
     }
@@ -274,6 +361,12 @@ public sealed partial class ContactsPage : Page
     public static Visibility StatusToConfirmVisibility(ContactStatus status) =>
         status == ContactStatus.Accepted ? Visibility.Visible : Visibility.Collapsed;
 
+    /// <summary>Visible iff the shared face answered a line (<c>contact-public-name</c>,
+    /// <c>contact-labels</c>); a collapsed element is absent from UI Automation, which
+    /// is what "collapsed when absent" asserts.</summary>
+    public static Visibility PresentToVisibility(string? line) =>
+        string.IsNullOrEmpty(line) ? Visibility.Collapsed : Visibility.Visible;
+
     private async void ContactConfirm_Click(object sender, RoutedEventArgs e)
     {
         if (_viewModel is null) return;
@@ -297,7 +390,7 @@ public sealed partial class ContactsPage : Page
     /// handle their own taps; clicking one doesn't change ListView selection.</summary>
     private void ContactsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (ContactsList.SelectedItem is ContactInfo contact && !string.IsNullOrEmpty(contact.ActorId))
+        if (ContactsList.SelectedItem is ContactRow contact && !string.IsNullOrEmpty(contact.ActorId))
         {
             App.PendingProfileTarget = contact.ActorId;
             // Clear before navigating; the re-entrant SelectionChanged (now null)
@@ -321,7 +414,7 @@ public sealed partial class ContactsPage : Page
         Microsoft.UI.Xaml.Controls.ContainerContentChangingEventArgs args)
     {
         if (args.ItemContainer is Microsoft.UI.Xaml.Controls.ListViewItem container
-            && args.Item is ContactInfo contact
+            && args.Item is ContactRow contact
             && !string.IsNullOrEmpty(contact.ActorId))
         {
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(container, contact.ActorId);
@@ -333,7 +426,7 @@ public sealed partial class ContactsPage : Page
         // the same, since (unlike the thread-chip join) there is no MLS
         // address to resolve — a contact already carries a concrete actor id.
         if (args.ItemContainer.ContentTemplateRoot is Microsoft.UI.Xaml.FrameworkElement root
-            && args.Item is ContactInfo c
+            && args.Item is ContactRow c
             && root.FindName("UnattestedMarkText") is Microsoft.UI.Xaml.Controls.TextBlock mark)
         {
             var reviewed = _viewModel is not null

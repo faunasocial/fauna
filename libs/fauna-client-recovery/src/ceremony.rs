@@ -44,11 +44,9 @@ pub const SWEEP_KIND_RAN: &str = "ran";
 // Keys, never English: the app resolves them through its own pipeline, exactly
 // as `RecoveryKitStatus::status_line`'s.
 const KEY_SWEEP_NONE: &str = "settings.recovery_kit.sweep_none";
-const KEY_SWEEP_NONE_NO_RETRY: &str = "settings.recovery_kit.sweep_none_no_retry";
 const KEY_SWEEP_FAILED: &str = "settings.recovery_kit.sweep_failed";
 const KEY_SWEEP_ALL_REMOVED: &str = "settings.recovery_kit.sweep_all_removed";
 const KEY_SWEEP_PARTIAL: &str = "settings.recovery_kit.sweep_partial";
-const KEY_SWEEP_PARTIAL_NO_RETRY: &str = "settings.recovery_kit.sweep_partial_no_retry";
 const KEY_SWEEP_UNATTESTED: &str = "settings.recovery_kit.sweep_unattested";
 
 // The retry's four answers (`recovery-kit-sweep-retry-button`). Keys for the
@@ -166,28 +164,6 @@ pub struct SweepView {
     /// The size of the roster the sweep can vouch for nothing about
     /// ([`SweepStatus::review_roster`]) — `0` on every arm that swept nobody.
     pub unattested_members: u32,
-}
-
-/// Whether the surface painting a [`SweepCopy`] also paints
-/// `recovery-kit-sweep-retry-button` beside it.
-///
-/// The two degraded arms (`no-engine`, a partial `ran`) tell the user how to
-/// finish the job, and `settings.md` § Recovery kit rules that a degraded line
-/// must never name a control that is not on screen — so which remedy they name
-/// is decided by this, and by nothing an app writes itself.
-///
-/// ⚠ **`Absent` is a parity gap, never a product choice.** tui built the button
-/// 2026-08-16; every other app passes `Absent` only until it builds its own
-/// (`retry_group_sweep` has no FFI or wasm face yet). When the seventh app lands
-/// it, this enum and the two `*_no_retry` strings retire together.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SweepRetryAffordance {
-    /// The app renders the button on every arm [`SweepView::owes_work`] answers
-    /// true for — and MUST, since the copy will name it.
-    Rendered,
-    /// The app has not built the button. The owing arms carry the member-side
-    /// remedy alone.
-    Absent,
 }
 
 /// What a press of `recovery-kit-sweep-retry-button` answered — the retry's
@@ -309,11 +285,9 @@ impl SweepRetryAnswer {
 /// retry. `Some((hex, None))` means it is recorded but the seed is not here,
 /// which [`retry_sweep_as_successor`] answers with the member-side remedy.
 ///
-/// Native-only because `fauna-client-accounts` is (this crate's `Cargo.toml`
-/// scopes it to `cfg(not(target_arch = "wasm32"))`), and web needs none of it:
-/// no browser can hold the retired identity's conversation store, so its answer
-/// is settled before any registry walk would matter.
-#[cfg(not(target_arch = "wasm32"))]
+/// Every target: native's [`retry_sweep_as_successor`] and the browser driver
+/// (`fauna-wasm`'s `retry_sweep_as_successor_web`) resolve the retired identity
+/// through this one walk, so the direct-hop rule above has one statement.
 pub fn retry_predecessor(
     accounts: &fauna_client_accounts::AccountRegistry,
     successor_actor_hex: &str,
@@ -375,21 +349,19 @@ impl SweepView {
         }
     }
 
-    /// Select the sweep's lines — see [`SweepCopy`] for the two-facts rule and
-    /// [`SweepRetryAffordance`] for which remedy the degraded arms name.
+    /// Select the sweep's lines — see [`SweepCopy`] for the two-facts rule. The
+    /// degraded arms name `recovery-kit-sweep-retry-button`, which every app
+    /// renders on every arm [`Self::owes_work`] answers true for.
     ///
     /// ⚠ **Lifted here 2026-08-27 from `apps/fauna-tui/src/settings/recovery.rs`**,
     /// where the selection — including the `groups == 0` suppression — was one
     /// app's local judgment while web painted nothing, and apple and windows
     /// were about to re-derive it in Swift and C#. Same shape as the aftermath
     /// legs' `status_line()`s: the projection decides, an app only localizes.
-    pub fn copy(&self, retry: SweepRetryAffordance) -> SweepCopy {
+    pub fn copy(&self) -> SweepCopy {
         match self.kind.as_str() {
             SWEEP_KIND_NO_ENGINE => SweepCopy {
-                outcome: Some(LocalizedText::key(match retry {
-                    SweepRetryAffordance::Rendered => KEY_SWEEP_NONE,
-                    SweepRetryAffordance::Absent => KEY_SWEEP_NONE_NO_RETRY,
-                })),
+                outcome: Some(LocalizedText::key(KEY_SWEEP_NONE)),
                 unattested: None,
             },
             SWEEP_KIND_FAILED => SweepCopy {
@@ -411,10 +383,7 @@ impl SweepView {
                     LocalizedText::key_arg(KEY_SWEEP_ALL_REMOVED, "groups", self.groups.to_string())
                 } else {
                     LocalizedText::key_args(
-                        match retry {
-                            SweepRetryAffordance::Rendered => KEY_SWEEP_PARTIAL,
-                            SweepRetryAffordance::Absent => KEY_SWEEP_PARTIAL_NO_RETRY,
-                        },
+                        KEY_SWEEP_PARTIAL,
                         [
                             ("removed", self.groups_old_leaf_removed.to_string()),
                             ("groups", self.groups.to_string()),
@@ -458,8 +427,8 @@ impl SweepStatus {
     }
 
     /// [`SweepView::copy`], for a caller still holding the enum.
-    pub fn render_copy(&self, retry: SweepRetryAffordance) -> SweepCopy {
-        self.render_view().copy(retry)
+    pub fn render_copy(&self) -> SweepCopy {
+        self.render_view().copy()
     }
 
     /// Project this into the view a surface paints from — and selects its copy off
@@ -969,9 +938,7 @@ mod copy_tests {
     #[test]
     fn a_sweep_over_no_groups_says_nothing() {
         let sweep = ran(Vec::new());
-        for retry in [SweepRetryAffordance::Rendered, SweepRetryAffordance::Absent] {
-            assert_eq!(sweep.render_copy(retry), SweepCopy::default());
-        }
+        assert_eq!(sweep.render_copy(), SweepCopy::default());
         assert!(
             !sweep.owes_work(),
             "nothing to move, so nothing to finish — the retry must not render"
@@ -982,8 +949,7 @@ mod copy_tests {
     /// two facts, and there is no combined "you are safe" verdict to render.
     #[test]
     fn a_completed_sweep_reports_eviction_and_the_roster_as_two_facts() {
-        let copy = ran(vec![group(GroupSweepState::Swept, 7, 1)])
-            .render_copy(SweepRetryAffordance::Rendered);
+        let copy = ran(vec![group(GroupSweepState::Swept, 7, 1)]).render_copy();
         assert_eq!(
             copy.outcome,
             Some(LocalizedText::key_arg(KEY_SWEEP_ALL_REMOVED, "groups", "1"))
@@ -999,8 +965,7 @@ mod copy_tests {
     /// A clean sweep with nobody to review renders the eviction alone.
     #[test]
     fn a_clean_sweep_with_nobody_to_review_has_no_roster_line() {
-        let copy = ran(vec![group(GroupSweepState::AlreadySwept, 7, 0)])
-            .render_copy(SweepRetryAffordance::Absent);
+        let copy = ran(vec![group(GroupSweepState::AlreadySwept, 7, 0)]).render_copy();
         assert!(copy.outcome.is_some());
         assert_eq!(copy.unattested, None);
     }
@@ -1025,68 +990,38 @@ mod copy_tests {
         );
     }
 
-    /// The two degraded arms name `recovery-kit-sweep-retry-button` only where
-    /// the app renders it; elsewhere they carry the member-side remedy alone —
-    /// the same FACT under a different remedy, never a hidden arm
-    /// (`settings.md` § Recovery kit: a degraded line must not name a control
-    /// that is not on screen).
+    /// The two degraded arms name `recovery-kit-sweep-retry-button`, which every
+    /// app renders on every owing arm (`settings.md` § Recovery kit: a degraded
+    /// line must not name a control that is not on screen).
     #[test]
-    fn the_degraded_arms_name_the_retry_button_only_where_it_is_rendered() {
-        let none = SweepStatus::NoEngine;
+    fn the_degraded_arms_name_the_retry_button() {
         assert_eq!(
-            none.render_copy(SweepRetryAffordance::Rendered).outcome,
+            SweepStatus::NoEngine.render_copy().outcome,
             Some(LocalizedText::key(KEY_SWEEP_NONE))
         );
         assert_eq!(
-            none.render_copy(SweepRetryAffordance::Absent).outcome,
-            Some(LocalizedText::key(KEY_SWEEP_NONE_NO_RETRY))
-        );
-
-        let with = partial().render_copy(SweepRetryAffordance::Rendered);
-        let without = partial().render_copy(SweepRetryAffordance::Absent);
-        let counts = [("removed", "1"), ("groups", "3")];
-        assert_eq!(
-            with.outcome,
-            Some(LocalizedText::key_args(KEY_SWEEP_PARTIAL, counts))
-        );
-        assert_eq!(
-            without.outcome,
-            Some(LocalizedText::key_args(KEY_SWEEP_PARTIAL_NO_RETRY, counts))
+            partial().render_copy().outcome,
+            Some(LocalizedText::key_args(
+                KEY_SWEEP_PARTIAL,
+                [("removed", "1"), ("groups", "3")]
+            ))
         );
     }
 
-    /// The arms that never named the button read identically with or without
-    /// it: the failure reason travels as an argument, and the roster line is
-    /// the same fact on both.
+    /// The failure reason travels as an argument, and a sweep that could not
+    /// start swept nobody and reviews nobody.
     #[test]
-    fn the_other_arms_do_not_depend_on_the_retry_affordance() {
-        let failed = SweepStatus::Failed("nest unreachable".into());
-        let expected = Some(LocalizedText::key_arg(
-            KEY_SWEEP_FAILED,
-            "reason",
-            "nest unreachable",
-        ));
+    fn a_failed_sweep_carries_its_reason_and_no_roster_line() {
+        let failed = SweepStatus::Failed("nest unreachable".into()).render_copy();
         assert_eq!(
-            failed.render_copy(SweepRetryAffordance::Rendered).outcome,
-            expected
+            failed.outcome,
+            Some(LocalizedText::key_arg(
+                KEY_SWEEP_FAILED,
+                "reason",
+                "nest unreachable"
+            ))
         );
-        assert_eq!(
-            failed.render_copy(SweepRetryAffordance::Absent).outcome,
-            expected
-        );
-        assert_eq!(
-            failed.render_copy(SweepRetryAffordance::Absent).unattested,
-            None,
-            "a sweep that could not start swept nobody and reviews nobody"
-        );
-
-        let roster = ran(vec![group(GroupSweepState::Swept, 1, 2)]);
-        assert_eq!(
-            roster
-                .render_copy(SweepRetryAffordance::Rendered)
-                .unattested,
-            roster.render_copy(SweepRetryAffordance::Absent).unattested,
-        );
+        assert_eq!(failed.unattested, None);
     }
 
     /// The view carries the counts the copy is selected from, so an app
@@ -1101,9 +1036,7 @@ mod copy_tests {
             ran(vec![group(GroupSweepState::Swept, 1, 2)]),
             ran(Vec::new()),
         ] {
-            for retry in [SweepRetryAffordance::Rendered, SweepRetryAffordance::Absent] {
-                assert_eq!(sweep.render_copy(retry), sweep.render_view().copy(retry));
-            }
+            assert_eq!(sweep.render_copy(), sweep.render_view().copy());
         }
         let view = partial().render_view();
         assert_eq!((view.groups, view.groups_old_leaf_removed), (3, 1));
@@ -1185,6 +1118,44 @@ mod copy_tests {
         );
     }
 
+    /// A landed succession leaves BOTH durable facts behind for every app that
+    /// records it through the shared step: the predecessor link (the bound
+    /// launch's follow, the retry's and the re-seal's lookup) and the parked
+    /// ceremony context under the successor, naming the predecessor it raises
+    /// for.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "aftermath"))]
+    #[test]
+    fn recording_a_landed_succession_links_and_parks_under_the_successor() {
+        use fauna_client_accounts::{AccountRegistry, InMemorySecretStore};
+        let registry = AccountRegistry::new(std::sync::Arc::new(InMemorySecretStore::new()));
+        let old = fauna_core::identity::ActorKeypair::generate();
+        let new = fauna_core::identity::ActorKeypair::generate();
+        let old_hex = registry
+            .add_account(&fauna_core::hex32::encode(old.secret_bytes()), None, None)
+            .expect("predecessor row");
+        let new_secret = fauna_core::hex32::encode(new.secret_bytes());
+        let new_hex = registry
+            .add_account(&new_secret, None, Some("dev-successor"))
+            .expect("successor row");
+        let landed = LandedSuccession::new(
+            new_secret,
+            new.actor_id(),
+            SweepStatus::NoEngine,
+            Some(1_700_000_000),
+        );
+
+        record_landed_succession(&registry, &old.actor_id(), &landed);
+
+        assert_eq!(registry.predecessors_of(&new_hex), vec![old_hex]);
+        assert!(
+            matches!(
+                crate::aftermath::PendingCeremony::parked(&registry, &new_hex),
+                Some(Ok(_))
+            ),
+            "the ceremony context must be parked under the successor"
+        );
+    }
+
     /// The transport arm's sentence carries the reason it was given, rather
     /// than dropping it into a log the user cannot see.
     #[test]
@@ -1233,19 +1204,28 @@ mod copy_tests {
 /// then reports that it did not run and the successor finishes it from Settings
 /// (`retry_sweep_as_successor`). `db_path_for` is the app's per-account store
 /// resolver, invoked only after the successor's connect.
+/// `successor_device_id` is stored beside the successor's seed: `Some` from an
+/// app that builds its session from the account's stored `(secret, nest_url,
+/// device_id)` and refuses to construct one without all three (the FFI apps —
+/// a FRESH id, never the predecessor's: device registrations are re-created
+/// under the new identity, `succession-aftermath.md` § Propagation → *Own
+/// device fleet*); `None` from an app that mints its device id at session
+/// start (tui, linux).
 ///
 /// ## What the caller still owes
 ///
-/// On [`StolenOutcome::Landed`]: record the predecessor → successor link and
-/// switch to the successor (tui: `session::adopt_successor`), then the closing
-/// kit. On [`StolenOutcome::Undecided`]: paint [`StolenOutcome::message`], which
-/// puts the seed on screen when its persist did not read back.
+/// On [`StolenOutcome::Landed`]: record the predecessor → successor link
+/// ([`record_landed_succession`], before the account switch) and switch to the
+/// successor (tui: `session::adopt_successor`), then the closing kit. On
+/// [`StolenOutcome::Undecided`]: paint [`StolenOutcome::message`], which puts
+/// the seed on screen when its persist did not read back.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn succeed_stolen_identity(
     nest_url: &str,
     old_identity: &fauna_core::identity::ActorKeypair,
     kit_input: &str,
     old_engine: Option<&fauna_mls::engine::MlsEngine>,
+    successor_device_id: Option<&str>,
     accounts: &fauna_client_accounts::AccountRegistry,
     db_path_for: impl FnOnce(&str) -> std::path::PathBuf,
 ) -> StolenOutcome {
@@ -1279,7 +1259,11 @@ pub async fn succeed_stolen_identity(
     // precisely the case where the nest may have committed while telling us it
     // did not. Through the caller's own registry, because the unconfirmed arm
     // READS BACK through it to decide whether it may claim the seed is saved.
-    if let Err(e) = accounts.add_account(attempt.successor_secret_hex(), Some(nest_url), None) {
+    if let Err(e) = accounts.add_account(
+        attempt.successor_secret_hex(),
+        Some(nest_url),
+        successor_device_id,
+    ) {
         // Not fatal: the app's adoption tries again and, failing that, puts
         // the seed on screen as the only way back. Logged because this is the
         // moment of maximum exposure.
@@ -1312,6 +1296,47 @@ pub async fn succeed_stolen_identity(
             )
             .await
         }
+    }
+}
+
+/// Record a landed succession in the account registry — the step every app
+/// owes between [`succeed_stolen_identity`]'s `Landed` arm and its account
+/// switch, in this order:
+///
+/// 1. **Park** what only the ceremony knows (the sweep's review roster, the
+///    nest's commit stamp) under the successor, for the member-item and
+///    filter-mark raises the successor's post-store-ready pass drains
+///    ([`crate::aftermath::PendingCeremony`]) — the single durable decision
+///    point of those raises, so no app carries them across its switch.
+/// 2. **Link** predecessor → successor (`record_succession`). Load-bearing
+///    twice over: it is where a *bound* launch follows the account to the
+///    successor (`account-scoping.md` § Concurrent instances → *The binding
+///    follows the account*), and [`retry_predecessor`] and the corpus re-seal
+///    read it at every later sign-in to find the retired identity's store and
+///    `BackupKey` (`succession-aftermath.md` § Re-key scope).
+///
+/// Never fatal: the account has already moved on the nest, so a failure here
+/// costs the automatic re-seal and the sweep retry, never the account — it is
+/// logged and swallowed rather than turning a landed succession into an error.
+#[cfg(all(not(target_arch = "wasm32"), feature = "aftermath"))]
+pub fn record_landed_succession(
+    accounts: &fauna_client_accounts::AccountRegistry,
+    old_actor_id: &fauna_core::identity::ActorId,
+    landed: &LandedSuccession,
+) {
+    let successor_hex = landed.new_actor_id.to_hex();
+    crate::aftermath::PendingCeremony::new(
+        old_actor_id,
+        &landed.sweep.review_roster(),
+        landed.succeeded_at,
+    )
+    .park(accounts, &successor_hex);
+    if let Err(e) = accounts.record_succession(&old_actor_id.to_hex(), &successor_hex) {
+        tracing::error!(
+            "[recovery] recording the succession link failed — the corpus re-seal will not find \
+             this predecessor automatically, and the group-sweep retry will report that no move \
+             was recorded: {e}"
+        );
     }
 }
 
@@ -1828,6 +1853,118 @@ pub async fn sweep_as_successor(
     SweepStatus::Ran(Box::new(report))
 }
 
+/// Where the sweep retry's retired engine came from — the two arms of its
+/// resolver, "the local store when there is one, else the parked snapshot"
+/// (`succession-propagation.md` § Propagation → *Own device fleet*, *Where the
+/// retired leaf rests on a device with no local MLS store*, rule (2)). The arm
+/// decides how the ratcheted engine persists after a `Swept`: a local store
+/// saves itself; a parked leaf is written back to its parked path.
+pub enum RetiredLeafSource {
+    /// The retired identity's own MLS store on this device (native's SQLite).
+    LocalStore,
+    /// The snapshot the restore door parked at `retired/<predecessor_hex>/provider`,
+    /// with the CAS base it was read at — the write-back's precondition.
+    Parked(fauna_client_mls_sync::ReplicaBase),
+}
+
+/// **The parked arm of the retry's resolver**: rebuild the retired engine from
+/// the predecessor's seed and restore the parked snapshot into it — through the
+/// one checked restore door every snapshot goes through
+/// (`ProviderReplica::restore_into`), whose seating verdict is clean exactly
+/// because the engine's identity is the leaf the snapshot seats.
+///
+/// `replica` is the **successor's** replica client (the park rests under its
+/// path and its `BackupKey`). `Ok(None)` when nothing is parked for this
+/// predecessor — the retry's ordinary `NoOldState`. A parked snapshot that does
+/// not restore clean into the predecessor's engine is an error, never a
+/// fall-through: it is not the state the sweep can author from. Target-agnostic
+/// on purpose — native's fall-through and the browser driver's only arm are
+/// this one body.
+pub async fn restore_parked_retired_leaf(
+    replica: &fauna_client_mls_sync::MlsReplicaClient,
+    retired: fauna_core::identity::ActorKeypair,
+) -> Result<
+    Option<(
+        fauna_mls::engine::MlsEngine,
+        fauna_client_mls_sync::ReplicaBase,
+    )>,
+    String,
+> {
+    let predecessor = retired.actor_id();
+    let (parked, base) = replica
+        .load_retired_provider(&predecessor)
+        .await
+        .map_err(|e| format!("{e}"))?;
+    let Some(parked) = parked else {
+        return Ok(None);
+    };
+    let engine =
+        fauna_mls::engine::MlsEngine::new_in_memory(retired).map_err(|e| format!("{e}"))?;
+    let verdict = parked.restore_into(&engine).map_err(|e| format!("{e}"))?;
+    if !verdict.is_clean() {
+        return Err(format!(
+            "the parked retired leaf does not seat {} ({} foreign, {} unexaminable group(s))",
+            predecessor.to_hex(),
+            verdict.foreign.len(),
+            verdict.unexaminable
+        ));
+    }
+    Ok(Some((engine, base)))
+}
+
+/// Write the ratcheted retired engine back to its parked path after a `Swept`
+/// over the parked arm — the twin of `old_engine.save_state()`, so a later
+/// retry over a partial sweep starts from the ratcheted leaf, never the stale
+/// one. CAS at the base the leaf was read at: a conflict means another device's
+/// retry moved the leaf first, and a ratchet is not mergeable — logged, not
+/// forced.
+pub async fn write_back_parked_retired_leaf(
+    replica: &fauna_client_mls_sync::MlsReplicaClient,
+    retired: &fauna_mls::engine::MlsEngine,
+    base: fauna_client_mls_sync::ReplicaBase,
+) {
+    let snapshot = fauna_mls::state_replica::ProviderReplica::from_engine(retired);
+    match replica
+        .put_retired_provider(&retired.identity_actor_id(), &snapshot, base)
+        .await
+    {
+        Ok(fauna_client_mls_sync::PutOutcome::Stored) => {}
+        Ok(fauna_client_mls_sync::PutOutcome::Conflict) => tracing::warn!(
+            "[settings/recovery] the parked retired leaf moved under this retry (another \
+             device's retry wrote it first) — this device's ratchet is not written back"
+        ),
+        Err(e) => tracing::error!(
+            "[settings/recovery] writing the ratcheted retired leaf back to its parked path: {e}"
+        ),
+    }
+}
+
+/// The retry's resolver over both arms: the retired identity's local store when
+/// `old_db` exists, else the parked snapshot (`Ok(None)` when neither holds
+/// it). Split from [`retry_sweep_as_successor`] so the arm choice is testable
+/// without a live nest.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn resolve_retired_engine(
+    retired: fauna_core::identity::ActorKeypair,
+    old_db: &std::path::Path,
+    replica: &fauna_client_mls_sync::MlsReplicaClient,
+) -> Result<Option<(fauna_mls::engine::MlsEngine, RetiredLeafSource)>, String> {
+    // The existence check the local arm turns on. `try_exists` rather than
+    // `exists` so an unreadable path reports itself instead of masquerading as
+    // "no state here" and sending the user to another device for nothing.
+    match old_db.try_exists() {
+        Ok(true) => fauna_mls::engine::MlsEngine::new(retired, old_db)
+            .map(|engine| Some((engine, RetiredLeafSource::LocalStore)))
+            .map_err(|e| format!("{e}")),
+        // No local store: the parked snapshot, never a fresh SQLite at the
+        // path (an empty store there would read as the local arm next time).
+        Ok(false) => Ok(restore_parked_retired_leaf(replica, retired)
+            .await?
+            .map(|(engine, base)| (engine, RetiredLeafSource::Parked(base)))),
+        Err(e) => Err(format!("{e}")),
+    }
+}
+
 /// Finish a sweep the ceremony left unfinished — `recovery-kit-sweep-retry-button`'s
 /// one call, over the shared [`crate::retry_group_sweep`]
 /// (`succession-aftermath.md` § Propagation → *MLS groups*).
@@ -1886,22 +2023,28 @@ pub async fn retry_sweep_as_successor(
         Err(e) => return SweepRetryAnswer::Failed(format!("{e}")),
     };
     let old_db = old_db_path_for(&old_keypair.actor_id_hex());
-    // The existence check the whole op turns on. `try_exists` rather than
-    // `exists` so an unreadable path reports itself instead of masquerading as
-    // "no state here" and sending the user to another device for nothing.
-    match old_db.try_exists() {
-        Ok(true) => {}
-        // The seed is here but the conversation store is not — same answer, and
-        // the sentence is written to hold for both (it names another device
-        // conditionally rather than asserting one has it, since on this arm
-        // THIS device may well be the one that ran the ceremony).
-        Ok(false) => return SweepRetryAnswer::NoOldState,
-        Err(e) => return SweepRetryAnswer::Failed(format!("{e}")),
-    }
-    let old_engine = match fauna_mls::engine::MlsEngine::new(old_keypair, &old_db) {
-        Ok(engine) => engine,
+    // The successor's replica client: the parked arm reads the retired leaf
+    // from the successor's own `__mls` plane, sealed under its key.
+    let replica = match fauna_core::identity::ActorKeypair::from_secret_hex(successor_secret_hex) {
+        Ok(keypair) => fauna_client_mls_sync::MlsReplicaClient::new(
+            Box::new(fauna_client_mls_sync::NestMlsReplicaTransport::new(
+                Arc::clone(&nest),
+            )),
+            &keypair,
+        ),
         Err(e) => return SweepRetryAnswer::Failed(format!("{e}")),
     };
+    // "The local store when there is one, else the parked snapshot". Neither —
+    // the seed is here but no conversation state is — is the same answer as no
+    // seed, and the sentence is written to hold for both (it names another
+    // device conditionally rather than asserting one has it, since THIS device
+    // may well be the one that ran the ceremony).
+    let (old_engine, old_source) =
+        match resolve_retired_engine(old_keypair, &old_db, &replica).await {
+            Ok(Some(resolved)) => resolved,
+            Ok(None) => return SweepRetryAnswer::NoOldState,
+            Err(e) => return SweepRetryAnswer::Failed(e),
+        };
 
     // Built twice from the one secret rather than cloned, for the same reason
     // `sweep_as_successor` does it: `ActorKeypair` is signing key material and
@@ -1951,11 +2094,20 @@ pub async fn retry_sweep_as_successor(
     match outcome {
         crate::SweepRetryOutcome::Swept(report) => {
             // Both engines moved — the old one ratcheted past remove-old, the
-            // successor joined every group — so both must land.
-            if let Err(e) = old_engine.save_state() {
-                tracing::error!(
-                    "[settings/recovery] persisting the retired engine after the retry: {e}"
-                );
+            // successor joined every group — so both must land. The retired
+            // one lands where it came from: its local store, or its parked
+            // path.
+            match old_source {
+                RetiredLeafSource::LocalStore => {
+                    if let Err(e) = old_engine.save_state() {
+                        tracing::error!(
+                            "[settings/recovery] persisting the retired engine after the retry: {e}"
+                        );
+                    }
+                }
+                RetiredLeafSource::Parked(base) => {
+                    write_back_parked_retired_leaf(&replica, &old_engine, base).await;
+                }
             }
             if let Err(e) = successor_engine.save_state() {
                 tracing::error!(
@@ -2396,6 +2548,221 @@ mod tests {
         assert!(
             fauna_client_testkit::block_on(load_profile_edit_base(&offline, &registry, &successor))
                 .is_err()
+        );
+    }
+
+    /// A CAS-enforcing in-memory `__mls` plane — one nest, shared by clones.
+    #[derive(Default, Clone)]
+    struct MemReplica(Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>);
+
+    #[async_trait::async_trait]
+    impl fauna_client_mls_sync::MlsReplicaTransport for MemReplica {
+        async fn get(
+            &self,
+            path: String,
+        ) -> Result<Option<Vec<u8>>, fauna_client_mls_sync::MlsTransportError> {
+            Ok(self.0.lock().unwrap().get(&path).cloned())
+        }
+        async fn put(
+            &self,
+            path: String,
+            blob: Vec<u8>,
+            base: fauna_client_mls_sync::ReplicaBase,
+        ) -> Result<fauna_client_mls_sync::PutOutcome, fauna_client_mls_sync::MlsTransportError>
+        {
+            let mut map = self.0.lock().unwrap();
+            let current = map.get(&path).map(|b| blake3_hash(b));
+            let matches = match base {
+                fauna_client_mls_sync::ReplicaBase::Absent => current.is_none(),
+                fauna_client_mls_sync::ReplicaBase::Hash(h) => current == Some(h),
+            };
+            if !matches {
+                return Ok(fauna_client_mls_sync::PutOutcome::Conflict);
+            }
+            map.insert(path, blob);
+            Ok(fauna_client_mls_sync::PutOutcome::Stored)
+        }
+    }
+
+    /// The CAS base digest the plane keys on (`blake3` of the sealed blob, as
+    /// the replica client's `ReplicaBase::Hash` computes it).
+    fn blake3_hash(bytes: &[u8]) -> [u8; 32] {
+        fauna_core::chunker_stream::blake3_of_reader(bytes).unwrap()
+    }
+
+    fn kp(seed: u8) -> fauna_core::identity::ActorKeypair {
+        fauna_core::identity::ActorKeypair::from_secret([seed; 32])
+    }
+
+    /// The predecessor (seed 1) seated in a group with a peer, and its channel.
+    fn retired_in_a_group() -> (fauna_mls::engine::MlsEngine, fauna_mls::types::ChannelId) {
+        let retired = fauna_mls::engine::MlsEngine::new_in_memory(kp(1)).unwrap();
+        let peer = fauna_mls::engine::MlsEngine::new_in_memory(kp(2)).unwrap();
+        let (channel, _) = retired
+            .create_group(&peer.generate_key_packages(1).unwrap())
+            .unwrap();
+        (retired, channel)
+    }
+
+    /// A store path nothing has created — unique per process and per call.
+    fn absent_store() -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "fauna-recovery-no-retired-store-{}-{}.db",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
+    }
+
+    /// **The native retry falls through to the parked leaf when the retired
+    /// identity's SQLite store is absent** — `succession-propagation.md`
+    /// § Propagation → *Own device fleet*, *Where the retired leaf rests on a
+    /// device with no local MLS store*, rule (2): "the local store when there
+    /// is one, else the parked snapshot", one resolver shape on all seven apps.
+    /// Before it, an absent store was `NoOldState` whatever the plane held.
+    #[test]
+    fn the_retry_resolves_the_parked_leaf_when_the_local_store_is_absent() {
+        let plane = MemReplica::default();
+        let successor_replica =
+            fauna_client_mls_sync::MlsReplicaClient::new(Box::new(plane.clone()), &kp(3));
+        let old_db = absent_store();
+
+        // Nothing parked, no store: the ordinary NoOldState answer.
+        let none = fauna_client_testkit::block_on(resolve_retired_engine(
+            kp(1),
+            &old_db,
+            &successor_replica,
+        ))
+        .unwrap();
+        assert!(none.is_none());
+
+        // The restore door's park, as the successor's device writes it.
+        let (retired, channel) = retired_in_a_group();
+        let parked = fauna_mls::state_replica::ProviderReplica::from_engine(&retired);
+        fauna_client_testkit::block_on(successor_replica.put_retired_provider(
+            &retired.identity_actor_id(),
+            &parked,
+            fauna_client_mls_sync::ReplicaBase::Absent,
+        ))
+        .unwrap();
+
+        let (engine, source) = fauna_client_testkit::block_on(resolve_retired_engine(
+            kp(1),
+            &old_db,
+            &successor_replica,
+        ))
+        .unwrap()
+        .expect("the parked arm resolves");
+        assert!(matches!(source, RetiredLeafSource::Parked(_)));
+        assert!(engine.has_group(&channel), "the retired leaf is restored");
+        assert_eq!(engine.identity_actor_id(), retired.identity_actor_id());
+        assert!(
+            !old_db.exists(),
+            "the parked arm never creates a store at the local path"
+        );
+
+        // A wrong seed's engine is not the leaf the snapshot seats: an
+        // error, never a silently empty engine.
+        fauna_client_testkit::block_on(successor_replica.put_retired_provider(
+            &kp(5).actor_id(),
+            &parked,
+            fauna_client_mls_sync::ReplicaBase::Absent,
+        ))
+        .unwrap();
+        assert!(
+            fauna_client_testkit::block_on(resolve_retired_engine(
+                kp(5),
+                &old_db,
+                &successor_replica,
+            ))
+            .is_err()
+        );
+    }
+
+    /// The local store wins when it exists — the parked snapshot is the
+    /// fall-through, never a preference.
+    #[test]
+    fn the_retry_prefers_the_local_store_over_a_parked_leaf() {
+        let plane = MemReplica::default();
+        let successor_replica =
+            fauna_client_mls_sync::MlsReplicaClient::new(Box::new(plane.clone()), &kp(3));
+        let (retired, _) = retired_in_a_group();
+        fauna_client_testkit::block_on(successor_replica.put_retired_provider(
+            &retired.identity_actor_id(),
+            &fauna_mls::state_replica::ProviderReplica::from_engine(&retired),
+            fauna_client_mls_sync::ReplicaBase::Absent,
+        ))
+        .unwrap();
+        let old_db = absent_store();
+        fauna_mls::engine::MlsEngine::new(kp(1), &old_db).unwrap();
+
+        let (_, source) = fauna_client_testkit::block_on(resolve_retired_engine(
+            kp(1),
+            &old_db,
+            &successor_replica,
+        ))
+        .unwrap()
+        .expect("the local arm resolves");
+        assert!(matches!(source, RetiredLeafSource::LocalStore));
+        let _ = std::fs::remove_file(&old_db);
+    }
+
+    /// The `Swept` persistence of the parked arm: the ratcheted leaf is written
+    /// back at the base it was read at, and a stale base never overwrites a
+    /// leaf another device's retry moved first.
+    #[test]
+    fn the_parked_leaf_is_written_back_at_its_read_base_only() {
+        let plane = MemReplica::default();
+        let successor_replica =
+            fauna_client_mls_sync::MlsReplicaClient::new(Box::new(plane.clone()), &kp(3));
+        let (retired, _) = retired_in_a_group();
+        let id = retired.identity_actor_id();
+        fauna_client_testkit::block_on(successor_replica.put_retired_provider(
+            &id,
+            &fauna_mls::state_replica::ProviderReplica::from_engine(&retired),
+            fauna_client_mls_sync::ReplicaBase::Absent,
+        ))
+        .unwrap();
+        let (engine, source) = fauna_client_testkit::block_on(resolve_retired_engine(
+            kp(1),
+            &absent_store(),
+            &successor_replica,
+        ))
+        .unwrap()
+        .unwrap();
+        let RetiredLeafSource::Parked(base) = source else {
+            panic!("parked arm expected");
+        };
+        // The leaf moves (a second group stands in for the sweep's ratchet).
+        let carol = fauna_mls::engine::MlsEngine::new_in_memory(kp(4)).unwrap();
+        engine
+            .create_group(&carol.generate_key_packages(1).unwrap())
+            .unwrap();
+        let ratcheted = fauna_mls::state_replica::ProviderReplica::from_engine(&engine);
+
+        fauna_client_testkit::block_on(write_back_parked_retired_leaf(
+            &successor_replica,
+            &engine,
+            base,
+        ));
+        let read = |r: &fauna_client_mls_sync::MlsReplicaClient| {
+            fauna_client_testkit::block_on(r.load_retired_provider(&id))
+                .unwrap()
+                .0
+                .unwrap()
+        };
+        assert!(read(&successor_replica) == ratcheted, "written back");
+
+        // The same stale base again: refused, the stored leaf stands.
+        let stale = fauna_mls::engine::MlsEngine::new_in_memory(kp(1)).unwrap();
+        fauna_client_testkit::block_on(write_back_parked_retired_leaf(
+            &successor_replica,
+            &stale,
+            base,
+        ));
+        assert!(
+            read(&successor_replica) == ratcheted,
+            "a stale base never overwrites"
         );
     }
 }

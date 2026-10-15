@@ -48,6 +48,24 @@ pub trait RpcRequester {
     where
         Req: Serialize,
         Reply: DeserializeOwned;
+
+    /// The number of the connection a request issued now would ride
+    /// ([`crate::RpcDispatcher::connection_id`], minted per (re)connect), or
+    /// `None` when none is live — or when this transport keeps no
+    /// per-connection memo, the default. The key of
+    /// [`Self::nest_info_memo`].
+    fn live_connection_id(&self) -> Option<u64> {
+        None
+    }
+
+    /// This transport's per-connection memo of the `fauna.nest.info` reply
+    /// ([`crate::NestInfoMemo`]), read through [`crate::read_nest_info`] —
+    /// `None` for a transport that remembers nothing (the default: a fake, a
+    /// port-built web client, a wrapper that does not forward it), whose
+    /// readers then read on every call.
+    fn nest_info_memo(&self) -> Option<&crate::NestInfoMemo> {
+        None
+    }
 }
 
 /// The outbox-drain seam: a transport that sends a request whose envelope
@@ -113,6 +131,18 @@ pub trait RpcErrorClass {
     /// it. A classifier that only needs the boolean keeps using `is_rejection`.
     fn as_rpc_error(&self) -> Option<&RpcError> {
         None
+    }
+
+    /// `true` when the nest refused this app's subprotocol — the pre-upgrade
+    /// HTTP 426, or the 4426 close that ends a completed upgrade: the app is
+    /// too old for the nest, and no retry clears it
+    /// (`transport-connection.md` § Connection lifecycle, the 4426 paragraph).
+    /// The typed predicate the shared classifiers read
+    /// ([`crate::auth::silent_challenge_error`], the onboarding probe), never
+    /// a match on the error's text. Defaults to `false`; the transport error
+    /// types with a `SubprotocolMismatch` variant override it.
+    fn is_subprotocol_mismatch(&self) -> bool {
+        false
     }
 }
 
@@ -228,6 +258,14 @@ impl<T: RpcRequester + ?Sized> RpcRequester for &T {
     {
         (**self).request(kind, payload).await
     }
+
+    fn live_connection_id(&self) -> Option<u64> {
+        (**self).live_connection_id()
+    }
+
+    fn nest_info_memo(&self) -> Option<&crate::NestInfoMemo> {
+        (**self).nest_info_memo()
+    }
 }
 
 impl<T: KeyedRpcRequester + ?Sized> KeyedRpcRequester for &T {
@@ -260,6 +298,14 @@ impl<T: RpcRequester + ?Sized> RpcRequester for std::sync::Arc<T> {
         Reply: DeserializeOwned,
     {
         (**self).request(kind, payload).await
+    }
+
+    fn live_connection_id(&self) -> Option<u64> {
+        (**self).live_connection_id()
+    }
+
+    fn nest_info_memo(&self) -> Option<&crate::NestInfoMemo> {
+        (**self).nest_info_memo()
     }
 }
 
@@ -332,5 +378,129 @@ mod nest_seam_error_tests {
             nest_seam_error(Fake { rejection: true }),
             NestSeamError::Rejected("detail".into())
         );
+    }
+}
+
+/// What one connection **proved** about the nest at its far end: the identity
+/// the connection is bound to, cross-checked against the nest's own
+/// `fauna.nest.info` claim, and the address the connection was dialled on.
+/// The value a [`ProvenIdentityMemo`] remembers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProvenNestIdentity {
+    /// The nest's 32-byte Ed25519 identity, as the connection proved it.
+    pub nest_id: [u8; 32],
+    /// The address the connection was dialled on.
+    pub url: String,
+}
+
+/// The identity a transport's **current connection** has already proven,
+/// remembered for that connection and no other — the memo behind "prove once
+/// per connection" (`security.md` § Transport trust → *The proven identity is
+/// remembered per connection*).
+///
+/// Keyed on the connection's [`crate::RpcDispatcher::connection_id`], a
+/// process-unique number minted per (re)connect: a value remembered on
+/// connection N is never served on connection N+1, so a reconnect to the same
+/// address, a different box behind it, or a client re-bound to another nest
+/// proves afresh. The caller takes a *ticket* — the live connection's number
+/// — BEFORE it runs the proof and redeems it after: a proof whose connection
+/// changed underneath it ([`Self::remember`] with a ticket that is no longer
+/// the live connection) remembers nothing, so an identity proven over one
+/// socket is never attributed to the next.
+///
+/// Both transport clients own one (native `NestClient`, wasm `WsRpcClient`);
+/// the one resolver every app reads the bound identity through
+/// (`fauna_client_pair::LinkedNestsMachine::bound_nest_id`) consults it, so
+/// the per-call `fauna.nest.info` re-proof that drew on the nest's per-actor
+/// discovery budget on every backups-page read is one round trip per
+/// connection.
+#[derive(Debug, Default)]
+pub struct ProvenIdentityMemo {
+    slot: std::sync::Mutex<Option<(u64, ProvenNestIdentity)>>,
+}
+
+impl ProvenIdentityMemo {
+    /// An empty memo — nothing proven on any connection yet.
+    pub const fn new() -> Self {
+        Self {
+            slot: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The identity remembered for connection `live`, if that very connection
+    /// proved one. `None` for a connection that has proven nothing yet, which
+    /// includes every connection after the one the memo was taken on.
+    pub fn get(&self, live: u64) -> Option<ProvenNestIdentity> {
+        let slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+        match slot.as_ref() {
+            Some((connection, identity)) if *connection == live => Some(identity.clone()),
+            _ => None,
+        }
+    }
+
+    /// Remember `identity` as proven on connection `ticket` — but only while
+    /// `ticket` still names the live connection (`live`): a proof that
+    /// straddled a reconnect ran, at least in part, on a connection that is
+    /// gone, and is not attributed to the one that replaced it. Returns
+    /// whether it was remembered.
+    pub fn remember(&self, ticket: u64, live: Option<u64>, identity: ProvenNestIdentity) -> bool {
+        if live != Some(ticket) {
+            return false;
+        }
+        let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+        *slot = Some((ticket, identity));
+        true
+    }
+
+    /// Forget whatever is remembered. The clients never need this — a new
+    /// connection carries a new number — but a refused re-proof over a
+    /// connection that once passed must not keep serving the earlier answer.
+    pub fn clear(&self) {
+        let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+        *slot = None;
+    }
+}
+
+#[cfg(test)]
+mod proven_identity_tests {
+    use super::*;
+
+    fn id(byte: u8) -> ProvenNestIdentity {
+        ProvenNestIdentity {
+            nest_id: [byte; 32],
+            url: "https://nest.test".into(),
+        }
+    }
+
+    #[test]
+    fn a_memo_answers_only_the_connection_it_was_taken_on() {
+        let memo = ProvenIdentityMemo::new();
+        assert_eq!(memo.get(7), None);
+        assert!(memo.remember(7, Some(7), id(0xaa)));
+        assert_eq!(memo.get(7), Some(id(0xaa)));
+        // The next connection remembers nothing — a reconnect proves afresh.
+        assert_eq!(memo.get(8), None);
+        assert!(memo.remember(8, Some(8), id(0xbb)));
+        assert_eq!(memo.get(8), Some(id(0xbb)));
+        assert_eq!(memo.get(7), None, "the earlier connection's answer is gone");
+    }
+
+    #[test]
+    fn a_proof_that_straddled_a_reconnect_is_not_remembered() {
+        let memo = ProvenIdentityMemo::new();
+        // Ticket taken on connection 3; by the time the proof completes the
+        // live connection is 4 (or none at all).
+        assert!(!memo.remember(3, Some(4), id(0xaa)));
+        assert!(!memo.remember(3, None, id(0xaa)));
+        assert_eq!(memo.get(3), None);
+        assert_eq!(memo.get(4), None);
+    }
+
+    #[test]
+    fn clear_forgets() {
+        let memo = ProvenIdentityMemo::new();
+        assert!(memo.remember(1, Some(1), id(0xaa)));
+        memo.clear();
+        assert_eq!(memo.get(1), None);
     }
 }

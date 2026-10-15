@@ -35,14 +35,15 @@ use fauna_protocol::merge_policy::{
 };
 use fauna_protocol::{RpcErrorClass, RpcRequester, decode_strict, encode_canonical};
 use fauna_sync_engine::account_runtime::{
-    AccountRuntimeParams, AccountStoreHandle, AccountStoreRuntime, CRED_NAMESPACE,
+    AccountRuntimeParams, AccountStoreHandle, AccountStoreRuntime, CRED_NAMESPACE, DialPass,
     RuntimePrincipal, StoreRoot, resolve_writer_key_serialized,
 };
 use fauna_sync_engine::generation_tip::GenerationTrust;
-use fauna_transport::testing::{Listeners, await_listening, listeners};
+use fauna_transport::PathKind;
+use fauna_transport::testing::{Listeners, PathCell, await_listening, listeners};
 
 mod common;
-use common::{mem_factory, mem_factory_with};
+use common::{mem_factory, mem_factory_on_path, mem_factory_with};
 
 fn root() -> ActorKeypair {
     ActorKeypair::from_secret([0x5A; 32])
@@ -149,6 +150,20 @@ fn params(base: &Path, device: &str, listeners: &Listeners) -> AccountRuntimePar
         peer_transport: Some(mem_factory(listeners)),
         // The machine's named row — never read here (no nest answers enrollment).
         enrollment_target_device_id: "ab".repeat(32),
+    }
+}
+
+/// [`params`] with every connection the leg makes or accepts reporting `path`
+/// (`common::mem_factory_on_path`).
+fn params_on_path(
+    base: &Path,
+    device: &str,
+    listeners: &Listeners,
+    path: &PathCell,
+) -> AccountRuntimeParams<NestInfoOnly> {
+    AccountRuntimeParams {
+        peer_transport: Some(mem_factory_on_path(listeners, path.clone())),
+        ..params(base, device, listeners)
     }
 }
 
@@ -281,19 +296,50 @@ async fn moderation_of(handle: &AccountStoreHandle) -> Option<Vec<String>> {
 /// account, no reachable nest — a preference written on A becomes readable
 /// on B over the DIALED leg, driven entirely through the pump. B's only
 /// route to the value is dial → admit → pull-only walk: its nest legs all
-/// fail, and nothing in the test touches a plane or channel by hand.
+/// fail, and nothing in the test touches a plane or channel by hand. On a
+/// direct path the pass counts no relayed admission.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_preference_write_converges_over_the_dialed_leg_with_no_nest() {
+    let dialed = preference_converges_over_the_dialed_leg(None).await;
+    assert_eq!(
+        dialed.admitted_relayed, 0,
+        "a sibling admitted over a direct path is no relayed admission: {dialed:?}"
+    );
+}
+
+/// The same convergence with the substrate able to reach the sibling only
+/// through a relay (`p2p.md` § The relay, *What it carries*): the rows ride
+/// the relayed connection as they ride a direct one (ruling 4 defers only
+/// bytes), and the pass names the admission as relayed — the count the image
+/// witness reads off a seat on a network with no path to its sibling.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_preference_write_converges_over_a_relayed_dialed_leg_and_says_so() {
+    let dialed =
+        preference_converges_over_the_dialed_leg(Some(PathCell::new(PathKind::Relay))).await;
+    assert!(
+        dialed.admitted_relayed >= 1 && dialed.admitted_relayed <= dialed.admitted,
+        "the sibling admitted over the relay must be counted as relayed: {dialed:?}"
+    );
+}
+
+/// The body of the two tests above: A writes a preference with no nest, B
+/// dials A over connections answering `path` (a direct one when `None`) until
+/// the value arrives. Returns B's converging dial pass.
+async fn preference_converges_over_the_dialed_leg(path: Option<PathCell>) -> DialPass {
     let tmp = tempfile::tempdir().unwrap();
     let base: PathBuf = tmp.path().to_path_buf();
     let net = listeners();
+    let params_for = |device: &str| match &path {
+        Some(path) => params_on_path(&base, device, &net, path),
+        None => params(&base, device, &net),
+    };
 
     // A stages nothing; B learns A's NodeId the way production replicas do —
     // from a device-endpoints entry already in its store.
     let a_pub = premint_and_stage(&base, "a", &[]).await;
     let _b_pub = premint_and_stage(&base, "b", &member_rows(&base, "a")).await;
 
-    let a = AccountStoreRuntime::start(params(&base, "a", &net))
+    let a = AccountStoreRuntime::start(params_for("a"))
         .await
         .expect("start A");
     // The blob leg fails (no nest) — the plane row is durable first, which is
@@ -313,26 +359,35 @@ async fn a_preference_write_converges_over_the_dialed_leg_with_no_nest() {
     // A's prologue (holder from birth) binds; barrier on the registration.
     await_listening(&net, &a_pub).await;
 
-    let b = AccountStoreRuntime::start(params(&base, "b", &net))
+    let b = AccountStoreRuntime::start(params_for("b"))
         .await
         .expect("start B");
+    let converged = std::sync::Arc::new(std::sync::Mutex::new(None));
     eventually("B converges A's preference over the dialed leg", || {
         let b = b.clone();
+        let converged = std::sync::Arc::clone(&converged);
         async move {
             let report = b.reconcile_now().await.expect("B pass");
-            let dialed = report
+            let Some(dialed) = report
                 .peer_dial
-                .map(|d| d.targets >= 1 && d.admitted >= 1)
-                .unwrap_or(false);
-            dialed
-                && moderation_of(&b).await.as_deref()
-                    == Some(&["over-the-dialed-leg".to_string()][..])
+                .filter(|d| d.targets >= 1 && d.admitted >= 1)
+            else {
+                return false;
+            };
+            let arrived = moderation_of(&b).await.as_deref()
+                == Some(&["over-the-dialed-leg".to_string()][..]);
+            if arrived {
+                *converged.lock().unwrap() = Some(dialed);
+            }
+            arrived
         }
     })
     .await;
 
     a.shutdown().await;
     b.shutdown().await;
+    let dialed = converged.lock().unwrap().take();
+    dialed.expect("the converging pass was recorded")
 }
 
 /// **The custody attach, red-verifiable** (the charter's :3700 sequencing —
@@ -343,11 +398,11 @@ async fn a_preference_write_converges_over_the_dialed_leg_with_no_nest() {
 /// Removing `with_generation_custody` from the dial plane construction reds
 /// this test and nothing else — the mutation run at the landing.
 ///
-/// **Only an authored shred drops** (`account-data-taxonomy.md`
-/// § *Fleet-scope reclamation* → *the authored shred*): G1's
-/// shred is sig-less — what any `BackupKey` holder can write — and staged
-/// first, G2's is signed by A, a verified member, and staged after it, so
-/// the walk merges G1's before G2's. B ends holding exactly G1's key: an
+/// **Only an authored shred drops** (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation* → *the authored shred*, *the shred cell*): G1's shred is a marker alone — what any `BackupKey`
+/// holder can write — and staged first, G2's is a marker beside A's
+/// attestation in its own cell, A a verified member, staged after it, so the
+/// walk merges G1's before G2's. B ends holding exactly G1's key: an
 /// unauthored drop would leave none, a detached custody both.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_shredded_mint_over_the_dialed_leg_drops_the_retained_key() {
@@ -396,20 +451,34 @@ async fn a_shredded_mint_over_the_dialed_leg_drops_the_retained_key() {
     .expect("mint G1");
     let authored =
         build_mint(&[member], &escrow, "identity", Vec::new(), &a_key, 7_500).expect("mint G2");
-    let shreds = [
+    let marker = |record: &GenerationMintRecord, generation_id: &[u8; 32]| {
         (
-            unauthored.generation_id,
-            GenerationMintRecord::Shredded {
-                core: core_of(&unauthored.record),
+            KIND_GENERATION_MINT,
+            fauna_core::hex32::encode(generation_id),
+            canonical_encode(&GenerationMintRecord::Shredded {
+                core: core_of(record),
                 shredded_at_ms: 9_000,
                 shredded_by: a_pub,
-                shredder_sig: vec![],
-            },
-        ),
+            })
+            .unwrap()
+            .to_vec(),
+        )
+    };
+    let shreds = [
+        // G1: the marker alone.
+        marker(&unauthored.record, &unauthored.generation_id),
+        // G2: the marker, and A's attestation in its own cell.
+        marker(&authored.record, &authored.generation_id),
         (
-            authored.generation_id,
-            fauna_core::generation::sign_shred(&a_key, core_of(&authored.record), 9_000)
-                .expect("sign"),
+            fauna_protocol::merge_policy::KIND_GENERATION_SHRED,
+            fauna_core::generation::shred_cell_key(&authored.generation_id, &a_pub),
+            canonical_encode(&fauna_core::generation::sign_shred(
+                &a_key,
+                &authored.generation_id,
+                9_000,
+            ))
+            .unwrap()
+            .to_vec(),
         ),
     ];
 
@@ -437,14 +506,14 @@ async fn a_shredded_mint_over_the_dialed_leg_drops_the_retained_key() {
         )
         .unwrap();
         // In order: G1's unauthored shred journals before G2's authored one.
-        for (generation_id, shredded) in &shreds {
+        for (kind, key, value) in &shreds {
             plane
                 .put(
                     &fauna_sync_engine::account_state_plane::ItemId {
-                        kind: KIND_GENERATION_MINT.into(),
-                        key: fauna_core::hex32::encode(generation_id),
+                        kind: (*kind).into(),
+                        key: key.clone(),
                     },
-                    canonical_encode(shredded).unwrap().to_vec(),
+                    value.clone(),
                     None,
                 )
                 .await
@@ -539,6 +608,8 @@ fn file_sync_serving(
     (
         fauna_sync_engine::account_runtime::PeerFileSync {
             file_chunks,
+            folder_changes: std::sync::Arc::new(|_, _, _| Box::pin(async { Ok(Vec::new()) })),
+            folder_manifests: std::sync::Arc::new(|_, _| Box::pin(async { None })),
             siblings: std::sync::Arc::clone(&siblings),
         },
         siblings,
@@ -621,6 +692,50 @@ async fn a_file_body_crosses_the_dialed_leg_and_the_rest_is_left_to_the_nest() {
 
     // Another folder's want is not served from this one, however the key reads.
     assert!(siblings.fetch("8", &[key], "elsewhere").await.is_empty());
+
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// A removed sibling leaves the registry at the remover's next pass
+/// (`account-sync-plane.md` § The admission seam → *Validity and severance*,
+/// property (b): a sibling never walks a removed device's planes). The dial
+/// pass reaches only verified members, so a removed one is no longer a
+/// target — and a channel held for a node no pass dials must not outlive the
+/// pass that stopped dialing it, or the engines keep asking the removed
+/// device for bodies and the reading keeps counting it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removed_sibling_leaves_the_registry_at_the_next_pass() {
+    let tmp = tempfile::tempdir().unwrap();
+    let net = listeners();
+    let key = fauna_core::data::ContentHash::of_raw(b"a chunk");
+    let (a, b, siblings) = two_seats_one_body(tmp.path(), &net, key, b"a chunk".to_vec()).await;
+    let a_id = resolve_writer_key_serialized(
+        &store_root_for(tmp.path(), "a"),
+        &root().actor_id_hex(),
+        &creds_for(tmp.path(), "a"),
+    )
+    .expect("A's writer key")
+    .verifying_key()
+    .to_bytes();
+
+    let owed = b.subscribe_holder_pass_owed();
+    b.remove_fleet_member(a_id)
+        .await
+        .expect("B removes A by its fleet id");
+    // The write owes the engine holder its pass: beside a co-located agent,
+    // the process that serves (the agent) learns of the removal at that
+    // pass rather than at its backstop tick.
+    assert!(
+        owed.has_changed().expect("the runtime is up"),
+        "a removal owes the engine holder its pass"
+    );
+    let _ = b.reconcile_now().await.expect("B pass");
+    assert_eq!(
+        siblings.len(),
+        0,
+        "B's pass after the removal must drop A's channel, not keep it for good"
+    );
 
     a.shutdown().await;
     b.shutdown().await;

@@ -42,15 +42,19 @@ Stamped 2026-10-01 at dc4b94e0f1.
 5. [nest] Stopping the nest tells a connected app that the nest is going away, so the app reconnects by itself instead of treating it as an error — `docs/goal/architecture/transport-connection.md` § Graceful shutdown
    - `tests/e2e-unified/tests/platform/docker/test_graceful_shutdown.py::test_docker_stop_emits_ws_1001`
 6. [nest] A mail helper that starts without its walls, its sandbox off or the nest's sealed store within its reach, shows up as a warning in the admin's log that names what is wrong — `docs/goal/architecture/security.md` § Confinement self-probe
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_bridge_confinement_degraded_docker.py::test_an_unsandboxed_mail_helper_warns_in_the_admins_log`
 7. [nest] A nest set up without its helpers' identities says so: the admin's read-out reports that helper enrolment is not strict, and the nest's log carries a warning — `docs/goal/architecture/security.md` § Implementation status — UID isolation
    - `tests/e2e-unified/tests/platform/docker/test_bridge_enrollment_pop.py::test_lenient_box_forged_enrollment_is_accepted`
 8. [nest] A request an app had already sent when the nest begins to stop is still finished and answered before the connection closes — `docs/goal/architecture/transport-connection.md` § Graceful shutdown
-   - (none)
+   - `tests/e2e-unified/tests/api/test_graceful_shutdown_in_flight.py::test_a_request_in_flight_at_stop_is_answered_before_the_1001_close`
 9. [nest] A compromised helper cannot fake where a connection comes from, so the per-address limits and the mail sign-in lockout cannot be dodged from inside the nest — `docs/goal/architecture/security.md` § Co-resident process trust boundary (UID isolation)
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_proxy_forgery_docker.py::test_a_helper_cannot_fake_where_a_connection_comes_from`
 10. [nest] The relay and the helper that connects the nest to another network each run as their own user too — `docs/goal/architecture/security.md` § Co-resident process trust boundary (UID isolation)
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_each_service_runs_under_its_own_uid`
+11. [nest] The video converter the nest runs over an uploaded file works in a sandbox of its own, so a flaw in it cannot reach the nest's sealed data or keys — `docs/goal/architecture/deployment-threat-model.md` § 1b — a user of that nest
+   - `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_transcode_domain_denies_the_nests_secrets_to_its_own_uid`
+12. [nest] The video converter the Bluesky helper runs when it prepares a video for publishing works in the same sandbox, so a flaw in it cannot reach the helper's signing key — `docs/goal/architecture/deployment-threat-model.md` § 1b — a user of that nest
+   - `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_transcode_domain_denies_the_pds_key_to_the_atproto_bridges_remux`
 
 ## Status
 
@@ -70,24 +74,26 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | 1 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_each_service_runs_under_its_own_uid` | nest (linux): passed |
 | 1 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_mail_bridges_run_under_fauna_sandbox` | nest (linux): passed |
 | 1 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_landlock_denies_node_db_in_real_bridge_context` | nest (linux): passed |
-| 1 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_landlock_denies_sealed_store_inside_sandbox_domain` | — |
+| 1 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_landlock_denies_sealed_store_inside_sandbox_domain` | nest (linux): passed |
 | 1 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_all_services_still_serve_after_split` | nest (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_bridge_uid_cannot_read_peer_key_or_sealed_store` | nest (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_key_files_and_dirs_have_expected_owner_and_mode` | nest (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/platform/docker/test_proxy_router_auth.py::test_router_secret_file_is_root_only_and_bridges_denied` | nest (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/platform/docker/test_proxy_router_auth.py::test_secret_not_on_any_world_readable_cmdline` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/platform/docker/test_proxy_router_auth.py::test_secret_env_channel_is_non_dumpable_and_isolated` | — |
-| 2 | nest | `tests/e2e-unified/tests/platform/docker/test_proxy_router_auth.py::test_mda_env_channel_is_non_dumpable_and_isolated` | — |
+| 2 | nest | `tests/e2e-unified/tests/platform/docker/test_proxy_router_auth.py::test_secret_env_channel_is_non_dumpable_and_isolated` | nest (linux): passed |
+| 2 | nest | `tests/e2e-unified/tests/platform/docker/test_proxy_router_auth.py::test_mda_env_channel_is_non_dumpable_and_isolated` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_enrollment_pop.py::test_forged_fresh_pubkey_enrollment_is_rejected` | nest (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_enrollment_pop.py::test_bridge_uid_can_read_but_not_substitute_blessed_pubkey` | — |
+| 3 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_enrollment_pop.py::test_bridge_uid_can_read_but_not_substitute_blessed_pubkey` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_enrollment_pop.py::test_both_blessed_and_signing_bridges_auto_approve` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/platform/docker/test_caldav_sni_router.py::test_external_request_enrollment_refused_over_router` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_bridges_self_report_their_confinement_over_the_wire` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_enrollment_pop.py::test_enrollment_strict_reported_on_provisioned_box` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/platform/docker/test_graceful_shutdown.py::test_docker_stop_emits_ws_1001` | nest (linux): passed |
-| 6 | nest | (none) | — |
+| 6 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_confinement_degraded_docker.py::test_an_unsandboxed_mail_helper_warns_in_the_admins_log` | nest (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_enrollment_pop.py::test_lenient_box_forged_enrollment_is_accepted` | — |
-| 8 | nest | (none) | — |
-| 9 | nest | (none) | — |
-| 10 | nest | (none) | — |
+| 8 | nest | `tests/e2e-unified/tests/api/test_graceful_shutdown_in_flight.py::test_a_request_in_flight_at_stop_is_answered_before_the_1001_close` | nest (linux): passed |
+| 9 | nest | `tests/e2e-unified/tests/platform/docker/test_proxy_forgery_docker.py::test_a_helper_cannot_fake_where_a_connection_comes_from` | nest (linux): passed |
+| 10 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_each_service_runs_under_its_own_uid` | nest (linux): passed |
+| 11 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_transcode_domain_denies_the_nests_secrets_to_its_own_uid` | — |
+| 12 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_transcode_domain_denies_the_pds_key_to_the_atproto_bridges_remux` | — |
 <!-- features-render:end -->

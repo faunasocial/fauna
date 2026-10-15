@@ -39,6 +39,14 @@ pub const FACEBOOK_TOKEN: &str = "facebook";
 /// wire spelling.
 pub const INSTAGRAM_TOKEN: &str = "instagram";
 
+/// Facebook's "Download your information" page in Accounts Center.
+pub const FACEBOOK_EXPORT_REQUEST_URL: &str =
+    "https://accountscenter.facebook.com/info_and_permissions/dyi/";
+
+/// Instagram's "Download your information" page in Accounts Center.
+pub const INSTAGRAM_EXPORT_REQUEST_URL: &str =
+    "https://accountscenter.instagram.com/info_and_permissions/dyi/";
+
 /// The source platform — an additive enum. The serde form is the
 /// lowercase token ([`FACEBOOK_TOKEN`], [`INSTAGRAM_TOKEN`]); Fauna's post
 /// `source` vocabulary carries the same spellings, pinned equal by a test in
@@ -80,6 +88,18 @@ impl Platform {
             Platform::Facebook => "Facebook",
             Platform::Instagram => "Instagram",
             Platform::Other(token) => token,
+        }
+    }
+
+    /// The page on the platform where its owner requests the export — the
+    /// import wizard's step-1 deep link (`archive-import.md` § The wizard and
+    /// its machine, step 1). A constant, not a setting: nobody chooses it.
+    /// `None` for a platform this build cannot name.
+    pub fn export_request_url(&self) -> Option<&'static str> {
+        match self {
+            Platform::Facebook => Some(FACEBOOK_EXPORT_REQUEST_URL),
+            Platform::Instagram => Some(INSTAGRAM_EXPORT_REQUEST_URL),
+            Platform::Other(_) => None,
         }
     }
 

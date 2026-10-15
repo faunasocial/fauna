@@ -218,7 +218,8 @@ pub struct ClaimItem {
     pub redeemed_by: Option<ActorId>,
     #[serde(default)]
     pub redeemed_at: Option<Timestamp>,
-    /// Set when a refund/dispute voided an unredeemed claim.
+    /// Set when the claim was voided — by a refund/dispute webhook or by the
+    /// author (`claims.void`); a redeemed claim can be voided too.
     #[serde(default)]
     pub voided_at: Option<Timestamp>,
     /// Forward-compat catch-all: unknown keys from a newer peer are
@@ -232,6 +233,37 @@ pub struct ClaimItem {
 pub struct ClaimsListReply {
     /// The author's claim codes, newest first.
     pub claims: Vec<ClaimItem>,
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+// ── claims.void ─────────────────────────────────────────────────
+
+/// The author withdraws one of their own claim codes (monetization.md
+/// § Pillar 3 → *Buyer↔actor binding (Q4)*): an unredeemed code is refused
+/// thereafter at `claims.redeem` and at the web redeem door; an already
+/// redeemed one is voided too and the redeemer's entitlement to its tier is
+/// voided as a refund voids it. A code the caller did not author answers
+/// `fauna.payments.claim_not_found`, exactly as an unknown one does.
+/// Idempotent: voiding a voided code answers the same reply again.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClaimVoidRequest {
+    pub code: String,
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClaimVoidReply {
+    /// When the code was voided — the FIRST void's stamp, so a repeat (or a
+    /// code a refund already voided) answers the same value.
+    pub voided_at: Timestamp,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).

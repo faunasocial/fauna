@@ -102,14 +102,17 @@ struct SpyChainSource {
 
 #[async_trait]
 impl SuccessionChainSource for Shared<SpyChainSource> {
-    async fn walk_from_domain(
+    /// The canned answer canned answer as a one-hop line — what the statement walk
+    /// dials since it takes the whole line (head from `first()`, destination
+    /// from `last()`).
+    async fn walk_line_from_domain(
         &self,
         handle_domain: &str,
         _old: ActorId,
         _known_head: Option<ChainHead>,
-    ) -> Option<VerifiedSuccession> {
+    ) -> Option<Vec<VerifiedSuccession>> {
         self.0.dials.lock().unwrap().push(handle_domain.to_string());
-        self.0.answer
+        self.0.answer.map(|hop| vec![hop])
     }
 }
 
@@ -233,44 +236,6 @@ fn the_walk_is_anchored_on_the_handle_domain_the_consumer_already_knew() {
 
     assert_eq!(verified.new_actor_id, f.successor);
     assert_eq!(dials(&source), vec!["nest.example.test".to_string()]);
-}
-
-/// `resolve_successor` returns the **terminal** hop, whose `old_actor_id` on a
-/// twice-succeeded identity is the *middle* id — an id no participant row
-/// bears, so passing it through verbatim would silently re-point nothing. The
-/// pair the consumer acts on must be (the identity asked about) → (where the
-/// chain ends).
-#[test]
-fn a_multi_hop_path_repoints_from_the_identity_the_member_actually_holds() {
-    let f = fixture();
-    let middle = ActorKeypair::from_secret([33u8; 32]).actor_id();
-    let terminal = ActorKeypair::from_secret([44u8; 32]).actor_id();
-    // What the walk returns for a two-hop path old → middle → terminal.
-    let walked = VerifiedSuccession {
-        old_actor_id: middle,
-        new_actor_id: terminal,
-        seq: 5,
-        chain_head: f.head,
-    };
-    let (witness, anchors, _source) = build(None, Some("alice@example.test"), Some(walked));
-
-    let verified = block_on(witness.verify_statement(f.signed)).expect("the walk verifies");
-
-    assert_eq!(
-        verified.old_actor_id, f.old,
-        "the re-point must start at the id the thread's participant row holds, \
-         not at the terminal hop's predecessor"
-    );
-    assert_eq!(
-        verified.new_actor_id, terminal,
-        "and land on where the chain actually ends"
-    );
-    assert!(
-        anchors.remembered.lock().unwrap().is_empty(),
-        "the terminal hop's head is the MIDDLE identity's chain — remembered \
-         under the identity asked about, it would refuse that identity's true \
-         chain as a rewrite on every later walk"
-    );
 }
 
 /// A completed walk teaches the consumer a head, so the *next* statement for
@@ -2419,6 +2384,85 @@ impl PeerAnchorStore for AmnesiacAnchors {
     }
 }
 
+/// A store that already holds the peer's head and whose writes succeed without
+/// persisting: both seam methods answer the held anchors as they were, so a
+/// mark the harvest just wrote is never in what reads back.
+struct HoldsHeadForgetsWrites(PeerAnchors);
+
+#[async_trait]
+impl PeerAnchorStore for HoldsHeadForgetsWrites {
+    async fn peer_anchors(&self) -> Result<PeerAnchors, String> {
+        Ok(self.0.clone())
+    }
+    async fn merge_peer_anchors(&self, _replica: PeerAnchors) -> Result<PeerAnchors, String> {
+        Ok(self.0.clone())
+    }
+}
+
+/// The demotion is read back too: a mark that does not stick must be reported
+/// as `SeedLost` (retryable), never `Seeded` (settled for the session, with the
+/// re-drive announcing a demotion that is not at rest).
+///
+/// The seed here is outrun-only (`seeded_head: false`, `seeded_domain: false`),
+/// so `outrun_ok` is the one conjunct that can be false.
+#[test]
+fn a_demotion_the_store_does_not_read_back_is_reported_rather_than_believed() {
+    let f = fixture();
+    let held = Arc::new(MemoryAnchors::default());
+    block_on(harvest_peer_anchor(
+        &StubProfileNest {
+            body: Some(signed_profile_bytes(&old_keypair(), Some(f.head), None)),
+        },
+        &f.old,
+        &Shared(Arc::clone(&held)),
+    ));
+    let anchors = held.anchors.lock().unwrap().clone().unwrap();
+    assert!(
+        anchors.known_chain_head(&f.old).is_some(),
+        "the control holds a head"
+    );
+
+    let nest = StubProfileNest {
+        body: Some(signed_profile_bytes(
+            &old_keypair(),
+            Some(rotated_head(&f)),
+            None,
+        )),
+    };
+
+    assert_eq!(
+        block_on(harvest_peer_anchor(
+            &nest,
+            &f.old,
+            &HoldsHeadForgetsWrites(anchors)
+        )),
+        HarvestOutcome::SeedLost,
+        "a demotion that reads back unmarked must surface as its own arm — \
+         reported as `Seeded` the sweep never retries the peer while the held \
+         head keeps settling offline"
+    );
+}
+
+/// The domain half of the same read-back. The profile carries no head, so
+/// `head_ok` is vacuous and the domain conjunct is the only one that can fail.
+#[test]
+fn a_domain_the_store_does_not_read_back_is_reported_rather_than_believed() {
+    let f = fixture();
+    let nest = StubProfileNest {
+        body: Some(signed_profile_bytes(
+            &old_keypair(),
+            None,
+            Some("https://alice.example/"),
+        )),
+    };
+
+    assert_eq!(
+        block_on(harvest_peer_anchor(&nest, &f.old, &AmnesiacAnchors)),
+        HarvestOutcome::SeedLost,
+        "a domain write that reads back empty must surface as `SeedLost`, not `Seeded`"
+    );
+}
+
 /// The producer half: the harvest log names *which* non-seeding outcome a peer
 /// hit, and counts the retried ones.
 ///
@@ -2573,6 +2617,7 @@ fn the_state_report_carries_the_poll_the_producer_and_the_verdict() {
         awaiting_remove_old: 1,
         not_in_this_group: 1,
         held_commits: 2,
+        park_full: 1,
     };
 
     let json = fauna_client_recovery::witness::state_json(&witness.observation(), &log, &counts);
@@ -2589,6 +2634,7 @@ fn the_state_report_carries_the_poll_the_producer_and_the_verdict() {
     assert_eq!(json["statements"]["awaiting_remove_old"], 1);
     assert_eq!(json["statements"]["not_in_this_group"], 1);
     assert_eq!(json["statements"]["held_commits"], 2);
+    assert_eq!(json["statements"]["park_full"], 1);
 
     // The PRODUCER half, keyed by actor so a driver can find its own peer.
     let harvest = json["harvest"].as_array().expect("harvest is a list");
@@ -3255,14 +3301,6 @@ struct LineSpy {
 
 #[async_trait]
 impl SuccessionChainSource for Shared<LineSpy> {
-    async fn walk_from_domain(
-        &self,
-        _handle_domain: &str,
-        _old: ActorId,
-        _known_head: Option<ChainHead>,
-    ) -> Option<VerifiedSuccession> {
-        panic!("a bare name carries no statement: only the line walk is dialled");
-    }
     async fn walk_line_from_domain(
         &self,
         handle_domain: &str,
@@ -3352,6 +3390,112 @@ fn a_bare_names_line_is_walked_once_from_the_owners_own_anchor() {
          the harvested one), with the held head as the rewrite guard"
     );
     assert_eq!(*anchors.remembered.lock().unwrap(), vec![(f.old, f.head)]);
+}
+
+// ── a statement's multi-hop walk: the held head is `old`'s own ──────────────
+
+/// Anchors that behave like the real store: a remembered head is held for the
+/// next ask, so a second walk can be seen to receive it.
+#[derive(Default)]
+struct HeldAnchors {
+    head: Mutex<Option<ChainHead>>,
+    remembered: Mutex<Vec<(ActorId, ChainHead)>>,
+}
+
+#[async_trait]
+impl SuccessionAnchors for Shared<HeldAnchors> {
+    async fn known_head(&self, _actor: &ActorId) -> Option<ChainHead> {
+        *self.0.head.lock().unwrap()
+    }
+    async fn known_handle(&self, _actor: &ActorId) -> Option<String> {
+        Some("alice@example.test".to_string())
+    }
+    async fn known_home_domain(&self, _actor: &ActorId) -> Option<String> {
+        None
+    }
+    async fn remember_head(&self, actor: &ActorId, head: ChainHead) {
+        self.0.remembered.lock().unwrap().push((*actor, head));
+        *self.0.head.lock().unwrap() = Some(head);
+    }
+}
+
+type HeldWitness = ChainWitness<Shared<HeldAnchors>, Shared<LineSpy>>;
+
+fn held_witness(
+    anchors: &Arc<HeldAnchors>,
+    line: Vec<VerifiedSuccession>,
+) -> (HeldWitness, Arc<LineSpy>) {
+    let spy = Arc::new(LineSpy {
+        line: Mutex::new(Some(line)),
+        dials: Mutex::new(Vec::new()),
+    });
+    (
+        ChainWitness::new(Shared(Arc::clone(anchors)), Shared(Arc::clone(&spy))),
+        spy,
+    )
+}
+
+/// The statement walk lands on the line's **destination**, whose last hop's
+/// `old_actor_id` on a twice-succeeded identity is the *middle* id — an id no
+/// participant row bears. The pair the consumer acts on is (the identity asked
+/// about) → (where the chain ends); and the head it keeps for the identity is
+/// the FIRST hop's — `old`'s own chain — never the terminal hop's, which is the
+/// middle identity's and would refuse `old`'s true chain as a rewrite for good.
+#[test]
+fn a_multi_hop_path_repoints_from_the_identity_the_member_actually_holds() {
+    let f = fixture();
+    let (hops, third) = two_hops(&f);
+    let anchors = Arc::new(HeldAnchors::default());
+    let (witness, _spy) = held_witness(&anchors, hops);
+
+    let verified = block_on(witness.verify_statement(f.signed)).expect("the walk verifies");
+
+    assert_eq!(
+        verified.old_actor_id, f.old,
+        "the re-point must start at the id the thread's participant row holds"
+    );
+    assert_eq!(
+        verified.new_actor_id, third,
+        "and land where the chain ends"
+    );
+    assert_eq!(
+        *anchors.remembered.lock().unwrap(),
+        vec![(f.old, f.head)],
+        "a verified walk leaves `old`'s own first-hop head held (rule 3), not \
+         the terminal hop's, which is the middle identity's"
+    );
+}
+
+/// The head a multi-hop verify kept is what the NEXT walk for `old` is guarded
+/// by: a later session (a fresh witness over the same store) that cannot settle
+/// from the held head dials with it as `known`, so a chain that does not extend
+/// it is refused instead of walked as first contact.
+#[test]
+fn the_next_walk_after_a_multi_hop_verify_carries_the_kept_head_as_its_guard() {
+    let f = fixture();
+    // The first hop's head authorizes no statement the later session sees, so
+    // tier 1 cannot settle and the walk is dialled.
+    let firsts_head = ChainHead::new([0x77; 32], 1);
+    let (mut hops, _third) = two_hops(&f);
+    hops[0].chain_head = firsts_head;
+    let anchors = Arc::new(HeldAnchors::default());
+
+    let (first_session, first_spy) = held_witness(&anchors, hops.clone());
+    block_on(first_session.verify_statement(f.signed.clone())).expect("the walk verifies");
+    assert_eq!(
+        first_spy.dials.lock().unwrap()[0].1,
+        None,
+        "first contact: nothing held yet"
+    );
+
+    let (next_session, next_spy) = held_witness(&anchors, hops);
+    block_on(next_session.verify_statement(f.signed)).expect("the walk verifies");
+    assert_eq!(
+        *next_spy.dials.lock().unwrap(),
+        vec![("example.test".to_string(), Some(firsts_head))],
+        "the later walk must receive `old`'s own first-hop head as its \
+         rewrite/truncation guard"
+    );
 }
 
 /// Nothing independent to anchor on: no dial, nothing established — and
@@ -3691,5 +3835,47 @@ fn past_the_grace_an_unlent_store_is_charged_as_store_failed() {
         nest.fetches.load(std::sync::atomic::Ordering::Relaxed),
         0,
         "and still no fetch for a seed that could not be kept"
+    );
+}
+
+/// The report is bounded by the witness, never by what a peer sends
+/// (`identity-succession.md` § The succession statement → *What a statement
+/// may cost the member who receives it*). The witness is consulted before the
+/// roster gate, so an in-group member can name a fresh made-up
+/// `old_actor_id` in every statement it posts — and without a bound each one
+/// left a report row behind for the whole session. Past the bound a statement
+/// is still counted, so the session total keeps its meaning; it only gets no
+/// row of its own.
+#[test]
+fn forged_old_actor_ids_leave_the_report_at_its_bound() {
+    use fauna_client_recovery::witness::MAX_REPORTED_PEERS;
+
+    let f = fixture();
+    let (witness, _anchors, source) = build(None, None, None);
+    let forged = MAX_REPORTED_PEERS + 40;
+    for i in 0..forged {
+        let mut statement = f.signed.clone();
+        let mut secret = [0u8; 32];
+        secret[..8].copy_from_slice(&(i as u64 + 1).to_le_bytes());
+        statement.statement.old_actor_id = ActorKeypair::from_secret(secret).actor_id();
+        assert!(block_on(witness.verify_statement(statement)).is_none());
+    }
+
+    let obs = witness.observation();
+    assert_eq!(obs.peers.len(), MAX_REPORTED_PEERS);
+    assert_eq!(obs.unreported_statements, 40);
+    assert_eq!(obs.statements_seen, forged as u64);
+    assert!(dials(&source).is_empty(), "the no-anchor arm dials nothing");
+
+    // The truncation is visible in the rendered state, not only on the type.
+    let json = fauna_client_recovery::witness::state_json(
+        &obs,
+        &fauna_client_recovery::harvest::HarvestLog::default(),
+        &fauna_conversations::backends::fauna_mls::SuccessionStatementCounts::default(),
+    );
+    assert_eq!(json["unreported_statements"], 40);
+    assert_eq!(
+        json["peers"].as_array().map(Vec::len),
+        Some(MAX_REPORTED_PEERS)
     );
 }

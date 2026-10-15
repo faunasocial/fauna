@@ -50,7 +50,10 @@ pub enum ReconnectSignal {
 }
 
 impl ReconnectSignal {
-    fn from_close(close: Option<&CloseFrame>) -> Self {
+    /// The reading of one tungstenite close frame (`None`: no frame at all).
+    /// Public so a one-shot connection with no supervisor (`fauna-anon-client`)
+    /// reads a close exactly as the supervised one does.
+    pub fn from_close(close: Option<&CloseFrame>) -> Self {
         let Some(c) = close else {
             return Self::Retry;
         };

@@ -485,7 +485,7 @@ mod tests {
     };
     use fauna_protocol::error::RpcError;
     use fauna_protocol::merge_policy::{
-        KIND_DEVICE_REACH, KIND_GENERATION_MINT, KIND_GENERATION_WRAP, LwwStamp, kind_keys,
+        KIND_DEVICE_REACH, KIND_GENERATION_WRAP, LwwStamp, kind_keys,
     };
     use std::sync::{Arc, Mutex};
 
@@ -1022,15 +1022,13 @@ mod tests {
         let f = fixture().await;
         f.put(enrollment_row(US)).await;
         f.put(enrollment_row(THEM)).await;
-        let (g, _, core) = f.mint_over(&[member_of(US)]).await;
-        let shred = machinery_row(
-            KIND_GENERATION_MINT,
-            fauna_core::hex32::encode(&g),
-            // Authored by a verified member, so the generation IS dead —
-            // the pin is that its own mint row still is not.
-            &fauna_core::generation::sign_shred(&device_key(THEM), core, 9_000).unwrap(),
-        );
+        let (_, _, core) = f.mint_over(&[member_of(US)]).await;
+        // Authored by a verified member, so the generation IS dead — the pin
+        // is that its own mint row (and its cell, the mint row's company)
+        // still is not.
+        let [shred, cell] = authored_shred_rows(THEM, core, 9_000);
         f.put(shred.clone()).await;
+        f.put(cell).await;
         let nest = PutNest::default();
         let p = plane(&f, &nest);
         let theirs = relayed(&f, &f.schedule, THEM, 5, &shred, false).await;

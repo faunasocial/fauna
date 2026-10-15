@@ -121,6 +121,24 @@ public class NestRpcPushDispatchTests
         Assert.Equal(0, calendarRaises);
     }
 
+    [Theory]
+    [InlineData("fauna.bridges.push.spam_model_updated")]
+    [InlineData("fauna.bridges.push.spam_model_reset")]
+    public async Task SpamModelPushes_RaiseMailSpamPushChanged_AndNeverNudgeTheSyncAgent(string kind)
+    {
+        // mail-spam.md § Implementation status today, item 5: an undo or reset on another
+        // device arrives as `FfiPushEvent.Other`, and only the shared classifier's
+        // `mailSpam` flag decides whether the open Spam panel re-hydrates.
+        var (rpc, agent) = Subject();
+        int raised = 0;
+        rpc.MailSpamPushChanged += () => raised++;
+
+        await rpc.DispatchPush(new FfiPushEvent.Other(kind));
+
+        Assert.Equal(1, raised);
+        Assert.Empty(agent.PulledNow);
+    }
+
     [Fact]
     public async Task SyncChanged_AlsoRaisesFolderChangedPushed()
     {

@@ -42,7 +42,8 @@ from helpers.mail_client_ui import (
 from helpers.waiting import wait_until
 
 # tui leads (the default app set); linux shares the same session loop and the
-# second-device fixture, and is listed so its sweep carries the witness too.
+# second-device fixture, and is listed so its sweep carries the witness too. The
+# web marks sit on the tests, not the module.
 pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.tui,
@@ -115,6 +116,7 @@ def test_a_mail_nobody_opened_is_still_unread_after_a_restart(
                  bridge_log=mail_bridge_mta.log_file)
 
 
+@pytest.mark.web
 @pytest.mark.feature("email-in-conversations")
 def test_a_mail_read_on_one_device_reads_on_the_other_and_stays_read(
     request, logged_in_app, mail_bridge_mta, nest_instance, test_user
@@ -132,8 +134,12 @@ def test_a_mail_read_on_one_device_reads_on_the_other_and_stays_read(
     _wait_unread(device_a, nonce, 1, what="device A before any read", bridge_log=log)
 
     # The same account's second device: its own launch, its own receive loop,
-    # the same mailbox.
-    device_b, _driver_b = request.getfixturevalue("alice_second_device")
+    # the same mailbox. Web's second device is a twin page in its own
+    # BrowserContext; every other app launches a second process.
+    second_device = (
+        "alice_second_web_device" if device_a.driver.is_web() else "alice_second_device"
+    )
+    device_b, _driver_b = request.getfixturevalue(second_device)
     wait_for_thread_with_nonce(device_b, nonce, what="device B", budget_s=MLS_HANDSHAKE_S,
                                bridge_log=log)
     _wait_unread(device_b, nonce, 1, what="device B before any read", bridge_log=log)

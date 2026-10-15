@@ -246,7 +246,6 @@ async fn run_no_dns_provision(mock: &MockServer, caller_labels: &[(String, Strin
     let params = CloudInitParams {
         domain: "x.com".into(),
         image_tag: "latest".into(),
-        watchtower_poll: 60,
         claim_code: "claim".into(),
         enable_mail: false,
         deployment_seed: None,

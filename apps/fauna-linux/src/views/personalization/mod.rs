@@ -13,6 +13,7 @@
 //! **Community labelers** catalog sub-page for browse + inspect-before-
 //! subscribe + subscribe).
 
+pub(crate) mod inspect_panel;
 mod publish_sheet;
 mod trained_topics;
 
@@ -25,7 +26,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use fauna_labeler_catalog_machine::{
-    LabelerCatalogEntry, LabelerCatalogMachine, LabelerCatalogObserver, LabelerInspectView,
+    LabelerCatalogEntry, LabelerCatalogMachine, LabelerCatalogObserver,
 };
 
 use fauna_client_moderation::moderation::ModerationSignalShareStatusReply;
@@ -41,6 +42,10 @@ pub struct PersonalizationHandles {
     /// The shared-Rust `LabelerCatalogMachine`. Refreshed on auth + whenever
     /// either sub-page becomes visible.
     pub labeler_catalog_machine: Arc<LabelerCatalogMachine>,
+    /// The Trained topics facet's own load — what the home page's map runs;
+    /// the store-change notice re-drives it while the page is open
+    /// (`crate::store_surfaces`).
+    pub trained_topics_refresh: Rc<dyn Fn()>,
 }
 
 /// Bridges `LabelerCatalogMachine` notifications to the GTK main loop. Mirrors
@@ -64,7 +69,7 @@ impl LabelerCatalogObserver for GtkLabelerCatalogObserver {
 /// unrecoverable identity fault) falls back to the grant-less machine with a
 /// warning, so the pages still browse, inspect and (un)subscribe — the Nests
 /// page's own fallback (`mail_glue::build_linked_nests_machine_with_mail_relay_and_trust`).
-fn build_machine(
+pub(crate) fn build_machine(
     fauna_client: &FaunaClient,
     observer: Arc<dyn LabelerCatalogObserver>,
 ) -> Arc<LabelerCatalogMachine> {
@@ -258,21 +263,9 @@ struct CatalogShell {
     content: gtk::Box,
     catalog_list: gtk::ListBox,
     catalog_empty: gtk::Label,
-    inspect_panel: gtk::Box,
-    inspect_metadata: gtk::Label,
-    /// The list-kind inspect section (hidden for `wasm` labelers): the decoded
-    /// publisher-chosen name, the entry count, and the exact id→score rows —
-    /// the frame's "renders the exact id→score map before subscribing".
-    inspect_list_name: gtk::Label,
-    inspect_list_entry_count: gtk::Label,
-    inspect_list_entries: gtk::ListBox,
-    /// The text-model-kind inspect section (hidden for every other kind): the
-    /// decoded publisher-chosen name, the n-gram count, and the FULL
-    /// vocabulary — the model's twin of the list section above.
-    inspect_model_name: gtk::Label,
-    inspect_model_ngram_count: gtk::Label,
-    inspect_model_entries: gtk::ListBox,
-    inspect_close_button: gtk::Button,
+    /// The inspect panel — the one widget the Community labelers page and a
+    /// room's labeler-set editor both paint (`inspect_panel.rs`).
+    inspect: inspect_panel::InspectPanel,
     error_label: gtk::Label,
 }
 
@@ -282,77 +275,8 @@ fn build_catalog_shell() -> CatalogShell {
     let err = error_label();
     content.append(&err);
 
-    let inspect_panel = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(8)
-        .visible(false)
-        .build();
-    set_test_id(&inspect_panel, ids::LABELER_INSPECT_PANEL);
-    let inspect_metadata = gtk::Label::builder()
-        .wrap(true)
-        .halign(gtk::Align::Start)
-        .build();
-    set_test_id(&inspect_metadata, ids::LABELER_INSPECT_METADATA);
-    inspect_panel.append(&inspect_metadata);
-
-    // List-kind section (ui.yaml optional_elements — visible only when the
-    // inspected labeler is a `list` artifact).
-    let inspect_list_name = gtk::Label::builder()
-        .wrap(true)
-        .halign(gtk::Align::Start)
-        .visible(false)
-        .build();
-    set_test_id(&inspect_list_name, ids::LABELER_INSPECT_LIST_NAME);
-    inspect_panel.append(&inspect_list_name);
-    let inspect_list_entry_count = gtk::Label::builder()
-        .halign(gtk::Align::Start)
-        .visible(false)
-        .build();
-    inspect_list_entry_count.add_css_class("dim-label");
-    set_test_id(
-        &inspect_list_entry_count,
-        ids::LABELER_INSPECT_LIST_ENTRY_COUNT,
-    );
-    inspect_panel.append(&inspect_list_entry_count);
-    let inspect_list_entries = gtk::ListBox::builder()
-        .selection_mode(gtk::SelectionMode::None)
-        .visible(false)
-        .build();
-    set_test_id(&inspect_list_entries, ids::LABELER_INSPECT_LIST_ENTRIES);
-    inspect_panel.append(&inspect_list_entries);
-
-    // Text-model-kind section (ui.yaml optional_elements — visible only when
-    // the inspected labeler is a `text-model` artifact), the list section's
-    // twin.
-    let inspect_model_name = gtk::Label::builder()
-        .wrap(true)
-        .halign(gtk::Align::Start)
-        .visible(false)
-        .build();
-    set_test_id(&inspect_model_name, ids::LABELER_INSPECT_MODEL_NAME);
-    inspect_panel.append(&inspect_model_name);
-    let inspect_model_ngram_count = gtk::Label::builder()
-        .halign(gtk::Align::Start)
-        .visible(false)
-        .build();
-    inspect_model_ngram_count.add_css_class("dim-label");
-    set_test_id(
-        &inspect_model_ngram_count,
-        ids::LABELER_INSPECT_MODEL_NGRAM_COUNT,
-    );
-    inspect_panel.append(&inspect_model_ngram_count);
-    let inspect_model_entries = gtk::ListBox::builder()
-        .selection_mode(gtk::SelectionMode::None)
-        .visible(false)
-        .build();
-    set_test_id(&inspect_model_entries, ids::LABELER_INSPECT_MODEL_ENTRIES);
-    inspect_panel.append(&inspect_model_entries);
-
-    let inspect_close_button = gtk::Button::with_label(labeler_catalog::CLOSE_INSPECT);
-    inspect_close_button.set_halign(gtk::Align::Start);
-    set_test_id(&inspect_close_button, ids::LABELER_INSPECT_CLOSE_BUTTON);
-    inspect_panel.append(&inspect_close_button);
-    content.append(&inspect_panel);
+    let inspect = inspect_panel::InspectPanel::new();
+    content.append(&inspect.root);
 
     let catalog_group = adw::PreferencesGroup::builder()
         .title(labeler_catalog::TITLE)
@@ -374,15 +298,7 @@ fn build_catalog_shell() -> CatalogShell {
         content,
         catalog_list,
         catalog_empty,
-        inspect_panel,
-        inspect_metadata,
-        inspect_list_name,
-        inspect_list_entry_count,
-        inspect_list_entries,
-        inspect_model_name,
-        inspect_model_ngram_count,
-        inspect_model_entries,
-        inspect_close_button,
+        inspect,
         error_label: err,
     }
 }
@@ -468,6 +384,11 @@ fn build_labeler_row(
             let subscribe = gtk::Button::with_label(labeler_catalog::SUBSCRIBE);
             subscribe.add_css_class("suggested-action");
             set_test_id(&subscribe, ids::LABELER_CATALOG_ITEM_SUBSCRIBE_BUTTON);
+            // Disabled while the open inspect view is THIS row's labeler and
+            // fails the shared `subscribable` gate — the machine's one read
+            // (`subscribe_enabled`), set before the offline gate records the
+            // page's own sensitivity.
+            subscribe.set_sensitive(machine.subscribe_enabled(index));
             crate::offline_gate::declare_wire_kind(&subscribe, "fauna.labelers.subscribe");
             {
                 let machine = Arc::clone(machine);
@@ -517,143 +438,6 @@ fn rebuild_rows(
     for (index, entry) in indices {
         let row = build_labeler_row(machine, runtime, entry, *index, show_inspect_subscribe);
         list.append(&row);
-    }
-}
-
-/// Render the inspect panel from the snapshot's `inspecting` view, if any.
-/// For a `list` artifact the panel additionally renders the decoded
-/// publisher-chosen name + the **exact** id→score map (frame § Tier-3 artifact
-/// kinds — every entry, never a capped preview: a truncated map is not the
-/// exact map).
-fn render_inspect_panel(shell: &CatalogShell, inspecting: Option<&LabelerInspectView>) {
-    while let Some(child) = shell.inspect_list_entries.first_child() {
-        shell.inspect_list_entries.remove(&child);
-    }
-    while let Some(child) = shell.inspect_model_entries.first_child() {
-        shell.inspect_model_entries.remove(&child);
-    }
-    match inspecting {
-        Some(view) => {
-            let text = format!(
-                "labeler_id: {}\nversion: {}\nartifact_kind: {}\nwasm_hash: {}\nwasm_size: {}\nneeds_text: {}\nneeds_hashtags: {}\nneeds_media_metadata: {}\nneeds_author: {}\nneeds_attachment_bytes: {}\nverified: {}",
-                view.labeler_id,
-                view.version,
-                view.artifact_kind,
-                view.wasm_hash,
-                view.wasm_size,
-                view.needs_text,
-                view.needs_hashtags,
-                view.needs_media_metadata,
-                view.needs_author,
-                view.needs_attachment_bytes,
-                view.verified,
-            );
-            shell.inspect_metadata.set_text(&text);
-
-            let is_list = view.artifact_kind == "list";
-            shell.inspect_list_name.set_visible(is_list);
-            shell.inspect_list_entry_count.set_visible(is_list);
-            shell.inspect_list_entries.set_visible(is_list);
-            if is_list {
-                // An unnamed list is valid (pre-name artifacts) — say so rather
-                // than rendering an empty label.
-                shell.inspect_list_name.set_text(&match &view.list_name {
-                    Some(name) => labeler_catalog::list_name(name),
-                    None => labeler_catalog::UNNAMED_LIST.to_string(),
-                });
-                shell
-                    .inspect_list_entry_count
-                    .set_text(&labeler_catalog::list_entry_count(
-                        &view.list_entries.len().to_string(),
-                    ));
-                for entry in &view.list_entries {
-                    let row = gtk::Box::builder()
-                        .orientation(gtk::Orientation::Horizontal)
-                        .spacing(8)
-                        .accessible_role(gtk::AccessibleRole::Group)
-                        .build();
-                    set_test_id(&row, ids::LABELER_INSPECT_LIST_ENTRY);
-
-                    let id = gtk::Label::new(Some(&entry.content_id));
-                    id.set_hexpand(true);
-                    id.set_halign(gtk::Align::Start);
-                    id.set_xalign(0.0);
-                    id.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-                    set_test_id(&id, ids::LABELER_INSPECT_LIST_ENTRY_ID);
-                    row.append(&id);
-
-                    // The publisher's per-mille verbatim — the same number the
-                    // publish sheet showed; no rescale anywhere in the chain.
-                    let score = gtk::Label::new(Some(&entry.score.to_string()));
-                    score.add_css_class("dim-label");
-                    set_test_id(&score, ids::LABELER_INSPECT_LIST_ENTRY_SCORE);
-                    row.append(&score);
-
-                    shell.inspect_list_entries.append(&row);
-                }
-            }
-
-            // The text-model section, the same optional_elements shape: it
-            // registers only for a `text-model` artifact, keyed on the KIND
-            // rather than on the payload being non-empty — an empty
-            // vocabulary is a decode failure, not a reason to render the
-            // panel as if it were some other kind.
-            let is_model = view.artifact_kind == fauna_core::scoring::artifact_kind::TEXT_MODEL;
-            shell.inspect_model_name.set_visible(is_model);
-            shell.inspect_model_ngram_count.set_visible(is_model);
-            shell.inspect_model_entries.set_visible(is_model);
-            if is_model {
-                shell.inspect_model_name.set_text(&match &view.model_name {
-                    Some(name) => labeler_catalog::model_name(name),
-                    None => labeler_catalog::UNNAMED_MODEL.to_string(),
-                });
-                shell
-                    .inspect_model_ngram_count
-                    .set_text(&labeler_catalog::model_ngram_count(
-                        &view.model_ngrams.len().to_string(),
-                    ));
-                // EVERY entry — the vocabulary is the model's whole matching
-                // surface, and a capped preview is not the artifact.
-                for entry in &view.model_ngrams {
-                    let row = gtk::Box::builder()
-                        .orientation(gtk::Orientation::Horizontal)
-                        .spacing(8)
-                        .accessible_role(gtk::AccessibleRole::Group)
-                        .build();
-                    set_test_id(&row, ids::LABELER_INSPECT_MODEL_ENTRY);
-
-                    let text = gtk::Label::new(Some(&entry.ngram));
-                    text.set_hexpand(true);
-                    text.set_halign(gtk::Align::Start);
-                    text.set_xalign(0.0);
-                    text.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                    set_test_id(&text, ids::LABELER_INSPECT_MODEL_ENTRY_TEXT);
-                    row.append(&text);
-
-                    // The SAME two shared faces the publisher's review rows
-                    // painted, so what a publisher was shown before
-                    // publishing is what a subscriber reads before
-                    // subscribing.
-                    let direction = gtk::Label::new(Some(&crate::i18n::ngram_direction(
-                        entry.more, entry.less,
-                    )));
-                    direction.add_css_class("dim-label");
-                    set_test_id(&direction, ids::LABELER_INSPECT_MODEL_ENTRY_DIRECTION);
-                    row.append(&direction);
-
-                    let count = gtk::Label::new(Some(&crate::i18n::ngram_doc_count(
-                        entry.more, entry.less,
-                    )));
-                    count.add_css_class("dim-label");
-                    set_test_id(&count, ids::LABELER_INSPECT_MODEL_ENTRY_COUNT);
-                    row.append(&count);
-
-                    shell.inspect_model_entries.append(&row);
-                }
-            }
-            shell.inspect_panel.set_visible(true);
-        }
-        None => shell.inspect_panel.set_visible(false),
     }
 }
 
@@ -861,7 +645,7 @@ pub fn build_personalization_and_catalog_pages(
     {
         let machine = Arc::clone(&machine);
         let runtime = fauna_client.runtime_handle();
-        catalog.inspect_close_button.connect_clicked(move |_| {
+        catalog.inspect.close_button.connect_clicked(move |_| {
             machine.close_inspect();
             let _ = &runtime;
         });
@@ -894,13 +678,15 @@ pub fn build_personalization_and_catalog_pages(
     // (no machine — the muted-words shape), refreshed on the same
     // visible-trigger so the registry + example counts stay current.
     let trained = trained_topics::wire(fauna_client, trained_widgets, ctx.home.error_label.clone());
+    let trained_topics_refresh: Rc<dyn Fn()> = Rc::new(move || trained.refresh());
     {
-        let trained = Rc::new(trained);
-        home_page.connect_map(move |_| trained.refresh());
+        let refresh = Rc::clone(&trained_topics_refresh);
+        home_page.connect_map(move |_| refresh());
     }
 
     let handles = PersonalizationHandles {
         labeler_catalog_machine: Arc::clone(&machine),
+        trained_topics_refresh,
     };
     (home_page, catalog_page, handles)
 }
@@ -949,7 +735,7 @@ fn render_pages(
         .catalog_empty
         .set_visible(snap.loaded && all.is_empty());
 
-    render_inspect_panel(&ctx.catalog, snap.inspecting.as_ref());
+    ctx.catalog.inspect.render(snap.inspecting.as_ref());
 
     let text = snap.error.as_ref().map(|err| err.resolve(strings::lookup));
     crate::settings::render_error_label(&ctx.home.error_label, text.as_deref());

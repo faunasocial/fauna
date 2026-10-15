@@ -144,6 +144,16 @@ var SMTPSenderDomainFailOpen = prometheus.NewCounterVec(
 	[]string{"reason"},
 )
 
+// SMTPInboundHELOSelfClaim counts inbound sessions refused because the peer
+// greeted with a domain this server hosts mail for — impersonation of the
+// server itself (smtp-server.md § HELO / EHLO, the two self-claim rows).
+var SMTPInboundHELOSelfClaim = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Name: "smtp_inbound_helo_self_claim_total",
+		Help: "Count of inbound sessions refused for greeting with one of this server's own mail domains.",
+	},
+)
+
 // SMTPGreylistCheckFailOpen counts inbound greylist checks
 // (`fauna.bridges.check_greylist`) that failed OPEN because the nest call
 // errored (transport / decode), so the bridge accepted the envelope rather
@@ -223,7 +233,8 @@ var SMTPInboundAutoReplySent = prometheus.NewCounter(
 // reason: "rate" (a reply was already sent within interval_hours) plus the
 // loop-guard reasons from fauna_mail::filter::auto_reply_decision —
 // "null_sender" / "auto_submitted" / "list" / "self" / "not_in_recipients" —
-// plus "panic" (the post-delivery auto-reply stage recovered an unexpected
+// plus "role_address" (the recipient was a role address such as postmaster@,
+// which never auto-replies), plus "panic" (the post-delivery auto-reply stage recovered an unexpected
 // panic; the local copy was still delivered). Admins watch these to spot a
 // misfiring vacation rule, a loop attempt, or a hostile-header-triggered panic.
 var SMTPInboundAutoReplySuppressed = prometheus.NewCounterVec(
@@ -263,6 +274,7 @@ func init() {
 		SMTPInboundMessagesTotal,
 		CgoCallsTotal,
 		SMTPSenderDomainFailOpen,
+		SMTPInboundHELOSelfClaim,
 		SMTPGreylistCheckFailOpen,
 		SMTPInboundSrsDecode,
 		SMTPInboundFilterReject,

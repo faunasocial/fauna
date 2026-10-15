@@ -142,7 +142,7 @@ async fn a_method_its_caller_polls_late_still_runs_inside_its_transaction() {
 #[wasm_bindgen_test::wasm_bindgen_test]
 fn the_store_name_is_the_actors_one_spelling_under_the_root() {
     use fauna_account_store::root::StoreRoot;
-    let root = StoreRoot::platform();
+    let root = StoreRoot::platform().expect("the web root always resolves");
     let upper = "AB".repeat(32);
     assert_eq!(
         root.store_name(&upper).unwrap(),

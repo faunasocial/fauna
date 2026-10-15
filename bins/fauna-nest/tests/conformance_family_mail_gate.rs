@@ -1379,6 +1379,7 @@ async fn rcpt_accepts_the_null_sender_for_a_reject_ward() {
                 domain: DOMAIN.into(),
                 sender_domain: String::new(),
                 sender_address: String::new(),
+                ..Default::default()
             }),
         )
         .await

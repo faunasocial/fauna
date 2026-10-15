@@ -164,6 +164,7 @@ fn main() {
         ValidateRecipientReply::Resolved {
             actor_id: b32(0x11),
             is_role_address: true,
+            handle: Some("alice".into()),
         }
     );
     emit!(
@@ -581,6 +582,11 @@ fn main() {
     emit!(
         "reply-report-tls-attempt.cbor",
         ReportTlsAttemptReply { ok: true }
+    );
+
+    emit!(
+        "reply-report-dmarc-observation.cbor",
+        ReportDmarcObservationReply { counted: true }
     );
 
     emit!(

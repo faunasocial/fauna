@@ -165,7 +165,21 @@ struct Widgets {
     /// [`build_destinations_section`]) — it is the loud surface, and a data-loss
     /// warning the user has to scroll to find is not loud.
     alerts: gtk::Box,
-    alert_labels: RefCell<Vec<gtk::Label>>,
+    /// The banner widgets currently in [`Self::alerts`] — each a
+    /// `backup-audit-alert` carrying its text, and (on a recoverable fifth
+    /// reason) its `backup-audit-recover-button` inside it.
+    alert_labels: RefCell<Vec<gtk::Widget>>,
+    /// Every painted `backup-audit-recover-button`, so a run in flight disarms
+    /// them all.
+    recover_buttons: RefCell<Vec<gtk::Button>>,
+    /// `backup-audit-recover-confirm-modal` (inline reveal, in
+    /// [`Self::alerts`] beneath the banners) + its pair.
+    recover_modal: gtk::Box,
+    recover_confirm_button: gtk::Button,
+    recover_cancel_button: gtk::Button,
+    /// `backup-audit-recover-result` — the running line, then the shared
+    /// `result_lines`; absent until a run starts.
+    recover_result: gtk::Label,
 }
 
 /// Everything the handlers + render need.
@@ -192,6 +206,16 @@ struct Ctx {
     /// the two above for the same repaint, so an audit landing later cannot
     /// drop a raised row's review mark.
     last_marks: RefCell<Vec<DestinationUnattestedMark>>,
+    /// Whether [`render_rows`] has run — until it has, the three `last_*`
+    /// fields above describe nothing, and an empty first read must still paint
+    /// the placeholder.
+    rows_painted: std::cell::Cell<bool>,
+    /// Whether `error_label` holds a failed status READ, the one message a
+    /// later successful read retires. A gesture's error (the form left open to
+    /// fix the input) stays until the next gesture: the store-change notice
+    /// re-drives [`refresh`] while the page is open, and a level must never
+    /// erase it.
+    read_error_shown: std::cell::Cell<bool>,
     /// `Some(bytes)` while this device holds a sealed custodian store no
     /// destination row claims — the `backup-orphaned-store-row` verdict
     /// (`fauna_core::data::custodian_store_is_orphaned`), re-measured after
@@ -201,6 +225,11 @@ struct Ctx {
     /// A re-seed is running: every `backup-destination-reseed-button` is
     /// disarmed and a second confirm is a no-op.
     reseed_running: std::cell::Cell<bool>,
+    /// `Some(destination_id)` while the recovery confirm is armed for it.
+    recovering: RefCell<Option<String>>,
+    /// A recovery is running: every `backup-audit-recover-button` is disarmed
+    /// and a second confirm is a no-op.
+    recover_running: std::cell::Cell<bool>,
     w: Widgets,
 }
 
@@ -220,7 +249,14 @@ struct Ctx {
 /// error-reporting surface, and it is *returned* rather than duplicated so the
 /// snapshot half's `BackupsMachine` errors land on the same element — one page,
 /// one `error-message`, whichever half failed.
-pub fn build_destinations_section(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, gtk::Label) {
+///
+/// The fourth element is the section's own re-read — exactly what the
+/// section's `connect_map` runs (the status read, then the debounced audit) —
+/// for the store-change notice to re-drive while the page is open
+/// (`crate::store_surfaces`).
+pub fn build_destinations_section(
+    client: &Rc<FaunaClient>,
+) -> (gtk::Box, gtk::Box, gtk::Label, Rc<dyn Fn()>) {
     // Empty and invisible until a failing verdict lands — the
     // `restore-divergence-banner` idiom (renders only when there is something to
     // say), so a healthy page is silent.
@@ -319,6 +355,14 @@ pub fn build_destinations_section(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::B
         build_remove_modal();
     outer.append(&remove_modal);
 
+    // -- Recovery (`backups.md` § Audit-alert surface, the fifth reason). The
+    // confirm and the result sit in the alerts box, directly under the banners
+    // whose button arms them.
+    let (recover_modal, recover_confirm_button, recover_cancel_button) = build_recover_modal();
+    let recover_result = build_recover_result();
+    alerts.append(&recover_modal);
+    alerts.append(&recover_result);
+
     let widgets = Widgets {
         add_button,
         form: f.form,
@@ -354,9 +398,18 @@ pub fn build_destinations_section(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::B
         rows: RefCell::new(Vec::new()),
         alerts: alerts.clone(),
         alert_labels: RefCell::new(Vec::new()),
+        recover_buttons: RefCell::new(Vec::new()),
+        recover_modal,
+        recover_confirm_button,
+        recover_cancel_button,
+        recover_result,
     };
-    wire(client, widgets);
-    (alerts, outer, error_label)
+    let ctx = wire(client, widgets);
+    let refresh_fn: Rc<dyn Fn()> = Rc::new(move || {
+        refresh(&ctx);
+        refresh_audit(&ctx);
+    });
+    (alerts, outer, error_label, refresh_fn)
 }
 
 /// Build the `backup-destination-kind-select` dropdown over the shared
@@ -693,6 +746,56 @@ fn build_reseed_result() -> gtk::Label {
     label
 }
 
+/// `backup-audit-recover-confirm-modal` (inline reveal) — the plain confirm
+/// pair, the re-seed modal's idiom. The body states the consequence where the
+/// decision is made; ui.yaml scopes no id to it.
+fn build_recover_modal() -> (gtk::Box, gtk::Button, gtk::Button) {
+    let modal = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .visible(false)
+        .accessible_role(gtk::AccessibleRole::Group)
+        .build();
+    set_test_id(&modal, ids::BACKUP_AUDIT_RECOVER_CONFIRM_MODAL);
+
+    let title = gtk::Label::new(Some(s::BACKUP_RECOVER_CONFIRM_TITLE));
+    title.set_halign(gtk::Align::Start);
+    title.add_css_class("heading");
+    modal.append(&title);
+
+    let body = gtk::Label::new(Some(s::BACKUP_RECOVER_CONFIRM_BODY));
+    body.set_halign(gtk::Align::Start);
+    body.set_wrap(true);
+    modal.append(&body);
+
+    let buttons = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .halign(gtk::Align::End)
+        .build();
+    let cancel = gtk::Button::with_label(s::BACKUP_RECOVER_CANCEL_BUTTON);
+    set_test_id(&cancel, ids::BACKUP_AUDIT_RECOVER_CANCEL_BUTTON);
+    let confirm = gtk::Button::with_label(s::BACKUP_RECOVER_CONFIRM_BUTTON);
+    confirm.add_css_class("suggested-action");
+    set_test_id(&confirm, ids::BACKUP_AUDIT_RECOVER_CONFIRM_BUTTON);
+    buttons.append(&cancel);
+    buttons.append(&confirm);
+    modal.append(&buttons);
+
+    (modal, confirm, cancel)
+}
+
+/// `backup-audit-recover-result` — hidden until a run starts.
+fn build_recover_result() -> gtk::Label {
+    let label = gtk::Label::builder()
+        .wrap(true)
+        .halign(gtk::Align::Start)
+        .visible(false)
+        .build();
+    set_test_id(&label, ids::BACKUP_AUDIT_RECOVER_RESULT);
+    label
+}
+
 /// `backup-reclaim-confirm-modal` (inline reveal) — the plain confirm trio,
 /// deliberately no re-type: the store is re-buildable on re-enrollment, unlike
 /// the declassify-style confirms elsewhere on this app. Mirrors
@@ -740,7 +843,7 @@ fn build_reclaim_modal() -> (gtk::Box, gtk::Button, gtk::Button) {
 /// Wire the section to the shared persist/resolve calls, load + render on mount
 /// (with live status), and connect every interaction. No-op (static placeholder)
 /// when no client is registered (the unit test).
-fn wire(client: &Rc<FaunaClient>, widgets: Widgets) {
+fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
     let ctx = Rc::new(Ctx {
         client: Rc::clone(client),
         rt: client.runtime_handle(),
@@ -750,8 +853,12 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) {
         last_destinations: RefCell::new(Vec::new()),
         last_statuses: RefCell::new(HashMap::new()),
         last_marks: RefCell::new(Vec::new()),
+        rows_painted: std::cell::Cell::new(false),
+        read_error_shown: std::cell::Cell::new(false),
         orphaned_store: RefCell::new(None),
         reseed_running: std::cell::Cell::new(false),
+        recovering: RefCell::new(None),
+        recover_running: std::cell::Cell::new(false),
         w: widgets,
     });
 
@@ -1002,6 +1109,23 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) {
                 }
             });
     }
+    // Recovery cancel → hide, nothing changed.
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w
+            .recover_cancel_button
+            .clone()
+            .connect_clicked(move |_| close_recover_confirm(&ctx));
+    }
+    // Recovery confirm → run it.
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w
+            .recover_confirm_button
+            .clone()
+            .connect_clicked(move |_| dispatch_recover(&ctx));
+    }
+    ctx
 }
 
 /// The five persisting actions the section dispatches.
@@ -1243,9 +1367,9 @@ fn refresh_audit(ctx: &Rc<Ctx>) {
             // once for the pass.
             let folder_index = fauna_sync_engine::segment_backup::bound_replica_folder_index(
                 &index_nest,
-                Some(fauna_sync_engine::segment_backup::local_agent_state_dir(
-                    &actor_id_hex,
-                )),
+                fauna_sync_engine::segment_backup::local_agent_state_dir(&actor_id_hex)
+                    .inspect_err(|e| tracing::warn!("backup audit: no replica state dir: {e:#}"))
+                    .ok(),
             )
             .await;
             let connector = fauna_client_pair::native_backup_destination_connector(secret);
@@ -1427,15 +1551,29 @@ fn render_audit(ctx: &Rc<Ctx>, records: Vec<DestinationAuditRecord>) {
     }
 }
 
-/// The owner-side `backup-audit-alert` banner texts, in record order: for each
+/// One owner-side `backup-audit-alert` banner: its text, and — on a fifth-reason
+/// banner whose copy this device can recover from — the destination its
+/// `backup-audit-recover-button` is for.
+#[derive(Debug, PartialEq)]
+struct OwnerBanner {
+    text: String,
+    recover: Option<String>,
+}
+
+/// The owner-side `backup-audit-alert` banners, in record order: for each
 /// record, one banner per reason `DestinationAuditRecord::alert_reasons(now)`
 /// yields — the standing verdict's, then at most one open source-regression
-/// recovery window. Pure, so the render is testable without GTK.
+/// recovery window. The recovery button's offered-rule is the shared
+/// `recover_targets`, so every app offers it on exactly the same rows. Pure, so
+/// the render is testable without GTK.
 fn owner_alert_banners(
+    this_device: &str,
     records: &[DestinationAuditRecord],
     destinations: &[BackupDestination],
     now: i64,
-) -> Vec<String> {
+) -> Vec<OwnerBanner> {
+    let recoverable =
+        fauna_client_backup::recover::recover_targets(records, destinations, this_device, now);
     records
         .iter()
         .flat_map(|record| {
@@ -1446,10 +1584,17 @@ fn owner_alert_banners(
                 .find(|d| d.destination_id == record.state.destination_id)
                 .map(destination_label)
                 .unwrap_or_else(|| record.state.destination_id.clone());
-            record
-                .alert_reasons(now)
-                .into_iter()
-                .map(move |reason| crate::i18n::backup_audit_alert(reason, &dest_label))
+            let offered = recoverable.contains(&record.state.destination_id);
+            record.alert_reasons(now).into_iter().map(move |reason| {
+                let regressed = matches!(
+                    reason,
+                    fauna_core::format::BackupAuditAlertReason::SourceRegressed { .. }
+                );
+                OwnerBanner {
+                    text: crate::i18n::backup_audit_alert(reason, &dest_label),
+                    recover: (regressed && offered).then(|| record.state.destination_id.clone()),
+                }
+            })
         })
         .collect()
 }
@@ -1484,19 +1629,270 @@ fn render_alerts(ctx: &Rc<Ctx>) {
         banner.add_css_class("error");
         set_test_id(&banner, ids::BACKUP_AUDIT_ALERT);
         ctx.w.alerts.append(&banner);
-        labels.push(banner);
+        labels.push(banner.upcast());
     }
 
-    for text in owner_alert_banners(&ctx.audit.borrow(), &destinations, now_secs()) {
-        let banner = gtk::Label::new(Some(&text));
-        banner.set_halign(gtk::Align::Start);
-        banner.set_wrap(true);
-        banner.add_css_class("error");
-        set_test_id(&banner, ids::BACKUP_AUDIT_ALERT);
-        ctx.w.alerts.append(&banner);
-        labels.push(banner);
+    ctx.w.recover_buttons.borrow_mut().clear();
+    for banner in owner_alert_banners(
+        &this_device_hex(),
+        &ctx.audit.borrow(),
+        &destinations,
+        now_secs(),
+    ) {
+        let widget = build_owner_banner(ctx, &banner);
+        ctx.w.alerts.append(&widget);
+        labels.push(widget);
     }
-    ctx.w.alerts.set_visible(!labels.is_empty());
+    // The recovery's confirm and result sit directly under the banners.
+    for widget in [
+        ctx.w.recover_modal.upcast_ref::<gtk::Widget>(),
+        ctx.w.recover_result.upcast_ref::<gtk::Widget>(),
+    ] {
+        ctx.w.alerts.remove(widget);
+        ctx.w.alerts.append(widget);
+    }
+    drop(labels);
+    paint_alerts_visibility(ctx);
+}
+
+/// Show [`Widgets::alerts`] while anything is in it: a banner, the recovery's
+/// confirm, or its result (which outlives the banner it cleared).
+fn paint_alerts_visibility(ctx: &Ctx) {
+    ctx.w.alerts.set_visible(
+        !ctx.w.alert_labels.borrow().is_empty()
+            || ctx.w.recover_modal.is_visible()
+            || ctx.w.recover_result.is_visible(),
+    );
+}
+
+/// One owner-side banner. A banner with no recovery is the plain error label;
+/// one that offers it is a `backup-audit-alert` group holding its text and the
+/// `backup-audit-recover-button`, so the button is scoped inside its own
+/// banner (`backup-audit-alert[i]`). The group reads back as the banner's text
+/// alone (`set_test_text`), never the button's label joined onto it.
+fn build_owner_banner(ctx: &Rc<Ctx>, banner: &OwnerBanner) -> gtk::Widget {
+    let label = gtk::Label::new(Some(&banner.text));
+    label.set_halign(gtk::Align::Start);
+    label.set_wrap(true);
+    label.set_hexpand(true);
+    label.add_css_class("error");
+    let Some(destination_id) = banner.recover.clone() else {
+        set_test_id(&label, ids::BACKUP_AUDIT_ALERT);
+        return label.upcast();
+    };
+
+    let group = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .accessible_role(gtk::AccessibleRole::Group)
+        .build();
+    set_test_id(&group, ids::BACKUP_AUDIT_ALERT);
+    crate::testid::set_test_text(&group, &banner.text);
+    group.append(&label);
+
+    let button = gtk::Button::with_label(s::BACKUP_AUDIT_RECOVER_BUTTON);
+    button.set_valign(gtk::Align::Center);
+    button.add_css_class("suggested-action");
+    button.set_sensitive(!ctx.recover_running.get());
+    set_test_id(&button, ids::BACKUP_AUDIT_RECOVER_BUTTON);
+    let ctx_click = Rc::clone(ctx);
+    button.connect_clicked(move |_| open_recover_confirm(&ctx_click, &destination_id));
+    ctx.w.recover_buttons.borrow_mut().push(button.clone());
+    group.append(&button);
+    group.upcast()
+}
+
+/// The destinations whose banner offers the recovery right now — the keyboard
+/// backstop behind the paint (a confirm for a destination that no longer offers
+/// it is a no-op).
+fn recover_targets(ctx: &Ctx) -> Vec<String> {
+    fauna_client_backup::recover::recover_targets(
+        &ctx.audit.borrow(),
+        &ctx.last_destinations.borrow(),
+        &this_device_hex(),
+        now_secs(),
+    )
+}
+
+/// Arm the recovery confirm for `destination_id` — a no-op while a run is in
+/// flight or when the banner does not offer it.
+fn open_recover_confirm(ctx: &Rc<Ctx>, destination_id: &str) {
+    if ctx.recover_running.get() || !recover_targets(ctx).iter().any(|d| d == destination_id) {
+        return;
+    }
+    *ctx.recovering.borrow_mut() = Some(destination_id.to_string());
+    ctx.w.recover_result.set_visible(false);
+    ctx.w.recover_modal.set_visible(true);
+    paint_alerts_visibility(ctx);
+}
+
+/// Close the confirm without side effect.
+fn close_recover_confirm(ctx: &Rc<Ctx>) {
+    *ctx.recovering.borrow_mut() = None;
+    ctx.w.recover_modal.set_visible(false);
+    paint_alerts_visibility(ctx);
+}
+
+/// Arm or disarm every painted `backup-audit-recover-button`.
+fn paint_recover_buttons(ctx: &Ctx) {
+    let armed = !ctx.recover_running.get();
+    for button in ctx.w.recover_buttons.borrow().iter() {
+        button.set_sensitive(armed);
+    }
+}
+
+/// How a recovery ended, handed from the runtime to the GTK thread.
+enum RecoverDone {
+    /// The run did not reach the shared driver's end; a re-run resumes.
+    Failed(String),
+    /// The shared driver's verdict.
+    Finished(fauna_client_backup::recover::RecoveryOutcome),
+}
+
+/// The confirmed recovery (`backups.md` § Audit-alert surface, the fifth
+/// reason), by the row's leg (`fauna_client_backup::recover::recover_leg`): a
+/// nest runs the shared native composition over this app's own connections —
+/// `fauna_sync_engine::recovery::recover_from_destination`; this device's own
+/// custodian row runs in the sync agent that owns the store, through the shared
+/// `await_agent_recover`. Then the page's ordinary re-read, whose audit pass
+/// reads the record the run's duty cleared. Nothing about the run's order or
+/// its result is decided here; tui runs the same calls.
+fn dispatch_recover(ctx: &Rc<Ctx>) {
+    // Re-checked at press time, not trusted from the paint.
+    let destination_id = ctx.recovering.borrow_mut().take();
+    ctx.w.recover_modal.set_visible(false);
+    let Some(destination_id) = destination_id else {
+        paint_alerts_visibility(ctx);
+        return;
+    };
+    if ctx.recover_running.get() || !recover_targets(ctx).contains(&destination_id) {
+        paint_alerts_visibility(ctx);
+        return;
+    }
+    let Some(destination) = ctx
+        .last_destinations
+        .borrow()
+        .iter()
+        .find(|d| d.destination_id == destination_id)
+        .cloned()
+    else {
+        paint_alerts_visibility(ctx);
+        return;
+    };
+    let secret = match secret_from_hex(ctx.client.secret_hex()) {
+        Ok(secret) => secret,
+        Err(e) => {
+            ctx.w.error_label.add_css_class("error");
+            crate::settings::render_error_label(
+                &ctx.w.error_label,
+                Some(&s::backup_recover_failed(&e)),
+            );
+            paint_alerts_visibility(ctx);
+            return;
+        }
+    };
+    let nest = Arc::clone(ctx.client.nest_rpc());
+    let actor_id_hex = ctx.client.actor_id().unwrap_or_default();
+
+    // The row's kind decides the leg, never this shell: a nest runs here over
+    // the app's own connections; this device's own custodian row runs in the
+    // sync agent that owns the store.
+    let leg = fauna_client_backup::recover::recover_leg(&destination, &this_device_hex());
+    let own_store = match leg {
+        Some(fauna_client_backup::recover::RecoverLeg::OwnStore) => {
+            let Some(agent) = crate::sync_agent::provisioner_and_runtime() else {
+                ctx.w.error_label.add_css_class("error");
+                crate::settings::render_error_label(
+                    &ctx.w.error_label,
+                    Some(&s::backup_recover_failed(s::BACKUP_RESEED_NO_AGENT)),
+                );
+                paint_alerts_visibility(ctx);
+                return;
+            };
+            Some(agent)
+        }
+        _ => None,
+    };
+    let rt = own_store
+        .as_ref()
+        .map_or_else(|| ctx.rt.clone(), |(_, rt)| rt.clone());
+    let provisioner = own_store.map(|(p, _)| p);
+
+    ctx.recover_running.set(true);
+    paint_recover_buttons(ctx);
+    crate::settings::render_error_label(&ctx.w.error_label, None);
+    ctx.w.recover_result.set_text(s::BACKUP_RECOVER_RUNNING);
+    ctx.w.recover_result.set_visible(true);
+    paint_alerts_visibility(ctx);
+
+    let ctx_render = Rc::clone(ctx);
+    spawn_with_snapshot(
+        &rt,
+        move || async move {
+            if let Some(provisioner) = provisioner {
+                use fauna_client_sync::recover_wire::{AGENT_RECOVER_POLL, await_agent_recover};
+                // The agent grants this key to the owner's nest before it
+                // delivers; the app only hands it over.
+                let key = fauna_core::crypto::NestBackupKey::derive(&secret);
+                let result =
+                    await_agent_recover(provisioner.as_ref(), key.to_bytes(), AGENT_RECOVER_POLL)
+                        .await;
+                drop(key);
+                return match result {
+                    Ok(result) => RecoverDone::Finished(result),
+                    Err(stop) => RecoverDone::Failed(s::backup_recover_failed(&stop.to_string())),
+                };
+            }
+            let Ok(device_id) = crate::sync::device_id() else {
+                return RecoverDone::Failed(s::backup_recover_failed(
+                    "this device has no sync identity to record the recovery under",
+                ));
+            };
+            let audit = crate::backup_audit::store(&actor_id_hex);
+            match fauna_sync_engine::recovery::recover_from_destination(
+                fauna_sync_engine::recovery::NativeRecovery {
+                    source: nest,
+                    owner_secret: secret,
+                    device_id,
+                    destination: &destination,
+                    audit: &audit,
+                },
+            )
+            .await
+            {
+                Ok(result) => RecoverDone::Finished(result),
+                Err(e) => RecoverDone::Failed(s::backup_recover_failed(&e)),
+            }
+        },
+        move |done| render_recover(&ctx_render, done),
+    );
+}
+
+/// Paint a recovery's end (GTK main thread), then re-read the page.
+fn render_recover(ctx: &Rc<Ctx>, done: RecoverDone) {
+    ctx.recover_running.set(false);
+    paint_recover_buttons(ctx);
+    match done {
+        RecoverDone::Failed(message) => {
+            ctx.w.recover_result.set_visible(false);
+            ctx.w.error_label.add_css_class("error");
+            crate::settings::render_error_label(&ctx.w.error_label, Some(&message));
+        }
+        RecoverDone::Finished(result) => {
+            let text = fauna_client_backup::recover::result_lines(&result)
+                .iter()
+                .map(|line| line.resolve_nested(crate::i18n::strings::lookup))
+                .collect::<Vec<_>>()
+                .join("\n");
+            ctx.w.recover_result.set_text(&text);
+            ctx.w.recover_result.set_visible(true);
+            // The run's duty cleared the notice; re-list and re-audit so the
+            // banner (and its button) go away on their own.
+            refresh(ctx);
+            refresh_audit(ctx);
+        }
+    }
+    paint_alerts_visibility(ctx);
 }
 
 /// One [`refresh`] round-trip's result, handed from the tokio runtime to the
@@ -1544,16 +1940,31 @@ fn render_load(ctx: &Rc<Ctx>, load: StatusLoad) {
         Some(msg) => {
             ctx.w.error_label.add_css_class("error");
             crate::settings::render_error_label(&ctx.w.error_label, Some(&msg));
+            ctx.read_error_shown.set(true);
             // Not "you have no backups" — we do not know what you have.
             ctx.w.placeholder.set_visible(false);
         }
         None => {
-            crate::settings::render_error_label(&ctx.w.error_label, None);
-            render_rows(ctx, &load.destinations, &load.marks, &load.statuses);
-            // Re-label the banners: the two reads are independent, so an audit
-            // that landed first named its destinations by raw id (nothing knew
-            // their display names yet). Now that the list is in, redraw.
-            render_alerts(ctx);
+            if ctx.read_error_shown.replace(false) {
+                crate::settings::render_error_label(&ctx.w.error_label, None);
+            }
+            // A read answering what the rows were built from rebuilds nothing
+            // (a level, not an event — the store-change notice re-drives this
+            // read while the page is open). An audit landing in between
+            // repaints the rows itself, from these same fields.
+            let unchanged = ctx.rows_painted.get()
+                && *ctx.last_destinations.borrow()
+                    == fauna_core::data::distinct_destinations(&load.destinations)
+                && *ctx.last_marks.borrow() == load.marks
+                && *ctx.last_statuses.borrow() == load.statuses;
+            if !unchanged {
+                render_rows(ctx, &load.destinations, &load.marks, &load.statuses);
+                // Re-label the banners: the two reads are independent, so an
+                // audit that landed first named its destinations by raw id
+                // (nothing knew their display names yet). Now that the list
+                // is in, redraw.
+                render_alerts(ctx);
+            }
             // The orphaned-store verdict rides HERE, not beside `refresh`'s
             // call sites, because it is judged AGAINST the destination rows —
             // and `render_rows` above is what makes them current. Calling it
@@ -1585,6 +1996,14 @@ fn dispatch(ctx: &Rc<Ctx>, mutation: Mutation) {
     ctx.w.confirm_button.set_sensitive(false);
     let nest = ctx.client.nest_rpc().clone();
     let secret_hex = ctx.client.secret_hex().to_string();
+    // Resolved HERE, on the GTK thread, because the agent handle is
+    // thread-local to it ([`remove_destination_and_maybe_reclaim`]).
+    let reclaim_agent = match &mutation {
+        Mutation::Remove { reclaim: true, .. } => {
+            Some(crate::sync_agent::provisioner_and_runtime().map(|(p, _rt)| p))
+        }
+        _ => None,
+    };
     let ctx_render = Rc::clone(ctx);
     spawn_with_snapshot(
         &ctx.rt,
@@ -1598,8 +2017,8 @@ fn dispatch(ctx: &Rc<Ctx>, mutation: Mutation) {
                 Mutation::Edit { id, url, name } => {
                     edit_destination(nest, secret_hex, id, url, name).await
                 }
-                Mutation::Remove { id, reclaim } => {
-                    remove_destination_and_maybe_reclaim(nest, id, reclaim).await
+                Mutation::Remove { id, .. } => {
+                    remove_destination_and_maybe_reclaim(nest, id, reclaim_agent).await
                 }
                 Mutation::Keep { id } => keep_destination(nest, id).await,
             }
@@ -1631,6 +2050,7 @@ impl From<MutationResult> for Applied {
 fn apply(ctx: &Rc<Ctx>, applied: Applied, close_form: bool) {
     ctx.w.add_button.set_sensitive(true);
     ctx.w.confirm_button.set_sensitive(true);
+    ctx.read_error_shown.set(false);
 
     match applied.error {
         Some(msg) => {
@@ -1689,6 +2109,7 @@ fn render_rows(
     *ctx.last_destinations.borrow_mut() = destinations.to_vec();
     *ctx.last_statuses.borrow_mut() = statuses.clone();
     *ctx.last_marks.borrow_mut() = marks.to_vec();
+    ctx.rows_painted.set(true);
 
     let reseed_rows = reseed_rows(ctx);
     ctx.w.reseed_buttons.borrow_mut().clear();
@@ -2185,21 +2606,22 @@ async fn remove_destination(nest: Nest, id: String) -> MutationResult {
 async fn remove_destination_and_maybe_reclaim(
     nest: Nest,
     id: String,
-    reclaim: bool,
+    reclaim: Option<Option<Arc<crate::sync_agent::LinuxAgentProvisioner>>>,
 ) -> MutationResult {
     let destinations = remove_destination(nest, id).await?;
-    if !reclaim {
+    // `None`: no opt-in. `Some(provisioner)`: the opt-in, with the agent seam
+    // the GTK thread resolved before the spawn — `sync_agent`'s handle is a
+    // thread-local on that thread, so asking for it from this runtime thread
+    // always answered "no agent" and the reclaim silently never ran.
+    let Some(provisioner) = reclaim else {
         return Ok(destinations);
-    }
-    // `ctx.rt` (the caller's spawn runtime) and the agent's own runtime are the
-    // SAME handle (`sync_agent::install` seeds `AgentUi::rt` from
-    // `FaunaClient::runtime_handle()`), so awaiting the provisioner here needs
-    // no runtime hop.
-    let Some((provisioner, _rt)) = crate::sync_agent::provisioner_and_runtime() else {
-        // No agent on this platform: nothing to reclaim, and the removal
-        // itself still landed — an absent agent must never read as a removal
-        // failure.
-        return Ok(destinations);
+    };
+    let Some(provisioner) = provisioner else {
+        // The removal DID land, but the opt-in cannot be honoured:
+        // `convention 11` — fail loudly, never silently.
+        return Err(
+            s::BACKUP_RECLAIM_AFTER_REMOVE_FAILED.replace("{reason}", s::BACKUP_RECLAIM_NO_AGENT)
+        );
     };
     match provisioner.reclaim_custodian_store().await {
         Ok(outcome) if outcome.still_hosting => Err(s::BACKUP_RECLAIM_AFTER_REMOVE_FAILED
@@ -2854,13 +3276,18 @@ mod tests {
     fn an_open_recovery_window_paints_a_named_banner() {
         let now = 1_800_000_000;
         let banners = owner_alert_banners(
+            "",
             &[regressed_record("d1", now, now + 10 * 24 * 60 * 60 + 60)],
             &[named_destination("d1", "Attic")],
             now,
         );
         assert_eq!(banners.len(), 1, "got {banners:?}");
-        assert!(banners[0].contains("Attic"), "got {:?}", banners[0]);
-        assert!(banners[0].contains("10 more days"), "got {:?}", banners[0]);
+        assert!(banners[0].text.contains("Attic"), "got {:?}", banners[0]);
+        assert!(
+            banners[0].text.contains("10 more days"),
+            "got {:?}",
+            banners[0]
+        );
     }
 
     /// A closed window paints nothing: the notice expires by itself.
@@ -2868,6 +3295,7 @@ mod tests {
     fn a_closed_recovery_window_paints_nothing() {
         let now = 1_800_000_000;
         let banners = owner_alert_banners(
+            "",
             &[regressed_record("d1", now, now - 1)],
             &[named_destination("d1", "Attic")],
             now,
@@ -2883,7 +3311,74 @@ mod tests {
         record.verdict = Some(fauna_client_backup::audit::AuditVerdict::Overdue {
             since_secs: 9 * 24 * 60 * 60,
         });
-        let banners = owner_alert_banners(&[record], &[named_destination("d1", "Attic")], now);
+        let banners = owner_alert_banners("", &[record], &[named_destination("d1", "Attic")], now);
         assert_eq!(banners.len(), 2, "got {banners:?}");
+    }
+
+    /// A nest destination's fifth-reason banner carries the recover button
+    /// (`recover` names its destination); the standing verdict's banner on the
+    /// same destination does not — the gesture belongs to the fifth reason alone.
+    #[test]
+    fn a_nest_destinations_regression_banner_carries_the_recover_button() {
+        let now = 1_800_000_000;
+        let mut record = regressed_record("d1", now, now + 3 * 24 * 60 * 60);
+        record.verdict = Some(fauna_client_backup::audit::AuditVerdict::Overdue {
+            since_secs: 9 * 24 * 60 * 60,
+        });
+        let mut nest = named_destination("d1", "Attic");
+        nest.kind = DESTINATION_KIND_NEST.to_string();
+        let banners = owner_alert_banners("", &[record], &[nest], now);
+        assert_eq!(banners.len(), 2, "got {banners:?}");
+        assert_eq!(banners[0].recover, None, "the standing verdict's banner");
+        assert_eq!(
+            banners[1].recover.as_deref(),
+            Some("d1"),
+            "the fifth reason's banner"
+        );
+    }
+
+    /// Another device's custodian row paints its banner but no button: its copy
+    /// is not on this device.
+    #[test]
+    fn another_devices_custodian_row_carries_no_recover_button() {
+        let now = 1_800_000_000;
+        let banners = owner_alert_banners(
+            &"beef".repeat(16),
+            &[regressed_record("d1", now, now + 3 * 24 * 60 * 60)],
+            &[custodian_row("d1", None)],
+            now,
+        );
+        assert_eq!(banners.len(), 1, "the banner paints: {banners:?}");
+        assert_eq!(banners[0].recover, None, "but carries no button");
+    }
+
+    /// This device's own custodian row carries the button: its copy sits in the
+    /// store the sync agent owns, and the confirm runs that leg.
+    #[test]
+    fn this_devices_own_custodian_row_carries_the_recover_button() {
+        let now = 1_800_000_000;
+        let banners = owner_alert_banners(
+            &"dead".repeat(16),
+            &[regressed_record("d1", now, now + 3 * 24 * 60 * 60)],
+            &[custodian_row("d1", None)],
+            now,
+        );
+        assert_eq!(banners.len(), 1, "the banner paints: {banners:?}");
+        assert_eq!(banners[0].recover.as_deref(), Some("d1"));
+    }
+
+    /// The recovery's confirm pair and result carry their ui.yaml ids, and the
+    /// confirm starts closed, the result hidden.
+    #[test]
+    fn the_recover_confirm_and_result_carry_their_ids_and_start_hidden() {
+        crate::testid::run_on_gtk_thread(|| {
+            let (modal, confirm, cancel) = build_recover_modal();
+            let result = build_recover_result();
+            assert_eq!(modal.widget_name(), "backup-audit-recover-confirm-modal");
+            assert_eq!(confirm.widget_name(), "backup-audit-recover-confirm-button");
+            assert_eq!(cancel.widget_name(), "backup-audit-recover-cancel-button");
+            assert_eq!(result.widget_name(), "backup-audit-recover-result");
+            assert!(!modal.is_visible() && !result.is_visible());
+        });
     }
 }

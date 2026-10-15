@@ -36,29 +36,6 @@ pub fn left_align_clamped_pages(root: &impl IsA<gtk::Widget>) {
     }
 }
 
-/// Remove every dynamically-added row from `group` before rebuilding it —
-/// **never** a blind `while first_child() { remove }`. `AdwPreferencesGroup`'s
-/// own header/title/description furniture ARE `first_child()` results too, not
-/// just the rows a caller `.add()`ed; blindly removing them corrupts the
-/// widget's internal structure (found 2026-08-15 chasing a feature-limits e2e
-/// hang whose actual symptom was every automation command on the app going
-/// unacknowledged — the corrupted group wedged the next GTK layout pass, not
-/// the request handler itself). Only remove children that are actually rows
-/// (`adw::ActionRow` or a plain `gtk::ListBoxRow`), and stop the moment a
-/// non-row child is reached — `first_child()` order means anything after that
-/// point is the group's own furniture, not more rows.
-pub fn clear_preferences_group_rows(group: &adw::PreferencesGroup) {
-    while let Some(child) = group.first_child() {
-        if child.downcast_ref::<adw::ActionRow>().is_some()
-            || child.downcast_ref::<gtk::ListBoxRow>().is_some()
-        {
-            group.remove(&child);
-        } else {
-            break;
-        }
-    }
-}
-
 /// Remove every row from a `gtk::ListBox`, keeping its placeholder.
 ///
 /// The placeholder is a child of the list like the rows are, so the

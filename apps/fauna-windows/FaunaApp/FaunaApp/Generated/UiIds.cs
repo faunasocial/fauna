@@ -118,6 +118,7 @@ public static partial class Ids
     public const string AdminDnsDomainAutoRenew = "admin-dns-domain-auto-renew";
     public const string AdminDnsDomainCatchAllClearedState = "admin-dns-domain-catch-all-cleared-state";
     public const string AdminDnsDomainCatchAllSelect = "admin-dns-domain-catch-all-select";
+    public const string AdminDnsDomainDmarcPolicySelect = "admin-dns-domain-dmarc-policy-select";
     public const string AdminDnsDomainMode = "admin-dns-domain-mode";
     public const string AdminDnsDomainName = "admin-dns-domain-name";
     public const string AdminDnsDomainPrimaryBadge = "admin-dns-domain-primary-badge";
@@ -334,6 +335,7 @@ public static partial class Ids
     public const string AdminUsersActionError = "admin-users-action-error";
     public const string AdminUsersAdmitActorInput = "admin-users-admit-actor-input";
     public const string AdminUsersAdmitButton = "admin-users-admit-button";
+    public const string AdminUsersAdmitGuardianSelect = "admin-users-admit-guardian-select";
     public const string AdminUsersAdmitHandleInput = "admin-users-admit-handle-input";
     public const string AdminUsersAdmitSection = "admin-users-admit-section";
     public const string AdminUsersAdmitTierSelect = "admin-users-admit-tier-select";
@@ -451,6 +453,11 @@ public static partial class Ids
     public const string AwaitingDnsRecords = "awaiting-dns-records";
     public const string AwaitingDnsStatus = "awaiting-dns-status";
     public const string BackupAuditAlert = "backup-audit-alert";
+    public const string BackupAuditRecoverButton = "backup-audit-recover-button";
+    public const string BackupAuditRecoverCancelButton = "backup-audit-recover-cancel-button";
+    public const string BackupAuditRecoverConfirmButton = "backup-audit-recover-confirm-button";
+    public const string BackupAuditRecoverConfirmModal = "backup-audit-recover-confirm-modal";
+    public const string BackupAuditRecoverResult = "backup-audit-recover-result";
     public const string BackupDestinationAddButton = "backup-destination-add-button";
     public const string BackupDestinationAddCancelButton = "backup-destination-add-cancel-button";
     public const string BackupDestinationAddConfirmButton = "backup-destination-add-confirm-button";
@@ -544,8 +551,6 @@ public static partial class Ids
     public const string ComposeFileRemove = "compose-file-remove";
     public const string ComposeGatePreviewField = "compose-gate-preview-field";
     public const string ComposeGateTierSelect = "compose-gate-tier-select";
-    public const string ComposeSellPrice = "compose-sell-price";
-    public const string ComposeSellSubscribersFree = "compose-sell-subscribers-free";
     public const string ComposeTagsField = "compose-tags-field";
     public const string ComposeTextField = "compose-text-field";
     public const string ConflictFileInfo = "conflict-file-info";
@@ -739,7 +744,12 @@ public static partial class Ids
     public const string DnsVerifyButton = "dns-verify-button";
     public const string DocRemoteImage = "doc-remote-image";
     public const string EmailFilterPanel = "email-filter-panel";
+    public const string EmergencyLockoutBackButton = "emergency-lockout-back-button";
+    public const string EmergencyLockoutEntryButton = "emergency-lockout-entry-button";
     public const string EncryptedBadge = "encrypted-badge";
+    public const string EncryptionKeypackageCount = "encryption-keypackage-count";
+    public const string EncryptionKeypackageLowWarning = "encryption-keypackage-low-warning";
+    public const string EncryptionKeypackageRefreshButton = "encryption-keypackage-refresh-button";
     public const string ErrorBanner = "error-banner";
     public const string ErrorMessage = "error-message";
     public const string ErrorMessageCopyButton = "error-message-copy-button";
@@ -762,6 +772,7 @@ public static partial class Ids
     public const string EventDtstart = "event-dtstart";
     public const string EventForm = "event-form";
     public const string EventFormDescription = "event-form-description";
+    public const string EventFormDiscard = "event-form-discard";
     public const string EventFormEndDatetime = "event-form-end-datetime";
     public const string EventFormLocation = "event-form-location";
     public const string EventFormStartDatetime = "event-form-start-datetime";
@@ -886,6 +897,7 @@ public static partial class Ids
     public const string FeedPostText = "feed-post-text";
     public const string FeedPostTrainTargetSheet = "feed-post-train-target-sheet";
     public const string FeedPostUnpublishWebButton = "feed-post-unpublish-web-button";
+    public const string FeedPostViewThreadButton = "feed-post-view-thread-button";
     public const string FeedQuoteButton = "feed-quote-button";
     public const string FeedReplyAudience = "feed-reply-audience";
     public const string FeedReplyButton = "feed-reply-button";
@@ -903,6 +915,8 @@ public static partial class Ids
     public const string FeedSearchField = "feed-search-field";
     public const string FeedSelector = "feed-selector";
     public const string FeedTab = "feed-tab";
+    public const string FeedThreadPage = "feed-thread-page";
+    public const string FeedThreadPost = "feed-thread-post";
     public const string FeedTrendingItem = "feed-trending-item";
     public const string FeedView = "feed-view";
     public const string FileListItem = "file-list-item";
@@ -1011,9 +1025,6 @@ public static partial class Ids
     public const string FolderWriterUncappedWarning = "folder-writer-uncapped-warning";
     public const string FoldersSettingsLink = "folders-settings-link";
     public const string GatedPostBadge = "gated-post-badge";
-    public const string GatedPostBuyButton = "gated-post-buy-button";
-    public const string GatedPostPaymentLink = "gated-post-payment-link";
-    public const string GatedPostPrice = "gated-post-price";
     public const string GroupConversationHint = "group-conversation-hint";
     public const string HandleCheckButton = "handle-check-button";
     public const string HandleControlCheckbox = "handle-control-checkbox";
@@ -1377,6 +1388,7 @@ public static partial class Ids
     public const string NavKeyHints = "nav-key-hints";
     public const string NestIdentityChangedTrustButton = "nest-identity-changed-trust-button";
     public const string NestIdentityChangedWarning = "nest-identity-changed-warning";
+    public const string NestIdentityForkWarning = "nest-identity-fork-warning";
     public const string NestOsMaintenanceStatus = "nest-os-maintenance-status";
     public const string NestOsRestartNowButton = "nest-os-restart-now-button";
     public const string NestOsUpdatesCount = "nest-os-updates-count";
@@ -1861,6 +1873,7 @@ public static partial class Ids
     public const string SpamModerationControls = "spam-moderation-controls";
     public const string SpamPreferences = "spam-preferences";
     public const string SpamThreshold = "spam-threshold";
+    public const string SpamThresholdBand = "spam-threshold-band";
     public const string StatusActorIdCopyBtn = "status-actor-id-copy-btn";
     public const string StatusBuildSha = "status-build-sha";
     public const string StatusMlsChannels = "status-mls-channels";
@@ -1882,8 +1895,6 @@ public static partial class Ids
     public const string SubscriptionOfferDescription = "subscription-offer-description";
     public const string SubscriptionOfferList = "subscription-offer-list";
     public const string SubscriptionOfferName = "subscription-offer-name";
-    public const string SubscriptionOfferPaymentLink = "subscription-offer-payment-link";
-    public const string SubscriptionOfferPrice = "subscription-offer-price";
     public const string SubscriptionOfferRow = "subscription-offer-row";
     public const string SubscriptionOfferStatus = "subscription-offer-status";
     public const string SubscriptionOfferSubscribeButton = "subscription-offer-subscribe-button";
@@ -1914,13 +1925,10 @@ public static partial class Ids
     public const string SubscriptionTierFormCancel = "subscription-tier-form-cancel";
     public const string SubscriptionTierFormDescription = "subscription-tier-form-description";
     public const string SubscriptionTierFormName = "subscription-tier-form-name";
-    public const string SubscriptionTierFormPaymentUrl = "subscription-tier-form-payment-url";
-    public const string SubscriptionTierFormPriceHint = "subscription-tier-form-price-hint";
     public const string SubscriptionTierFormRank = "subscription-tier-form-rank";
     public const string SubscriptionTierFormSave = "subscription-tier-form-save";
     public const string SubscriptionTierList = "subscription-tier-list";
     public const string SubscriptionTierName = "subscription-tier-name";
-    public const string SubscriptionTierPrice = "subscription-tier-price";
     public const string SubscriptionTierRank = "subscription-tier-rank";
     public const string SubscriptionTierRow = "subscription-tier-row";
     public const string SubscriptionTiersSection = "subscription-tiers-section";
@@ -2023,6 +2031,11 @@ public static partial class Ids
 public static partial class Ids
 {
     public const string ComposeSellAskingPrice = "compose-sell-asking-price";
+    public const string ComposeSellPrice = "compose-sell-price";
+    public const string ComposeSellSubscribersFree = "compose-sell-subscribers-free";
+    public const string GatedPostBuyButton = "gated-post-buy-button";
+    public const string GatedPostPaymentLink = "gated-post-payment-link";
+    public const string GatedPostPrice = "gated-post-price";
     public const string PostTipCount = "post-tip-count";
     public const string PostTipItem = "post-tip-item";
     public const string PostTipList = "post-tip-list";
@@ -2038,6 +2051,8 @@ public static partial class Ids
     public const string SubscriptionClaimStatus = "subscription-claim-status";
     public const string SubscriptionClaimTier = "subscription-claim-tier";
     public const string SubscriptionClaimTierSelect = "subscription-claim-tier-select";
+    public const string SubscriptionOfferPaymentLink = "subscription-offer-payment-link";
+    public const string SubscriptionOfferPrice = "subscription-offer-price";
     public const string SubscriptionProviderAddButton = "subscription-provider-add-button";
     public const string SubscriptionProviderForm = "subscription-provider-form";
     public const string SubscriptionProviderFormCancel = "subscription-provider-form-cancel";
@@ -2054,6 +2069,9 @@ public static partial class Ids
     public const string SubscriptionProviderSection = "subscription-provider-section";
     public const string SubscriptionProviderStatus = "subscription-provider-status";
     public const string SubscriptionTierFormAskingPrice = "subscription-tier-form-asking-price";
+    public const string SubscriptionTierFormPaymentUrl = "subscription-tier-form-payment-url";
+    public const string SubscriptionTierFormPriceHint = "subscription-tier-form-price-hint";
+    public const string SubscriptionTierPrice = "subscription-tier-price";
 }
 #endif
 

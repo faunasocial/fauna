@@ -24,13 +24,14 @@ opens it first. Every step is a synchronous RPC whose reply follows the write �
 14.
 """
 
-import socket
-
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from conftest import _bridge_admin_post, _provision_baseline_contributor
-from helpers.waiting import wait_until
+from conftest import _bridge_admin_post
+from helpers.spam_baseline_venue import (
+    baseline_contributors,
+    open_mail_gate_and_wait_for_the_bridges,
+)
 
 pytestmark = pytest.mark.tier_3
 
@@ -43,18 +44,6 @@ def _ws(nest, contributor):
 def _admin_ws(nest):
     sk = nest["admin"]["signing_key"]
     return WsRpcAdminClient(nest["url"], actor_id=bytes(sk.verify_key), signing_key=bytes(sk))
-
-
-def _contributors(nest, seal_helper_binary, tag, n=3):
-    """`n` fresh opted-in contributors, each with a sealed model, a holder copy
-    and a keyless grant to the nest's own aggregation holder."""
-    return [
-        _provision_baseline_contributor(
-            nest_instance=nest, seal_helper_binary=seal_helper_binary,
-            local_part=f"withdraw-{tag}-{i}", token=f"qz{tag}{i}wx", spam_messages=5,
-        )[0]
-        for i in range(n)
-    ]
 
 
 def _publish(nest):
@@ -70,49 +59,6 @@ def _served(nest):
         return ws.call("fauna.bridges.get_spam_baseline_state", {})
 
 
-def _accepts(port: int) -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=1.0):
-            return True
-    except OSError:
-        return False
-
-
-def _open_mail_gate_and_wait_for_the_bridges(venue, budget_s: float = 120.0) -> None:
-    """The admin opens the deployment's mail gate; return once both bridges serve.
-
-    Opening the gate races each bridge's first config fetch (the race
-    `test_mail_bridge_mta.py::_open_mail_gate_and_wait_for_the_mta` documents):
-    a bridge whose fetch lands after the gate opened serves at once and never
-    exits, while one that had already idled exits for rebind and needs the venue
-    to play the supervisor. So wait, per role, for whichever state it reaches,
-    and rebind only the ones that exited.
-    """
-    venue.admin_opens_mail_gate()
-    roles = {"mta": (venue.mta, venue.mx_port), "mda": (venue.mda, venue.imaps_port)}
-
-    def _states():
-        states = {}
-        for role, (bridge, port) in roles.items():
-            if _accepts(port):
-                states[role] = "serving"
-            elif bridge.proc.poll() is not None:
-                states[role] = "exited"
-            else:
-                return None
-        return states
-
-    states = wait_until(
-        _states,
-        budget_s,
-        interval=0.5,
-        diagnose=lambda: "a mail bridge neither served nor exited for rebind after the gate opened",
-    )
-    exited = {role for role, state in states.items() if state == "exited"}
-    if exited:
-        venue.rebind_after_enable(mta="mta" in exited, mda="mda" in exited)
-
-
 @pytest.mark.feature("spam")
 def test_departure_withdraws_the_served_baseline_at_once(dedicated_mail_nest, seal_helper_binary):
     venue = dedicated_mail_nest
@@ -120,10 +66,10 @@ def test_departure_withdraws_the_served_baseline_at_once(dedicated_mail_nest, se
     # The venue boots with mail off, and an MDA idling on a shut gate runs no
     # baseline drain — so open the deployment gate (as the admin does) and wait
     # for the bridges to serve again before any publish needs the holder.
-    _open_mail_gate_and_wait_for_the_bridges(venue)
+    open_mail_gate_and_wait_for_the_bridges(venue)
 
     # Arm 1 — stopping the contribution.
-    first = _contributors(nest, seal_helper_binary, "optout")
+    first = baseline_contributors(nest, seal_helper_binary, "optout")
     _publish(nest)
     assert _served(nest)["published"] is True
     with _ws(nest, first[0]) as ws:
@@ -134,7 +80,7 @@ def test_departure_withdraws_the_served_baseline_at_once(dedicated_mail_nest, se
         f"got {state!r}")
 
     # Arm 2 — resetting the filter.
-    second = _contributors(nest, seal_helper_binary, "reset")
+    second = baseline_contributors(nest, seal_helper_binary, "reset")
     _publish(nest)
     with _ws(nest, second[0]) as ws:
         ws.call("fauna.bridges.reset_spam_model", {})
@@ -145,7 +91,7 @@ def test_departure_withdraws_the_served_baseline_at_once(dedicated_mail_nest, se
     # Arm 3 — deleting the account. The deletion is a scheduled pending action;
     # the account (and its training) goes when it executes, which the test hook
     # runs through the real executor.
-    third = _contributors(nest, seal_helper_binary, "delete")
+    third = baseline_contributors(nest, seal_helper_binary, "delete")
     _publish(nest)
     with _ws(nest, third[0]) as ws:
         ws.call("fauna.account.delete", {})

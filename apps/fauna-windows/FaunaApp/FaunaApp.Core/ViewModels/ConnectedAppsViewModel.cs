@@ -307,7 +307,10 @@ internal partial class ConnectedAppsViewModel : ViewModelBase
             lines.Add($"  • {Strings.Resolve(scope)}");
         }
         var facts = new List<string>();
-        if (!row.@connected) facts.Add(Strings.Get("connected_apps/not_connected"));
+        // A paused row says why it cannot act and how to undo it; "not connected" is only
+        // for a row nothing but itself holds back.
+        if (row.@paused) facts.Add(Strings.Get("connected_apps/paused"));
+        else if (!row.@connected) facts.Add(Strings.Get("connected_apps/not_connected"));
         facts.Add(Strings.Get("connected_apps/created").Replace("{time}", When(row.@createdAtMillis)));
         facts.Add(row.@lastUsedAtMillis is { } used
             ? Strings.Get("connected_apps/last_used").Replace("{time}", When(used))
@@ -341,8 +344,11 @@ internal partial class ConnectedAppsViewModel : ViewModelBase
             var members = string.Concat(set.@memberDescriptions.Select(line => $"\n  • {line}"));
             return $"\n{heading}{details}{members}";
         }));
+        // A key replacement's line (`ConsentCardRow.ends`) is last, after the sets — the order
+        // `compose::request_card_lines` gives every app; absent on an ordinary card.
+        var ends = request.@ends is { } e ? $"\n{Strings.Resolve(e)}" : string.Empty;
         return $"{Strings.Get("atproto_settings/consent_heading")}\n{who}\n"
-             + $"{Strings.Get("atproto_settings/consent_scopes_heading")}\n{asks}{sets}";
+             + $"{Strings.Get("atproto_settings/consent_scopes_heading")}\n{asks}{sets}{ends}";
     }
 
     /// <summary>The binding code line (<c>connected-apps-request-code</c>'s text); the raw code is

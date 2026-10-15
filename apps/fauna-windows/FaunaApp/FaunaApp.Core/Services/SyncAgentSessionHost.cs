@@ -197,7 +197,7 @@ internal sealed class SyncAgentSessionHost<T> where T : class, ISyncAgentSession
 
     /// <summary>
     /// Stop the loop and tell the agent to drop its capability — the sign-out /
-    /// account-switch / factory-reset teardown (on-demand-files.md § Multi-account ×
+    /// account-switch / factory-reset teardown (on-demand-files-apple.md § Multi-account ×
     /// File Provider, consequence 1). Best-effort: an unreachable or never-started agent
     /// is a normal no-op.
     ///

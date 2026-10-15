@@ -51,6 +51,20 @@ const videoMIME = "video/mp4"
 // "something is wrong" bound, not a budget the normal path approaches.
 const remuxTimeout = 2 * time.Minute
 
+// sandboxBin is where the nest image installs the sandbox wrapper — the same
+// constant the nest's transcode uses (bins/fauna-nest/src/video/transcode.rs
+// SANDBOX_BIN). Its presence is auto-detected, never configured: the image
+// ships it, a developer machine does not (principles.md § One configuration
+// surface, bucket 1).
+const sandboxBin = "/usr/local/bin/fauna-sandbox"
+
+// The remux's input and output names inside its job directory. Fixed strings:
+// nothing chosen at run time reaches ffmpeg's command line but the directory.
+const (
+	remuxInput  = "in.ts"
+	remuxOutput = "out.mp4"
+)
+
 // VideoRendition is one resolution's worth of a Fauna video, as the shared-Rust
 // extraction described it. Mirrors the FFI AtprotoVideoRendition.
 type VideoRendition struct {
@@ -295,38 +309,61 @@ func fetchSegments(
 //
 // ffmpeg ships in the runtime image already (it is there for the nest's own
 // transcode path), so this adds no packaging dependency.
+//
+// ffmpeg is a large native parser, and this one runs as the bridge's own uid —
+// the owner of the PDS signing key — so it runs isolated the way the nest's
+// transcode does (deployment-threat-model.md § Concern 1b, item 2; the command
+// itself is [remuxCommand]):
+//
+//   - Its own job directory: the temp dir below, mode 0700, with constant
+//     relative names inside it, removed on every exit path.
+//   - A kernel sandbox, where the image provides one: with [sandboxBin]
+//     present ffmpeg runs under `fauna-sandbox transcode --job-dir <dir>`, the
+//     profile the nest's ffmpeg runs under, so Landlock grants that one
+//     directory and the system trees and kernel-denies /data — the key
+//     included — and the wrapper's rlimits bound memory, CPU and file size.
+//     Without it (a developer machine, a test run) the remux still runs, with
+//     the measures below and a warning.
+//   - No reach beyond the file: `-nostdin`, `-protocol_whitelist file`, the
+//     input demuxer pinned to mpegts by both `-f` and `-format_whitelist`.
+//   - No inherited environment: `PATH` alone, so nothing the bridge was
+//     started with (the router's proxy secret among it) is in ffmpeg's
+//     environ.
 func remuxToMP4(ctx context.Context, ts []byte) ([]byte, error) {
 	dir, err := os.MkdirTemp("", "atproto-video-")
 	if err != nil {
 		return nil, fmt.Errorf("temp dir: %w", err)
 	}
 	defer os.RemoveAll(dir)
+	// Absolute, because the wrapper resolves `--job-dir` from inside the job
+	// directory (the child's cwd), where a relative path names something else.
+	if dir, err = filepath.Abs(dir); err != nil {
+		return nil, fmt.Errorf("temp dir: %w", err)
+	}
 
-	inPath := filepath.Join(dir, "in.ts")
-	outPath := filepath.Join(dir, "out.mp4")
-	if err := os.WriteFile(inPath, ts, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, remuxInput), ts, 0o600); err != nil {
 		return nil, fmt.Errorf("write remux input: %w", err)
+	}
+
+	sandbox := sandboxBin
+	if _, err := os.Stat(sandbox); err != nil {
+		slog.Warn("remuxing without the fauna-sandbox wrapper: ffmpeg runs in its job "+
+			"directory with file-only protocols, but without Landlock or rlimits",
+			"sandbox", sandboxBin)
+		sandbox = ""
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, remuxTimeout)
 	defer cancel()
 
 	var stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "ffmpeg",
-		"-nostdin",
-		"-loglevel", "error",
-		"-f", "mpegts",
-		"-i", inPath,
-		"-c", "copy",
-		"-bsf:a", "aac_adtstoasc",
-		"-movflags", "+faststart",
-		"-y", outPath,
-	)
+	cmd := remuxCommand(ctx, dir, sandbox, os.Getenv("PATH"))
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("ffmpeg remux: %w (%s)", err, truncateForLog(stderr.String()))
 	}
 
+	outPath := filepath.Join(dir, remuxOutput)
 	mp4, err := os.ReadFile(outPath)
 	if err != nil {
 		return nil, fmt.Errorf("read remux output: %w", err)
@@ -335,6 +372,38 @@ func remuxToMP4(ctx context.Context, ts []byte) ([]byte, error) {
 		return nil, fmt.Errorf("ffmpeg remux produced no output (%s)", truncateForLog(stderr.String()))
 	}
 	return mp4, nil
+}
+
+// remuxCommand is the ffmpeg invocation for one remux in job directory dir:
+// wrapped in the sandbox when sandbox names one, run from dir with every path
+// relative to it, `PATH` its only environment. Every argument is a constant
+// but the job directory.
+func remuxCommand(ctx context.Context, dir, sandbox, pathEnv string) *exec.Cmd {
+	args := []string{
+		"-nostdin",
+		"-loglevel", "error",
+		"-protocol_whitelist", "file",
+		"-format_whitelist", "mpegts",
+		"-f", "mpegts",
+		"-i", remuxInput,
+		"-c", "copy",
+		"-bsf:a", "aac_adtstoasc",
+		"-movflags", "+faststart",
+		"-y", remuxOutput,
+	}
+	var cmd *exec.Cmd
+	if sandbox != "" {
+		cmd = exec.CommandContext(ctx, sandbox,
+			append([]string{"transcode", "--job-dir", dir, "--", "ffmpeg"}, args...)...)
+	} else {
+		cmd = exec.CommandContext(ctx, "ffmpeg", args...)
+	}
+	cmd.Dir = dir
+	cmd.Env = []string{}
+	if pathEnv != "" {
+		cmd.Env = []string{"PATH=" + pathEnv}
+	}
+	return cmd
 }
 
 func truncateForLog(s string) string {

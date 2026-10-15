@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+        The kids artifact's permission set (`family-safety.md` § The account age
+        band, the kids-app bullet, item (4)): merged over the main manifest, it
+        removes every permission whose only user is a surface item (4) does not
+        keep. Photo backup (the media-read permissions, the foreground sync
+        service and its permissions) and the battery-optimization exemption
+        prompt are not in the Kept set; `PhotoBackupSection` is not composed
+        under BuildConfig.KIDS, so nothing here asks for them. INTERNET,
+        ACCESS_NETWORK_STATE and POST_NOTIFICATIONS stay: the Kept
+        conversations and notifications need them. `android-kids-check` asserts
+        the packaged manifest names none of the removed ones.
+    -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" tools:node="remove" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" tools:node="remove" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" tools:node="remove" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" tools:node="remove" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" tools:node="remove" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" tools:node="remove" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" tools:node="remove" />
+
+    <application>
+        <!-- Photo backup's foreground sync service: no permission to start it. -->
+        <service android:name=".service.SyncService" tools:node="remove" />
+    </application>
+</manifest>

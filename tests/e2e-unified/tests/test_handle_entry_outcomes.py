@@ -17,6 +17,7 @@ turns them green one app at a time.
 import pytest
 
 from drivers.machine_test_setter import set_handle_check_snapshot
+from i18n.strings import S
 
 pytestmark = pytest.mark.tier_2
 
@@ -90,6 +91,14 @@ def test_registered_no_nest_shows_checkbox(app):
         "control_checkbox_visible": True,
         "control_checkbox_checked": False,
     })
+    # The fully qualified key the machine emits renders as its sentence, never
+    # the raw key (the machine side is pinned by fauna-onboarding-machine's
+    # `i18n_keys_resolve` test).
+    expected = S.onboarding.handle_check.outcome.registered_no_nest(domain="example.com")
+    assert app.get_text("handle-message-area").strip() == expected, (
+        f"RegisteredNoNest should read {expected!r}: "
+        f"{app.driver.diagnose('handle-message-area')} error={app.error_text()!r}"
+    )
     assert app.is_visible("handle-control-checkbox"), (
         "RegisteredNoNest should show the control checkbox: "
         f"{app.driver.diagnose('handle-control-checkbox')} error={app.error_text()!r}"

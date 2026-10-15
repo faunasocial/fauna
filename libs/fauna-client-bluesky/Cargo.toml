@@ -4,8 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# The consume-side Bluesky client only: the typed `bluesky.feed.thread` call and
-# the shared focal-post heuristic. The host side (did:plc custody, rotation keys,
+# The consume-side Bluesky client only: the typed `bluesky.feed.thread` call (the
+# nest names the focal post on the wire). The host side (did:plc custody, rotation keys,
 # handle binding, tombstones, the recovery fork) is ATProto and lives in
 # `fauna-client-atproto` (`atproto-pds-bridge.md` § Naming).
 

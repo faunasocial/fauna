@@ -732,6 +732,20 @@ pub fn is_access_revoked(folder: &str) -> bool {
 /// The hold is per SET (one engine per bound set), so like [`is_access_revoked`]
 /// this is keyed by set name rather than by folder path.
 pub fn deletes_held_for(folder: &str) -> u64 {
+    binding_row_count(folder, |row| row.deletes_held)
+}
+
+/// How many deletes were withheld on `folder` because part of it was
+/// **unreadable** (`delete-propagation.md` § Unreadable is not absent) — the
+/// count `folder-location-unreadable` renders, a status line with no action.
+/// `0` (and the reading before [`install`]) renders nothing. Read like
+/// [`deletes_held_for`], off the same fold.
+pub fn deletes_skipped_unreadable_for(folder: &str) -> u64 {
+    binding_row_count(folder, |row| row.deletes_skipped_unreadable)
+}
+
+/// One count off the bound-set row for `folder`; `0` with no agent or no row.
+fn binding_row_count(folder: &str, count: impl Fn(&BindingRow) -> u64) -> u64 {
     AGENT.with(|cell| {
         cell.borrow()
             .as_ref()
@@ -742,7 +756,7 @@ pub fn deletes_held_for(folder: &str) -> u64 {
                     .rendered()
                     .iter()
                     .find(|row| row.folder == folder)
-                    .map(|row| row.deletes_held)
+                    .map(count)
                     .unwrap_or_default()
             })
             .unwrap_or_default()
@@ -962,7 +976,7 @@ pub fn apply_held_deletes(folder: String) {
 /// the agent. A failed push keeps the row rendered and re-pushes on the next
 /// reconcile (union semantics); a successful one confirms + pokes the loop. The
 /// set's content keys are the agent's to resolve: the bind's reconcile re-reads
-/// its holder's custody (`on-demand-files.md` § Shared sets on a capability host
+/// its holder's custody (`on-demand-files-shared-sets.md` § Shared sets on a capability host
 /// → *One mechanism*).
 pub fn add_binding(mapping: LocationBinding) {
     AGENT.with(|cell| {
@@ -1067,7 +1081,11 @@ pub fn reconcile() {
 }
 
 /// Push one bind; confirm into the model on success (a failure just leaves the
-/// row pending for the next reconcile).
+/// row pending for the next reconcile). A confirmed bind also repaints the
+/// Folders page: the agent enrols this device's place as part of the bind
+/// (`file-sync.md` § 4), and the rebuild re-opens the expanded row, whose
+/// re-read paints the new seat in `folder-place-row` — the twin of tui's
+/// `FolderBindConfirmed` roster resync.
 fn push_bind(agent: &AgentUi, pending: PendingBind) {
     let provisioner = Arc::clone(&agent.provisioner);
     let done_path = pending.path.clone();
@@ -1079,11 +1097,14 @@ fn push_bind(agent: &AgentUi, pending: PendingBind) {
                 .await
         },
         move |result| match result {
-            Ok(()) => AGENT.with(|cell| {
-                if let Some(agent) = cell.borrow().as_ref() {
-                    agent.model.borrow_mut().confirm_bind(&done_path);
-                }
-            }),
+            Ok(()) => {
+                AGENT.with(|cell| {
+                    if let Some(agent) = cell.borrow().as_ref() {
+                        agent.model.borrow_mut().confirm_bind(&done_path);
+                    }
+                });
+                rerender_folders_page();
+            }
             Err(e) => tracing::warn!("bind_location failed (reconcile will retry): {e}"),
         },
     );

@@ -324,14 +324,18 @@ impl FfiSyncClient {
     /// `fauna.sync.status` — the sync state of one folder: its source device
     /// (+ online flag) and every destination. Ownership-checked.
     pub async fn status(&self, folder: String) -> Result<FfiSyncStatus, FfiError> {
-        let reply = self.client().status(folder).await.map_err(stringify)?;
+        let reply = self
+            .client()
+            .status(folder, None)
+            .await
+            .map_err(stringify)?;
         Ok(reply.into())
     }
 
     /// `fauna.sync.files` — the files in one folder (the media page's file
     /// list). Ownership-checked.
     pub async fn files(&self, folder: String) -> Result<Vec<FfiSyncFile>, FfiError> {
-        let reply = self.client().files(folder).await.map_err(stringify)?;
+        let reply = self.client().files(folder, None).await.map_err(stringify)?;
         Ok(reply.files.into_iter().map(Into::into).collect())
     }
 

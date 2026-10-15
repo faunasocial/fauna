@@ -516,6 +516,12 @@ impl InMemoryPersistence {
         self
     }
 
+    /// Re-point the persisted account in place — what an in-process account
+    /// switch does to the store a reused machine reads.
+    pub fn switch_identity(&self, secret: Vec<u8>) {
+        *self.identity.lock().unwrap() = Some(secret);
+    }
+
     pub fn with_nest_url(self, nest_url: impl Into<String>) -> Self {
         *self.nest_url.lock().unwrap() = Some(nest_url.into());
         self

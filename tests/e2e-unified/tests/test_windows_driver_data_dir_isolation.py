@@ -68,13 +68,13 @@ class _FakeProc:
         pass
 
 
-@pytest.fixture
-def driver(monkeypatch):
+def _stubbed_driver(monkeypatch):
     """A `WindowsBridgeDriver` whose `launch()` runs for real against stubs.
 
     Only the outward calls are replaced (bridge build, process spawn, HTTP, the
     2s dialog-dismiss sleep) — the env-building and dir-ownership logic under test
-    runs verbatim.
+    runs verbatim. A plain function rather than only the fixture below, because
+    the ownership tests need a SEQUENCE of fresh drivers, as the seams they pin do.
     """
     monkeypatch.setattr(win, "_ensure_bridge_built", lambda: None)
     monkeypatch.setattr(win.subprocess, "Popen", lambda *a, **k: _FakeProc())
@@ -89,6 +89,12 @@ def driver(monkeypatch):
     # the one actually on the path or recover() hits a real socket refusal.
     monkeypatch.setattr(d, "_await_health", lambda *a, **k: True)
     monkeypatch.setattr(d, "dismiss_system_dialogs", lambda *a, **k: None)
+    return d
+
+
+@pytest.fixture
+def driver(monkeypatch):
+    d = _stubbed_driver(monkeypatch)
     yield d
     d.teardown()
 
@@ -153,24 +159,13 @@ def test_teardown_reclaims_only_a_dir_the_driver_created(tmp_path, monkeypatch):
     phase launches a fresh driver against it and expects to find what this phase
     wrote), so teardown must leave it alone; the per-instance default is ours.
     """
-    monkeypatch.setattr(win, "_ensure_bridge_built", lambda: None)
-    monkeypatch.setattr(win.subprocess, "Popen", lambda *a, **k: _FakeProc())
-    monkeypatch.setattr(win.time, "sleep", lambda *_a, **_k: None)
-
-    def _stub(d):
-        monkeypatch.setattr(d, "_get", lambda *a, **k: {"ready": True})
-        monkeypatch.setattr(d, "_post", lambda *a, **k: {})
-        monkeypatch.setattr(d, "_delete", lambda *a, **k: {})
-        monkeypatch.setattr(d, "dismiss_system_dialogs", lambda *a, **k: None)
-        return d
-
-    owned = _stub(win.WindowsBridgeDriver())
+    owned = _stubbed_driver(monkeypatch)
     default_dir = _launch_env(owned)["FAUNA_E2E_DATA_DIR"]
     owned.teardown()
     assert not os.path.isdir(default_dir), "teardown leaked the per-instance data dir"
 
     pinned = tmp_path / "outlives-me"
-    supplied = _stub(win.WindowsBridgeDriver())
+    supplied = _stubbed_driver(monkeypatch)
     _launch_env(supplied, {"data_dir": str(pinned)})
     supplied.teardown()
     assert pinned.is_dir(), (
@@ -271,13 +266,14 @@ def test_localappdata_survives_recover_as_a_same_device_restart(driver):
 
 
 def test_a_caller_supplied_data_dir_is_not_reparented(driver, tmp_path):
-    """The at-rest grid / `alice_second_device` seam keeps its EXACT path.
+    """A caller-supplied data dir keeps its EXACT path (`alice_second_device`).
 
-    Those seams hand one root to a sequence of driver instances, so re-parenting
-    it under this instance's throwaway `%LOCALAPPDATA%` would hand the next phase
-    a different (empty) root. `%LOCALAPPDATA%` is still relocated — the two roots
-    just stop being nested, which is why the store root is published separately
-    rather than derived from the data dir.
+    A seam that hands one root to a sequence of driver instances would get a
+    different (empty) root on the next phase if it were re-parented under this
+    instance's throwaway `%LOCALAPPDATA%`. `%LOCALAPPDATA%` is still relocated —
+    the two roots just stop being nested, which is why the store root is published
+    separately rather than derived from the data dir (and why the at-rest grid pins
+    `local_appdata` too: see the grid's own pin below).
     """
     pinned = tmp_path / "pinned-root"
     env = _launch_env(driver, {"data_dir": str(pinned)})
@@ -289,27 +285,54 @@ def test_a_caller_supplied_data_dir_is_not_reparented(driver, tmp_path):
 
 def test_teardown_reclaims_the_relocated_localappdata_it_created(tmp_path, monkeypatch):
     """Ownership mirrors the credential/data-dir contract."""
-    monkeypatch.setattr(win, "_ensure_bridge_built", lambda: None)
-    monkeypatch.setattr(win.subprocess, "Popen", lambda *a, **k: _FakeProc())
-    monkeypatch.setattr(win.time, "sleep", lambda *_a, **_k: None)
-
-    def _stub(d):
-        monkeypatch.setattr(d, "_get", lambda *a, **k: {"ready": True})
-        monkeypatch.setattr(d, "_post", lambda *a, **k: {})
-        monkeypatch.setattr(d, "_delete", lambda *a, **k: {})
-        monkeypatch.setattr(d, "dismiss_system_dialogs", lambda *a, **k: None)
-        return d
-
-    owned = _stub(win.WindowsBridgeDriver())
+    owned = _stubbed_driver(monkeypatch)
     default_local = _launch_env(owned)["LOCALAPPDATA"]
     owned.teardown()
     assert not os.path.isdir(default_local), "teardown leaked the relocated %LOCALAPPDATA%"
 
     pinned = tmp_path / "outlives-me"
-    supplied = _stub(win.WindowsBridgeDriver())
+    supplied = _stubbed_driver(monkeypatch)
     _launch_env(supplied, {"local_appdata": str(pinned)})
     supplied.teardown()
     assert pinned.is_dir(), "teardown deleted a CALLER-supplied %LOCALAPPDATA% root"
+
+
+def test_the_at_rest_grid_hands_both_builds_one_account_store(tmp_path, monkeypatch):
+    """`skew_client.state_home_config` pins the ANCESTOR, so the grid's builds share
+    one unified account store.
+
+    The at-rest upgrade grid launches a SEQUENCE of fresh drivers on one HOME — the
+    previous build, then HEAD — and asks whether the second opens what the first
+    left. A config that pinned only `data_dir` carried the MLS store, logs and pins
+    across, but left each driver relocating `%LOCALAPPDATA%` to a fresh `mkdtemp`;
+    shared Rust roots the account store at `%LOCALAPPDATA%\\Fauna\\sync`, so HEAD
+    opened an EMPTY account store — the one at-rest store an upgrade most has to
+    carry. Pinning `local_appdata` with the data dir under it as `<home>\\Fauna` is
+    production's layout, and the same one-ancestor pin linux/tui make with
+    `xdg_base`.
+    """
+    from helpers.skew_client import state_home_config
+
+    home = tmp_path / "home"
+    config = state_home_config(
+        "windows", home=home, creds=tmp_path / "creds", keyring_app="at-rest-pin")
+
+    resolved = []
+    for _build in ("previous", "head"):
+        d = _stubbed_driver(monkeypatch)
+        env = _launch_env(d, config)
+        resolved.append((env["LOCALAPPDATA"], env["FAUNA_E2E_DATA_DIR"], d._resolved_store_root))
+        d.teardown()
+
+    assert resolved[0] == resolved[1], (
+        f"the at-rest grid's two builds resolved different roots, so HEAD opens a fresh "
+        f"account store instead of the previous build's: {resolved!r}"
+    )
+    local, data_dir, store_root = resolved[0]
+    assert local == str(home)
+    assert data_dir == os.path.join(str(home), "Fauna")
+    assert store_root == os.path.join(str(home), "Fauna", "sync")
+    assert home.is_dir(), "teardown reclaimed the grid's caller-owned HOME between builds"
 
 
 def test_keeping_the_data_dir_keeps_the_root_that_contains_it(monkeypatch):
@@ -320,16 +343,8 @@ def test_keeping_the_data_dir_keeps_the_root_that_contains_it(monkeypatch):
     keeping — and that dir is the only windows-side record of what the shared
     crates decided (`<data_dir>/logs/fauna.log.<date>`).
     """
-    monkeypatch.setattr(win, "_ensure_bridge_built", lambda: None)
-    monkeypatch.setattr(win.subprocess, "Popen", lambda *a, **k: _FakeProc())
-    monkeypatch.setattr(win.time, "sleep", lambda *_a, **_k: None)
     monkeypatch.setenv("FAUNA_E2E_KEEP_DATA_DIR", "1")
-
-    d = win.WindowsBridgeDriver()
-    monkeypatch.setattr(d, "_get", lambda *a, **k: {"ready": True})
-    monkeypatch.setattr(d, "_post", lambda *a, **k: {})
-    monkeypatch.setattr(d, "_delete", lambda *a, **k: {})
-    monkeypatch.setattr(d, "dismiss_system_dialogs", lambda *a, **k: None)
+    d = _stubbed_driver(monkeypatch)
 
     env = _launch_env(d)
     data_dir, local = env["FAUNA_E2E_DATA_DIR"], env["LOCALAPPDATA"]

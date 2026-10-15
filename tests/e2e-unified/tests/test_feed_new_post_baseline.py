@@ -1,9 +1,10 @@
 """Unit tests for the new-post wait's BASELINE (tier_1).
 
-`FeedActions._wait_for_new_post` returns on either of two signals: the composed
-text reaching the top of the list, or the list's count rising above a baseline
-the caller read before submitting. The count half is only a question about the
-caller's OWN post when that baseline came from a list that had already loaded.
+`FeedActions._wait_for_new_post` confirms a caller that has the body by IDENTITY
+(the typed text on any rendered card); only a caller without the body falls back
+to the list's count rising above a baseline read before submitting. That count
+is only a question about the caller's OWN post when the baseline came from a
+list that had already loaded.
 
 On web it often had not. The Feed page enables its composer at `feedReady`,
 before its `loadAll()` runs four reads and the local-feed query, and every test
@@ -85,3 +86,42 @@ def test_web_baseline_on_an_already_loaded_page_returns_at_once():
 
 def test_non_web_baseline_is_the_plain_count():
     assert FeedActions(_NativeDriver(count=5))._settled_post_count() == 5
+
+
+class _IdentityFeed(FeedActions):
+    """A feed pinned at its display cap whose top card is NOT the new post.
+
+    The count never grows and the top card is an older post — the shape a
+    shared nest at the 50-post page with a ranked feed selected presents."""
+
+    def __init__(self, visible_texts: list[str]) -> None:
+        self._texts = visible_texts
+        self.driver = type("D", (), {"is_visible": lambda self, _id: False})()
+
+    def post_text_visible(self, text: str) -> bool:
+        return any(text in t for t in self._texts)
+
+    def first_post_text(self) -> str:
+        return self._texts[0]
+
+    def post_count(self) -> int:
+        return 50
+
+    def is_visible(self) -> bool:
+        return True
+
+    def _compose_console_tail(self) -> str:
+        return ""
+
+
+def test_new_post_is_confirmed_by_identity_not_top_position_or_count():
+    feed = _IdentityFeed(["trending-keep-gated-bb13e8bb", "the typed body"])
+    # Count is flat at the cap and the top card is another post: still found.
+    feed._wait_for_new_post(50, expected_text="the typed body", timeout=2)
+
+
+def test_absent_identity_times_out_even_if_count_would_have_grown():
+    feed = _IdentityFeed(["trending-keep-gated-bb13e8bb"])
+    feed.post_count = lambda: 51  # type: ignore[method-assign]
+    with pytest.raises(TimeoutError, match="on any card"):
+        feed._wait_for_new_post(50, expected_text="the typed body", timeout=0.5)

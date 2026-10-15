@@ -127,7 +127,7 @@ pub async fn begin_dns01_order(
 /// As [`begin_dns01_order`], but the ACME account/directory HTTP calls go through
 /// the caller-supplied `http` client — the pebble real-wire entry (S4b); see
 /// [`obtain_certificate_dns01_with_http`]. `test-helpers` only.
-#[cfg(feature = "test-helpers")]
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
 pub async fn begin_dns01_order_with_http(
     cfg: &Dns01OrderConfig,
     account_credentials: Option<&[u8]>,
@@ -210,7 +210,7 @@ pub async fn obtain_certificate_dns01(
 // injected client — that shadowing is the whole point, so collapsing these into
 // a struct here would diverge from the production signature under test.
 #[allow(clippy::too_many_arguments)]
-#[cfg(feature = "test-helpers")]
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
 pub async fn obtain_certificate_dns01_with_http(
     cfg: &Dns01OrderConfig,
     account_credentials: Option<&[u8]>,
@@ -327,7 +327,7 @@ async fn load_or_create_account(
 /// As [`load_or_create_account`], but over a caller-supplied HTTP client (the
 /// pebble test injects one trusting pebble's throwaway CA — S4b). `test-helpers`
 /// only; the production order never reaches this.
-#[cfg(feature = "test-helpers")]
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
 async fn load_or_create_account_with_http(
     cfg: &Dns01OrderConfig,
     account_credentials: Option<&[u8]>,

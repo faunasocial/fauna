@@ -67,6 +67,25 @@ pub fn retry_policy_from_outbound(policy: &OutboundPolicy) -> RetryPolicy {
     }
 }
 
+/// Map the admin's two backscatter toggles (`mail-policy-config.md` §
+/// Outbound delivery) onto the shared suppressor. The null-sender and
+/// forwarded-and-externally-bounced suppressors have no admin knob and stay
+/// on. Read by both the permfail bounce and the delay warning.
+pub fn suppressor_toggles_from_outbound(policy: &OutboundPolicy) -> SuppressorToggles {
+    SuppressorToggles {
+        on_spf_hardfail: policy.suppress_ndr_spf_hardfail,
+        on_dmarc_reject_quarantine: policy.suppress_ndr_dmarc_reject,
+        ..SuppressorToggles::default()
+    }
+}
+
+/// The effective suppressor toggles from the stored outbound policy.
+pub(crate) async fn suppressor_toggles(db: &CacheDb) -> Result<SuppressorToggles> {
+    Ok(suppressor_toggles_from_outbound(
+        &db.get_outbound_policy().await?.effective(),
+    ))
+}
+
 /// What to do with a row whose latest delivery attempt just failed
 /// temporarily. Returned for the handler to apply; carries no side effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,7 +160,7 @@ pub async fn enqueue_delay_warning(
         &row.original_sender,
         row.is_forwarded,
         false,
-        &SuppressorToggles::default(),
+        &suppressor_toggles(db).await?,
     ) {
         tracing::info!(
             id = row.id,
@@ -459,5 +478,44 @@ mod tests {
             "must not warn a sender that SPF-hardfailed inbound"
         );
         assert_eq!(db.fetch_all_outbound_for_test().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delay_warning_sent_on_spf_hardfail_when_admin_switches_suppression_off() {
+        // The admin's backscatter toggle (`mail-policy-config.md` § Outbound
+        // delivery) governs delay warnings as well as bounces.
+        let db = CacheDb::open_in_memory().unwrap();
+        db.put_outbound_policy(crate::db::mail_policy::OutboundPolicyOverrides {
+            suppress_ndr_spf_hardfail: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let now = 1_500_000;
+        let ids = db
+            .enqueue_outbound_at(
+                NewOutbound {
+                    original_msgid: "orig@local.test",
+                    original_sender: "spf-fail@sender.test",
+                    recipients: &["bob@dest.test"],
+                    raw_message: b"From: spf-fail@sender.test\r\nTo: bob@dest.test\r\n\r\nbody",
+                    inbound_verdicts: verdicts("fail", "none", "none"),
+                    is_forwarded: false,
+                    forward_actor_id: None,
+                    forward_rule_id: None,
+                    forward_copy_mode: None,
+                    submit_actor_id: None,
+                },
+                now - 4 * HOUR,
+            )
+            .await
+            .unwrap();
+        let r = db.fetch_outbound_by_id(ids[0]).await.unwrap().unwrap();
+
+        let emitted = enqueue_delay_warning(&db, &r, "451 4.7.1 try later", now)
+            .await
+            .unwrap();
+        assert!(emitted, "suppression switched off: the warning is sent");
+        assert_eq!(db.fetch_all_outbound_for_test().await.unwrap().len(), 2);
     }
 }

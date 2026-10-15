@@ -11,7 +11,9 @@
 //! WASM-safe and unit-testable in isolation. The day-counter / `mails_sent_today`
 //! state, the submission-time enforcement decision, and the queue-tomorrow
 //! deferral all live nest-side (`bins/fauna-nest/src/db/mail_warmup.rs` +
-//! `submit_outbound`), bound to nest's clock + the `outbound_mail_queue`. Keeping
+//! `submit_outbound`), bound to nest's clock + the `outbound_mail_queue`; the
+//! held-queue fold ([`held_positions`] — a held message's release date and the
+//! count of held messages ahead of it) is pure and lives here too. Keeping
 //! the cap curve here (priority #2) lets a future client "warmup status" preview
 //! or the Go MTA bridge reuse the identical day→max interpretation.
 
@@ -90,6 +92,65 @@ pub fn current_day_for(first_outbound_at: i64, now_secs: i64) -> u32 {
     (delta_days.max(0) + 1) as u32
 }
 
+/// One queued recipient row the warm-up is holding, as the held-queue read
+/// sees it: the row's id (its place in submission order), the message it
+/// belongs to (any key naming the message — every recipient row of one message
+/// carries the same one), and when the ramp lets it go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldRow<K> {
+    pub row_id: i64,
+    pub message: K,
+    pub release_at: i64,
+}
+
+/// A message's place in the warm-up's held queue (`mail-deliverability.md`
+/// § Enforcement at submission time, the deferred-state bullet): when it will
+/// be delivered, and how many held messages were submitted before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeldPosition {
+    /// The latest release instant over the message's held recipient rows
+    /// (Unix seconds) — the ramp's next 00:00 UTC at submission.
+    pub release_at: i64,
+    /// Held messages submitted before this one (`0` = first in the queue).
+    pub messages_ahead: u32,
+}
+
+/// Fold the held recipient rows into one [`HeldPosition`] per message.
+///
+/// A message's place is decided by its earliest row (submission order is row
+/// order), so a message split across many recipient rows counts once, and the
+/// count ahead of it is the number of distinct messages whose earliest row
+/// came first. Pure: the caller reads the rows (still pending, release still
+/// ahead) from its own queue.
+pub fn held_positions<K: Ord + Clone>(
+    rows: impl IntoIterator<Item = HeldRow<K>>,
+) -> std::collections::BTreeMap<K, HeldPosition> {
+    let mut first: std::collections::BTreeMap<K, (i64, i64)> = Default::default();
+    for r in rows {
+        let e = first.entry(r.message).or_insert((r.row_id, r.release_at));
+        e.0 = e.0.min(r.row_id);
+        e.1 = e.1.max(r.release_at);
+    }
+    let mut order: Vec<(i64, K, i64)> = first
+        .into_iter()
+        .map(|(k, (row_id, release_at))| (row_id, k, release_at))
+        .collect();
+    order.sort_by_key(|(row_id, _, _)| *row_id);
+    order
+        .into_iter()
+        .enumerate()
+        .map(|(i, (_, k, release_at))| {
+            (
+                k,
+                HeldPosition {
+                    release_at,
+                    messages_ahead: i as u32,
+                },
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +225,52 @@ mod tests {
         assert_eq!(current_day_for(first, 129 * DAY), 30); // unlimited threshold
         // Never runs backwards: a `now` before first_outbound clamps to day 1.
         assert_eq!(current_day_for(first, first - DAY), 1);
+    }
+
+    #[test]
+    fn held_positions_count_messages_not_rows_in_submission_order() {
+        let row = |row_id, message: &str, release_at| HeldRow {
+            row_id,
+            message: message.to_string(),
+            release_at,
+        };
+        let held = held_positions([
+            // "b" was submitted second, but its rows are read first.
+            row(7, "b", 200),
+            row(3, "a", 100),
+            row(4, "a", 100),
+            row(5, "a", 100),
+            row(8, "b", 200),
+            row(12, "c", 200),
+        ]);
+        assert_eq!(held.len(), 3);
+        assert_eq!(
+            held["a"],
+            HeldPosition {
+                release_at: 100,
+                messages_ahead: 0,
+            }
+        );
+        assert_eq!(held["b"].messages_ahead, 1);
+        assert_eq!(held["c"].messages_ahead, 2);
+        assert_eq!(held["c"].release_at, 200);
+    }
+
+    #[test]
+    fn a_held_message_releases_with_its_latest_row() {
+        let held = held_positions([
+            HeldRow {
+                row_id: 1,
+                message: 9u8,
+                release_at: 100,
+            },
+            HeldRow {
+                row_id: 2,
+                message: 9u8,
+                release_at: 300,
+            },
+        ]);
+        assert_eq!(held[&9].release_at, 300);
+        assert!(held_positions(Vec::<HeldRow<u8>>::new()).is_empty());
     }
 }

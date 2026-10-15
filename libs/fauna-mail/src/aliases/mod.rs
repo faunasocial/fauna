@@ -24,6 +24,10 @@ use thiserror::Error;
 #[cfg(feature = "role-overrides")]
 pub mod role_overrides;
 
+/// The client-side "Delivered to" resolution (`mail-aliases.md` § Label): which
+/// of the user's aliases an opened message arrived on, from its delivery stamps.
+pub mod delivered;
+
 /// Canonical `account_aliases.kind` strings — the single source of truth for
 /// the kind discriminator shared between the nest DB layer (which re-exports
 /// these), the WS-RPC handlers, and this matcher. `catchall` is intentionally
@@ -71,7 +75,8 @@ pub const MIN_WILDCARD_PREFIX_LEAD: usize = 2;
 
 /// `X-Fauna-Address-*` headers the resolver asks the MDA to stamp before the
 /// message hits the user's filter rules (`mail-aliases.md` § Kind 2/3/4/5).
-/// Exact matches stamp nothing.
+/// Exact matches stamp none of these (every resolved copy still carries the
+/// delivery stamps [`HEADER_DELIVERED_TO`] and [`HEADER_SPAM_THRESHOLD`]).
 pub const HEADER_ADDRESS_SUFFIX: &str = "X-Fauna-Address-Suffix";
 pub const HEADER_WILDCARD_SUFFIX: &str = "X-Fauna-Address-Wildcard-Suffix";
 pub const HEADER_CATCHALL: &str = "X-Fauna-Address-Catchall";
@@ -85,6 +90,17 @@ pub const HEADER_CATCHALL_DOMAIN: &str = "X-Fauna-Address-Catchall-Domain";
 /// the token is public (it's in the address the sender used) but body-stamping
 /// would leak it to a body-scanning recipient.
 pub const HEADER_DISPOSABLE: &str = "X-Fauna-Address-Disposable";
+
+/// The delivery-time envelope-recipient stamp (`mail-aliases.md` § Kind 2 — "the
+/// full original `RCPT TO` address is preserved in the message envelope as
+/// delivered"): the lower-cased `local@domain` this copy was delivered to,
+/// stamped on EVERY resolved mailbox copy (exact and role-address included),
+/// next to [`HEADER_SPAM_THRESHOLD`]. Deliberately NOT an `X-Fauna-Address-*`
+/// name: it records the delivery, not an alias-kind match, so "exact matches
+/// stamp no alias header" still holds. It shares the `X-Fauna-` namespace, so
+/// every filing door's forgery strip covers it by prefix. Read back by
+/// [`delivered::delivered_alias`] for the "Delivered to" label (§ Label).
+pub const HEADER_DELIVERED_TO: &str = "X-Fauna-Delivered-To";
 
 /// The delivery-time spam-threshold stamp (`mail-aliases.md` § Spam-threshold
 /// override — "nest folds alias > account > default at ingest into a single
@@ -167,24 +183,36 @@ pub fn prepend_stamped_headers(raw_message: &[u8], stamps: &[(String, String)]) 
 /// module does; `header_walk` (pure std) lists `aliases` among its gates for
 /// exactly this caller (`lib.rs`, the gate's comment).
 pub fn read_spam_threshold_stamp(raw_message: &[u8]) -> Option<u32> {
+    first_header_value(raw_message, HEADER_SPAM_THRESHOLD)?
+        .parse::<u32>()
+        .ok()
+}
+
+/// The trimmed value of the FIRST `name` field in `raw_message`'s header
+/// section (field name matched case-insensitively, RFC 5322 §2.2.3), or
+/// `None` when the field is absent, its value is not UTF-8, or the header walk
+/// stalls. First-match is the delivery-stamp contract: a genuine stamp is
+/// prepended at delivery, ahead of anything the sender wrote. The one reader
+/// every `X-Fauna-*` stamp consumer goes through, so they cannot drift on the
+/// parse.
+pub(crate) fn first_header_value<'a>(raw_message: &'a [u8], name: &str) -> Option<&'a str> {
     use crate::header_walk::{find_body_offset, parse_header};
     let body_offset = find_body_offset(raw_message).unwrap_or(raw_message.len());
     let header_section = &raw_message[..body_offset];
 
     let mut i = 0;
     while i < header_section.len() {
-        let (header_end, name) = parse_header(&header_section[i..]);
+        let (header_end, field_name) = parse_header(&header_section[i..]);
         if header_end == 0 {
             break; // Walker stalled — fail safe to "no stamp".
         }
-        if name
+        if field_name
             .trim_ascii()
-            .eq_ignore_ascii_case(HEADER_SPAM_THRESHOLD.as_bytes())
+            .eq_ignore_ascii_case(name.as_bytes())
         {
             let field = &header_section[i..i + header_end];
             let colon = field.iter().position(|b| *b == b':')?;
-            let value = &field[colon + 1..];
-            return std::str::from_utf8(value).ok()?.trim().parse::<u32>().ok();
+            return Some(std::str::from_utf8(&field[colon + 1..]).ok()?.trim());
         }
         i += header_end;
     }

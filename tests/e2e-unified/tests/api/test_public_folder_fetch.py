@@ -36,6 +36,7 @@ import fauna_ffi
 from clients._ws_rpc_core import RpcCallError
 from clients.ws_rpc_anon_client import WsRpcAnonClient
 from common.auth import create_actor_and_register
+from helpers.set_names import audience_update
 
 from tests.api.test_web_paywall_folder import _actor_client, _post_bytes
 
@@ -73,7 +74,7 @@ def _record(url: str, port: int, owner: dict, folder: str, path: str, body: byte
 
 def _set_audience(url: str, owner: dict, folder: str, audience: str) -> None:
     with _actor_client(url, owner) as ws:
-        ws.call("fauna.folders.update", {"name": folder, "audience": audience})
+        ws.call("fauna.folders.update", audience_update(folder, audience))
 
 
 def _fetch(ws, owner_id: bytes, folder: str, since: int = 0) -> dict:

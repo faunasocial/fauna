@@ -71,6 +71,13 @@ struct ListsCtx {
     form_mode: Cell<FormMode>,
     editing_id: RefCell<Option<String>>,
     domains: RefCell<Vec<String>>,
+    /// The edited list's stored archive link (`None` when adding) — the
+    /// predicate asks only about a link the list does not already hold.
+    saved_archive_url: RefCell<Option<String>>,
+    /// The archive URL the sheet's Submit is armed for (two-click confirm,
+    /// `common.md` § Two-click confirm). Keyed on the URL, so editing the link
+    /// disarms it.
+    archive_armed: RefCell<Option<String>>,
     on_navigate_to_members: Rc<dyn Fn(String, String)>,
     w: ListsWidgets,
 }
@@ -247,6 +254,8 @@ fn wire_machine(
         form_mode: Cell::new(FormMode::Add),
         editing_id: RefCell::new(None),
         domains: RefCell::new(Vec::new()),
+        saved_archive_url: RefCell::new(None),
+        archive_armed: RefCell::new(None),
         on_navigate_to_members,
         w: widgets,
     });
@@ -267,9 +276,18 @@ fn wire_machine(
             .clone()
             .connect_clicked(move |_| submit_sheet(&ctx));
     }
+    // Editing the archive link disarms a Submit armed for the old one.
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w
+            .list_archive_input
+            .clone()
+            .connect_changed(move |_| sync_archive_arm(&ctx));
+    }
     {
         let ctx = Rc::clone(&ctx);
         ctx.w.cancel_button.clone().connect_clicked(move |_| {
+            disarm_archive(&ctx);
             ctx.w.sheet_group.set_visible(false);
             hydrate_and_render(&ctx);
         });
@@ -284,9 +302,37 @@ fn wire_machine(
     Rc::new(move || hydrate_and_render(&ctx))
 }
 
+/// The archive URL a submit must confirm first, or `None` when it saves on the
+/// first press — the shared machine's decision, fed the user's own domains and
+/// (when editing) the URL the list already stores.
+fn archive_needing_confirm(ctx: &Rc<ListsCtx>) -> Option<String> {
+    let url = ctx.w.list_archive_input.text().trim().to_string();
+    let saved = ctx.saved_archive_url.borrow().clone();
+    let domains = ctx.domains.borrow().clone();
+    fauna_client_mail_settings::archive_url_needs_confirm(url.clone(), saved, domains)
+        .then_some(url)
+}
+
+/// Return the Submit to its base label and forget the arm.
+fn disarm_archive(ctx: &Rc<ListsCtx>) {
+    *ctx.archive_armed.borrow_mut() = None;
+    ctx.w.submit_button.set_label(S::SUBMIT);
+}
+
+/// Keep the Submit label honest after the archive input changes: armed only
+/// while the link it holds is the one that was armed.
+fn sync_archive_arm(ctx: &Rc<ListsCtx>) {
+    let armed = ctx.archive_armed.borrow().clone();
+    if armed.is_some() && armed != archive_needing_confirm(ctx) {
+        disarm_archive(ctx);
+    }
+}
+
 fn open_add_sheet(ctx: &Rc<ListsCtx>) {
     ctx.form_mode.set(FormMode::Add);
     *ctx.editing_id.borrow_mut() = None;
+    *ctx.saved_archive_url.borrow_mut() = None;
+    disarm_archive(ctx);
     crate::offline_gate::declare_wire_kind(
         &ctx.w.submit_button,
         "fauna.bridges.create_account_list",
@@ -307,6 +353,8 @@ fn open_add_sheet(ctx: &Rc<ListsCtx>) {
 fn open_edit_sheet(ctx: &Rc<ListsCtx>, view: &ListView) {
     ctx.form_mode.set(FormMode::Edit);
     *ctx.editing_id.borrow_mut() = Some(view.list_id_hex.clone());
+    *ctx.saved_archive_url.borrow_mut() = Some(view.list_archive_url.clone());
+    disarm_archive(ctx);
     crate::offline_gate::declare_wire_kind(
         &ctx.w.submit_button,
         "fauna.bridges.update_account_list",
@@ -331,6 +379,17 @@ fn open_edit_sheet(ctx: &Rc<ListsCtx>, view: &ListView) {
 }
 
 fn submit_sheet(ctx: &Rc<ListsCtx>) {
+    // An archive link off the user's own server asks once before saving: the
+    // first press saves nothing and relabels the button, a second press on the
+    // same link dispatches.
+    if let Some(url) = archive_needing_confirm(ctx)
+        && ctx.archive_armed.borrow().as_deref() != Some(url.as_str())
+    {
+        *ctx.archive_armed.borrow_mut() = Some(url);
+        ctx.w.submit_button.set_label(S::ARCHIVE_OFF_SERVER_CONFIRM);
+        return;
+    }
+    disarm_archive(ctx);
     let w = &ctx.w;
     let domains = ctx.domains.borrow();
     let local_domain = domains

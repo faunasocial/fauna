@@ -5,7 +5,7 @@ import Security
 /// The least-privilege capability the **app-dead** File Provider extension needs to
 /// serve one folder: a pre-derived owner `BackupKey` + a renewable nest
 /// bearer + the public identity/device ids and nest URL — **never the identity
-/// seed** (`file-sync.md` § On-Demand Files → Apple File Provider binding, *the
+/// seed** (`on-demand-files-apple.md` § On-Demand Files → Apple File Provider binding, *the
 /// extension hosts the engines*). The app writes these into the shared app-group
 /// Keychain at first domain creation; the extension reads them (and re-reads the
 /// bearer fresh on every use, so a rotated bearer is picked up without a rebuild).

@@ -1372,11 +1372,13 @@ pub async fn originate_room_roster(
     requesting_actor_hex: &str,
     room_id_hex: &str,
     at_policy_version: Option<u64>,
+    policy_version_span: Option<u32>,
 ) -> Result<Result<fauna_protocol::conversations::RoomListRosterReply, RpcError>, PoolError> {
     let req = FedRoomRosterRequest {
         requesting_actor_id: requesting_actor_hex.to_string(),
         room_id: room_id_hex.to_string(),
         at_policy_version,
+        policy_version_span,
     };
     let reply = pool
         .originate(
@@ -2589,8 +2591,12 @@ pub async fn originate_succession_push(
 
 /// Originate `fauna.federation.backup.changes.record` (exactly-once by
 /// content). Records one uploaded segment/manifest path as custody on the
-/// destination's owner-owned custody-copy reserved set. `Ok(reply)` ⇒ the
-/// custody `seq` (identical on a content-identical replay).
+/// destination's owner-owned custody-copy reserved set. `Ok(Ok(reply))` ⇒ the
+/// custody `seq` (identical on a content-identical replay); `Ok(Err(e))` ⇒ the
+/// peer answered with a typed error, kept whole so the coordinator can match
+/// its CODE (`fauna.protocol.rate_limited` is backpressure, never a failure —
+/// `segment-backup-protocol.md` § Cross-location backup protocol →
+/// *Backpressure*).
 ///
 /// `expected_nest_id`: see [`originate_backup_write_token_mint`].
 pub async fn originate_backup_changes_record(
@@ -2599,8 +2605,8 @@ pub async fn originate_backup_changes_record(
     peer_url: &str,
     expected_nest_id: &[u8],
     req: &FedBackupChangesRecordRequest,
-) -> Result<FedBackupChangesRecordReply, PoolError> {
-    match pool
+) -> Result<Result<FedBackupChangesRecordReply, RpcError>, PoolError> {
+    let reply = pool
         .originate_expecting(
             state,
             peer_url,
@@ -2609,15 +2615,8 @@ pub async fn originate_backup_changes_record(
             fresh_idempotency_key(),
             to_value(req),
         )
-        .await?
-    {
-        Ok(v) => value_to::<FedBackupChangesRecordReply>(&v)
-            .map_err(|()| PoolError::Dial("decode backup.changes.record reply".to_string())),
-        Err(e) => Err(PoolError::Dial(format!(
-            "peer backup.changes.record: {}",
-            e.code
-        ))),
-    }
+        .await?;
+    Ok(decode_peer_reply::<FedBackupChangesRecordReply>(reply))
 }
 
 #[cfg(test)]

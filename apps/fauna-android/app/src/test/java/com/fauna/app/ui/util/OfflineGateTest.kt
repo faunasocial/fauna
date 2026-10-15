@@ -119,6 +119,22 @@ import uniffi.fauna_client_mail_settings.SpamPolicyView
 import uniffi.fauna_client_mail_settings.SubmissionPolicyView
 import uniffi.fauna_client_mail_settings.DomainDmarcPolicy
 import uniffi.fauna_client_mail_settings.LocalDomainView
+import com.fauna.app.ui.screen.devices.DevicesRosterContent
+import com.fauna.app.ui.screen.settings.MailExportContent
+import com.fauna.app.ui.screen.settings.MailImportContent
+import uniffi.fauna_client_capabilities.CustodyHeldRowView
+import uniffi.fauna_client_capabilities.CustodyReceiptRowView
+import uniffi.fauna_client_capabilities.CustodyScopesView
+import uniffi.fauna_client_mail_settings.ExportStatus
+import uniffi.fauna_client_mail_settings.ExportStep
+import uniffi.fauna_client_mail_settings.ImportSourceKind
+import uniffi.fauna_client_mail_settings.ImportStatus
+import uniffi.fauna_client_mail_settings.ImportStep
+import uniffi.fauna_client_mail_settings.ImportTlsMode
+import uniffi.fauna_client_mail_settings.MailExportSnapshot
+import uniffi.fauna_client_mail_settings.MailImportSnapshot
+import uniffi.fauna_devices_machine.DevicesSnapshot
+import uniffi.fauna_mail.ExportFormat
 import uniffi.fauna_client_mail_settings.PrimaryDomainRenameView
 import uniffi.fauna_client_mail_settings.AliasKind
 import uniffi.fauna_client_mail_settings.AliasView
@@ -745,6 +761,7 @@ class OfflineGateTest {
                 expiresAt = 1_702_592_000L,
             ),
         ),
+        trustHoldersUnreachable = false,
     )
 
     private fun openAddFormAndType() {
@@ -991,6 +1008,7 @@ class OfflineGateTest {
         lastUsedAtMillis = null,
         lastsUntilMillis = null,
         connected = true,
+        paused = false,
         mail = mail,
     )
 
@@ -1889,7 +1907,7 @@ class OfflineGateTest {
             onNextPage = {},
             onPrevPage = {},
             onSaveRegistration = { _, _, _ -> },
-            onAdmitUser = { _, _, _ -> },
+            onAdmitUser = { _, _, _, _ -> },
             hexFull = { HexUtil.bytesToHex(it) },
             mailServingStatusLabel = { LocalizedText("admin.users_page.serving_here", emptyMap()) },
             rowControls = {
@@ -2035,9 +2053,11 @@ class OfflineGateTest {
             .performScrollTo().assertIsNotEnabled()
         // The five cap fields and the three membership pickers are drafts: the
         // admin may keep editing with no nest, and only Save reaches for one.
-        composeTestRule.onNodeWithTag("admin-settings-tier-cap-inbox")
+        // The add-a-tier form reuses the five cap ids, so each now matches two
+        // nodes (the tier row's and the form's); the first is the row's.
+        composeTestRule.onAllNodesWithTag("admin-settings-tier-cap-inbox")[0]
             .performScrollTo().assertIsEnabled()
-        composeTestRule.onNodeWithTag("admin-settings-tier-cap-feeds")
+        composeTestRule.onAllNodesWithTag("admin-settings-tier-cap-feeds")[0]
             .performScrollTo().assertIsEnabled()
         composeTestRule.onNodeWithTag("admin-settings-membership-tier-select")
             .performScrollTo().assertIsEnabled()
@@ -2283,6 +2303,7 @@ class OfflineGateTest {
             onAbortRename = {},
             onSetCatchAll = { _, _ -> },
             onSetRoleAddress = { _, _, _ -> },
+            onSetDmarcPolicy = { _, _ -> },
             onSetMode = { _, _ -> },
             onSetManageAll = {},
             onPutCredential = { _, _, _ -> },
@@ -3188,21 +3209,22 @@ class OfflineGateTest {
     }
 
     @Test
-    fun theAliasRowActiveToggleAndRevokeGate_whileEditAuditAndOverflowStayLive() {
+    fun theAliasRowActiveToggleRevokeAndDeleteGate_whileEditAndAuditStayLive() {
         render(FfiConnectionState.DISCONNECTED) { MailAliases() }
         composeTestRule.onNodeWithTag("mail-aliases-list-item-disabled-toggle")
             .performScrollTo().assertIsNotEnabled()
         composeTestRule.onNodeWithTag("mail-aliases-list-item-revoke-button")
             .performScrollTo().assertIsNotEnabled()
-        // Edit reveals, audit expands, and the overflow opens a menu — three
-        // live siblings in the same row as two dead controls. The overflow one
-        // matters most: the DELETE item inside it declares, and a gated opener
-        // would make that item unreachable rather than merely dead.
+        // `mail-aliases-list-item-overflow-menu` IS the inline Delete now (the
+        // two-click confirm, no dropdown — `common.md` § Two-click confirm), so
+        // it declares and gates like revoke rather than opening a menu.
+        composeTestRule.onNodeWithTag("mail-aliases-list-item-overflow-menu")
+            .performScrollTo().assertIsNotEnabled()
+        // Edit reveals and audit expands — two live siblings in the same row
+        // as the dead controls.
         composeTestRule.onNodeWithTag("mail-aliases-list-item-edit-button")
             .performScrollTo().assertIsEnabled()
         composeTestRule.onNodeWithTag("mail-aliases-list-item-show-audit")
-            .performScrollTo().assertIsEnabled()
-        composeTestRule.onNodeWithTag("mail-aliases-list-item-overflow-menu")
             .performScrollTo().assertIsEnabled()
     }
 
@@ -4159,6 +4181,7 @@ class OfflineGateTest {
         targetLevel = "linked",
         lines = listOf(LocalizedText("atproto_settings.transition_line", emptyMap())),
         showHistoryBackfill = true,
+        historyBackfillLabel = LocalizedText("atproto_settings.history_backfill_count_label", mapOf("count" to "3")),
         inProgress = inProgress,
     )
 
@@ -4216,6 +4239,7 @@ class OfflineGateTest {
             onOpenDeleteConfirm = {},
             onCancelDelete = {},
             onConfirmDelete = {},
+            onSetDeleteRetireIdentity = {},
             onSelectLevel = {},
             onConfirmTransition = {},
             onCancelTransition = {},
@@ -4678,5 +4702,268 @@ class OfflineGateTest {
         render(FfiConnectionState.CONNECTED) { ZapSigners() }
         composeTestRule.onNodeWithTag("nostr-unlink-button")
             .performScrollTo().assertIsEnabled()
+    }
+
+    // -- custody-held remove + the mail import/export wizards --
+    //
+    // Ten controls android rendered with no gate while the ledger recorded them
+    // as owed. Each pair: dead with no nest, live when connected. The wizard
+    // controls live in the noKids flavor; the unit-test source set compiles it.
+
+    private fun heldRow() = CustodyHeldRowView(
+        grantId = ByteArray(16) { 4 },
+        owner = ByteArray(32) { 5 },
+        scopes = CustodyScopesView(wholeAccount = true, scopes = emptyList()),
+        retainedBytesCap = 8uL * 1024uL * 1024uL * 1024uL,
+        budgetDraft = LocalizedText("8 GB", emptyMap()),
+        receipt = CustodyReceiptRowView(
+            statusLabel = LocalizedText("devices.custody_receipt_fresh", emptyMap()),
+            attestedAtSecs = 1_700_000_000L,
+            heldBytesLabel = LocalizedText("devices.custody_held_bytes", emptyMap()),
+            held = LocalizedText("", emptyMap()),
+            cap = LocalizedText("", emptyMap()),
+            degraded = false,
+            heldBytes = 1024uL,
+            attestedCap = 4096uL,
+        ),
+        stopped = false,
+    )
+
+    @Composable
+    private fun CustodyHeld() {
+        DevicesRosterContent(
+            snapshot = DevicesSnapshot(
+                devices = emptyList(),
+                folders = emptyList(),
+                followed = emptyList(),
+                websiteAddressEnabled = null,
+                conflicts = emptyList(),
+                wizard = null,
+                error = null,
+                members = emptyList(),
+                ownFleetId = null,
+                ownFingerprint = null,
+                ownP2pParticipation = null,
+            ),
+            localDeviceId = null,
+            actorId = "cd".repeat(32),
+            onRemoveDevice = {},
+            statusLabel = { online -> if (online) "Online" else "Offline" },
+            placeLabel = { o, a, d -> "PLACE:$o/$a/$d" },
+            keylessPrincipals = emptySet(),
+            custodyRows = emptyList(),
+            custodyHeld = listOf(heldRow()),
+            custodyOffers = emptyList(),
+            custodyOfferTargets = emptySet(),
+            mintCandidates = null,
+            onCustodyGesture = {},
+            receiptStatusLine = { "STATUS:${it.statusLabel.key}" },
+            heldBytesLine = { "HELD:${it.heldBytes}" },
+            memberRemovePending = null,
+            onMemberArm = {},
+            onMemberCancel = {},
+            onMemberConfirm = {},
+            memberEnrolledAt = { ms -> "WHEN:$ms" },
+        )
+    }
+
+    @Test
+    @Config(qualifiers = "h1280dp")
+    fun theCustodyHeldRemoveGates_whileItsStopSiblingStaysLive() {
+        render(FfiConnectionState.DISCONNECTED) { CustodyHeld() }
+        composeTestRule.onNodeWithTag("custody-held-remove-button")
+            .performScrollTo().assertIsNotEnabled()
+        // Stop is the pause, a different (un-gated here) gesture.
+        composeTestRule.onNodeWithTag("custody-held-stop-button")
+            .performScrollTo().assertIsEnabled()
+    }
+
+    @Test
+    @Config(qualifiers = "h1280dp")
+    fun theCustodyHeldRemoveIsLiveWhenConnected() {
+        render(FfiConnectionState.CONNECTED) { CustodyHeld() }
+        composeTestRule.onNodeWithTag("custody-held-remove-button")
+            .performScrollTo().assertIsEnabled()
+    }
+
+    private fun importSnap(step: ImportStep) = MailImportSnapshot(
+        step = step,
+        sourceKind = ImportSourceKind.GENERIC,
+        host = "",
+        port = 993u,
+        tlsMode = ImportTlsMode.IMPLICIT,
+        username = "",
+        password = "",
+        mailboxes = emptyList(),
+        dateFrom = "",
+        maxSizeBytes = 52428800uL,
+        sessionState = null,
+        importedCount = 0uL,
+        skippedCount = 0u,
+        erroredCount = 0u,
+        totalCount = 10uL,
+        errorLog = emptyList(),
+        startedAt = 0L,
+        lastProgressAt = 0L,
+        status = ImportStatus.IDLE,
+        error = null,
+    )
+
+    @Composable
+    private fun MailImport(step: ImportStep) {
+        MailImportContent(
+            snapshot = importSnap(step),
+            sourceKindLabel = { it.name },
+            tlsModeLabel = { it.name },
+            onBack = {},
+            onSelectSourceKind = {},
+            onSetTlsMode = {},
+            onConnect = { _, _, _, _, _ -> },
+            onToggleMailbox = {},
+            onScopeNext = { _, _ -> },
+            onPrev = {},
+            onStart = {},
+            onPause = {},
+            onResume = { _, _ -> },
+            onCancel = {},
+            onViewImported = {},
+        )
+    }
+
+    private fun exportSnap(step: ExportStep) = MailExportSnapshot(
+        step = step,
+        format = ExportFormat.MBOX,
+        mailboxes = emptyList(),
+        dateFrom = "",
+        dateTo = "",
+        stripHeaders = false,
+        sessionState = null,
+        exportedCount = 0u,
+        skippedCount = 0u,
+        erroredCount = 0u,
+        totalCount = 10u,
+        mailboxProgress = emptyList(),
+        errorLog = emptyList(),
+        blobBytes = null,
+        downloadUrl = "",
+        savedArchivePath = "",
+        startedAt = 0L,
+        lastProgressAt = 0L,
+        status = ExportStatus.IDLE,
+        error = null,
+    )
+
+    @Composable
+    private fun MailExport(step: ExportStep) {
+        MailExportContent(
+            snapshot = exportSnap(step),
+            formatLabel = { it.name },
+            onBack = {},
+            onSelectFormat = {},
+            onToggleMailbox = {},
+            onSetDateFrom = {},
+            onSetDateTo = {},
+            onSetStripHeaders = {},
+            onNext = {},
+            onPrev = {},
+            onStart = {},
+            onPause = {},
+            onResume = {},
+            onCancel = {},
+            onDiscard = {},
+            onDownload = {},
+        )
+    }
+
+    /** The controls a step shows, each asserted dead (offline) or live (connected). */
+    private fun assertGated(tags: List<String>, gated: Boolean) {
+        tags.forEach { tag ->
+            val node = composeTestRule.onNodeWithTag(tag).performScrollTo()
+            if (gated) node.assertIsNotEnabled() else node.assertIsEnabled()
+        }
+    }
+
+    @Test
+    @Config(qualifiers = "h1280dp")
+    fun theImportStartGates_whileBackStaysLive() {
+        render(FfiConnectionState.DISCONNECTED) { MailImport(ImportStep.CONFIRM) }
+        assertGated(listOf("mail-import-start-button"), gated = true)
+        composeTestRule.onNodeWithTag("wizard-back-button").performScrollTo().assertIsEnabled()
+    }
+
+    @Test
+    @Config(qualifiers = "h1280dp")
+    fun theImportStartIsLiveWhenConnected() {
+        render(FfiConnectionState.CONNECTED) { MailImport(ImportStep.CONFIRM) }
+        assertGated(listOf("mail-import-start-button"), gated = false)
+    }
+
+    @Test
+    @Config(qualifiers = "h1280dp")
+    fun theImportPauseResumeCancelAllGate() {
+        render(FfiConnectionState.DISCONNECTED) { MailImport(ImportStep.PROGRESS) }
+        assertGated(
+            listOf("mail-import-pause-button", "mail-import-resume-button", "mail-import-cancel-button"),
+            gated = true,
+        )
+    }
+
+    @Test
+    @Config(qualifiers = "h1280dp")
+    fun theImportPauseResumeCancelAreLiveWhenConnected() {
+        render(FfiConnectionState.CONNECTED) { MailImport(ImportStep.PROGRESS) }
+        assertGated(
+            listOf("mail-import-pause-button", "mail-import-resume-button", "mail-import-cancel-button"),
+            gated = false,
+        )
+    }
+
+    @Test
+    @Config(qualifiers = "h1280dp")
+    fun theExportStartGates_whileBackStaysLive() {
+        render(FfiConnectionState.DISCONNECTED) { MailExport(ExportStep.CONFIRM) }
+        assertGated(listOf("mail-export-start-button"), gated = true)
+        composeTestRule.onNodeWithTag("wizard-back-button").performScrollTo().assertIsEnabled()
+    }
+
+    @Test
+    @Config(qualifiers = "h1280dp")
+    fun theExportStartIsLiveWhenConnected() {
+        render(FfiConnectionState.CONNECTED) { MailExport(ExportStep.CONFIRM) }
+        assertGated(listOf("mail-export-start-button"), gated = false)
+    }
+
+    @Test
+    @Config(qualifiers = "h1280dp")
+    fun theExportPauseResumeCancelAllGate() {
+        render(FfiConnectionState.DISCONNECTED) { MailExport(ExportStep.PROGRESS) }
+        assertGated(
+            listOf("mail-export-pause-button", "mail-export-resume-button", "mail-export-cancel-button"),
+            gated = true,
+        )
+    }
+
+    @Test
+    @Config(qualifiers = "h1280dp")
+    fun theExportPauseResumeCancelAreLiveWhenConnected() {
+        render(FfiConnectionState.CONNECTED) { MailExport(ExportStep.PROGRESS) }
+        assertGated(
+            listOf("mail-export-pause-button", "mail-export-resume-button", "mail-export-cancel-button"),
+            gated = false,
+        )
+    }
+
+    @Test
+    @Config(qualifiers = "h1280dp")
+    fun theExportDiscardGates() {
+        render(FfiConnectionState.DISCONNECTED) { MailExport(ExportStep.DONE) }
+        assertGated(listOf("mail-export-discard-button"), gated = true)
+    }
+
+    @Test
+    @Config(qualifiers = "h1280dp")
+    fun theExportDiscardIsLiveWhenConnected() {
+        render(FfiConnectionState.CONNECTED) { MailExport(ExportStep.DONE) }
+        assertGated(listOf("mail-export-discard-button"), gated = false)
     }
 }

@@ -145,12 +145,59 @@ fn enter_live_keyring(op: &str, account: &str) -> bool {
     false
 }
 
+/// What a live probe of the OS secure store found — the input to step ③ of
+/// the headless-fallback resolution (`apps/tui.md` § Credential storage).
+///
+/// Three answers, not two, because the two ways of *not* being usable call for
+/// different things from the app: no store answering at all is the SSH/server
+/// case the sealed arm exists for, while a store that answered but cannot be
+/// used without the user is the case outcome 3 of the identity-protected
+/// feature is about (`apps/common.md` § Credential storage).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyringReach {
+    /// Reachable, unlocked and writable — the desktop arm.
+    Usable,
+    /// A store answered but is not usable without the user: the freedesktop
+    /// Secret Service connected, but its default collection is locked or
+    /// missing. Reported only by the freedesktop arm — the macOS login
+    /// keychain reads locked over SSH too, so its lock state cannot tell a
+    /// desktop session from a remote one, and it answers [`Self::Absent`].
+    Locked,
+    /// No store answered: no session bus (the SSH case), a target with no
+    /// native arm, or a test build.
+    Absent,
+}
+
+/// The three-way probe ([`KeyringReach`]) — never [`KeyringReach::Usable`]
+/// in a test build.
+pub fn keyring_reach() -> KeyringReach {
+    if let Some(forced) = forced_keyring_reach() {
+        return forced;
+    }
+    // A refused probe is an ordinary answer ("no usable keyring"), never a
+    // warning — hence the plain check before the counting gate.
+    if live_keyring_allowed() && enter_live_keyring("probe", "") {
+        native_keyring_reach()
+    } else {
+        KeyringReach::Absent
+    }
+}
+
 /// Whether a usable OS keyring is reachable right now (the per-platform
 /// meaning lives on each arm's own probe) — and never, in a test build.
 pub fn keyring_probe() -> bool {
-    // A refused probe is an ordinary answer ("no usable keyring"), never a
-    // warning — hence the plain check before the counting gate.
-    live_keyring_allowed() && enter_live_keyring("probe", "") && native_keyring_probe()
+    keyring_reach() == KeyringReach::Usable
+}
+
+/// The arms with no lock state to tell apart (macOS, Windows, no native arm):
+/// their boolean probe is usable-or-absent.
+#[cfg(not(target_os = "linux"))]
+fn native_keyring_reach() -> KeyringReach {
+    if native_keyring_probe() {
+        KeyringReach::Usable
+    } else {
+        KeyringReach::Absent
+    }
 }
 
 /// Read one item's value by (`application`, `account`). `None` on absent item,
@@ -917,36 +964,44 @@ fn native_keyring_delete_namespace(app: &str) -> Result<(), anyhow::Error> {
     .map_err(|_| anyhow::anyhow!("[account-store] keyring namespace-delete thread panicked"))?
 }
 
-/// Probe whether a usable freedesktop Secret Service is reachable: connect,
-/// resolve the default collection, and require it **unlocked**. On a headless
-/// box (no session bus) the connect fails fast; on a box whose gnome-keyring
-/// default collection is locked, writes would fail `IsLocked` even though
-/// `connect` succeeds (the documented file-fallback motivation above) — so a
-/// locked collection reads as *unreachable* here. Dedicated OS thread, like
-/// every other keyring op. (The macOS analogue — default keychain present +
-/// unlocked + writable — lives in [`mac_keychain::keyring_probe`].)
+/// Probe the freedesktop Secret Service: connect, resolve the default
+/// collection, and require it **unlocked**. On a headless box (no session bus)
+/// the connect fails fast → [`KeyringReach::Absent`]; on a box whose
+/// gnome-keyring default collection is locked, writes would fail `IsLocked`
+/// even though `connect` succeeds (the documented file-fallback motivation
+/// above), so a connected service whose default collection is locked, missing
+/// or unreadable → [`KeyringReach::Locked`]. ⚠ A connect can also succeed over
+/// SSH when the login has a systemd user bus that D-Bus-activates the keyring
+/// daemon, so `Locked` is "a service answered", not proof of a desktop
+/// session. Dedicated OS thread, like every other keyring op. (The macOS
+/// analogue — default keychain present + unlocked + writable — lives in
+/// [`mac_keychain::keyring_probe`].)
 #[cfg(target_os = "linux")]
-fn native_keyring_probe() -> bool {
+fn native_keyring_reach() -> KeyringReach {
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .ok()?;
+        else {
+            return KeyringReach::Absent;
+        };
         rt.block_on(async {
-            let ss = secret_service::SecretService::connect(secret_service::EncryptionType::Dh)
-                .await
-                .ok()?;
-            let collection = ss.get_default_collection().await.ok()?;
+            let Ok(ss) =
+                secret_service::SecretService::connect(secret_service::EncryptionType::Dh).await
+            else {
+                return KeyringReach::Absent;
+            };
+            let Ok(collection) = ss.get_default_collection().await else {
+                return KeyringReach::Locked;
+            };
             match collection.is_locked().await {
-                Ok(locked) => Some(!locked),
-                Err(_) => None,
+                Ok(false) => KeyringReach::Usable,
+                Ok(true) | Err(_) => KeyringReach::Locked,
             }
         })
     })
     .join()
-    .ok()
-    .flatten()
-    .unwrap_or(false)
+    .unwrap_or(KeyringReach::Absent)
 }
 
 /// Test-only carve-out (the `FAUNA_E2E_CREDENTIAL_DIR` family): force the
@@ -968,6 +1023,69 @@ pub fn force_headless_store() -> bool {
     false
 }
 
+/// Test-only carve-out, same family and gate as [`force_headless_store`]:
+/// `FAUNA_E2E_FORCE_LOCKED_KEYRING` makes [`keyring_reach`] answer
+/// [`KeyringReach::Locked`] without touching any keyring — the "a store
+/// answered but is locked" outcome, which a dev box's unlocked keyring cannot
+/// otherwise produce on demand. Distinct from [`force_headless_store`], which
+/// skips the probe and so stands in for the SSH case, where no store answers.
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+pub fn forced_keyring_reach() -> Option<KeyringReach> {
+    std::env::var("FAUNA_E2E_FORCE_LOCKED_KEYRING")
+        .is_ok_and(|v| !v.is_empty() && v != "0")
+        .then_some(KeyringReach::Locked)
+}
+
+/// Production twin: a shipped build always asks the real store.
+#[cfg(not(any(test, debug_assertions, feature = "e2e-agent")))]
+pub fn forced_keyring_reach() -> Option<KeyringReach> {
+    None
+}
+
+/// Why the headless-fallback resolution landed on the sealed file
+/// ([`CredentialStore::sealed_arm_cause`]) — what the client reads to decide
+/// whether the user is owed a word about the protected store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SealedArmCause {
+    /// ② a sealed file already holds this namespace (data-present wins).
+    ExistingFile,
+    /// The test-only [`force_headless_store`] carve-out.
+    Forced,
+    /// ④ an OS store answered but is locked ([`KeyringReach::Locked`]).
+    KeyringLocked,
+    /// ④ no OS store answered ([`KeyringReach::Absent`]) — the SSH/headless
+    /// case the arm exists for.
+    KeyringAbsent,
+}
+
+/// The arm [`resolve_headless_arm`] picks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadlessArm {
+    Keyring,
+    Sealed(SealedArmCause),
+}
+
+/// Steps ②–④ of [`CredentialStore::new_with_headless_fallback`], pure: the
+/// probe runs only when neither an existing sealed file nor the test-only
+/// force has already decided.
+fn resolve_headless_arm(
+    sealed_exists: bool,
+    forced_headless: bool,
+    reach: impl FnOnce() -> KeyringReach,
+) -> HeadlessArm {
+    if sealed_exists {
+        return HeadlessArm::Sealed(SealedArmCause::ExistingFile);
+    }
+    if forced_headless {
+        return HeadlessArm::Sealed(SealedArmCause::Forced);
+    }
+    match reach() {
+        KeyringReach::Usable => HeadlessArm::Keyring,
+        KeyringReach::Locked => HeadlessArm::Sealed(SealedArmCause::KeyringLocked),
+        KeyringReach::Absent => HeadlessArm::Sealed(SealedArmCause::KeyringAbsent),
+    }
+}
+
 /// The backend for [`CredentialStore`], resolved once at construction.
 enum SecretStoreBackend {
     /// `FAUNA_E2E_CREDENTIAL_DIR` file store — a generic per-namespace map.
@@ -977,12 +1095,22 @@ enum SecretStoreBackend {
     Keyring,
     /// The passphrase-encrypted sealed file ([`sealed::SealedFileStore`]) —
     /// the headless arm (`apps/tui.md` § Credential storage). Constructed
-    /// locked; the client unlocks/creates it before launch routing runs.
-    Sealed(sealed::SealedFileStore),
+    /// locked; the client unlocks/creates it before launch routing runs. The
+    /// cause is why resolution chose it ([`CredentialStore::sealed_arm_cause`]).
+    Sealed(sealed::SealedFileStore, SealedArmCause),
     /// The app's own platform secure store, lent over the foreign seam
     /// ([`install_foreign_store`]) — the phones' arm, where the native one is
     /// inert. Keys are namespace-prefixed ([`foreign_key`]).
     Foreign(Arc<dyn SecretStore>),
+    /// A store standing in for this namespace and holding nothing of it — a
+    /// removed account's in-memory snapshot
+    /// ([`CredentialStore::detached_like`]). Keys verbatim, no prefix: the
+    /// store is one namespace by construction. `items_in_files` is the posture
+    /// fact of the store it stands in for ([`CredentialStore::items_rest_in_files`]).
+    Detached {
+        store: Arc<dyn SecretStore>,
+        items_in_files: bool,
+    },
 }
 
 /// Pick the backend for a namespace from the three inputs that decide it —
@@ -1079,10 +1207,12 @@ impl CredentialStore {
     ///    data-present wins, so a box that was headless when the identity was
     ///    stored can never silently switch to an empty keyring and strand it.
     /// 3. `FAUNA_E2E_FORCE_HEADLESS_STORE` (test-only carve-out) → **sealed**.
-    /// 4. [`keyring_probe`] finds a usable Secret Service → **keyring** (the
+    /// 4. [`keyring_reach`] finds a usable OS store → **keyring** (the
     ///    desktop-session arm, byte-identical to [`Self::new`]).
     /// 5. Otherwise → **sealed** (the headless arm; the client shows its
-    ///    unlock/create surface before launch routing reads anything).
+    ///    unlock/create surface before launch routing reads anything), with
+    ///    the probe's answer kept as [`Self::sealed_arm_cause`] — a store that
+    ///    answered locked is told apart from none answering.
     pub fn new_with_headless_fallback(default_app: &str, data_dir: PathBuf) -> Self {
         let app = resolved_namespace(default_app);
         if let Some(dir) = cred_file_dir() {
@@ -1092,11 +1222,14 @@ impl CredentialStore {
             };
         }
         let sealed_exists = sealed::sealed_file_path(&data_dir, &app).exists();
-        let backend = if sealed_exists || force_headless_store() || !keyring_probe() {
-            SecretStoreBackend::Sealed(sealed::SealedFileStore::new(app.clone(), data_dir))
-        } else {
-            SecretStoreBackend::Keyring
-        };
+        let backend =
+            match resolve_headless_arm(sealed_exists, force_headless_store(), keyring_reach) {
+                HeadlessArm::Keyring => SecretStoreBackend::Keyring,
+                HeadlessArm::Sealed(cause) => SecretStoreBackend::Sealed(
+                    sealed::SealedFileStore::new(app.clone(), data_dir),
+                    cause,
+                ),
+            };
         Self { app, backend }
     }
 
@@ -1112,12 +1245,36 @@ impl CredentialStore {
     /// Sealed-backed store at an explicit dir + namespace — the sealed twin of
     /// [`Self::with_file_backend`], for tests driving the unlock/create or
     /// change-passphrase surfaces env-free. Constructed locked, exactly like
-    /// resolution arm ⑤ of [`Self::new_with_headless_fallback`].
+    /// resolution arm ⑤ of [`Self::new_with_headless_fallback`] when no OS
+    /// store answered ([`SealedArmCause::KeyringAbsent`]).
     pub fn with_sealed_backend(app: impl Into<String>, dir: PathBuf) -> Self {
         let app = app.into();
         Self {
-            backend: SecretStoreBackend::Sealed(sealed::SealedFileStore::new(app.clone(), dir)),
+            backend: SecretStoreBackend::Sealed(
+                sealed::SealedFileStore::new(app.clone(), dir),
+                SealedArmCause::KeyringAbsent,
+            ),
             app,
+        }
+    }
+
+    /// A store over `store`'s keys, standing in for `like` — the namespace a
+    /// remove-account's nest half assembles over once the registry removal
+    /// has deleted the real slots (`account-scoping.md` § Erasure follows
+    /// scope → *Removing an account retires this machine from it, as a
+    /// sign-out does*, decision 1). Reads and writes reach `store` alone,
+    /// keys verbatim, so nothing the assembly writes reaches `like`'s
+    /// backend; what it keeps of `like` is the namespace name and whether
+    /// `like`'s items rest in files, which decides the replica's at-rest
+    /// posture ([`Self::items_rest_in_files`]) — a snapshot of a file-backed
+    /// slot must open the replica as the slot itself would.
+    pub fn detached_like(like: &CredentialStore, store: Arc<dyn SecretStore>) -> Self {
+        Self {
+            app: like.app.clone(),
+            backend: SecretStoreBackend::Detached {
+                store,
+                items_in_files: like.items_rest_in_files(),
+            },
         }
     }
 
@@ -1128,8 +1285,24 @@ impl CredentialStore {
         match &self.backend {
             SecretStoreBackend::File(dir) => Some(dir),
             SecretStoreBackend::Keyring
-            | SecretStoreBackend::Sealed(_)
-            | SecretStoreBackend::Foreign(_) => None,
+            | SecretStoreBackend::Sealed(..)
+            | SecretStoreBackend::Foreign(_)
+            | SecretStoreBackend::Detached { .. } => None,
+        }
+    }
+
+    /// Whether this namespace's items rest in plain files — the one fact the
+    /// account replica's at-rest posture turns on (`account-replica-posture.md`
+    /// § Local at-rest posture: a seal whose key rests beside the data would be
+    /// theatre). True on the file backend, and on a [`Self::detached_like`]
+    /// store standing in for one.
+    pub fn items_rest_in_files(&self) -> bool {
+        match &self.backend {
+            SecretStoreBackend::File(_) => true,
+            SecretStoreBackend::Detached { items_in_files, .. } => *items_in_files,
+            SecretStoreBackend::Keyring
+            | SecretStoreBackend::Sealed(..)
+            | SecretStoreBackend::Foreign(_) => false,
         }
     }
 
@@ -1155,10 +1328,15 @@ impl CredentialStore {
         match &self.backend {
             SecretStoreBackend::File(dir) => cred_file_remove(dir, &self.app),
             SecretStoreBackend::Keyring => keyring_delete_namespace(&self.app),
-            SecretStoreBackend::Sealed(store) => store.delete_namespace(),
+            SecretStoreBackend::Sealed(store, _) => store.delete_namespace(),
             SecretStoreBackend::Foreign(_) => Err(anyhow::anyhow!(
                 "[account-store] namespace {:?} rides the app's foreign store, which \
                  cannot enumerate — sweep it app-side (the platform store's own reset)",
+                self.app
+            )),
+            SecretStoreBackend::Detached { .. } => Err(anyhow::anyhow!(
+                "[account-store] a detached stand-in for namespace {:?} holds none of it — \
+                 there is nothing here to sweep",
                 self.app
             )),
         }
@@ -1169,7 +1347,17 @@ impl CredentialStore {
     /// `None` on the file and keyring arms, which need no unlock.
     pub fn sealed_backend(&self) -> Option<&sealed::SealedFileStore> {
         match &self.backend {
-            SecretStoreBackend::Sealed(store) => Some(store),
+            SecretStoreBackend::Sealed(store, _) => Some(store),
+            _ => None,
+        }
+    }
+
+    /// Why resolution chose the sealed file, when it did — `None` on every
+    /// other arm. [`SealedArmCause::KeyringLocked`] is the one cause behind
+    /// which a protected OS store exists but could not be used.
+    pub fn sealed_arm_cause(&self) -> Option<SealedArmCause> {
+        match &self.backend {
+            SecretStoreBackend::Sealed(_, cause) => Some(*cause),
             _ => None,
         }
     }
@@ -1194,8 +1382,9 @@ impl SecretStore for CredentialStore {
         match &self.backend {
             SecretStoreBackend::File(dir) => cred_file_read(dir, &self.app).get(account).cloned(),
             SecretStoreBackend::Keyring => keyring_get(&self.app, account),
-            SecretStoreBackend::Sealed(store) => store.get(account),
+            SecretStoreBackend::Sealed(store, _) => store.get(account),
             SecretStoreBackend::Foreign(store) => store.get(&foreign_key(&self.app, account)),
+            SecretStoreBackend::Detached { store, .. } => store.get(account),
         }
     }
 
@@ -1217,10 +1406,11 @@ impl SecretStore for CredentialStore {
                 }
             }
             SecretStoreBackend::Keyring => keyring_set(&self.app, account, value),
-            SecretStoreBackend::Sealed(store) => store.set(account, value),
+            SecretStoreBackend::Sealed(store, _) => store.set(account, value),
             SecretStoreBackend::Foreign(store) => {
                 store.set(&foreign_key(&self.app, account), value);
             }
+            SecretStoreBackend::Detached { store, .. } => store.set(account, value),
         }
     }
 
@@ -1237,8 +1427,9 @@ impl SecretStore for CredentialStore {
                 }
             }
             SecretStoreBackend::Keyring => keyring_delete(&self.app, account),
-            SecretStoreBackend::Sealed(store) => store.delete(account),
+            SecretStoreBackend::Sealed(store, _) => store.delete(account),
             SecretStoreBackend::Foreign(store) => store.delete(&foreign_key(&self.app, account)),
+            SecretStoreBackend::Detached { store, .. } => store.delete(account),
         }
     }
 }
@@ -1268,6 +1459,70 @@ mod tests {
 
     fn file_store(dir: PathBuf) -> CredentialStore {
         CredentialStore::with_file_backend("fauna-desktop", dir)
+    }
+
+    /// The headless-fallback resolution, pinned as a pure function over its
+    /// three inputs (`apps/tui.md` § Credential storage, steps ②–④): every
+    /// arm that lands on the sealed file says WHY, because "an OS store
+    /// answered but is locked" is the cause outcome 3 of the
+    /// identity-protected feature is about (`apps/common.md` § Credential
+    /// storage), while "no OS store answered at all" is the SSH case that
+    /// must stay silent.
+    #[test]
+    fn headless_resolution_names_the_cause_of_every_sealed_arm() {
+        let never = || -> KeyringReach { panic!("the probe must not run here") };
+        assert_eq!(
+            resolve_headless_arm(true, false, never),
+            HeadlessArm::Sealed(SealedArmCause::ExistingFile),
+            "② an existing sealed file wins without consulting the probe"
+        );
+        assert_eq!(
+            resolve_headless_arm(false, true, never),
+            HeadlessArm::Sealed(SealedArmCause::Forced),
+            "the test-only force skips the probe"
+        );
+        assert_eq!(
+            resolve_headless_arm(false, false, || KeyringReach::Usable),
+            HeadlessArm::Keyring,
+            "③ a usable OS store selects the desktop arm"
+        );
+        assert_eq!(
+            resolve_headless_arm(false, false, || KeyringReach::Locked),
+            HeadlessArm::Sealed(SealedArmCause::KeyringLocked),
+            "④ an OS store that answered but is locked is its own cause"
+        );
+        assert_eq!(
+            resolve_headless_arm(false, false, || KeyringReach::Absent),
+            HeadlessArm::Sealed(SealedArmCause::KeyringAbsent),
+            "④ no OS store at all — the SSH/headless case"
+        );
+    }
+
+    /// The cause reaches the accessor the client reads, and only the sealed
+    /// arm reports one.
+    #[test]
+    fn sealed_arm_cause_is_reported_only_by_the_sealed_arm() {
+        let dir = fresh_dir();
+        assert_eq!(file_store(dir.clone()).sealed_arm_cause(), None);
+        let sealed = CredentialStore::with_sealed_backend("fauna-tui", dir.clone());
+        assert_eq!(
+            sealed.sealed_arm_cause(),
+            Some(SealedArmCause::KeyringAbsent),
+            "the explicit sealed constructor stands in for arm ④'s silent case"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A test build never reaches the live keyring, so the three-way probe
+    /// reads `Absent` — never `Locked`, which would claim a store answered —
+    /// and the boolean probe every other caller keeps is its `Usable` arm.
+    /// Compiled only where the live keyring is refused, so it can never itself
+    /// open a session with the developer's desktop keyring.
+    #[test]
+    #[cfg(all(feature = "no-live-keyring", not(feature = "allow-live-keyring")))]
+    fn a_test_build_reads_no_keyring_as_absent() {
+        assert_eq!(keyring_reach(), KeyringReach::Absent);
+        assert!(!keyring_probe());
     }
 
     /// The e2e namespace-collapse fix, pinned env-free: one override value
@@ -1662,9 +1917,53 @@ mod tests {
         match backend {
             SecretStoreBackend::File(_) => "file",
             SecretStoreBackend::Keyring => "keyring",
-            SecretStoreBackend::Sealed(_) => "sealed",
+            SecretStoreBackend::Sealed(..) => "sealed",
             SecretStoreBackend::Foreign(_) => "foreign",
+            SecretStoreBackend::Detached { .. } => "detached",
         }
+    }
+
+    /// A removed account's stand-in reads and writes its own store alone, keys
+    /// verbatim — never the namespace it stands in for — and keeps that
+    /// namespace's posture fact, so the replica opens as the real slot would
+    /// have opened it.
+    #[test]
+    fn a_detached_store_touches_only_its_own_store_and_keeps_the_posture() {
+        let dir = fresh_dir();
+        let file = CredentialStore::with_file_backend("fauna-account-store", dir.clone());
+        file.set("aa/device-auth", "the real slot");
+        let snapshot = Arc::new(fauna_client_accounts::InMemorySecretStore::new());
+        snapshot.seed("aa/device-auth", "the snapshot's copy");
+
+        let detached = CredentialStore::detached_like(&file, snapshot.clone());
+        assert_eq!(
+            detached.get("aa/device-auth").as_deref(),
+            Some("the snapshot's copy")
+        );
+        detached.set("aa", "a minted writer key");
+        detached.delete("aa/device-auth");
+
+        assert_eq!(file.get("aa"), None, "a write reached the real namespace");
+        assert_eq!(
+            file.get("aa/device-auth").as_deref(),
+            Some("the real slot"),
+            "a delete reached the real namespace"
+        );
+        assert_eq!(snapshot.get("aa").as_deref(), Some("a minted writer key"));
+        assert!(detached.items_rest_in_files(), "a file slot's stand-in");
+        assert!(
+            detached.file_backend_dir().is_none(),
+            "never a sweepable dir"
+        );
+        assert!(detached.delete_namespace().is_err());
+        assert!(
+            !CredentialStore::detached_like(
+                &CredentialStore::with_sealed_backend("fauna-account-store", dir),
+                snapshot,
+            )
+            .items_rest_in_files(),
+            "a sealed slot's stand-in seals the replica"
+        );
     }
 
     /// The whole resolution matrix, on every host. The one row that carries

@@ -153,7 +153,7 @@ def test_folder_webdav_toggle_is_disabled_until_mail_is_set_up(
     # Now mint the MSEK the capability keys on, and the same toggle goes live.
     app.mail_settings.navigate()
     app.mail_settings.ensure_mail_enabled()
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=15.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "mail must enable to mint the MSEK; "
         f"error={app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
@@ -200,7 +200,7 @@ def test_folder_webdav_toggle_serves_and_unserves_a_sync_set(
     # actor's MSEK, minted when mail is first enabled.
     app.mail_settings.navigate()
     app.mail_settings.ensure_mail_enabled()
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=15.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "mail must enable to mint the MSEK serve_set seals under; "
         f"error={app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
@@ -309,6 +309,6 @@ def test_mua_webdav_url_row_tracks_the_per_actor_serve_state(
     b.toggle_webdav()
     assert not app.has_error(), f"serve-off raised an error: {app.error_text()!r}"
     app.mail_settings.navigate()
-    assert not app.mail_settings.mua_webdav_url_visible(timeout=6.0), (
+    assert app.mail_settings.mua_webdav_url_hidden(), (
         "unserving the last folder must hide the WebDAV URL row again"
     )

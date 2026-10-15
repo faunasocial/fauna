@@ -49,7 +49,6 @@ pub mod test_fixtures;
 pub mod view_model;
 
 use fauna_protocol::RpcRequester;
-use fauna_protocol::discovery::{NestInfoReply, NestInfoRequest};
 use fauna_protocol::features::{FeaturesStatusReply, FeaturesStatusRequest};
 
 // Re-exported so a client reads the feature-plane shapes through this wrapper
@@ -106,12 +105,14 @@ impl<R: RpcRequester> FeaturesClient<R> {
     /// Not a feature-plane kind, but the second half of what a row needs: the
     /// `hidden` affordance is decided by a capability token's absence, and there
     /// is no other source for it.
+    ///
+    /// Read through [`fauna_protocol::read_nest_info`], so the transport's
+    /// per-connection memo serves it when the connection has already read the
+    /// reply (the node leg, the other feature-limits leg, the sign-in look).
     pub async fn node_capabilities(&self) -> Result<Vec<String>, R::Error> {
-        let reply: NestInfoReply = self
-            .nest
-            .request("fauna.nest.info", NestInfoRequest::default())
-            .await?;
-        Ok(reply.capabilities)
+        Ok(fauna_protocol::read_nest_info(&self.nest)
+            .await?
+            .capabilities)
     }
 
     /// **The call an app makes** — the whole feature-limits surface, ready to
@@ -128,8 +129,18 @@ impl<R: RpcRequester> FeaturesClient<R> {
     /// sessions is leaving seven chances to forget the second one.
     pub async fn rows(&self) -> Result<Vec<FeatureRow>, R::Error> {
         let capabilities = self.node_capabilities().await?;
+        self.rows_with(&capabilities).await
+    }
+
+    /// [`rows`](Self::rows) over a capability set the caller already holds —
+    /// `NestInfoReply.capabilities` from a `fauna.nest.info` read made once for
+    /// a whole surface load. A settings landing that renders the node leg, the
+    /// feature-limits rows and the own-limits surface wants one reply for all
+    /// three; reading it once per leg spent three of the actor's pre-identity
+    /// discovery budget (`anonymous_rate_limit::DISCOVERY_MAX_EVENTS`) on the same answer.
+    pub async fn rows_with(&self, capabilities: &[String]) -> Result<Vec<FeatureRow>, R::Error> {
         let reply = self.status().await?;
-        Ok(feature_rows(&reply.features, &capabilities))
+        Ok(feature_rows(&reply.features, capabilities))
     }
 }
 
@@ -165,5 +176,17 @@ mod tests {
         let back: FeaturesStatusRequest =
             fauna_protocol::decode_strict(&payload).expect("decode request");
         assert_eq!(back, FeaturesStatusRequest::default());
+    }
+
+    /// The one-read shape: a caller that already holds the capability set
+    /// dispatches no `fauna.nest.info` of its own.
+    #[test]
+    fn rows_with_reads_no_nest_info() {
+        let requester = RecordingRequester::new(reply);
+        let client = FeaturesClient::new(&requester);
+
+        block_on(client.rows_with(&[])).expect("rows");
+
+        assert_eq!(requester.kinds(), vec!["fauna.features.status"]);
     }
 }

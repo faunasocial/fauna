@@ -103,6 +103,12 @@ pub(crate) struct FeedPostOut {
     /// 32-byte content id of the repost target — the quote twin; the WS
     /// handler hex-encodes it into `FeedPostItem.reposted_post_id`.
     pub reposted_post_id: Option<Vec<u8>>,
+    /// On a repost row, the target's tier and room (`FeedPostRow`'s
+    /// `reposted_gated_*`); the WS handler copies them onto
+    /// `FeedPostItem.reposted_gated_tier` / `reposted_gated_room` (the room
+    /// hex-encoded) → the repost card's `gated-post-badge`.
+    pub reposted_gated_tier: Option<String>,
+    pub reposted_gated_room: Option<Vec<u8>>,
     /// The viewer's own live repost of this row's post (filled by the
     /// viewer-state augment on the local paths only); hex-encoded into
     /// `FeedPostItem.viewer_repost_id` — `unrepost`'s argument.
@@ -152,6 +158,8 @@ impl From<&crate::db::FeedPostRow> for FeedPostOut {
             quote_count: p.quote_count,
             quoted_post_id: p.quoted_post_id.clone(),
             reposted_post_id: p.reposted_post_id.clone(),
+            reposted_gated_tier: p.reposted_gated_tier.clone(),
+            reposted_gated_room: p.reposted_gated_room.clone(),
             viewer_repost_id: p.viewer_repost_id.clone(),
             viewer_liked: p.viewer_liked,
             score: p.score,
@@ -208,6 +216,28 @@ pub(crate) async fn decorate_bridged_authors_best_effort(
     }
 }
 
+/// The one-post twin of [`decorate_bridged_authors_best_effort`], for the
+/// single-post read (`fauna.posts.get`): the bridged author's face for the post
+/// whose stored `body` this is, or `None`. The author comes from decoding the
+/// body (the read outcome carries no row), and only a bridged author has a
+/// `bridge_authors` row — a native author yields `None`, so a native reply
+/// stays byte-identical. Best-effort like the page decoration: an undecodable
+/// body or a failed read serves the post faceless rather than failing the read.
+pub(crate) async fn bridged_author_display_best_effort(
+    state: &Arc<AppState>,
+    body: &[u8],
+) -> Option<fauna_protocol::feed::AuthorDisplay> {
+    let post = crate::db::posts::decode_stored_post(body)?;
+    let conn = state.db.conn().await;
+    match crate::db::bridge_authors::get(&conn, &post.author.0) {
+        Ok(author) => author.map(|a| a.display()),
+        Err(e) => {
+            tracing::warn!("bridge_authors single-post decoration: {e}");
+            None
+        }
+    }
+}
+
 /// Result of a feed-posts query. Exactly one cursor is `Some`, set by the
 /// order branch that ran: chronological ⇒ `cursor` carries the trailing
 /// `created_at` (`score_cursor` is `None`); score-ordered ⇒ `score_cursor`
@@ -230,7 +260,10 @@ pub(crate) struct FeedPostsOut {
 /// Shared rules-validation + storage-encode for create/update. Returns the
 /// canonical dag-cbor-encoded rule bytes or a `bad_request` `ApiError`
 /// mirroring the twins (Layer-6 at-rest encoding — serialization.md:29).
-fn validate_and_encode_rules(combination: &str, rules: &[FilterRule]) -> Result<Vec<u8>, ApiError> {
+pub(crate) fn validate_and_encode_rules(
+    combination: &str,
+    rules: &[FilterRule],
+) -> Result<Vec<u8>, ApiError> {
     if parse_combination(combination).is_none() {
         return Err(ApiError::bad_request(
             "invalid combination: must be \"all\" or \"any\"",
@@ -506,16 +539,25 @@ pub(crate) async fn delete_feed_core(
     }
 }
 
-/// Who is reading one of the nest's public timelines (local, Trending).
+/// Who is reading a feed — one of the nest's public timelines (local,
+/// Trending) or one of the account's custom feeds.
 ///
-/// The two timelines have one core each, whoever reads them; the reader
-/// decides only what of the **account's own state** the read may use.
+/// Each read has one core, whoever reads it; the reader decides what of the
+/// **account's own state** the read may use, and which posts may leave.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum FeedReader {
     /// The account on its own app: its block list filters authors out, its
     /// global factors re-weight Trending, and each post carries its viewer
     /// state (liked, reposted).
     Account([u8; 32]),
+    /// A third-party principal under `fauna:feed:read:account`
+    /// (`authorization-server.md` § Scope grammar → *The fourth arm*): **the
+    /// account's view over public posts** — the account's block list, global
+    /// factors and viewer state, as [`FeedReader::Account`] has them, over
+    /// only the posts the off-box predicate lets leave the nest
+    /// ([`crate::db::feeds::FeedAudience::OffBox`]); and of the custom feeds,
+    /// only the account's own.
+    PrincipalAccount([u8; 32]),
     /// A third-party principal under `fauna:feed:read`
     /// (`authorization-server.md` § Scope grammar → *The Fauna family,
     /// exactly*): public posts only and nothing of the account's own state —
@@ -525,10 +567,32 @@ pub(crate) enum FeedReader {
 }
 
 impl FeedReader {
+    /// The account whose own state (block list, factors, viewer state) the
+    /// read uses — `None` for the bare-arm principal.
     fn account(self) -> Option<[u8; 32]> {
         match self {
-            FeedReader::Account(actor) => Some(actor),
+            FeedReader::Account(actor) | FeedReader::PrincipalAccount(actor) => Some(actor),
             FeedReader::Principal => None,
+        }
+    }
+
+    /// Whether the read leaves the box — held to
+    /// [`crate::db::feeds::FeedAudience::OffBox`] whatever the feed.
+    fn off_box(self) -> bool {
+        matches!(
+            self,
+            FeedReader::PrincipalAccount(_) | FeedReader::Principal
+        )
+    }
+
+    /// The owner a custom feed must have for this reader to read it — the
+    /// account, for a principal (`fauna:feed:read:account` covers the
+    /// account's own feeds); `None` for the account on its own app, which
+    /// reads any feed the nest holds.
+    pub(crate) fn own_feeds_only(self) -> Option<[u8; 32]> {
+        match self {
+            FeedReader::PrincipalAccount(account) => Some(account),
+            FeedReader::Account(_) | FeedReader::Principal => None,
         }
     }
 }
@@ -556,14 +620,13 @@ pub(crate) async fn query_local_feed_core(
     {
         mandatory.push(filter);
     }
-    let read = match reader {
-        FeedReader::Account(_) => {
-            state
-                .db
-                .query_feed(&[], FilterCombination::All, &mandatory, cursor, limit)
-                .await
-        }
-        FeedReader::Principal => state.db.query_feed_off_box(&mandatory, cursor, limit).await,
+    let read = if reader.off_box() {
+        state.db.query_feed_off_box(&mandatory, cursor, limit).await
+    } else {
+        state
+            .db
+            .query_feed(&[], FilterCombination::All, &mandatory, cursor, limit)
+            .await
     };
     match read {
         Ok(mut posts) => {
@@ -622,7 +685,8 @@ pub(crate) async fn query_trending_feed_core(
     // resolution). A sealed tier-1 factor (muted keywords, topic models) has no
     // nest-side `content_scores` row → contributes 0 here and is applied
     // client-side (the sealed-factor seam).
-    // A principal folds in no factors: they are the account's own state.
+    // The bare-arm principal folds in no factors: they are the account's own
+    // state, which the account-arm principal reads as the account does.
     let mut composition = vec![fauna_core::scoring::CompositionEntry {
         factor: fauna_core::scoring::factor::TRENDING.to_string(),
         weight_permille: 1000,
@@ -635,26 +699,23 @@ pub(crate) async fn query_trending_feed_core(
         composition.extend(global);
     }
 
-    let read = match reader {
-        FeedReader::Account(_) => {
-            state
-                .db
-                .query_feed_scored_public(
-                    &[],
-                    FilterCombination::All,
-                    &mandatory,
-                    score_cursor,
-                    limit,
-                    &composition,
-                )
-                .await
-        }
-        FeedReader::Principal => {
-            state
-                .db
-                .query_feed_scored_off_box(&mandatory, score_cursor, limit, &composition)
-                .await
-        }
+    let read = if reader.off_box() {
+        state
+            .db
+            .query_feed_scored_off_box(&mandatory, score_cursor, limit, &composition)
+            .await
+    } else {
+        state
+            .db
+            .query_feed_scored_public(
+                &[],
+                FilterCombination::All,
+                &mandatory,
+                score_cursor,
+                limit,
+                &composition,
+            )
+            .await
     };
     match read {
         Ok(mut posts) => {
@@ -683,13 +744,19 @@ pub(crate) async fn query_trending_feed_core(
     }
 }
 
-/// Shared core behind `GET /api/v1/feeds/{id}/posts` and `fauna.feed.posts`.
+/// Shared core behind `GET /api/v1/feeds/{id}/posts` and `fauna.feed.posts`
+/// (the account's and the `fauna:feed:read:account` principal's).
 /// Loads the feed, decodes its rules, applies spam-suppression + the optional
 /// search filter, then branches on `order=="score"` (score-ordered, paginated
 /// via `score_cursor` as an `f64`) vs chronological (`cursor` as `created_at`).
+///
+/// The reader must carry an account: a custom feed is the account's state, so
+/// the bare-arm principal is refused. A principal reads only the account's
+/// own feeds — any other id answers as a missing feed — and only the posts
+/// that may leave the box ([`FeedReader::off_box`]).
 pub(crate) async fn query_feed_core(
     state: &Arc<AppState>,
-    caller: [u8; 32],
+    reader: FeedReader,
     feed_id: &str,
     cursor: Option<i64>,
     limit: Option<i64>,
@@ -703,7 +770,21 @@ pub(crate) async fn query_feed_core(
     // could never narrow (the default e2e "General" feed is empty-rules+any:
     // the month-old test_feed_search_filters_posts apple red) and one matching
     // content rule bypassed the spam guard.
+    let Some(caller) = reader.account() else {
+        return Err(ApiError::forbidden("custom feeds are the account's"));
+    };
     let (feed, rules, composition) = get_feed_core(state, feed_id).await?;
+    if reader
+        .own_feeds_only()
+        .is_some_and(|owner| feed.owner != owner.to_vec())
+    {
+        return Err(ApiError::not_found("feed not found"));
+    }
+    let audience = if reader.off_box() {
+        crate::db::feeds::FeedAudience::OffBox
+    } else {
+        crate::db::feeds::FeedAudience::OnBox
+    };
     let mut mandatory: Vec<FilterRule> = Vec::new();
     ensure_spam_filter(&rules, &mut mandatory);
     push_viewer_block(&caller, &mut mandatory);
@@ -750,13 +831,14 @@ pub(crate) async fn query_feed_core(
         composition.extend(global);
         match state
             .db
-            .query_feed_scored(
+            .query_feed_scored_for(
                 &rules,
                 combination,
                 &mandatory,
                 score_cursor,
                 limit,
                 &composition,
+                audience,
             )
             .await
         {
@@ -785,7 +867,7 @@ pub(crate) async fn query_feed_core(
     } else {
         match state
             .db
-            .query_feed(&rules, combination, &mandatory, cursor, limit)
+            .query_feed_for(&rules, combination, &mandatory, cursor, limit, audience)
             .await
         {
             Ok(mut posts) => {
@@ -1480,6 +1562,125 @@ mod tests {
         );
     }
 
+    /// `fauna:feed:read:account`'s reader (`authorization-server.md` § Scope
+    /// grammar → *The fourth arm*): the account's view over public posts. On
+    /// both timelines and on the account's own custom feed — chronological
+    /// and scored — the gated post the account liked never appears, the
+    /// public one it liked carries `viewer_liked`; another account's feed
+    /// answers as missing, and the bare-arm reader reads no custom feed and
+    /// no viewer state.
+    #[tokio::test]
+    async fn the_account_arm_reads_the_accounts_view_over_public_posts() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let state = Arc::new(AppState::for_test(db.clone()));
+        let (account, other, author) = ([9u8; 32], [8u8; 32], [7u8; 32]);
+        let (public, gated) = ([0xA6u8; 32], [0xB6u8; 32]);
+        seed_trending_post(&db, public, author, 1_000_000, 300).await;
+        seed_trending_post(&db, gated, author, 2_000_000, 900).await;
+        db.execute_batch(&format!(
+            "UPDATE content_meta SET gated_tier = 'premium' WHERE content_id = x'{}'",
+            hex::encode(gated)
+        ))
+        .await
+        .unwrap();
+        for post in [public, gated] {
+            let like = fauna_core::engagement::compute_toggle_event_id(
+                &fauna_core::identity::ActorId(account),
+                &fauna_core::data::ContentHash::from_digest_raw(post),
+                "like",
+            );
+            db.insert_engagement_event(
+                like.digest().as_slice(),
+                &post,
+                Some(&account),
+                "like",
+                None,
+                3_000_000,
+            )
+            .await
+            .unwrap();
+        }
+        let rules = validate_and_encode_rules("any", &[]).ok().expect("rules");
+        let mine = db
+            .create_feed(&account, "Mine", &rules, "any", "local", "[]", None)
+            .await
+            .unwrap();
+        let theirs = db
+            .create_feed(&other, "Theirs", &rules, "any", "local", "[]", None)
+            .await
+            .unwrap();
+        let reader = FeedReader::PrincipalAccount(account);
+        let liked_public_only = |out: &FeedPostsOut, what: &str| {
+            let ids: Vec<Vec<u8>> = out.posts.iter().map(|p| p.post_id.clone()).collect();
+            assert_eq!(ids, vec![public.to_vec()], "{what}: public posts only");
+            assert!(
+                out.posts[0].viewer_liked,
+                "{what}: the account's like state"
+            );
+        };
+
+        let local = query_local_feed_core(&state, reader, None, Some(10), None)
+            .await
+            .ok()
+            .expect("local");
+        liked_public_only(&local, "local");
+        let trending = query_trending_feed_core(&state, reader, None, Some(10), None)
+            .await
+            .ok()
+            .expect("trending");
+        liked_public_only(&trending, "trending");
+        for order in [None, Some("score")] {
+            let out = query_feed_core(&state, reader, &mine, None, Some(10), order, None, None)
+                .await
+                .ok()
+                .expect("own custom feed");
+            liked_public_only(&out, &format!("own feed, order {order:?}"));
+        }
+
+        // The control: the account on its own app reads the gated post too.
+        let own = query_feed_core(
+            &state,
+            FeedReader::Account(account),
+            &mine,
+            None,
+            Some(10),
+            None,
+            None,
+            None,
+        )
+        .await
+        .ok()
+        .expect("account's own read");
+        assert_eq!(own.posts.len(), 2);
+
+        assert!(
+            query_feed_core(&state, reader, &theirs, None, Some(10), None, None, None)
+                .await
+                .is_err(),
+            "another account's feed is not the account's"
+        );
+        assert!(
+            query_feed_core(
+                &state,
+                FeedReader::Principal,
+                &mine,
+                None,
+                Some(10),
+                None,
+                None,
+                None
+            )
+            .await
+            .is_err(),
+            "the bare arm reads no custom feed"
+        );
+        let bare = query_local_feed_core(&state, FeedReader::Principal, None, Some(10), None)
+            .await
+            .ok()
+            .expect("bare local");
+        assert!(bare.posts.iter().all(|p| !p.viewer_liked));
+    }
+
     /// The compound keyset cursor paginates the trending read with no dupes or
     /// gaps — `(score_cursor, score_cursor_created_at)` echoed from the last row.
     #[tokio::test]
@@ -1522,6 +1723,70 @@ mod tests {
             ids2,
             vec![pc.to_vec()],
             "second page picks up exactly where the first stopped"
+        );
+    }
+
+    // ── fauna.posts.get bridged-author face (the single-post read) ──────
+
+    fn bare_post_bytes(author: [u8; 32]) -> Vec<u8> {
+        let post = fauna_core::data::Post {
+            author: fauna_core::identity::ActorId(author),
+            created_at: fauna_core::data::Timestamp(1_700_000_000_000_000),
+            body: fauna_core::data::PostBody::Text {
+                content: "hello".into(),
+                facets: vec![],
+            },
+            references: vec![],
+            expires_at: None,
+            gated: None,
+            content_warning: None,
+            origin: None,
+        };
+        fauna_core::encoding::canonical_encode(&post).expect("encode")
+    }
+
+    /// A bridged author's post read by id names its author as the timeline
+    /// card does; a native author (no `bridge_authors` row) and an undecodable
+    /// body both serve faceless.
+    #[tokio::test]
+    async fn single_post_read_carries_the_bridged_face_and_native_gets_none() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let state = Arc::new(AppState::for_test(db.clone()));
+        let (bridged, native) = ([0x31u8; 32], [0x32u8; 32]);
+        {
+            let conn = db.conn().await;
+            crate::db::bridge_authors::upsert(
+                &conn,
+                &crate::db::bridge_authors::BridgeAuthor {
+                    actor_id: bridged,
+                    bridge: crate::db::bridge_authors::BRIDGE_ACTIVITYPUB.into(),
+                    external_id: "https://remote.example/users/alice".into(),
+                    handle: Some("@alice@remote.example".into()),
+                    display_name: Some("Alice".into()),
+                    avatar_url: None,
+                    updated_at: 10,
+                },
+            )
+            .unwrap();
+        }
+
+        let face = bridged_author_display_best_effort(&state, &bare_post_bytes(bridged))
+            .await
+            .expect("the bridged author's face rides the single-post read");
+        assert_eq!(face.display_name.as_deref(), Some("Alice"));
+        assert_eq!(face.handle.as_deref(), Some("@alice@remote.example"));
+
+        assert!(
+            bridged_author_display_best_effort(&state, &bare_post_bytes(native))
+                .await
+                .is_none(),
+            "a native author has no projection row"
+        );
+        assert!(
+            bridged_author_display_best_effort(&state, b"not a post")
+                .await
+                .is_none(),
+            "an undecodable body serves faceless, never fails the read"
         );
     }
 }

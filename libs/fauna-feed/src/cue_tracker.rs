@@ -75,6 +75,29 @@ pub enum LeaveModel {
     AbsenceIsLeave,
 }
 
+/// How a tracked exposure ended — stamped by the tracker into
+/// [`CueObservation::ended_by`], read by [`crate::cues::CueEngine`]: a `skip`
+/// derives only from [`ExposureEnd::ScrolledPast`]
+/// (`docs/goal/behavior/engagement-cues.md` § Cue vocabulary & derivation, the
+/// 2026-10-10 ruling). A shell never chooses it — it relays what the tracker
+/// emitted, because it has no honest way of its own to know how an exposure
+/// ended.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExposureEnd {
+    /// The user moved on: positively measured below skip-visibility, or — under
+    /// [`LeaveModel::AbsenceIsLeave`] — disposed by the virtualizing container
+    /// while its post is still in the loaded window.
+    ScrolledPast,
+    /// Its post left the loaded window (a feed switch, a refresh that dropped
+    /// it, a mute or a delete) — checked before either leave model's own arm.
+    WindowDropped,
+    /// [`CueTracker::drain_all`]: the page left, the tab hid, a detail or
+    /// compose dialog covered the list, the app quit.
+    Drained,
+}
+
 /// One row of a shell's geometry probe: the row's post identity, its position
 /// and rendered size along the scroll axis, and what the shell's live post
 /// window says about it.
@@ -101,19 +124,28 @@ pub struct CueRow {
     /// The row's rendered extent along the scroll axis. Non-positive means "not
     /// yet arranged" — unmeasurable, never a fabricated 0-visibility reading.
     pub height: f64,
-    /// Whether the row's post is a media (video/audio) post, from the shell's
-    /// live post window. Stamped into the exposure once, at first sighting.
+    /// Whether the row's post is playable media, from the shell's live post
+    /// window — the snapshot's `PostSummary::plays_media`, never `has_media`
+    /// (a still image is a non-media post). The exposure keeps the latest
+    /// visible sample's reading.
     pub is_media: bool,
     /// Peak playback fraction reached so far, per-mille, for a media row; `None`
     /// for a non-media row or one that never played. The tracker folds the
     /// **maximum** across the exposure's samples, which is exactly
     /// [`CueObservation::media_played_pm`]'s "peak reached".
     ///
-    /// No shipped capture shell reports playback yet (linux, windows, android
-    /// and apple all render feed media as still images, so every current caller
-    /// passes `None` and gets `None` back). The field exists so a video-capable
-    /// shell needs no face change: a UniFFI record field-add breaks every
-    /// Kotlin/Swift/C# construction site, so it is far cheaper here than later.
+    /// **What a shell passes: the peak its inline player reached since the
+    /// previous sample, taken.** The player notes every position it reports
+    /// (through [`fauna_core::scoring::cues::played_per_mille`], never a local
+    /// clamp), its end included, into a per-post "unread" maximum; the probe
+    /// takes that value for the row (clearing it) and passes `None` when the
+    /// player made no progress since. Taking, rather than re-passing the
+    /// player's lifetime peak, is what keeps one play from crediting a second
+    /// exposure when the reader scrolls back to a video they already finished
+    /// (completions accumulate); noting on the player's own progress events,
+    /// rather than reading the position at the tick, is what catches the last
+    /// frame of a play that ends between two ticks. The fold here turns the
+    /// takes back into the exposure's peak.
     pub media_played_pm: Option<u32>,
 }
 
@@ -149,6 +181,24 @@ pub struct CueTracker {
     /// probe read and by [`CueTracker::drain_all`], so credit only ever spans
     /// between two successful measurements.
     last_sample_mono_ms: Option<u64>,
+    /// The e2e clock seam (§ *The test clock*, below). `None` in every
+    /// ordinary run; absent from a release build.
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    test_clock: Option<FrozenClock>,
+    /// The last sample's probe read and viewport, for
+    /// [`CueTracker::probe_for_test`].
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    last_probe: Option<(Vec<CueRow>, f64, f64)>,
+}
+
+/// The two readings a frozen tracker uses in place of the ones the shell
+/// passes: `mono_ms` on the shell's own monotonic scale, `wall_ms` epoch
+/// milliseconds.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FrozenClock {
+    mono_ms: u64,
+    wall_ms: u64,
 }
 
 impl CueTracker {
@@ -158,6 +208,10 @@ impl CueTracker {
             leave_model,
             entries: HashMap::new(),
             last_sample_mono_ms: None,
+            #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+            test_clock: None,
+            #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+            last_probe: None,
         }
     }
 
@@ -170,6 +224,16 @@ impl CueTracker {
     /// bookkeeping itself is entirely internal.
     pub fn tracked(&self) -> usize {
         self.entries.len()
+    }
+
+    /// The post ids of the exposures in progress — every row last measured at
+    /// or above skip-visibility and not yet emitted — sorted. A shell-facing
+    /// diagnostic like [`CueTracker::tracked`]: it is how a test watches an
+    /// exposure begin and end without reading the bookkeeping.
+    pub fn tracked_post_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.entries.keys().cloned().collect();
+        ids.sort();
+        ids
     }
 
     /// One honest sample: credit elapsed monotonic time to every row measured
@@ -191,6 +255,12 @@ impl CueTracker {
         mono_now_ms: u64,
         wall_now_ms: u64,
     ) -> Vec<CueObservation> {
+        #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+        let (mono_now_ms, wall_now_ms) = self.clock_readings(mono_now_ms, wall_now_ms);
+        #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+        {
+            self.last_probe = Some((rows.to_vec(), viewport_start, viewport_end));
+        }
         // Bucket every MEASURABLE row. A non-positive height is "not yet
         // arranged" — unmeasurable, never a fabricated 0-visibility reading that
         // would flush a row merely mid-layout.
@@ -239,15 +309,17 @@ impl CueTracker {
                 .entries
                 .entry(row.post_id.clone())
                 .or_insert_with(|| DwellState {
-                    // Stamped once, at first sighting — a window that reports
-                    // media-ness differently later (it can't, in practice) never
-                    // retroactively rewrites a live exposure.
                     is_media: row.is_media,
                     dwell_ms_at_skip_visibility: 0,
                     dwell_ms_at_long_visibility: 0,
                     visible_samples: 0,
                     media_played_pm: None,
                 });
+            // The latest reading wins: a post's media-ness only becomes better
+            // known (`PostSummary::plays_media` reads an unresolved attachment
+            // as playable until its media resolves), so an image post first
+            // sighted before its resolve still ends on the dwell arm.
+            entry.is_media = row.is_media;
             entry.visible_samples += 1;
             entry.dwell_ms_at_skip_visibility += credit_ms;
             if fraction_pm >= CUE_LONG_DWELL_VISIBLE_PM {
@@ -265,29 +337,35 @@ impl CueTracker {
             .collect();
         let window: HashSet<&str> = window_post_ids.iter().map(String::as_str).collect();
 
-        let gone: Vec<String> = self
+        let gone: Vec<(String, ExposureEnd)> = self
             .entries
             .keys()
-            .filter(|id| {
-                let id = id.as_str();
-                match measured.get(id) {
+            .filter_map(|id| {
+                let key = id.as_str();
+                let end = match measured.get(key) {
                     // Positively measured out of the viewport.
-                    Some(&fraction) => fraction < CUE_SKIP_VISIBLE_PM,
-                    None if unmeasurable.contains(id) => false,
+                    Some(&fraction) if fraction < CUE_SKIP_VISIBLE_PM => ExposureEnd::ScrolledPast,
+                    Some(_) => return None,
+                    None if unmeasurable.contains(key) => return None,
+                    // Its post left the loaded window entirely (a feed switch,
+                    // a refresh, a mute) — checked before either leave model's
+                    // arm, so a disposal-by-switch is never read as a scroll.
+                    None if !window.contains(key) => ExposureEnd::WindowDropped,
                     None => match self.leave_model {
-                        // Its post left the loaded window entirely (feed switch).
-                        LeaveModel::HoldUnmeasured => !window.contains(id),
-                        // Absent from a non-empty measured set ⇒ disposed.
-                        LeaveModel::AbsenceIsLeave => true,
+                        // Still loaded, merely unmeasured: mid-layout, held.
+                        LeaveModel::HoldUnmeasured => return None,
+                        // Absent from a non-empty measured set while still
+                        // loaded ⇒ the container disposed it: scrolled away.
+                        LeaveModel::AbsenceIsLeave => ExposureEnd::ScrolledPast,
                     },
-                }
+                };
+                Some((id.clone(), end))
             })
-            .cloned()
             .collect();
 
-        let left: Vec<(String, DwellState)> = gone
+        let left: Vec<(String, DwellState, ExposureEnd)> = gone
             .into_iter()
-            .filter_map(|id| self.entries.remove_entry(&id))
+            .filter_map(|(id, end)| self.entries.remove_entry(&id).map(|(id, d)| (id, d, end)))
             .collect();
         finish(left, wall_now_ms)
     }
@@ -297,23 +375,186 @@ impl CueTracker {
     /// baseline so a later reuse of this same tracker never credits the
     /// elapsed-while-away gap as dwell.
     pub fn drain_all(&mut self, wall_now_ms: u64) -> Vec<CueObservation> {
+        #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+        let (_, wall_now_ms) = self.clock_readings(0, wall_now_ms);
         self.last_sample_mono_ms = None;
-        let all: Vec<(String, DwellState)> = self.entries.drain().collect();
+        let all: Vec<(String, DwellState, ExposureEnd)> = self
+            .entries
+            .drain()
+            .map(|(id, d)| (id, d, ExposureEnd::Drained))
+            .collect();
         finish(all, wall_now_ms)
     }
 }
 
-/// Apply the single-sample noise floor and assemble the [`CueObservation`]s.
-fn finish(left: Vec<(String, DwellState)>, wall_now_ms: u64) -> Vec<CueObservation> {
+/// # The test clock
+///
+/// A skip is an exposure *shorter* than `CUE_SKIP_MS`, and a fast-scroll burst
+/// is two exposures ending *less* than `CUE_BURST_MIN_GAP_MS` apart — upper
+/// bounds on time, which a loaded box can only break. A long dwell is a lower
+/// bound, and a loaded box breaks that too: the per-sample credit cap
+/// ([`CUE_MAX_SAMPLE_CREDIT_MS`]) is the product's own refusal to count a
+/// stalled main loop as dwell, so a wall-clock hold on a busy machine earns
+/// less than it waited. So an e2e witness of any of the three cannot read the
+/// real clocks (`e2e-latency-independent-assertions.md`, convention 14:
+/// advance the clock, never sleep). These seams freeze BOTH readings the
+/// tracker uses — the monotonic one that credits dwell and the wall one the
+/// engine's pace gate reads (`observed_at_ms`) — and move them only when the
+/// test says, by exact amounts. Everything else is real: the shell's geometry
+/// probe, its scroll, the tracker's bookkeeping, the engine.
+///
+/// The seam lives here, beside the bookkeeping, so every capture shell gets it
+/// the same way: a shell keeps passing its real readings, and a frozen tracker
+/// substitutes its own. A frozen clock credits nothing between advances: a row
+/// accrues exactly the time the test advanced while it was in view. One
+/// sample's credit is capped, so [`CueTracker::advance_clock_for_test`] refuses
+/// a larger step rather than let the excess vanish — and each step needs a
+/// sample of its own to land (tui draws after every agent request; linux's
+/// advance command samples itself).
+///
+/// The freeze lives on this tracker, so a re-auth (which rebuilds the shell's
+/// capture) thaws it.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+impl CueTracker {
+    fn clock_readings(&self, mono_now_ms: u64, wall_now_ms: u64) -> (u64, u64) {
+        match self.test_clock {
+            Some(clock) => (clock.mono_ms, clock.wall_ms),
+            None => (mono_now_ms, wall_now_ms),
+        }
+    }
+
+    /// Freeze both readings at the shell's current real ones. Idempotent: a
+    /// second freeze keeps the clocks where the test left them.
+    pub fn freeze_clock_for_test(&mut self, mono_now_ms: u64, wall_now_ms: u64) {
+        if self.test_clock.is_none() {
+            self.test_clock = Some(FrozenClock {
+                mono_ms: mono_now_ms,
+                wall_ms: wall_now_ms,
+            });
+        }
+    }
+
+    /// Move both frozen readings forward by `ms`. Refused when nothing is
+    /// frozen or when `ms` exceeds one sample's credit cap.
+    pub fn advance_clock_for_test(&mut self, ms: u64) -> Result<(), String> {
+        let Some(clock) = self.test_clock.as_mut() else {
+            return Err("the cue clock is not frozen".to_string());
+        };
+        if ms > CUE_MAX_SAMPLE_CREDIT_MS {
+            return Err(format!(
+                "one advance of {ms} ms exceeds the per-sample credit cap of \
+                 {CUE_MAX_SAMPLE_CREDIT_MS} ms; advance in steps"
+            ));
+        }
+        clock.mono_ms += ms;
+        clock.wall_ms += ms;
+        Ok(())
+    }
+
+    /// Back to the shell's real readings. The monotonic reading jumps to real
+    /// time, so the next sample's credit is capped like any stall.
+    pub fn thaw_clock_for_test(&mut self) {
+        self.test_clock = None;
+    }
+
+    /// Whether the clock is frozen.
+    pub fn clock_frozen_for_test(&self) -> bool {
+        self.test_clock.is_some()
+    }
+
+    /// What the tracker holds right now, for a test to steer its scrolling by
+    /// and to read an exposure's progress from: the exposures in progress with
+    /// the credit each has accrued, and the rows and viewport the last sample
+    /// measured, in the shell's coordinate space.
+    pub fn probe_for_test(&self) -> CueProbe {
+        let (cards, band) = match &self.last_probe {
+            Some((rows, start, end)) => (
+                rows.iter()
+                    .map(|r| CueProbeCard {
+                        post_id: r.post_id.clone(),
+                        top: r.top,
+                        height: r.height,
+                    })
+                    .collect(),
+                Some((*start, *end)),
+            ),
+            None => (Vec::new(), None),
+        };
+        let mut exposures: Vec<CueProbeExposure> = self
+            .entries
+            .iter()
+            .map(|(id, d)| CueProbeExposure {
+                post_id: id.clone(),
+                dwell_ms_at_skip_visibility: d.dwell_ms_at_skip_visibility,
+                dwell_ms_at_long_visibility: d.dwell_ms_at_long_visibility,
+                visible_samples: d.visible_samples,
+                media_played_pm: d.media_played_pm,
+            })
+            .collect();
+        exposures.sort_by(|a, b| a.post_id.cmp(&b.post_id));
+        CueProbe {
+            frozen: self.test_clock.is_some(),
+            tracked: self.tracked_post_ids(),
+            band,
+            cards,
+            exposures,
+        }
+    }
+}
+
+/// [`CueTracker::probe_for_test`]'s reading — the one shape every app's
+/// `feed_cue_probe` agent command publishes.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CueProbe {
+    /// Whether the test clock is frozen.
+    pub frozen: bool,
+    /// The exposures in progress (at least half in view at their last
+    /// measurement), sorted.
+    pub tracked: Vec<String>,
+    /// The last sample's viewport `[start, end]`; `None` before any sample.
+    pub band: Option<(f64, f64)>,
+    /// The rows the last sample measured.
+    pub cards: Vec<CueProbeCard>,
+    /// The credit each exposure in progress has accrued, sorted by post id.
+    pub exposures: Vec<CueProbeExposure>,
+}
+
+/// One measured row of a [`CueProbe`].
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CueProbeCard {
+    pub post_id: String,
+    pub top: f64,
+    pub height: f64,
+}
+
+/// One exposure in progress of a [`CueProbe`].
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CueProbeExposure {
+    pub post_id: String,
+    pub dwell_ms_at_skip_visibility: u64,
+    pub dwell_ms_at_long_visibility: u64,
+    pub visible_samples: u32,
+    /// The peak playback per-mille folded so far — what the media arm of
+    /// `watch-complete` will read at emit.
+    pub media_played_pm: Option<u32>,
+}
+
+/// Apply the single-sample noise floor and assemble the [`CueObservation`]s,
+/// each stamped with how its exposure ended.
+fn finish(left: Vec<(String, DwellState, ExposureEnd)>, wall_now_ms: u64) -> Vec<CueObservation> {
     left.into_iter()
-        .filter(|(_, d)| d.visible_samples >= CUE_MIN_VISIBLE_SAMPLES)
-        .map(|(content_id, d)| CueObservation {
+        .filter(|(_, d, _)| d.visible_samples >= CUE_MIN_VISIBLE_SAMPLES)
+        .map(|(content_id, d, ended_by)| CueObservation {
             content_id,
             is_media: d.is_media,
             media_played_pm: d.media_played_pm,
             dwell_ms_at_skip_visibility: d.dwell_ms_at_skip_visibility,
             dwell_ms_at_long_visibility: d.dwell_ms_at_long_visibility,
             observed_at_ms: wall_now_ms,
+            ended_by,
         })
         .collect()
 }
@@ -697,11 +938,19 @@ mod tests {
     // ── Exposure bookkeeping ─────────────────────────────────────────────────
 
     #[test]
-    fn media_ness_is_stamped_once_at_first_sighting() {
+    fn media_ness_follows_the_latest_reading() {
+        // An image post first sighted before its media resolved reads as
+        // playable, then as not — the exposure ends on the dwell arm.
         let mut t = hold();
         tick(&mut t, vec![row_at("p", 1000).media(true)], &["p"], 0);
-        // A later read claiming otherwise never rewrites a live exposure.
         tick(&mut t, vec![row_at("p", 1000).media(false)], &["p"], 250);
+        let left = t.drain_all(9);
+        assert!(!left[0].is_media);
+
+        // And the other way: a video resolving mid-exposure is media.
+        let mut t = hold();
+        tick(&mut t, vec![row_at("p", 1000).media(false)], &["p"], 0);
+        tick(&mut t, vec![row_at("p", 1000).media(true)], &["p"], 250);
         let left = t.drain_all(9);
         assert!(left[0].is_media);
     }
@@ -832,9 +1081,150 @@ mod tests {
         );
     }
 
+    // ── How an exposure ended (the 2026-10-10 ruling) ────────────────────────
+
+    #[test]
+    fn a_row_measured_out_of_the_viewport_ended_scrolled_past() {
+        for mut t in [hold(), absence()] {
+            let p = row_at("p", 1000);
+            tick(&mut t, vec![p.clone()], &["p"], 0);
+            tick(&mut t, vec![p.clone()], &["p"], 250);
+            let left = tick(&mut t, vec![p.with_fraction(0)], &["p"], 500);
+            assert_eq!(left[0].ended_by, ExposureEnd::ScrolledPast);
+        }
+    }
+
+    #[test]
+    fn absence_a_disposed_row_still_in_the_window_ended_scrolled_past() {
+        let mut t = absence();
+        let p = row_at("p", 1000);
+        let q = row_at("q", 1000);
+        tick(&mut t, vec![p.clone(), q.clone()], &["p", "q"], 0);
+        tick(&mut t, vec![p.clone(), q], &["p", "q"], 250);
+        let left = tick(&mut t, vec![p], &["p", "q"], 500);
+        assert_eq!(left[0].content_id, "q");
+        assert_eq!(left[0].ended_by, ExposureEnd::ScrolledPast);
+    }
+
+    #[test]
+    fn a_row_gone_from_the_loaded_window_ended_window_dropped_in_both_models() {
+        // Under AbsenceIsLeave too: a feed switch disposes the row AND drops its
+        // post from the window — the window check comes first, so it is never
+        // mislabelled as a scroll.
+        for mut t in [hold(), absence()] {
+            let p = row_at("p", 1000);
+            let q = row_at("q", 1000);
+            tick(&mut t, vec![p.clone(), q.clone()], &["p", "q"], 0);
+            tick(&mut t, vec![p.clone(), q], &["p", "q"], 250);
+            let left = tick(&mut t, vec![p], &["p"], 500);
+            assert_eq!(left.len(), 1);
+            assert_eq!(left[0].content_id, "q");
+            assert_eq!(left[0].ended_by, ExposureEnd::WindowDropped);
+        }
+    }
+
+    #[test]
+    fn drain_all_stamps_every_exposure_drained() {
+        let mut t = hold();
+        let rows = vec![row_at("p", 1000), row_at("q", 1000)];
+        tick(&mut t, rows.clone(), &["p", "q"], 0);
+        tick(&mut t, rows, &["p", "q"], 250);
+        let left = t.drain_all(0);
+        assert_eq!(left.len(), 2);
+        assert!(left.iter().all(|o| o.ended_by == ExposureEnd::Drained));
+    }
+
+    #[test]
+    fn the_stamp_serializes_kebab_case() {
+        assert_eq!(
+            serde_json::to_string(&ExposureEnd::ScrolledPast).unwrap(),
+            "\"scrolled-past\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ExposureEnd::WindowDropped).unwrap(),
+            "\"window-dropped\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ExposureEnd::Drained).unwrap(),
+            "\"drained\""
+        );
+    }
+
     #[test]
     fn the_leave_model_is_readable_back() {
         assert_eq!(hold().leave_model(), LeaveModel::HoldUnmeasured);
         assert_eq!(absence().leave_model(), LeaveModel::AbsenceIsLeave);
+    }
+
+    // ── The test clock ───────────────────────────────────────────────────────
+
+    /// Frozen, a row accrues exactly the time the test advanced while it was
+    /// in view — whatever the real readings the shell kept passing — and the
+    /// finished exposure carries the frozen WALL reading the engine's pace
+    /// gate compares, moved by the same advances.
+    #[test]
+    fn a_frozen_clock_credits_exactly_what_the_test_advanced() {
+        let mut t = hold();
+        tick(&mut t, vec![row_at("a", 1000)], &["a"], 1_000);
+        t.freeze_clock_for_test(1_000, 50_000);
+        // Real readings racing ahead (a stalled loop, a slow agent) credit
+        // nothing while frozen.
+        for real in [5_000, 9_000, 30_000] {
+            tick(&mut t, vec![row_at("a", 1000)], &["a"], real);
+        }
+        for _ in 0..9 {
+            t.advance_clock_for_test(CUE_MAX_SAMPLE_CREDIT_MS).unwrap();
+            tick(&mut t, vec![row_at("a", 1000)], &["a"], 99_999);
+        }
+        let probe = t.probe_for_test();
+        assert!(probe.frozen);
+        assert_eq!(probe.tracked, vec!["a".to_string()]);
+        assert_eq!(probe.band, Some((0.0, 1000.0)));
+        assert_eq!(
+            probe.exposures,
+            vec![CueProbeExposure {
+                post_id: "a".into(),
+                dwell_ms_at_skip_visibility: 9_000,
+                dwell_ms_at_long_visibility: 9_000,
+                visible_samples: 13,
+                media_played_pm: None,
+            }]
+        );
+        let left = tick(&mut t, vec![row_at("a", 0)], &["a"], 123);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].dwell_ms_at_long_visibility, 9_000);
+        assert_eq!(left[0].observed_at_ms, 50_000 + 9_000);
+        assert_eq!(left[0].ended_by, ExposureEnd::ScrolledPast);
+    }
+
+    /// Two advances with no sample between land as one sample's credit, which
+    /// the cap clips — why each step needs its own sample, and why one step
+    /// larger than the cap is refused rather than silently clipped.
+    #[test]
+    fn the_test_clock_refuses_what_it_cannot_honour() {
+        let mut t = hold();
+        assert!(t.advance_clock_for_test(100).is_err(), "not frozen");
+        t.freeze_clock_for_test(0, 0);
+        assert!(
+            t.advance_clock_for_test(CUE_MAX_SAMPLE_CREDIT_MS + 1)
+                .is_err()
+        );
+        t.advance_clock_for_test(CUE_MAX_SAMPLE_CREDIT_MS).unwrap();
+        t.thaw_clock_for_test();
+        assert!(!t.clock_frozen_for_test());
+        assert!(t.advance_clock_for_test(100).is_err(), "thawed");
+    }
+
+    /// A drain stamps the frozen wall reading too (the quit path).
+    #[test]
+    fn a_frozen_drain_stamps_the_frozen_wall_reading() {
+        let mut t = hold();
+        t.freeze_clock_for_test(0, 7_000);
+        tick(&mut t, vec![row_at("a", 1000)], &["a"], 1);
+        t.advance_clock_for_test(500).unwrap();
+        tick(&mut t, vec![row_at("a", 1000)], &["a"], 2);
+        let drained = t.drain_all(999_999);
+        assert_eq!(drained[0].observed_at_ms, 7_500);
+        assert_eq!(drained[0].dwell_ms_at_skip_visibility, 500);
     }
 }

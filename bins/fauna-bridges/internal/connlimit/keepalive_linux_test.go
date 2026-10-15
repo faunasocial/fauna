@@ -14,7 +14,7 @@ import (
 // crate). All three release their permit when the connection closes, so all
 // three have the same failure mode: a peer that vanishes without a clean TCP
 // close leaves an ESTABLISHED socket forever and burns one of its IP's slots
-// permanently. That is what took example.com's :443 down on 2026-07-31, once ~256
+// permanently. That is what took the live nest's :443 down on 2026-07-31, once ~256
 // such sockets had accumulated on the router.
 //
 // The Rust side had to arm TCP keepalive explicitly (SO_KEEPALIVE is off by
@@ -81,7 +81,7 @@ func TestAcceptedConnectionsHaveDeadPeerDetectionArmed(t *testing.T) {
 	if keepalive == 0 {
 		t.Fatal("SO_KEEPALIVE is off on an accepted connection: a peer that vanishes " +
 			"without a clean close would hold its per-IP permit forever (the 2026-07-31 " +
-			"example.com :443 outage class). Arm it explicitly on the listener, the way " +
+			"the live nest :443 outage class). Arm it explicitly on the listener, the way " +
 			"libs/fauna-conn-limit::arm_dead_peer_detection does for the Rust callers.")
 	}
 	// The OS default idle is ~2h, which is too slow to keep a 256-slot budget

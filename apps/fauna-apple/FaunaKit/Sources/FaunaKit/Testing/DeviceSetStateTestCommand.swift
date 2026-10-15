@@ -8,8 +8,8 @@ import Foundation
 #if DEBUG
 
 /// Shared handler for the cross-app `device_set_state` TestAgent command — the
-/// e2e reader for a fleet-scope removal (`account-data-taxonomy.md` § The
-/// generation machinery → *Fleet-scope reclamation*, clause (4)): whether
+/// e2e reader for a fleet-scope removal (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (4)): whether
 /// `device_id_hex`'s plane `fauna.state.device-set` row reads Removed/Enrolled
 /// from THIS app's own account runtime. The apple twin of tui's arm
 /// (`apps/fauna-tui/src/automation.rs`), linux's and android's; the

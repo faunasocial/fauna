@@ -45,7 +45,9 @@ public final class ModerationQueueVM {
     /// The sealed spam-model client-write path (1d — mail-spam.md § Encrypted-mode
     /// interaction). `nil` ⇒ no sealed-write path ⇒ every correction takes the
     /// server-side / flag-removal route unchanged (e.g. mail not enabled).
+    #if !FAUNA_KIDS
     private var mailSettings: MailSettingsMachine?
+    #endif
     private var api: APIClient?
 
     public init() {}
@@ -76,7 +78,9 @@ public final class ModerationQueueVM {
         api = nil
         moderation = nil
         conversationsSession = nil
+        #if !FAUNA_KIDS
         mailSettings = nil
+        #endif
         rows = []
         isLoading = false
         errorMessage = nil
@@ -116,11 +120,13 @@ public final class ModerationQueueVM {
             guard self.api === api else { return }   // the in-flight clause
             conversationsSession = session
         }
+        #if !FAUNA_KIDS
         if mailSettings == nil {
             let settings = try? await api.mailSettingsMachine()
             guard self.api === api else { return }   // the in-flight clause
             mailSettings = settings
         }
+        #endif
         await load()
     }
 
@@ -207,14 +213,17 @@ public final class ModerationQueueVM {
         if row.source == .local {
             let text = conversationsSession?.moderationMessageBody(contentId: row.contentId)
             _ = conversationsSession?.moderationRemoveLocalDetection(contentId: row.contentId)
+            #if !FAUNA_KIDS
             if let mailSettings, let text, !text.isEmpty {
                 _ = try? await mailSettings.trainSpamModelClient(text: text, isSpam: false)
             }
+            #endif
             guard self.api === issuedApi else { return }
             await load()
             return
         }
         var trainedClientSide = false
+        #if !FAUNA_KIDS
         if let mailSettings, (try? await mailSettings.sealedSpamWriteAvailable()) == true,
             let text = await api?.postBodyText(contentId: row.contentId)
         {
@@ -223,6 +232,7 @@ public final class ModerationQueueVM {
                 trainedClientSide = result.sealed
             }
         }
+        #endif
         guard self.api === issuedApi else { return }
         if !trainedClientSide {
             do {

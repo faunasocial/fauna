@@ -49,8 +49,8 @@
 //! and neither nest ends serving a device-set row of the departed device.
 //!
 //! The two cases after them are **the removal's nest half across two nests**
-//! (`account-data-taxonomy.md` § The generation machinery → *Fleet-scope
-//! reclamation*, clause (4) → *The nest half follows merged state*): the
+//! (`fleet-scope-reclamation.md`
+//! § *Fleet-scope reclamation*, clause (4) → *The nest half follows merged state*): the
 //! device bound to B is lost and removed from a device bound to A, and B must
 //! stop minting for its key and stop counting its walk mark (measured red
 //! 2026-10-01, before the rule was built); and a lost device removed by key
@@ -1517,6 +1517,50 @@ async fn a_linked_nest_is_completed_without_ever_being_bound() {
         vec![entry.clone()],
         "the seed-only reader reads the box from B, a nest no device was ever bound to"
     );
+
+    // Plane first (`account-replica-posture.md` § *Escrow custody*, ruling
+    // (2)): B's fleet plane carries the wrap rows, so the same reader keys
+    // every generation with B's escrow door down, and never asks it.
+    let blind = EscrowDoorDown {
+        nest: &b,
+        asked: AtomicUsize::new(0),
+    };
+    let read = cold_read_deployment_seeds(&blind, &IDENTITY_SEED)
+        .await
+        .expect("the cold read needs no escrow door");
+    assert_eq!(
+        read,
+        vec![entry.clone()],
+        "the seed-only reader keys from the wrap rows"
+    );
+    assert_eq!(
+        blind.asked.load(Ordering::SeqCst),
+        0,
+        "the holder's door is never asked"
+    );
+}
+
+/// `nest` with its escrow door unreachable: every `fauna.generation.escrow.get`
+/// is counted and fails as a transport fault; everything else is `nest`'s.
+struct EscrowDoorDown<'n> {
+    nest: &'n Nest,
+    asked: AtomicUsize,
+}
+
+impl RpcRequester for EscrowDoorDown<'_> {
+    type Error = Refused;
+
+    async fn request<Req, Reply>(&self, kind: &'static str, payload: Req) -> Result<Reply, Refused>
+    where
+        Req: serde::Serialize,
+        Reply: serde::de::DeserializeOwned,
+    {
+        if kind == fauna_protocol::generation_escrow::KIND_ESCROW_GET {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            return Err(Refused::Connection("the escrow door is down".into()));
+        }
+        self.nest.request(kind, payload).await
+    }
 }
 
 /// The RecoveryKey registration chain `nest` holds for the account, as the
@@ -3641,8 +3685,8 @@ async fn gate_of(nest: &Nest) -> (Option<i64>, i64) {
 /// member there and goes by the member-addressed door, its fleet `Removed` row
 /// alone. B must stop minting for its key, and its walk mark there must stop
 /// counting: B's gate must not hold every later retire behind a device the
-/// user has removed (`account-data-taxonomy.md` § The generation machinery →
-/// *Fleet-scope reclamation*, clause (4) → *The nest half follows merged
+/// user has removed (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (4) → *The nest half follows merged
 /// state*).
 ///
 /// **Measured red 2026-10-01, before that ruling was built**: after six
@@ -3736,8 +3780,8 @@ async fn a_lost_device_removed_at_the_other_nest_stops_counting_at_its_own_nests
 /// removes it through the member-addressed door — its fleet `Removed` row
 /// alone, no row gesture, so nothing nest-side is sent by the removal itself.
 /// `near`'s next full pass reads A's roster, finds the row claiming the removed
-/// key and revokes that grant by key (`account-data-taxonomy.md` § The
-/// generation machinery → *Fleet-scope reclamation*, clause (4) → *The nest
+/// key and revokes that grant by key (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (4) → *The nest
 /// half follows merged state*: the bound nest, in each full pass). A keeps the
 /// row. Reverting the pump's removed-grants step turns this red.
 #[tokio::test]

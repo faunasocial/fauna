@@ -20,7 +20,8 @@ persisted flag is read back over WS-RPC).
 
 v1 is SET-ONLY (ratified 2026-07-13): the select offers a "Not paywalled"
 placeholder only while the set is still public; once paywalled there is no clear
-affordance (the nest-side revoke/rotation leg is not shipped yet). This test
+affordance (the shared `unpaywall_set` / `rotate_paywall_grant` legs exist, but no
+app ships the clear control yet — folders.md § Web paywall). This test
 asserts the SET transition — the structural sibling of the webdav toggle's serve
 transition on owner rows.
 
@@ -232,3 +233,69 @@ def test_folder_paywall_select_paywalls_a_website_set(app, paywall_nest):
             f"{_paywalled_tier(gt, name)!r}; error={app.error_text()!r}"
         )
         assert not app.has_error(), f"paywall raised an error: {app.error_text()!r}"
+
+
+@pytest.mark.feature("paid-posts-and-tips")
+def test_folder_paywall_select_is_unavailable_without_a_tier(app, paywall_nest):
+    """With no tier of your own, a folder's paywall control is unavailable —
+    `ui/folders.md` § Element IDs → *Web paywall*: "disabled, with a 'create a
+    tier first' hint, for a creator holding no tiers (nothing to paywall to)".
+
+    The disabled state is read through the uniform `/element/enabled` contract
+    (`paywall_select_enabled`). The hint itself carries no ui.yaml id — tui
+    paints it as the select's prompt label, which the automation surface
+    deliberately does not register (an element's registry text is its VALUE) —
+    so this witness pins the control's unavailability, and the hint's
+    observability is captured as its own row rather than scraped off the
+    screen here.
+
+    Ordering is a causal barrier, not a wait: the select is asserted RENDERED
+    on the website-enabled row before its enabled state is read, and the row's
+    options and its enabled state come from the same per-visit tiers read."""
+    from conftest import _relaunch_trusting_nest
+
+    _relaunch_trusting_nest(app.driver, paywall_nest)
+    admin = paywall_nest["admin"]
+    app.driver.set_state({
+        "session": {
+            "authenticated": True,
+            "node_url": paywall_nest["url"],
+            "secret_hex": bytes(admin["signing_key"]).hex(),
+            "handle": "admin",
+            "actor_id": admin["actor_id_hex"],
+            "device_id": "test-device-paywall-notier",
+        },
+        "nav": {"stack": [{"view": "feed"}]},
+    })
+
+    gt = _admin_client(paywall_nest)
+    with gt:
+        # ── Precondition: this creator holds no tier at all (nest ground truth).
+        tiers = gt.call("fauna.subscriptions.tiers.list", {}).get("tiers", [])
+        assert tiers == [], f"precondition: a fresh admin holds no tier, got {tiers!r}"
+
+        b = app.backups
+        name = f"paywall-notier-{uuid.uuid4().hex[:6]}"
+        b.navigate_folders()
+        b.create_folder_via_wizard(name)
+        b.find_and_expand_folder(name)
+        assert b.website_toggle_visible(), (
+            f"folder-website-toggle must render on the expanded owner row of "
+            f"{name!r}; error={app.error_text()!r}"
+        )
+        b.toggle_website()
+        assert _wait(lambda: _website_enabled(gt, name)), (
+            f"flipping folder-website-toggle must persist website_enabled on "
+            f"{name!r}; error={app.error_text()!r}"
+        )
+        if not _wait(lambda: b.paywall_select_visible(), timeout=10.0):
+            b.find_and_expand_folder(name)
+        assert _wait(lambda: b.paywall_select_visible()), (
+            f"a website-enabled row renders folder-paywall-tier-select even with "
+            f"no tier; error={app.error_text()!r}"
+        )
+        assert not b.paywall_select_enabled(), (
+            "with no tier of one's own the paywall select must be DISABLED — there "
+            f"is nothing to paywall to; error={app.error_text()!r}"
+        )
+        assert _paywalled_tier(gt, name) is None, "nothing may have been paywalled"

@@ -654,6 +654,13 @@ pub fn persist_confirmed_identity(
 /// append-mode arms that register through their own add + switch) clears the
 /// slot explicitly at that same terminal, never earlier.
 ///
+/// **So is the pending-factory-reset slot** (`nest/common.md` § Client-state
+/// recoverability, CR-1): reaching `LoggedIn` means the re-claim it carried has
+/// landed. Its row is evaluated before every other launch row, and within the
+/// mint grace a `Claimed` box HONORS a fresh slot (a reset still in flight), so
+/// a survivor reopens the admin who just re-claimed onto the claim page and its
+/// "already claimed" error instead of the app.
+///
 /// Idempotent — `add_account` re-affirms an existing account rather than
 /// duplicating it, so a re-entered wizard or a resumed claim is safe.
 /// `set_active` carries the same rationale as [`persist_confirmed_identity`]'s:
@@ -670,6 +677,7 @@ pub fn persist_logged_in(
     let _ = registry.set_active(&actor_id);
     registry.clear_pending_invite(&actor_id);
     registry.clear_awaiting_dns(&actor_id);
+    registry.clear_pending_factory_reset(&actor_id);
     // The reach hint (`onboarding.md` § Reach hint), captured here because this
     // is the moment the account learns its `nest_url` — and the hint's whole job
     // is to be dialable while that URL is not. `None` is the ordinary case (a
@@ -976,6 +984,32 @@ mod tests {
         assert!(
             adapter.load_pending_invite().is_none(),
             "the invite is spent once the wizard reaches LoggedIn"
+        );
+    }
+
+    /// The terminal spends the pending-factory-reset slot too: the re-claim it
+    /// carried has landed. A survivor is read on the next launch as a reset still
+    /// in flight — within the mint grace a `Claimed` box HONORS a fresh slot —
+    /// so the admin who just re-claimed would reopen onto the claim page and its
+    /// "already claimed" error instead of the app.
+    #[test]
+    fn the_wizard_terminal_spends_the_pending_factory_reset_slot() {
+        let (registry, adapter) = setup();
+        registry
+            .add_account(SECRET_A, Some("https://nest.example"), None)
+            .unwrap();
+        mint_and_persist_pending_factory_reset(
+            &adapter,
+            "https://nest.example".into(),
+            "admin".into(),
+        )
+        .expect("the slot lands");
+        assert!(adapter.load_pending_factory_reset().is_some());
+
+        persist_logged_in(&registry, SECRET_A, "https://nest.example", None, None).unwrap();
+        assert!(
+            adapter.load_pending_factory_reset().is_none(),
+            "the pending re-claim is spent once the wizard reaches LoggedIn"
         );
     }
 
@@ -1328,6 +1362,132 @@ mod tests {
         reg.set_active(&b).unwrap();
         assert_eq!(unbound.load_identity(), Some(secret_bytes(SECRET_B)));
         assert_eq!(bound.load_identity(), Some(secret_bytes(SECRET_B)));
+    }
+
+    // --- web's tab pin (`account-scoping.md` § Concurrent instances → *Web*,
+    // "Which tabs mirror"): a tab pinned to a NON-active account is a genuine
+    // secondary and binds; a tab pinned to the active account, or unpinned, is
+    // the primary. ---------------------------------------------------------------
+
+    /// Two accounts, A active, each with its own outstanding factory reset
+    /// minted by the tab that serves it: the tab pinned to B (a secondary)
+    /// writes B's slot and leaves A's — the browser twin of a
+    /// `FAUNA_BOUND_ACCOUNT` instance (`nest/common.md` § Client-state
+    /// recoverability, CR-3: the slot is per-identity).
+    #[test]
+    fn a_tab_pinned_to_a_non_active_account_mints_into_its_own_slot() {
+        let store = Arc::new(InMemorySecretStore::new());
+        let reg = AccountRegistry::new(store.clone());
+        let a = reg
+            .add_account(SECRET_A, Some("https://a.example"), None)
+            .unwrap();
+        let b = reg
+            .add_account(SECRET_B, Some("https://b.example"), None)
+            .unwrap();
+        assert_eq!(reg.active().as_deref(), Some(a.as_str()));
+
+        let primary = reg.tab_launch_persistence(Some(&a));
+        let code_a = mint_and_persist_pending_factory_reset(
+            &primary,
+            "https://a.example".into(),
+            "a".into(),
+        )
+        .unwrap();
+        let slot_a = reg.pending_factory_reset_json(&a);
+
+        let secondary = reg.tab_launch_persistence(Some(&b));
+        assert_eq!(
+            secondary.load_pending_factory_reset(),
+            None,
+            "a tab pinned to B must not read A's pending reset as its own"
+        );
+        let code_b = mint_and_persist_pending_factory_reset(
+            &secondary,
+            "https://b.example".into(),
+            "b".into(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            reg.pending_factory_reset_json(&a),
+            slot_a,
+            "B's reset in the tab pinned to B must leave A's slot exactly as it was"
+        );
+        assert_eq!(
+            secondary.load_pending_factory_reset().unwrap().claim_code,
+            code_b
+        );
+        assert_eq!(
+            primary.load_pending_factory_reset().unwrap().claim_code,
+            code_a
+        );
+        assert_eq!(
+            reg.active().as_deref(),
+            Some(a.as_str()),
+            "a secondary never moves the active pointer"
+        );
+    }
+
+    /// The primary: no pin, or a pin naming the active account, follows
+    /// `active` exactly as before pinning existed — so a primary tab that
+    /// onboards another account (which moves `active`) keeps resolving the
+    /// account the wizard is on.
+    #[test]
+    fn an_unpinned_tab_or_one_pinned_to_the_active_account_is_the_primary() {
+        let store = Arc::new(InMemorySecretStore::new());
+        let reg = AccountRegistry::new(store.clone());
+        let a = reg
+            .add_account(SECRET_A, Some("https://a.example"), None)
+            .unwrap();
+        let b = reg
+            .add_account(SECRET_B, Some("https://b.example"), None)
+            .unwrap();
+
+        let unpinned = reg.tab_launch_persistence(None);
+        let pinned_to_active = reg.tab_launch_persistence(Some(&a));
+        assert_eq!(unpinned.load_identity(), Some(secret_bytes(SECRET_A)));
+        assert_eq!(
+            pinned_to_active.load_identity(),
+            Some(secret_bytes(SECRET_A))
+        );
+
+        reg.set_active(&b).unwrap();
+        assert_eq!(unpinned.load_identity(), Some(secret_bytes(SECRET_B)));
+        assert_eq!(
+            pinned_to_active.load_identity(),
+            Some(secret_bytes(SECRET_B)),
+            "the binding is decided when the adapter is built; an adapter built \
+             for the primary keeps following `active`"
+        );
+    }
+
+    /// The pin is normalized exactly as `FAUNA_BOUND_ACCOUNT` is
+    /// (`parse_bound_account`): case and surrounding blanks do not make the
+    /// active account look like another one, and an empty pin is no pin.
+    #[test]
+    fn the_tab_pin_is_normalized_like_the_launch_binding() {
+        let store = Arc::new(InMemorySecretStore::new());
+        let reg = AccountRegistry::new(store.clone());
+        let a = reg
+            .add_account(SECRET_A, Some("https://a.example"), None)
+            .unwrap();
+        let b = reg
+            .add_account(SECRET_B, Some("https://b.example"), None)
+            .unwrap();
+
+        let shouted = format!("  {}  ", b.to_ascii_uppercase());
+        assert_eq!(
+            reg.tab_launch_persistence(Some(&shouted)).load_identity(),
+            Some(secret_bytes(SECRET_B))
+        );
+        let shouted_active = a.to_ascii_uppercase();
+        let primary = reg.tab_launch_persistence(Some(&shouted_active));
+        reg.set_active(&b).unwrap();
+        assert_eq!(primary.load_identity(), Some(secret_bytes(SECRET_B)));
+        assert_eq!(
+            reg.tab_launch_persistence(Some("")).load_identity(),
+            Some(secret_bytes(SECRET_B))
+        );
     }
 
     /// Binding is a pure read end-to-end: gate check + a full sweep of the

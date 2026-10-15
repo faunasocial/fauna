@@ -15,11 +15,14 @@ producer and one checker:
       --static (the SPA's `static/`, copied verbatim into the tree) it first
       REFUSES when that directory holds a git-ignored file `just wasm` does not
       produce — a test recipe's output or a retired chunk's, which a long-lived
-      checkout keeps and a deploy's fresh checkout never has.
+      checkout keeps and a deploy's fresh checkout never has. It also REFUSES
+      when the pinned wasm32 C compiler is active (`supply-chain/wasm32-cc.toml`)
+      and the build's recorded `wasm32-cc` is not its version line.
   check  <manifest> <tree> [--commit SHA]
       Rebuild-and-compare's comparison half (`just web-verify` drives the
       rebuild): exit 1 naming every changed, missing and extra file, and a
-      commit mismatch; toolchain differences print as notes.
+      commit mismatch; toolchain differences print as notes, save the manifest's
+      `wasm32-cc` against the commit's active pin, which is a difference.
   commit <manifest>
       Print the commit a manifest was built from.
 
@@ -158,6 +161,27 @@ def toolchains(repo: Path) -> dict:
     return pins
 
 
+def wasm32_cc_pin(repo: Path) -> str:
+    """The pinned wasm32 C compiler's `clang --version` line; empty while the
+    pin is not active (`scripts/wasm32-cc.py` § `active`) or the repo has none."""
+    pin = repo / "supply-chain" / "wasm32-cc.toml"
+    if not pin.is_file():
+        return ""
+    return tomllib.loads(pin.read_text(encoding="utf-8")).get("clang_version_line", "")
+
+
+def wasm32_cc_problem(recorded: str | None, pin: str) -> str | None:
+    """Why a build's recorded wasm32-cc breaks an active pin; None when it does not.
+
+    release-integrity.md piece 1: the manifest's `wasm32-cc` must equal the
+    pin, so a tree compiled by any other C compiler is never published, and a
+    published one is graded against the pin of the commit it names.
+    """
+    if not pin or recorded == pin:
+        return None
+    return f"wasm32-cc: built with {recorded!r}, the pin is {pin!r}"
+
+
 def _head(repo: Path) -> str:
     return subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
@@ -196,7 +220,16 @@ def main(argv=None) -> int:
             for rel in strays:
                 print(f"  {rel}", file=sys.stderr)
             return 1
-        out = write_manifest(args.tree, args.commit or _head(args.repo), toolchains(args.repo))
+        pins = toolchains(args.repo)
+        problem = wasm32_cc_problem(pins.get("wasm32-cc"), wasm32_cc_pin(args.repo))
+        if problem:
+            print(
+                f"web-asset-manifest: REFUSED — {problem}; a tree compiled by another C compiler "
+                "reproduces nowhere else (`just wasm32-cc-install-steps` prints the install).",
+                file=sys.stderr,
+            )
+            return 1
+        out = write_manifest(args.tree, args.commit or _head(args.repo), pins)
         print(f"web-asset-manifest: wrote {out}")
         return 0
 
@@ -208,6 +241,9 @@ def main(argv=None) -> int:
         if mine is not None and mine != pin:
             print(f"note: toolchain {name}: manifest {pin!r}, this rebuild {mine!r}")
     problems = compare(expected, actual)
+    cc_problem = wasm32_cc_problem(expected.get("toolchains", {}).get("wasm32-cc"), wasm32_cc_pin(args.repo))
+    if cc_problem:
+        problems.append(f"manifest {cc_problem}")
     if problems:
         print(f"web-asset-manifest: MISMATCH — {len(problems)} difference(s) against {args.manifest}")
         for line in problems:

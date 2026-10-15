@@ -7,7 +7,7 @@ about either depends on a device clock"; § How the carriers meet the in-memory
 set (the *Native, position known* arm). The shared-Rust proofs (the fill rule,
 the raise, two runtimes converging) live in ``unread_tracking_tests.rs`` and
 ``read_positions_convergence.rs``; this is the same promise through a real app,
-a real nest and a real quit-and-reopen. tui leads (the lead-app rule).
+a real nest and a real quit-and-reopen, on every app that hosts an account runtime.
 
 The sequence, and why each step is there:
 
@@ -34,7 +34,6 @@ import json
 import pytest
 
 from common import create_actor_and_register
-from helpers.app_surface import declared_absence, skip_unbuilt
 from helpers.budgets import MLS_HANDSHAKE_S
 from helpers.waiting import await_account_runtime_assembled, wait_until
 from tests.api import conv_api
@@ -70,12 +69,6 @@ def test_a_native_message_sent_while_the_app_was_closed_is_unread_at_launch(
     logged_in_app, nest_instance, test_user
 ):
     app = logged_in_app
-    if app.driver.is_web():
-        declared_absence(
-            app.driver,
-            capability="an account runtime, so no synced read marker on the native rail",
-            doc="docs/goal/behavior/conversation-read-state.md § web",
-        )
     if not app.driver.preserve_state_across_relaunch():
         pytest.skip(
             "driver cannot preserve the client's long-term store across a relaunch, "
@@ -92,7 +85,7 @@ def test_a_native_message_sent_while_the_app_was_closed_is_unread_at_launch(
         port, admin_signing_key=nest_instance["admin"]["signing_key"]
     )
     wait_until(
-        lambda: conv_api.keypackage_count(port, sender, me) > 0,
+        lambda: conv_api.keypackage_count(port, test_user, me) > 0,
         MLS_HANDSHAKE_S,
         diagnose=lambda: "waiting for the app to publish a key package",
     )
@@ -116,14 +109,14 @@ def test_a_native_message_sent_while_the_app_was_closed_is_unread_at_launch(
     )
 
     marker = _read_marker(app, channel_hex)
-    if marker is None:
-        skip_unbuilt(
-            app.driver,
-            surface="read_marker_state reader",
-            detail="the e2e durability barrier over the shared "
-            "fauna_client_account_runtime::read_marker_state_json",
-            tracked="",
-        )
+    # Every app that hosts an account runtime answers the barrier (tui, linux,
+    # web, windows, macOS, iOS, android), so an absent reader is a defect in the
+    # build under test — not an unbuilt surface to skip past (convention 7).
+    assert marker is not None, (
+        "this app does not answer the `read_marker_state` reader; every "
+        "runtime-hosting app registers it over the shared "
+        "fauna_account_plane::account_driver::e2e_readers::read_marker_state"
+    )
 
     app.conversations.navigate()
     app.conversations.open_thread_by_channel(channel_hex)
@@ -143,7 +136,12 @@ def test_a_native_message_sent_while_the_app_was_closed_is_unread_at_launch(
     read_through = _read_marker(app, channel_hex)["through"]
 
     # ── 3. Quit; message two arrives while the app is closed. ──
-    app.driver.teardown()
+    if app.driver.is_web():
+        # Web's quit keeps the profile: `teardown()` would end the whole session
+        # (bridge included), leaving `hard_reload()` nothing to reopen.
+        app.driver.kill_uncleanly()
+    else:
+        app.driver.teardown()
     conv_api.channel_send(port, sender, channel_hex, second)
 
     # ── 4. Relaunch against the pinned store. ──

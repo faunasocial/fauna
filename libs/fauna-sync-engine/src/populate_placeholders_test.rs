@@ -30,7 +30,7 @@ use fauna_protocol::sync::SyncChange;
 
 use crate::adaptive::AdaptiveConcurrency;
 use crate::db::{SyncDb, SyncState};
-use crate::engine::SyncEngine;
+use crate::engine::{StaleHydratedRow, SyncEngine};
 use crate::ignore::IgnoreMatcher;
 use crate::nest_client::SyncClient;
 use crate::transfer::TransferPool;
@@ -555,8 +555,12 @@ fn out_of_order_delete_after_create_is_not_resurrected() {
     assert!(engine.db().get_entry("a").unwrap().is_none());
 }
 
-#[test]
-fn cross_pull_delete_removes_stale_placeholder() {
+/// A later pull's delete of a placeholder the fold recorded: the fold REPORTS it and
+/// leaves the row — the platform may have put the placeholder on the disk, and the row
+/// may go only after it has (`PlaceholderFold::deleted`). Applied with nothing on the
+/// disk, the row is all there is, and it goes.
+#[tokio::test]
+async fn cross_pull_delete_reports_the_stale_placeholder_and_its_apply_removes_it() {
     let watch = tempfile::tempdir().unwrap();
     let engine = test_engine(watch.path().to_path_buf());
 
@@ -572,30 +576,49 @@ fn cross_pull_delete_removes_stale_placeholder() {
         SyncState::Placeholder,
     );
 
-    // Pull 2: a later-pull delete of the same path must remove the stale
-    // placeholder row so the file browser stops listing the gone file. The
-    // delete is NOT in the same slice as the create — it's a separate pull over
-    // a db the prior pull already populated.
-    let n2 = engine
+    // Pull 2: a later-pull delete of the same path. The delete is NOT in the same
+    // slice as the create — it's a separate pull over a db the prior pull already
+    // populated.
+    let fold = engine
         .record_placeholders_from_changes(&[change(2, "a", None, 0, 200)])
-        .unwrap()
-        .recorded;
-    assert_eq!(n2, 0, "a delete records no new placeholder");
+        .unwrap();
+    assert_eq!(fold.recorded, 0, "a delete records no new placeholder");
+    assert_eq!(
+        fold.deleted,
+        vec![crate::engine::FoldedDelete {
+            relative_path: "a".to_string(),
+            deleting_device: Some("device".to_string()),
+        }],
+        "the delete is reported to the host, with the device that made it"
+    );
+    assert_eq!(
+        engine.db().get_entry("a").unwrap().map(|e| e.state),
+        Some(SyncState::Placeholder),
+        "the fold leaves the row: it goes only after what the disk holds"
+    );
+
+    let outcome = engine
+        .apply_folded_delete(&fold.deleted[0], |p| {
+            panic!("nothing is on the disk to remove, yet the binding was asked: {p:?}")
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome, crate::engine::FoldedDeleteOutcome::Applied);
     assert!(
         engine.db().get_entry("a").unwrap().is_none(),
-        "the prior Placeholder row is removed when its remote file is deleted across pulls",
+        "with nothing on the disk the row is the whole file, and it goes"
     );
 }
 
 #[test]
-fn cross_pull_delete_leaves_non_placeholder_entry() {
+fn cross_pull_delete_reports_a_hydrated_entry_and_leaves_it() {
     let watch = tempfile::tempdir().unwrap();
     let engine = test_engine(watch.path().to_path_buf());
 
-    // The always→on-demand *switch* path left a Synced (on-disk) entry. A delete
-    // arriving via this bytes-free population fold must NOT remove it — deleting
-    // an on-disk file's tracking + bytes is the full reconcile path's job, not
-    // the placeholder fold's. Only Placeholder rows are the fold's to drop.
+    // A Synced (on-disk) entry — a hydrated copy, or what the always→on-demand
+    // *switch* left. Its bytes are on the disk, so the bytes-free fold must not
+    // touch it: it reports the delete, and the host applies it through the shared
+    // verdict (`SyncEngine::apply_folded_delete`).
     engine
         .db()
         .upsert_entry(
@@ -612,25 +635,30 @@ fn cross_pull_delete_leaves_non_placeholder_entry() {
         )
         .unwrap();
 
-    let n = engine
+    let fold = engine
         .record_placeholders_from_changes(&[change(2, "a", None, 0, 200)])
-        .unwrap()
-        .recorded;
-    assert_eq!(n, 0, "a delete records no placeholder");
+        .unwrap();
+    assert_eq!(fold.recorded, 0, "a delete records no placeholder");
+    let reported: Vec<&str> = fold
+        .deleted
+        .iter()
+        .map(|d| d.relative_path.as_str())
+        .collect();
+    assert_eq!(reported, vec!["a"], "the delete is reported to the host");
 
     let entry = engine.db().get_entry("a").unwrap().unwrap();
     assert_eq!(
         entry.state,
         SyncState::Synced,
-        "a Synced (switch-case) entry is left to the full reconcile path, not removed by the fold",
+        "a Synced entry's bytes are on the disk: the fold leaves the row to the host's apply",
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // Re-pointing an already-tracked placeholder at a moved head
 //
-// The fold owns `Placeholder` rows and only those — the same rule the delete
-// arm already follows ("only a Placeholder row is ours to remove"). A
+// The fold owns `Placeholder` rows and only those (its delete arm removes no
+// live row — it reports the delete to the host). A
 // Placeholder carries **no local bytes**, so re-pointing it at the nest's
 // current head can clobber nothing.
 //
@@ -725,6 +753,72 @@ fn repointing_is_idempotent_when_the_head_already_matches() {
     let entry = engine.db().get_entry("a").unwrap().unwrap();
     assert_eq!(entry.size_bytes, 10);
     assert_eq!(entry.content_key_version, Some(3));
+}
+
+/// **A re-point carries the row's local identity and drops the old head's proof**
+/// (`file-versions.md` § Restore, ordering 2). A `Placeholder` row may sit over a stale
+/// cache — a restore's free that a held file refused — and its `local_hash` names those
+/// bytes, a version already recorded, which is what keeps the uploader from taking them for
+/// an edit (`stale_cache_placeholder_test`). A re-point that dropped the identity would hand
+/// the stale cache to the uploader as an edit of the new head, recording the replaced
+/// version over another device's change. The dehydration proof is the content the OLD head
+/// reassembles to, so it goes when the head moves: a proof left behind would vouch for the
+/// stale cache as the new head (`materialize_placeholder_rows` would then mark it `Synced`).
+#[test]
+fn a_repoint_carries_the_rows_local_identity_and_drops_the_old_heads_proof() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_engine(watch.path().to_path_buf());
+
+    let old = manifest_hex(0x01);
+    engine
+        .record_placeholders_from_changes(&[change_with_generation(1, "a", &old, 10, 100, None)])
+        .unwrap();
+    // The bytes the disk last held under the row, as a free (or a restore) leaves them:
+    // named by the row, and proven the head's.
+    let held = ContentHash::of_raw(b"the version the disk last held");
+    let seeded = engine.db().get_entry("a").unwrap().unwrap();
+    engine
+        .db()
+        .upsert_entry(
+            "a",
+            Some(held),
+            None,
+            seeded.manifest_hash,
+            SyncState::Placeholder,
+            0,
+            seeded.remote_mtime,
+            seeded.size_bytes,
+            seeded.version_num,
+            seeded.content_key_version,
+        )
+        .unwrap();
+    engine
+        .db()
+        .stamp_recorded_content_from_local("a", crate::db::ProofOrigin::Fetched)
+        .unwrap();
+
+    let new = manifest_hex(0x02);
+    engine
+        .record_placeholders_from_changes(&[change_with_generation(
+            9, "a", &new, 99, 900_000, None,
+        )])
+        .unwrap();
+
+    let entry = engine.db().get_entry("a").unwrap().unwrap();
+    assert_eq!(
+        entry.manifest_hash,
+        Some(ContentHash::from_digest_raw([0x02; 32])),
+        "precondition: the row follows the moved head"
+    );
+    assert_eq!(
+        entry.local_hash,
+        Some(held),
+        "the row still names the bytes the disk last held"
+    );
+    assert_eq!(
+        entry.recorded_content_hash, None,
+        "the old head's proof is not the new head's"
+    );
 }
 
 /// A `Synced` row's bytes are **on disk**. Re-pointing it would silently orphan
@@ -1048,6 +1142,51 @@ fn apply_refresh_fold_reports_false_on_a_true_noop() {
     );
 }
 
+/// A remote delete of a file this host holds only as a placeholder: the row going is
+/// the whole delete here (the OS keeps whatever bytes a File Provider file holds), and
+/// the tick must report `changed=true` — or the enumerator is never signalled and the
+/// gone file stays listed. A hydrated row's delete is left as it is.
+#[test]
+fn apply_refresh_fold_drops_a_remotely_deleted_placeholder_and_reports_it() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_engine(watch.path().to_path_buf());
+
+    let m = manifest_hex(0x01);
+    engine
+        .record_placeholders_from_changes(&[
+            change(1, "cloud", Some(&m), 10, 100),
+            change(2, "hydrated", Some(&m), 10, 100),
+        ])
+        .unwrap();
+    engine
+        .db()
+        .update_state("hydrated", SyncState::Synced)
+        .unwrap();
+
+    let fold = engine
+        .record_placeholders_from_changes(&[
+            change(3, "cloud", None, 0, 200),
+            change(4, "hydrated", None, 0, 200),
+        ])
+        .unwrap();
+    assert_eq!(fold.recorded, 0, "precondition: nothing recorded");
+
+    let changed = engine.apply_refresh_fold(&fold).unwrap();
+    assert!(
+        changed,
+        "a dropped row is a change the enumerator must hear of"
+    );
+    assert!(
+        engine.db().get_entry("cloud").unwrap().is_none(),
+        "the remotely deleted placeholder's row goes"
+    );
+    assert_eq!(
+        engine.db().get_entry("hydrated").unwrap().map(|e| e.state),
+        Some(SyncState::Synced),
+        "a hydrated row is not dropped here"
+    );
+}
+
 /// A stale-hydrated row (a remote modify of a file this host had hydrated)
 /// must be re-pointed at the nest's new head, marked back to `Placeholder`,
 /// have its dehydration proof cleared (so `content_version` changes and the OS
@@ -1128,6 +1267,133 @@ fn apply_refresh_fold_repoints_stale_hydrated_row_and_clears_recorded_content_ha
         entry.recorded_content_hash, None,
         "the dehydration proof must be cleared so content_version changes and the OS re-fetches",
     );
+}
+
+/// **A stale hydrated copy replaced in place** (a pinned file on a cfapi root,
+/// which the platform will not free): once the binding has swapped the reported
+/// head's bytes in, `record_replaced_head` moves the row to that head as `Synced`
+/// over them — the content its local identity and its fetched proof, so the
+/// upload paths see no local edit and the dehydration gate can prove the bytes.
+#[test]
+fn record_replaced_head_moves_the_row_to_the_reported_head_over_the_bytes_on_disk() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_engine(watch.path().to_path_buf());
+    engine
+        .db()
+        .upsert_entry(
+            "a",
+            Some(ContentHash::from_digest_raw([0x09; 32])),
+            None,
+            Some(ContentHash::from_digest_raw([0x09; 32])),
+            SyncState::Synced,
+            5,
+            5,
+            50,
+            7,
+            None,
+        )
+        .unwrap();
+    let fold = engine
+        .record_placeholders_from_changes(&[change_with_generation(
+            9,
+            "a",
+            &manifest_hex(0x02),
+            11,
+            900_000,
+            Some(5),
+        )])
+        .unwrap();
+    let [row] = fold.stale_hydrated.as_slice() else {
+        panic!("the moved head under a Synced row is reported stale");
+    };
+
+    // The binding swapped the new head's bytes in over the old copy.
+    const HEAD: &[u8] = b"the new head";
+    std::fs::write(watch.path().join("a"), HEAD).unwrap();
+    let content = ContentHash::of_raw(HEAD);
+    engine.record_replaced_head(row, content).unwrap();
+
+    let entry = engine.db().get_entry("a").unwrap().unwrap();
+    assert_eq!(entry.state, SyncState::Synced, "the bytes are on the disk");
+    assert_eq!(
+        entry.manifest_hash,
+        Some(ContentHash::from_digest_raw([0x02; 32])),
+        "the row follows the reported head"
+    );
+    assert_eq!(entry.local_hash, Some(content), "the bytes' identity");
+    assert_eq!(
+        entry.recorded_content_hash,
+        Some(content),
+        "the fetched proof"
+    );
+    assert_eq!(
+        entry.recorded_proof_origin,
+        crate::db::ProofOrigin::Fetched,
+        "a fetched body, never an own record"
+    );
+    assert_eq!(entry.size_bytes, HEAD.len() as i64);
+    assert!(
+        engine.is_recorded_content("a"),
+        "the disk proves to be the recorded head"
+    );
+}
+
+/// **A reported head that names its signer is stamped with it** — a restore this
+/// device recorded, handed to the replace road over a kept copy: every door that
+/// moves the row to the head stamps the identity it was recorded as, or the head
+/// would open under no owner root (`writer-signed-change-records.md` ruling
+/// (11)(d)). The fold's own reports name none and stamp nothing here.
+#[test]
+fn a_reported_head_that_names_its_signer_is_stamped_by_both_row_doors() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_engine(watch.path().to_path_buf());
+    for rel in ["replaced", "freed"] {
+        engine
+            .db()
+            .upsert_entry(
+                rel,
+                Some(ContentHash::from_digest_raw([0x09; 32])),
+                None,
+                Some(ContentHash::from_digest_raw([0x09; 32])),
+                SyncState::Synced,
+                5,
+                5,
+                50,
+                7,
+                None,
+            )
+            .unwrap();
+    }
+    let head = |rel: &str| StaleHydratedRow {
+        relative_path: rel.to_string(),
+        manifest_hash: ContentHash::from_digest_raw([0x02; 32]),
+        size_bytes: 12,
+        content_key_version: None,
+        remote_mtime: 900,
+        version_num: 7,
+        signed_as: Some([0x5c; 32]),
+    };
+
+    const HEAD: &[u8] = b"the restored";
+    std::fs::write(watch.path().join("replaced"), HEAD).unwrap();
+    engine
+        .record_replaced_head(&head("replaced"), ContentHash::of_raw(HEAD))
+        .unwrap();
+    engine
+        .repoint_hydrated_to_placeholder(&head("freed"))
+        .unwrap();
+
+    for rel in ["replaced", "freed"] {
+        let entry = engine.db().get_entry(rel).unwrap().unwrap();
+        assert_eq!(
+            (entry.manifest_hash, entry.head_signed_as),
+            (
+                Some(ContentHash::from_digest_raw([0x02; 32])),
+                Some([0x5c; 32])
+            ),
+            "{rel}: the row stands at the head, signed as its report names"
+        );
+    }
 }
 
 /// **The frontier check** (`mls-group-key-material.md` § M2 → *Writer-signed

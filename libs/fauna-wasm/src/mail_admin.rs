@@ -29,12 +29,12 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-#[cfg(feature = "test-helpers")]
-use fauna_client_dns::enable_dns_provider_fake_for_test;
 use fauna_client_dns::{
     DnsAction, DnsManagementMachine, build_dns_management_machine,
     build_dns_management_machine_with_credentials,
 };
+#[cfg(feature = "test-helpers")]
+use fauna_client_dns::{enable_dns_provider_fake_for_test, set_dns_clock_override_for_test};
 use fauna_client_mail_settings::rpc_glue::{
     build_bridge_approval_machine, build_caldav_policy_machine, build_carddav_policy_machine,
     build_forwarders_machine, build_local_domains_machine, build_mail_aliases_machine,
@@ -100,6 +100,26 @@ pub fn enable_dns_fake_provider_for_test() {
     enable_dns_provider_fake_for_test();
 }
 
+/// Test-only: compress the `admin-dns` page's two slow clocks (the background
+/// re-check and the managed re-publish interval) to `secs` — the wasm twin of
+/// native's `FAUNA_DNS_RECHECK_SECS` env var, read by
+/// [`fauna_client_dns::record_recheck_secs`]. Gated like
+/// `enableDnsFakeProviderForTest` above; invoked only from the Playwright e2e
+/// bridge (`window.__fauna_setDnsRecheckSecsForTest`), never by production code.
+#[cfg(feature = "test-helpers")]
+#[wasm_bindgen(js_name = setDnsRecheckSecsForTest)]
+pub fn set_dns_recheck_secs_for_test(secs: u32) {
+    set_dns_clock_override_for_test(u64::from(secs));
+}
+
+/// `fauna_client_dns::record_recheck_secs` — how often an open `admin-dns` page
+/// runs [`WasmDnsManagementMachine::background_recheck`]. The cadence is the
+/// shared crate's; the page owns only the timer.
+#[wasm_bindgen(js_name = recordRecheckSecs)]
+pub fn record_recheck_secs() -> u32 {
+    u32::try_from(fauna_client_dns::record_recheck_secs()).unwrap_or(u32::MAX)
+}
+
 /// `fauna_client_mail_settings::local_domains::role_address_options` → the four
 /// overridable RFC 2142 role addresses in render order, each entry carrying both
 /// its `role_address_overrides` storage key (the `<key>@` caption and the
@@ -115,6 +135,20 @@ pub fn role_address_options() -> Result<JsValue, JsValue> {
     crate::rpc::to_js(&fauna_client_mail_settings::local_domains::role_address_options())
 }
 
+/// `fauna_client_mail_settings::local_domains::dmarc_policy_options` → the three
+/// `admin-dns-domain-dmarc-policy-select` options in paint order (`reject`,
+/// `quarantine`, `none`), each carrying the RFC 7489 tag the picker's `<option
+/// value>` takes, its localized label, and the `policy` the tag names (serialized
+/// `"Reject"`/`"Quarantine"`/`"Monitor"` — the spelling `UpdateConfig` carries and
+/// `LocalDomainView.dmarc_policy` is compared against, so the page hand-writes no
+/// tag ↔ policy map).
+///
+/// Sibling of `roleAddressOptions` above (priority #2).
+#[wasm_bindgen(js_name = dmarcPolicyOptions)]
+pub fn dmarc_policy_options() -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_mail_settings::local_domains::dmarc_policy_options())
+}
+
 /// `fauna_client_mail_settings::admin_policy::fcrdns_mode_options` → the three
 /// `admin-mail-fcrdns-mode-select` values in render order, each carrying its wire
 /// token and i18n label key.
@@ -128,6 +162,14 @@ pub fn role_address_options() -> Result<JsValue, JsValue> {
 #[wasm_bindgen(js_name = fcrdnsModeOptions)]
 pub fn fcrdns_mode_options() -> Result<JsValue, JsValue> {
     crate::rpc::to_js(&fauna_client_mail_settings::admin_policy::fcrdns_mode_options())
+}
+
+/// `fauna_client_mail_settings::admin_policy::dmarc_forensic_mode_options` →
+/// the four DMARC `fo=` values in render order (the RFC 7489 tag each carries
+/// is what `DmarcPolicyView.fo_mode` holds). Sibling of `fcrdnsModeOptions`.
+#[wasm_bindgen(js_name = dmarcForensicModeOptions)]
+pub fn dmarc_forensic_mode_options() -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_mail_settings::admin_policy::dmarc_forensic_mode_options())
 }
 
 /// `fauna_client_mail_settings::admin_policy::imap_delete_nonempty_options` →
@@ -181,6 +223,20 @@ impl WasmDnsManagementMachine {
     #[wasm_bindgen(js_name = allDomainsManaged)]
     pub fn all_domains_managed(&self, active_domains: Vec<String>) -> bool {
         self.inner.all_domains_managed(active_domains)
+    }
+
+    /// One tick of the open page's background re-check
+    /// ([`fauna_client_dns::DnsManagementMachine::background_recheck`]): re-read
+    /// the matrix and verify it, re-publishing whatever managed record public DNS
+    /// no longer serves. Resolves `undefined`; a failure lands on the snapshot's
+    /// `error`, as a tapped re-check's would.
+    #[wasm_bindgen(js_name = backgroundRecheck)]
+    pub fn background_recheck(&self) -> js_sys::Promise {
+        let m = self.inner.clone();
+        future_to_promise(async move {
+            m.background_recheck().await;
+            Ok(JsValue::UNDEFINED)
+        })
     }
 }
 
@@ -511,6 +567,24 @@ wasm_admin_machine!(
     build_mail_lists_machine,
 );
 
+/// `fauna_client_mail_settings::archive_url_needs_confirm` — whether the
+/// add/edit sheet's Submit must first arm with `mail_lists.archive_off_server_confirm`
+/// (an archive link off the user's own domains goes out with every message;
+/// `mail-mass-mailing.md` § Don't do these). The web door for the predicate the
+/// native apps reach through UniFFI, so the SPA never re-derives the host check.
+#[wasm_bindgen(js_name = archiveUrlNeedsConfirm)]
+pub fn archive_url_needs_confirm(
+    archive_url: String,
+    saved_archive_url: Option<String>,
+    local_domains: Vec<String>,
+) -> bool {
+    fauna_client_mail_settings::archive_url_needs_confirm(
+        archive_url,
+        saved_archive_url,
+        local_domains,
+    )
+}
+
 /// Web user-facing `mail-list-members` page (the per-list members drill-down off
 /// `mail-lists`) — add / batch-import / unsubscribe / resubscribe the members of
 /// one list. Same `snapshot`/`hydrate`/`dispatch` surface as the macro wrappers,
@@ -725,6 +799,25 @@ impl WasmMailSettingsMachine {
                 }
             }
             Ok(js_sys::Uint8Array::from(&flat[..]).into())
+        })
+    }
+
+    /// The prior key generations' retirement instants (unix seconds) as a
+    /// `Float64Array`, aligned with `recipientStandingKeypairs`' second generation
+    /// onward — the web receive rail sets it on `WasmConversationsManager`
+    /// (`setRecipientRetirements`) so the openers select a generation by seal
+    /// time. `f64`, not `u64`, so the JS side stays `number` rather than
+    /// `BigInt`. See `MailSettingsMachine::recipient_generation_retirements`.
+    #[wasm_bindgen(js_name = recipientGenerationRetirements)]
+    pub fn recipient_generation_retirements(&self) -> js_sys::Promise {
+        let m = self.inner.clone();
+        future_to_promise(async move {
+            let instants = m
+                .recipient_generation_retirements()
+                .await
+                .map_err(err_to_js)?;
+            let as_f64: Vec<f64> = instants.into_iter().map(|t| t as f64).collect();
+            Ok(js_sys::Float64Array::from(&as_f64[..]).into())
         })
     }
 
@@ -1089,6 +1182,34 @@ pub fn resolve_autogenerated_bridge_password(
     )
 }
 
+/// `fauna_client_mail_settings::forward_all_to_draft_outcome` → `{ kind:
+/// "clear" | "set" | "refused", address?, message? }` (`message` a
+/// `LocalizedText`) — the `mail-settings-forward-all-to-input` draft check
+/// before the round trip (`mail-forwarding.md` § Per-account "forward all").
+#[wasm_bindgen(js_name = forwardAllToDraftOutcome)]
+pub fn forward_all_to_draft_outcome(draft: &str) -> Result<JsValue, JsValue> {
+    to_js(&fauna_client_mail_settings::forward_all_to_draft_outcome(
+        draft,
+    ))
+}
+
+/// `fauna_client_mail_settings::forward_per_hour_draft_outcome` → `{ kind:
+/// "value" | "refused", value?, message? }` — the
+/// `mail-settings-forward-per-hour-input` draft check against the nest's ceiling.
+#[wasm_bindgen(js_name = forwardPerHourDraftOutcome)]
+pub fn forward_per_hour_draft_outcome(draft: &str, ceiling: u32) -> Result<JsValue, JsValue> {
+    to_js(&fauna_client_mail_settings::forward_per_hour_draft_outcome(
+        draft, ceiling,
+    ))
+}
+
+/// `fauna_client_mail_settings::forward_per_hour_hint` → a `LocalizedText`
+/// naming the ceiling, the limit field's subtitle.
+#[wasm_bindgen(js_name = forwardPerHourHint)]
+pub fn forward_per_hour_hint(ceiling: u32) -> Result<JsValue, JsValue> {
+    to_js(&fauna_client_mail_settings::forward_per_hour_hint(ceiling))
+}
+
 /// `fauna_client_mail_settings::password_gen::password_strength_label` → a
 /// `LocalizedText` `{ key, args }` (`settings.mail.strength_{weak,fair,strong}`)
 /// the SPA resolves through `resolveLocalized`, or `null` for an empty password.
@@ -1112,4 +1233,60 @@ pub fn password_strength_label(password: &str) -> Result<JsValue, JsValue> {
 #[wasm_bindgen(js_name = resolveMuaUsername)]
 pub fn resolve_mua_username(mua_username: String, handle: String) -> String {
     fauna_client_mail_settings::resolve_mua_username(&mua_username, &handle)
+}
+
+/// What the `nest_retire` page passes its machine from the signed-in account
+/// (`nest-retirement.md` § Credential stance (b) and § DNS cleanup — scope and
+/// order, the remembered-slot arm): the account's DNS record
+/// (`fauna.state.dns`), read through this tab's account runtime, projected into
+/// the retire binding face's own input shapes — `providerIds[i]` pairs with
+/// `credsJson[i]` (the `providers.yaml`-keyed bag `setHeldDnsJson` takes, one
+/// per held credential, in the record's order, as
+/// `HeldDnsCredential::all_from` projects it natively), and `dkim` / `atproto`
+/// / `faunaSelf` are the record's remembered slot names as the
+/// `{"<domain>": ["<fqdn>", …]}` JSON `setRememberedSlotsJson` takes.
+///
+/// The retire machine lives in the pre-auth onboarding chunk and this record
+/// in the core chunk's runtime, so the two meet in JSON, not a shared Rust
+/// object. Resolves `undefined` when no runtime runs in this tab (the launch
+/// entry, before any session — the page then passes nothing), and
+/// `{"error": …, "notReady": bool}` when the read failed — `notReady` set on
+/// the first-listing gate's refusal, which the page surfaces through
+/// `setInputError` rather than reading it as "the account holds none".
+#[wasm_bindgen(js_name = retireHeldDnsJson)]
+pub async fn retire_held_dns_json() -> Option<String> {
+    let handle = crate::account_runtime::handle()?;
+    let value = match handle.dns().await {
+        Ok(dns) => {
+            let (provider_ids, creds_json): (Vec<_>, Vec<_>) = dns
+                .credentials
+                .iter()
+                .map(|c| {
+                    let bag: std::collections::BTreeMap<&str, &str> = c
+                        .fields
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.as_str()))
+                        .collect();
+                    (
+                        c.provider_id.clone(),
+                        serde_json::to_string(&bag).unwrap_or_default(),
+                    )
+                })
+                .unzip();
+            let names = |m| serde_json::to_string(m).unwrap_or_default();
+            serde_json::json!({
+                "providerIds": provider_ids,
+                "credsJson": creds_json,
+                "dkim": names(&dns.dkim_published_names),
+                "atproto": names(&dns.atproto_published_names),
+                "faunaSelf": names(&dns.fauna_self_published_names),
+            })
+        }
+        Err(e) => {
+            let reason = fauna_account_plane::preference_surfaces::plane_failure(e);
+            let not_ready = fauna_account_plane::preference_surfaces::refused_as_not_ready(&reason);
+            serde_json::json!({ "error": reason, "notReady": not_ready })
+        }
+    };
+    Some(value.to_string())
 }

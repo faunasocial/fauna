@@ -177,16 +177,23 @@ fn build_records(domain: &str, zone: Option<&str>, instance_ipv4: &str) -> Vec<D
         nest_ipv6: None,
         mail_ipv4: instance_ipv4,
         mail_ipv6: None,
-        // Both infra subdomains are off at VPS-provisioning time: the iroh P2P
-        // relay sidecar (the image's own decision, never a person's — it is
-        // not running before the box is claimed; `p2p.md` § The relay) and
-        // the ATProto PDS bridge (its service user always takes a
-        // manual admin approval card, which cannot have happened before the box
-        // exists). Their `relay.<primary>` / `pds.<primary>` A records surface
-        // via the live DNS matrix (`dns_handlers::append_host_records`) once
-        // enabled, not the initial zone seed.
-        relay_enabled: false,
+        // The iroh P2P relay is seeded with the zone: the image runs it with
+        // nothing switched on, and the nest hands it its certificate as soon as
+        // the box has a public name — the very name this zone gives it
+        // (`p2p.md` § The relay). Seeding `relay.<primary>` now lets its SAN
+        // join the first apex ACME order (`acme_http01::relay_san_included`
+        // waits for the record to resolve) instead of a later admin publish.
+        // The ATProto PDS bridge is not: its service user always takes a manual
+        // admin approval card, which cannot have happened before the box exists,
+        // so `pds.<primary>` surfaces via the live DNS matrix
+        // (`dns_handlers::append_host_records`) once approved.
+        relay_enabled: true,
         pds_enabled: false,
+        // No user has opted into a subdomain site and no plugin is installed
+        // before the box exists either; the wildcard `*.<primary>` row and a
+        // hosted plugin's claimed `<label>.<primary>` row surface the same way.
+        subdomain_sites: false,
+        plugin_labels: &[],
     });
 
     let dmarc_body = DmarcPublishPolicy::default().to_txt_body(domain);
@@ -984,8 +991,9 @@ mod tests {
 
         let recs = build_records("x.test", Some("x.test"), "1.2.3.4");
 
-        // apex A, mail A, MX, SPF, DMARC — no DKIM (provisioned nest-side post-boot).
-        assert_eq!(recs.len(), 5, "{recs:#?}");
+        // apex A, mail A, relay A, MX, SPF, DMARC — no DKIM (provisioned
+        // nest-side post-boot).
+        assert_eq!(recs.len(), 6, "{recs:#?}");
         let find = |ty: &str, name: &str| {
             recs.iter()
                 .find(|r| r.record_type == ty && r.name == name)
@@ -995,6 +1003,12 @@ mod tests {
         // Apex + mail.<primary> A both resolve to the VPS IP (single-host onboarding).
         assert_eq!(find("A", "@").value, "1.2.3.4");
         assert_eq!(find("A", "mail").value, "1.2.3.4");
+        // The image runs its relay with nothing switched on (`p2p.md` § The
+        // relay), so its host record is seeded with the zone and points at the
+        // nest, whose :443 SNI-routes `relay.*` to it (`dns-management.md`).
+        assert_eq!(find("A", "relay").value, "1.2.3.4");
+        // The PDS bridge waits for an admin's approval: no `pds` row yet.
+        assert!(!recs.iter().any(|r| r.name == "pds"), "{recs:#?}");
 
         // MX → mail.<primary> priority 10 (mail-multidomain.md:140), NOT the apex.
         // Target is the FQDN form (trailing dot) the shared builder emits so a
@@ -1050,16 +1064,17 @@ mod tests {
     /// Hetzner Cloud then double-suffixes (`e2e-x.zone.tld.zone.tld`).
     #[test]
     fn build_records_relativizes_subdomain_against_zone_name() {
-        let recs = build_records("e2e-abc.example.com", Some("example.com"), "1.2.3.4");
+        let recs = build_records("e2e-abc.example.net", Some("example.net"), "1.2.3.4");
         let has = |ty: &str, name: &str| recs.iter().any(|r| r.record_type == ty && r.name == name);
         assert!(has("A", "e2e-abc"), "apex A → subdomain label: {recs:#?}");
         assert!(has("A", "mail.e2e-abc"), "mail A: {recs:#?}");
+        assert!(has("A", "relay.e2e-abc"), "relay A: {recs:#?}");
         assert!(has("MX", "e2e-abc"), "MX at subdomain apex: {recs:#?}");
         assert!(has("TXT", "e2e-abc"), "SPF at subdomain apex: {recs:#?}");
         assert!(has("TXT", "_dmarc.e2e-abc"), "DMARC: {recs:#?}");
         // No owner is fully-qualified — the bug's signature.
         assert!(
-            !recs.iter().any(|r| r.name.contains("example.com")),
+            !recs.iter().any(|r| r.name.contains("example.net")),
             "owner names must be zone-relative, got {recs:#?}",
         );
     }
@@ -1071,13 +1086,13 @@ mod tests {
     /// (`zone_name_for_id`) before calling `build_records`.
     #[test]
     fn build_records_numeric_zone_id_leaves_owners_fully_qualified() {
-        let recs = build_records("e2e-abc.example.com", Some("42"), "1.2.3.4");
+        let recs = build_records("e2e-abc.example.net", Some("42"), "1.2.3.4");
         assert!(
             recs.iter()
-                .any(|r| r.record_type == "A" && r.name == "e2e-abc.example.com"),
+                .any(|r| r.record_type == "A" && r.name == "e2e-abc.example.net"),
             "{recs:#?}"
         );
-        assert!(recs.iter().any(|r| r.name == "mail.e2e-abc.example.com"));
+        assert!(recs.iter().any(|r| r.name == "mail.e2e-abc.example.net"));
     }
 
     #[test]
@@ -1085,7 +1100,7 @@ mod tests {
         let zones = vec![
             DnsZone {
                 id: "42".into(),
-                name: "example.com".into(),
+                name: "example.net".into(),
             },
             DnsZone {
                 id: "7".into(),
@@ -1094,7 +1109,7 @@ mod tests {
         ];
         assert_eq!(
             zone_name_for_id(&zones, "42").as_deref(),
-            Some("example.com")
+            Some("example.net")
         );
         assert_eq!(
             zone_name_for_id(&zones, "7").as_deref(),

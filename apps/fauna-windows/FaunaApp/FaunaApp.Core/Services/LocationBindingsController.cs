@@ -69,6 +69,14 @@ internal sealed class LocationBindingsController
     /// its own UI thread before reading <see cref="Rendered"/>.</summary>
     internal event Action? Changed;
 
+    /// <summary>A bind push was confirmed by the agent. Distinct from <see cref="Changed"/>:
+    /// the optimistic add already rendered the row, so a confirm usually changes nothing
+    /// rendered and <c>Changed</c> stays silent — yet the agent's handling of the bind has
+    /// by now enrolled this device's seat (file-sync.md § 4), which the Folders page's place
+    /// editor must re-read. The twin of tui's <c>FolderBindConfirmed</c>. Raised on an
+    /// arbitrary thread.</summary>
+    internal event Action? BindConfirmed;
+
     /// <summary>Raise <see cref="Changed"/> iff the rendered union (rows + their modes)
     /// actually differs from the last one signalled.</summary>
     private void SignalIfChanged()
@@ -239,6 +247,7 @@ internal sealed class LocationBindingsController
                 {
                     await channel.BindLocationAsync(bind.@path, bind.@folder, bind.@folderId);
                     _model.ConfirmBind(bind.@path);
+                    BindConfirmed?.Invoke();
                 }
                 catch (Exception)
                 {
@@ -271,7 +280,7 @@ internal sealed class LocationBindingsController
     /// <summary>
     /// Optimistic add: record the binding (it renders immediately, before the bind push) and
     /// reconcile. No content-key push precedes it: the agent resolves the newly-bound set's
-    /// keys from the account's custody itself (on-demand-files.md § Shared sets on a
+    /// keys from the account's custody itself (on-demand-files-shared-sets.md § Shared sets on a
     /// capability host → <i>One mechanism</i>). A blank path or set is a no-op —
     /// the set is contextual on the Folders page and the model holds only <i>bindings</i>,
     /// so there is no "add unbound" state. <paramref name="folderId"/> — the set's

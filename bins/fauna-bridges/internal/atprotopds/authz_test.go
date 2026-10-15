@@ -320,3 +320,63 @@ func TestEndpointClassNamesMatchTheModule(t *testing.T) {
 		}
 	}
 }
+
+// accountRouteFixture serves the package's real route table behind a caller
+// that always authenticates, so a request reaches D8's seat.
+func accountRouteFixture(t *testing.T, authz *stubAuthorizer) *httptest.Server {
+	t.Helper()
+	srv := NewServer(nil, nil, authz, nil, nil)
+	caller := &xrpc.Caller{ActorID: make([]byte, 32), Plane: PlaneAppCredential, Scope: ScopeAppPass}
+	x := xrpc.NewServer(staticCaller{caller}, nil, srv.AuthzHook, nil, nil)
+	srv.RegisterRoutes(x)
+	ts := httptest.NewServer(x)
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func callAuthed(t *testing.T, ts *httptest.Server, method, nsid string) int {
+	t.Helper()
+	req, _ := http.NewRequest(method, ts.URL+"/xrpc/"+nsid, nil)
+	req.Header.Set("Authorization", "Bearer anything")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+// D6's fauna-surface refusals (atproto-pds-full.md § Problem 4) must reach D8.
+// Left unregistered, the frame answers its closed-world MethodNotImplemented —
+// the DEFERRED flavour, which tells an app the opposite of the truth ("not
+// yet"), and which no module ever sees. Registered, an authenticated call is
+// handed to the module under its own NSID, and the module's verdict is what
+// goes on the wire.
+func TestAccountAndCredentialMethodsReachTheModule(t *testing.T) {
+	authz := &stubAuthorizer{decide: func(AuthzInput) AuthzVerdict {
+		return AuthzVerdict{XrpcError: "InvalidToken", Message: "from the module"}
+	}}
+	ts := accountRouteFixture(t, authz)
+	for nsid, method := range faunaSurfaceMethods {
+		before := authz.count()
+		status := callAuthed(t, ts, method, nsid)
+		if authz.count() != before+1 || authz.input().Lxm != nsid {
+			t.Errorf("%s never reached the module (calls %d→%d, lxm %q)",
+				nsid, before, authz.count(), authz.input().Lxm)
+		}
+		if status != http.StatusForbidden {
+			t.Errorf("%s: status %d, want the module's 403", nsid, status)
+		}
+	}
+}
+
+// Were the module ever to allow one of them, the route still refuses: the
+// handler is a closed door, never a half-built implementation.
+func TestAccountAndCredentialMethodsFailClosedPastAnAllow(t *testing.T) {
+	ts := accountRouteFixture(t, &stubAuthorizer{}) // allows
+	for nsid, method := range faunaSurfaceMethods {
+		if status := callAuthed(t, ts, method, nsid); status == http.StatusOK {
+			t.Errorf("%s answered 200 past an allowing module", nsid)
+		}
+	}
+}

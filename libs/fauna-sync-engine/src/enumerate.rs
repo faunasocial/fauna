@@ -2,7 +2,7 @@
 //!
 //! An on-demand placeholder surface (Windows Cloud Files API, macOS File
 //! Provider, a Linux FUSE/overlay) populates a directory's contents *when the
-//! user first browses it* — `file-sync.md` § On-Demand Files: "Directory
+//! user first browses it* — `on-demand-files.md` § On-Demand Files: "Directory
 //! listings populate lazily, so browsing a folder never forces a full download."
 //! The platform hands the provider the directory being opened and expects the
 //! immediate children back.

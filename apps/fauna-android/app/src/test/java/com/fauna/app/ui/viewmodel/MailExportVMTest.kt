@@ -3,6 +3,7 @@ package com.fauna.app.ui.viewmodel
 import com.fauna.app.core.ApiClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -73,8 +74,16 @@ class MailExportVMTest {
 
     private data class Fixture(val vm: MailExportVM, val api: ApiClient, val machine: MailExportMachine)
 
-    private fun makeVm(handle: String = "alice", snapshot: MailExportSnapshot = snap()): Fixture {
+    private fun makeVm(
+        handle: String = "alice",
+        snapshot: MailExportSnapshot = snap(),
+        exportChanged: MutableSharedFlow<Unit> = MutableSharedFlow(),
+        reconnect: MutableSharedFlow<Unit> = MutableSharedFlow(),
+    ): Fixture {
         val api = mock(ApiClient::class.java)
+        // `init` collects both ticks on `viewModelScope` (the page-gated re-read).
+        whenever(api.mailExportChangedTick).thenReturn(exportChanged)
+        whenever(api.reconnectTick).thenReturn(reconnect)
         val machine = mock(MailExportMachine::class.java)
         whenever(machine.snapshot()).thenReturn(snapshot)
         whenever(api.buildMailExportMachine()).thenReturn(machine)
@@ -107,6 +116,23 @@ class MailExportVMTest {
 
         verify(machine).setActorHandle("alice")
         verify(machine).runExport()
+    }
+
+    /** The Export page open here follows an export started, finished, failed or
+     *  dismissed on another device (`StaleSurfaces::mail_export`), and a
+     *  reconnect: each tick is the machine's own hydrate, once more. */
+    @Test
+    fun anExportPushAndAReconnectEachReReadTheSession() = runTest {
+        val exportChanged = MutableSharedFlow<Unit>()
+        val reconnect = MutableSharedFlow<Unit>()
+        val (_, _, machine) = makeVm(exportChanged = exportChanged, reconnect = reconnect)
+        verify(machine, times(1)).hydrate()
+
+        exportChanged.emit(Unit)
+        verify(machine, times(2)).hydrate()
+
+        reconnect.emit(Unit)
+        verify(machine, times(3)).hydrate()
     }
 
     @Test

@@ -80,7 +80,7 @@ pub fn write_secret_file_0600_at(path: &Path, tmp_path: &Path, bytes: &[u8]) -> 
     #[cfg(not(unix))]
     std::fs::write(tmp_path, bytes)?;
 
-    if let Err(e) = std::fs::rename(tmp_path, path) {
+    if let Err(e) = replace_file(tmp_path, path) {
         let _ = std::fs::remove_file(tmp_path);
         return Err(e.into());
     }
@@ -94,6 +94,54 @@ pub fn write_secret_file_0600_at(path: &Path, tmp_path: &Path, bytes: &[u8]) -> 
         std::fs::File::open(parent)?.sync_all()?;
     }
     Ok(())
+}
+
+/// How long [`replace_file`] rides out a windows reader holding `path` open.
+/// A reader of these files holds its handle for one read, so this is far
+/// above any real hold; it is the bound on a pathological one, not a wait a
+/// healthy write ever pays.
+#[cfg(windows)]
+const REPLACE_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// `rename(tmp_path, path)`, riding out a windows reader that holds `path`
+/// open without `FILE_SHARE_DELETE`.
+///
+/// On unix a rename replaces a file other processes hold open. On windows it
+/// cannot while any handle on the target refused delete sharing, and the
+/// commonest such handle is a plain read: a C runtime `open()` — every
+/// CPython `open()`, so every e2e harness read of a credential file — shares
+/// read and write but never delete. The rename then fails with a sharing
+/// violation (or access denied) for exactly as long as that read is open, and
+/// a caller that gives up loses the write: measured 2026-10-10 on the windows
+/// app's credential file while a harness poll read it. So on windows a
+/// transient refusal is retried, backing off, for at most
+/// [`REPLACE_RETRY_BUDGET`]; any other error, or one that outlives the
+/// budget, is returned as before.
+fn replace_file(tmp_path: &Path, path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION.
+        const TRANSIENT: [i32; 3] = [5, 32, 33];
+        let deadline = std::time::Instant::now() + REPLACE_RETRY_BUDGET;
+        let mut backoff = std::time::Duration::from_millis(5);
+        loop {
+            match std::fs::rename(tmp_path, path) {
+                Err(e)
+                    if e.raw_os_error()
+                        .is_some_and(|code| TRANSIENT.contains(&code))
+                        && std::time::Instant::now() < deadline =>
+                {
+                    #[cfg(test)]
+                    tests::on_replace_retry();
+                    std::thread::sleep(backoff);
+                    backoff = (backoff * 2).min(std::time::Duration::from_millis(100));
+                }
+                other => return other,
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    std::fs::rename(tmp_path, path)
 }
 
 /// Write `bytes` to `path` as an owner-only (`0o600`) file, staging the
@@ -114,6 +162,103 @@ mod tests {
     // below runs on every platform and is what keeps this import used on
     // windows too (a `-D warnings` unused-import failure otherwise).
     use super::*;
+
+    // What [`replace_file`]'s windows retry runs on each transient refusal —
+    // the test's handle on the moment the rename was refused, so a reader can
+    // be released exactly then rather than after a guessed sleep. Per thread:
+    // the retry runs on the writing thread, and parallel tests never see each
+    // other's hook.
+    #[cfg(windows)]
+    thread_local! {
+        static RETRY_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    #[cfg(windows)]
+    pub(super) fn on_replace_retry() {
+        RETRY_HOOK.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook();
+            }
+        });
+    }
+
+    /// A read handle that refuses delete sharing — what a C runtime `open()`
+    /// (every CPython `open()`) holds: read and write sharing, never delete.
+    #[cfg(windows)]
+    fn open_without_delete_sharing(path: &Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        const FILE_SHARE_READ: u32 = 0x1;
+        const FILE_SHARE_WRITE: u32 = 0x2;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(path)
+            .unwrap()
+    }
+
+    /// The windows write survives a reader that holds the target open without
+    /// delete sharing: the first rename is refused (the hook fires — the
+    /// condition is real, not assumed), the reader closes, and the retry
+    /// lands the new bytes. Red-verify: drop the retry loop and the write
+    /// returns the sharing violation.
+    #[cfg(windows)]
+    #[test]
+    fn a_reader_without_delete_sharing_delays_the_replace_but_never_loses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret");
+        write_secret_file_0600(&path, b"old").unwrap();
+
+        let reader = std::rc::Rc::new(std::cell::RefCell::new(Some(open_without_delete_sharing(
+            &path,
+        ))));
+        let held = reader.clone();
+        let fired = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let count = fired.clone();
+        RETRY_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                count.set(count.get() + 1);
+                held.borrow_mut().take();
+            }));
+        });
+
+        let written = write_secret_file_0600(&path, b"new");
+        RETRY_HOOK.with(|hook| *hook.borrow_mut() = None);
+
+        assert!(
+            fired.get() >= 1,
+            "the open reader must refuse the first rename — otherwise this test \
+             proves nothing about the retry"
+        );
+        written.expect("the retry must land the write once the reader closes");
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert!(reader.borrow().is_none());
+    }
+
+    /// The retry is bounded: a reader that never closes gets the refusal back
+    /// once the budget is spent, the old bytes stay whole, and no temp file is
+    /// left behind.
+    #[cfg(windows)]
+    #[test]
+    fn a_reader_that_never_closes_fails_the_replace_after_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret");
+        write_secret_file_0600(&path, b"old").unwrap();
+        let _reader = open_without_delete_sharing(&path);
+
+        let started = std::time::Instant::now();
+        let err = write_secret_file_0600(&path, b"new").unwrap_err();
+        assert!(
+            started.elapsed() >= REPLACE_RETRY_BUDGET,
+            "a refusal must be retried for the whole budget before it is returned; \
+             gave up after {:?} with {err:#}",
+            started.elapsed()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        let mut tmp_name = path.as_os_str().to_os_string();
+        tmp_name.push(".tmp");
+        assert!(!std::path::Path::new(&tmp_name).exists());
+    }
 
     /// Structural proof of atomicity: a rewrite replaces the file via a NEW
     /// inode (temp-file-then-rename), never truncates the live path in

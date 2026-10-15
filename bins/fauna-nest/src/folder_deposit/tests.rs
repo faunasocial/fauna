@@ -8,10 +8,13 @@ use serde_bytes::ByteBuf;
 
 use fauna_mls::wrapped_blob::GrantWindow;
 use fauna_protocol::folders::{
-    DepositEnvelope, FolderDepositReply, FolderDepositRequest, FolderDepositsListReply,
-    FolderDepositsListRequest, FolderDepositsRetireReply, FolderDepositsRetireRequest,
-    KIND_FOLDERS_DEPOSIT, KIND_FOLDERS_DEPOSITS_LIST, KIND_FOLDERS_DEPOSITS_RETIRE,
-    MAX_DEPOSIT_BYTES,
+    DepositEnvelope, DepositPart, FolderDepositBeginReply, FolderDepositBeginRequest,
+    FolderDepositCommitRequest, FolderDepositPartRequest, FolderDepositReply, FolderDepositRequest,
+    FolderDepositsListReply, FolderDepositsListRequest, FolderDepositsPartReply,
+    FolderDepositsPartRequest, FolderDepositsRetireReply, FolderDepositsRetireRequest,
+    KIND_FOLDERS_DEPOSIT, KIND_FOLDERS_DEPOSIT_BEGIN, KIND_FOLDERS_DEPOSIT_COMMIT,
+    KIND_FOLDERS_DEPOSIT_PART, KIND_FOLDERS_DEPOSITS_LIST, KIND_FOLDERS_DEPOSITS_PART,
+    KIND_FOLDERS_DEPOSITS_RETIRE, MAX_DEPOSIT_BYTES, MAX_DEPOSIT_PART_BYTES,
 };
 
 use crate::db::CacheDb;
@@ -78,6 +81,7 @@ async fn fixture(granted: bool) -> Fixture {
             account: ACCOUNT,
             principal_id,
             token_scopes: vec![scope],
+            family_id: None,
         },
         folder,
         msek,
@@ -451,4 +455,258 @@ fn only_the_account_holds_the_inbox_kinds() {
         assert!(!is_permitted(CallerClass::ThirdParty, kind), "{kind}");
         assert!(!is_permitted(CallerClass::BridgeMda, kind), "{kind}");
     }
+}
+
+// ── deposits larger than one message ────────────────────────────────────────
+
+fn encode<T: serde::Serialize>(v: &T) -> Bytes {
+    fauna_protocol::encode_canonical(v).unwrap()
+}
+
+async fn begin(f: &Fixture) -> Result<ByteBuf, fauna_protocol::RpcError> {
+    let reply = dispatch_principal(
+        f.state.clone(),
+        &f.binding,
+        KIND_FOLDERS_DEPOSIT_BEGIN,
+        encode(&FolderDepositBeginRequest {
+            folder_id: f.folder,
+            extra: Default::default(),
+        }),
+    )
+    .await?;
+    let reply: FolderDepositBeginReply = fauna_protocol::decode_strict(&reply).unwrap();
+    Ok(reply.upload)
+}
+
+async fn part(
+    f: &Fixture,
+    upload: &ByteBuf,
+    index: u32,
+    body: &[u8],
+) -> Result<Bytes, fauna_protocol::RpcError> {
+    dispatch_principal(
+        f.state.clone(),
+        &f.binding,
+        KIND_FOLDERS_DEPOSIT_PART,
+        encode(&FolderDepositPartRequest {
+            folder_id: f.folder,
+            upload: upload.clone(),
+            index,
+            body: ByteBuf::from(body.to_vec()),
+            extra: Default::default(),
+        }),
+    )
+    .await
+}
+
+async fn commit(
+    f: &Fixture,
+    upload: &ByteBuf,
+    name: &str,
+    parts: u32,
+) -> Result<Bytes, fauna_protocol::RpcError> {
+    dispatch_principal(
+        f.state.clone(),
+        &f.binding,
+        KIND_FOLDERS_DEPOSIT_COMMIT,
+        encode(&FolderDepositCommitRequest {
+            folder_id: f.folder,
+            upload: upload.clone(),
+            name: name.into(),
+            content_type: "application/octet-stream".into(),
+            parts,
+            extra: Default::default(),
+        }),
+    )
+    .await
+}
+
+/// The journey: three parts, each sealed on arrival, adoptable only once the
+/// commit lands — then the owner opens the header and every part, in order,
+/// with the recipient key, and none of it rests in the clear.
+#[tokio::test]
+async fn a_staged_deposit_parks_sealed_parts_and_lists_only_once_committed() {
+    let f = fixture(true).await;
+    let upload = begin(&f).await.expect("begun");
+    let bodies: [Vec<u8>; 3] = [
+        [MARKER, b"-0"].concat(),
+        [MARKER, b"-1"].concat(),
+        [MARKER, b"-2"].concat(),
+    ];
+    // Out of order, and a resent index replaces itself.
+    for i in [2u32, 0, 1, 1] {
+        part(&f, &upload, i, &bodies[i as usize])
+            .await
+            .expect("part");
+    }
+    assert!(
+        f.state
+            .db
+            .list_folder_deposits(f.folder)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a staged upload is not adoptable"
+    );
+    let err = commit(&f, &upload, "scan.bin", 4).await.unwrap_err();
+    assert!(err.code.ends_with("invalid_params"), "{}", err.code);
+    commit(&f, &upload, "scan.bin", 3).await.expect("committed");
+    // A retried commit answers alike and parks nothing more.
+    commit(&f, &upload, "scan.bin", 3)
+        .await
+        .expect("committed again");
+
+    let rows = f.state.db.list_folder_deposits(f.folder).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].sealed.windows(8).any(|w| w == b"scan.bin"));
+    let header: DepositEnvelope = fauna_protocol::decode_strict(
+        &crate::test_support::open_recipient_record(&rows[0].sealed, &f.msek),
+    )
+    .unwrap();
+    assert_eq!(header.name, "scan.bin");
+    assert_eq!(header.parts, 3);
+    assert!(header.body.is_empty());
+    for (i, body) in bodies.iter().enumerate() {
+        let reply: FolderDepositsPartReply = fauna_protocol::decode_strict(
+            &super::deposits_part_handler()(
+                f.state.clone(),
+                ACCOUNT,
+                encode(&FolderDepositsPartRequest {
+                    folder_id: f.folder,
+                    deposit_id: rows[0].id,
+                    index: u32::try_from(i).unwrap(),
+                    extra: Default::default(),
+                }),
+            )
+            .await
+            .expect("part served"),
+        )
+        .unwrap();
+        assert!(!reply.sealed.windows(MARKER.len()).any(|w| w == MARKER));
+        let opened: DepositPart = fauna_protocol::decode_strict(
+            &crate::test_support::open_recipient_record(&reply.sealed, &f.msek),
+        )
+        .unwrap();
+        assert_eq!(opened.index as usize, i);
+        assert_eq!(opened.body.as_ref(), body.as_slice());
+    }
+    // A committed upload takes no more parts.
+    let err = part(&f, &upload, 3, b"late").await.unwrap_err();
+    assert!(err.code.ends_with("invalid_request"), "{}", err.code);
+}
+
+/// Every call re-runs the gate: a grant revoked mid-upload ends it.
+#[tokio::test]
+async fn revoking_the_grant_mid_upload_refuses_the_rest() {
+    let f = fixture(true).await;
+    let upload = begin(&f).await.expect("begun");
+    part(&f, &upload, 0, MARKER).await.expect("part");
+    assert!(
+        f.state
+            .db
+            .delete_capability_grant(&ACCOUNT, &[1; 16])
+            .await
+            .unwrap()
+    );
+    for err in [
+        part(&f, &upload, 1, MARKER).await.unwrap_err(),
+        commit(&f, &upload, "scan.bin", 1).await.unwrap_err(),
+    ] {
+        assert_eq!(err.code, "fauna.folders.permission_denied");
+    }
+}
+
+/// An upload token names one principal's upload in one folder; a bad name
+/// at commit drops the staged parts at once.
+#[tokio::test]
+async fn an_unknown_token_is_not_found_and_a_bad_name_discards_the_upload() {
+    let f = fixture(true).await;
+    let err = part(&f, &ByteBuf::from(vec![0; 16]), 0, MARKER)
+        .await
+        .unwrap_err();
+    assert!(err.code.ends_with("not_found"), "{}", err.code);
+    let upload = begin(&f).await.expect("begun");
+    part(&f, &upload, 0, MARKER).await.expect("part");
+    let err = commit(&f, &upload, "a/b", 1).await.unwrap_err();
+    assert!(err.code.ends_with("invalid_params"), "{}", err.code);
+    let err = commit(&f, &upload, "fine.bin", 1).await.unwrap_err();
+    assert!(err.code.ends_with("not_found"), "discarded: {}", err.code);
+}
+
+/// The quota: where tier quotas are enforced, the tier's `max_inbox_bytes`
+/// bounds the sealed bytes parked across the account — a part past it and a
+/// single-message deposit past it are refused alike, and an adopted item's
+/// retire gives the room back.
+#[tokio::test]
+async fn the_tier_inbox_quota_refuses_past_it_and_a_retire_gives_room_back() {
+    let f = fixture(true).await;
+    *f.state.enforce_tier_quotas.write().await = true;
+    let mut tier = f.state.db.get_tier("free").await.unwrap().unwrap();
+    // Room for one sealed full part and change, not two.
+    tier.max_inbox_bytes =
+        i64::try_from(MAX_DEPOSIT_PART_BYTES + MAX_DEPOSIT_PART_BYTES / 2).unwrap();
+    f.state.db.update_tier(&tier).await.unwrap();
+
+    let full = vec![7u8; MAX_DEPOSIT_PART_BYTES];
+    let upload = begin(&f).await.expect("begun");
+    part(&f, &upload, 0, &full).await.expect("first part fits");
+    let err = part(&f, &upload, 1, &full).await.unwrap_err();
+    assert_eq!(err.code, "fauna.folders.inbox_full");
+    commit(&f, &upload, "big.bin", 1).await.expect("committed");
+    let half = &full[..MAX_DEPOSIT_BYTES / 2];
+    let err = deposit(&f, request(f.folder, "more.bin", half))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "fauna.folders.inbox_full");
+
+    let id = f.state.db.list_folder_deposits(f.folder).await.unwrap()[0].id;
+    assert!(
+        f.state
+            .db
+            .retire_folder_deposit(f.folder, id)
+            .await
+            .unwrap()
+    );
+    deposit(&f, request(f.folder, "more.bin", half))
+        .await
+        .expect("room again");
+}
+
+/// A storage-only tier (`max_inbox_bytes = 0`) parks nothing.
+#[tokio::test]
+async fn a_zero_inbox_tier_admits_no_deposit() {
+    let f = fixture(true).await;
+    *f.state.enforce_tier_quotas.write().await = true;
+    let mut tier = f.state.db.get_tier("free").await.unwrap().unwrap();
+    tier.max_inbox_bytes = 0;
+    f.state.db.update_tier(&tier).await.unwrap();
+    let err = deposit(&f, request(f.folder, "note.txt", MARKER))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "fauna.folders.inbox_full");
+}
+
+/// The larger-deposit kinds are the principal's, the part read the owner's.
+#[test]
+fn the_staged_kinds_are_third_party_only_and_the_part_read_the_owners() {
+    use crate::bridge_method_allowlist::{CallerClass, is_permitted};
+    for kind in [
+        KIND_FOLDERS_DEPOSIT_BEGIN,
+        KIND_FOLDERS_DEPOSIT_PART,
+        KIND_FOLDERS_DEPOSIT_COMMIT,
+    ] {
+        assert!(is_permitted(CallerClass::ThirdParty, kind), "{kind}");
+        for class in [
+            CallerClass::User,
+            CallerClass::Admin,
+            CallerClass::BridgeMda,
+        ] {
+            assert!(!is_permitted(class, kind), "{kind} {class:?}");
+        }
+    }
+    assert!(is_permitted(CallerClass::User, KIND_FOLDERS_DEPOSITS_PART));
+    assert!(!is_permitted(
+        CallerClass::ThirdParty,
+        KIND_FOLDERS_DEPOSITS_PART
+    ));
 }

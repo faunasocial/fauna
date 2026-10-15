@@ -149,6 +149,17 @@ func derefInt64(p *int64) int64 {
 // the WS-RPC wire — use `AuthVerdictsToWire` for the conversion.
 type AuthVerdicts = faunaCore.AuthVerdicts
 
+// InboundAuthOutcome / DmarcObservation / DkimAuthResult re-export the UniFFI
+// records `verify_inbound_observed` returns: the four verdicts plus what the
+// message contributes to an outbound DMARC aggregate report
+// (docs/goal/behavior/dmarc-reporting.md § Outbound aggregate-report sender).
+// Use `DmarcObservationToWire` for the WS-RPC mirror.
+type (
+	InboundAuthOutcome = faunaCore.InboundAuthOutcome
+	DmarcObservation   = faunaCore.DmarcObservation
+	DkimAuthResult     = faunaCore.DkimAuthResult
+)
+
 // DkimVerdict / SpfVerdict / DmarcVerdict / ArcVerdict / DmarcPolicy
 // re-export the UniFFI binding types. DkimVerdict + DmarcVerdict are
 // Go interfaces (with per-variant struct implementations
@@ -192,6 +203,40 @@ var ErrAuthErrorUnparseable = faunaMail.ErrAuthErrorUnparseable
 //   - clientHelo: HELO/EHLO hostname the peer announced.
 func VerifyInbound(raw []byte, mailFrom, clientIP, clientHelo string) (AuthVerdicts, error) {
 	return faunaMail.VerifyInbound(raw, mailFrom, clientIP, clientHelo)
+}
+
+// VerifyInboundObserved is VerifyInbound plus the DMARC aggregate-report
+// observation (`libs/fauna-mail/src/auth.rs::verify_inbound_observed`): the
+// From and envelope domains, the aligned DKIM and SPF results and each DKIM
+// signature's result, computed by the same single pipeline run. Same inputs and
+// errors as VerifyInbound; Session.Data calls this one.
+func VerifyInboundObserved(raw []byte, mailFrom, clientIP, clientHelo string) (InboundAuthOutcome, error) {
+	return faunaMail.VerifyInboundObserved(raw, mailFrom, clientIP, clientHelo)
+}
+
+// DmarcObservationToWire copies the UniFFI observation onto its WS-RPC mirror.
+// Every field is a plain string, bool or list, so this is a field copy with no
+// enum translation; `DkimResults` is always a list, never nil (nest decodes a
+// Rust Vec, which refuses a CBOR null).
+func DmarcObservationToWire(o DmarcObservation) wsrpc.DmarcObservation {
+	dkim := make([]wsrpc.DkimAuthResult, 0, len(o.DkimResults))
+	for _, r := range o.DkimResults {
+		dkim = append(dkim, wsrpc.DkimAuthResult{Domain: r.Domain, Selector: r.Selector, Result: r.Result})
+	}
+	return wsrpc.DmarcObservation{
+		HeaderFromDomain:   o.HeaderFromDomain,
+		EnvelopeFromDomain: o.EnvelopeFromDomain,
+		DkimAligned:        o.DkimAligned,
+		SpfAligned:         o.SpfAligned,
+		DkimResults:        dkim,
+		SpfResult:          o.SpfResult,
+	}
+}
+
+// DmarcVerdictToWire translates one DMARC verdict onto the wire mirror (the
+// `AuthVerdictsToWire` arm, exported for `report_dmarc_observation`).
+func DmarcVerdictToWire(v DmarcVerdict) wsrpc.DmarcVerdict {
+	return dmarcToWire(v)
 }
 
 // AuthVerdictsToWire translates the UniFFI-side `AuthVerdicts`

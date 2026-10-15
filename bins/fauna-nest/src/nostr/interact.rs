@@ -51,7 +51,8 @@ pub async fn route_unified_interaction(
             ApiError::internal("failed to look up Nostr account")
         })?
         .ok_or_else(|| {
-            ApiError::bad_request(
+            ApiError::refused(
+                fauna_protocol::RpcError::CODE_NOSTR_NOT_LINKED,
                 "no linked Nostr account; link one first from the Nostr settings page",
             )
         })?;
@@ -71,7 +72,8 @@ pub async fn route_unified_interaction(
     match action {
         "like" => {
             if relay_urls.is_empty() {
-                return Err(ApiError::bad_request(
+                return Err(ApiError::refused(
+                    fauna_protocol::RpcError::CODE_NOSTR_NO_RELAYS_CONFIGURED,
                     "no relays configured; add a relay first",
                 ));
             }
@@ -109,7 +111,8 @@ pub async fn route_unified_interaction(
         }
         "repost" => {
             if relay_urls.is_empty() {
-                return Err(ApiError::bad_request(
+                return Err(ApiError::refused(
+                    fauna_protocol::RpcError::CODE_NOSTR_NO_RELAYS_CONFIGURED,
                     "no relays configured; add a relay first",
                 ));
             }
@@ -146,13 +149,15 @@ pub async fn route_unified_interaction(
         // swept note's counters — it is a local row).
         "reply" | "quote" => {
             if relay_urls.is_empty() {
-                return Err(ApiError::bad_request(
+                return Err(ApiError::refused(
+                    fauna_protocol::RpcError::CODE_NOSTR_NO_RELAYS_CONFIGURED,
                     "no relays configured; add a relay first",
                 ));
             }
             decrypt_keypair(state, &account)?;
             if action == "reply" && !account.publish_replies {
-                return Err(ApiError::bad_request(
+                return Err(ApiError::refused(
+                    fauna_protocol::RpcError::CODE_NOSTR_REPLIES_OFF,
                     "replies to Nostr are switched off; turn on Publish replies on the Nostr page",
                 ));
             }
@@ -224,7 +229,8 @@ fn decrypt_keypair(
     let nest_key_bytes = nest_key.to_bytes();
 
     let encrypted_privkey = account.encrypted_privkey.as_ref().ok_or_else(|| {
-        ApiError::bad_request(
+        ApiError::refused(
+            fauna_protocol::RpcError::CODE_NOSTR_NO_CUSTODIAL_KEY,
             "Nostr interactions require a locally-stored private key (generate or import mode)",
         )
     })?;
@@ -425,19 +431,51 @@ mod tests {
     #[tokio::test]
     async fn reply_door_refusals_name_their_remedy() {
         let actor_hex = hex::encode([0x32u8; 32]);
-        let cases: [(bool, Option<&str>, bool, &str); 3] = [
-            (true, Some("[]"), true, "relay"),
-            (false, None, true, "private key"),
-            (true, None, false, "Publish replies"),
+        use fauna_protocol::RpcError;
+        let cases: [(bool, Option<&str>, bool, &str, &str); 3] = [
+            (
+                true,
+                Some("[]"),
+                true,
+                "relay",
+                RpcError::CODE_NOSTR_NO_RELAYS_CONFIGURED,
+            ),
+            (
+                false,
+                None,
+                true,
+                "private key",
+                RpcError::CODE_NOSTR_NO_CUSTODIAL_KEY,
+            ),
+            (
+                true,
+                None,
+                false,
+                "Publish replies",
+                RpcError::CODE_NOSTR_REPLIES_OFF,
+            ),
         ];
-        for (custodial, relays, publish_replies, remedy) in cases {
+        for (custodial, relays, publish_replies, remedy, code) in cases {
             let state = door_state(&actor_hex, custodial, relays, publish_replies).await;
             let err = route_unified_interaction(&state, &actor_hex, TARGET, "reply")
                 .await
                 .expect_err(remedy);
             assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST, "{remedy}");
             assert!(err.message.contains(remedy), "{remedy}: {}", err.message);
+            assert_eq!(err.code, Some(code), "{remedy}");
         }
+        // An actor with no linked identity, and a `like` with no relay: the
+        // same codes on the other arms (one code per remedy).
+        let state = door_state(&actor_hex, true, Some("[]"), true).await;
+        let unlinked = hex::encode([0x33u8; 32]);
+        let err = route_unified_interaction(&state, &unlinked, TARGET, "reply")
+            .await
+            .expect_err("unlinked");
+        assert_eq!(err.code, Some(RpcError::CODE_NOSTR_NOT_LINKED));
+        let err = route_unified_interaction(&state, &actor_hex, TARGET, "like")
+            .await
+            .expect_err("no relays");
+        assert_eq!(err.code, Some(RpcError::CODE_NOSTR_NO_RELAYS_CONFIGURED));
         let state = door_state(&actor_hex, true, None, false).await;
         let Json(ack) = route_unified_interaction(&state, &actor_hex, TARGET, "quote")
             .await

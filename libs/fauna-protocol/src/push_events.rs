@@ -595,6 +595,13 @@ pub enum PushEvent {
     BridgeAtprotoPermissionSetRequested(
         crate::atproto_pds::BridgeAtprotoPermissionSetRequestedPush,
     ),
+    /// `fauna.bridges.atproto.service_auth_requested` — the oracle's door
+    /// `fauna.atproto.oracle.service_auth` asks the PDS bridge, the repo
+    /// signing key's holder, to mint one service JWT. A request rather than a
+    /// nudge, composed as the permission-set call is: the bridge answers with
+    /// `fauna.bridges.atproto.deliver_service_auth`, correlated by
+    /// `request_id`, and the nest's deadline is the only fallback.
+    BridgeAtprotoServiceAuthRequested(crate::atproto_pds::BridgeAtprotoServiceAuthRequestedPush),
     /// `fauna.bridges.outbound_ready` — a remote-recipient row was just
     /// enqueued nest-side (interactive `fauna.email.send`). Routed to the
     /// MTA-role bridge's WS connection to nudge its outbound worker to drain
@@ -701,7 +708,7 @@ pub enum PushEvent {
 pub struct StaleSurfaces {
     /// The post feed. **No push feeds it** — so it is stale only after a
     /// reconnect, never from a push (see [`Self::on_reconnect`]). [`Self::family`]
-    /// is the other such surface.
+    /// and [`Self::own_thresholds`] are the other such surfaces.
     pub feed: bool,
     /// The unified notification list.
     pub notifications: bool,
@@ -751,6 +758,15 @@ pub struct StaleSurfaces {
     /// every app's status producer keeps last-known state on an error, so the
     /// sweep can only ever move enforcement state on a successful reply.
     pub family: bool,
+    /// The viewer's OWN spam/phishing thresholds — `fauna.spam.get_preferences`,
+    /// the every-user half of the content-policy render engine
+    /// (`family-client-enforcement.md` § Content policy; [`Self::family`]
+    /// carries the guardian half). Reconnect-only for the same reason as
+    /// `family`: no push feeds it, it is read at login, and a login read that
+    /// lost the socket would otherwise leave the own-threshold collapse off for
+    /// the rest of the session. Safe to re-fire for the same reason too: every
+    /// app's producer keeps the last-loaded thresholds on a failed read.
+    pub own_thresholds: bool,
     /// The Settings → Mail → Spam page's training-history list
     /// (`mail-spam.md` § Undo, § Reset) — re-read by the shared
     /// `MailSpamMachine`'s hydrate. Fed by `spam_model_updated` (an undo, or a
@@ -764,6 +780,21 @@ pub struct StaleSurfaces {
     /// refresh — the page already re-reads on every visit (`mail-spam.md`
     /// § Implementation status item 5, the refresh-on-visible requirement).
     pub mail_spam: bool,
+    /// The Settings → Mail → Export wizard (`mail-export.md` § A failed export
+    /// is a record the wizard shows until the user moves on) — re-read by the
+    /// shared `MailExportMachine`'s `Refresh`, which adopts whatever another
+    /// device started, finished, failed or discarded. Fed by the three export
+    /// events; no app reads their payload. A machine holding a run of the
+    /// session ignores the nudge: its own loop is the writer.
+    ///
+    /// ⚠ Apps page-gate this one, like [`Self::mail_spam`]: one progress push
+    /// lands per uploaded chunk, and the page re-reads on every visit anyway.
+    pub mail_export: bool,
+    /// The Settings → Mail → Import wizard — the [`Self::mail_export`] twin
+    /// (`mailbox-migration.md` § A failed import is a record the wizard shows
+    /// until the user moves on), fed by the three import events and page-gated
+    /// the same way.
+    pub mail_import: bool,
 }
 
 impl StaleSurfaces {
@@ -780,13 +811,16 @@ impl StaleSurfaces {
         address_book: false,
         media: false,
         family: false,
+        own_thresholds: false,
         mail_spam: false,
+        mail_export: false,
+        mail_import: false,
     };
 
     /// **Everything.** A reconnect resets the push `seq` to 0
     /// (`transport.md` § Push events), so the gap may have swallowed any push at
     /// all — including the feed's, which nothing else recovers, and the two
-    /// surfaces no push feeds at all (feed, family), which only this sweep ever
+    /// surfaces no push feeds at all (feed, family, own thresholds), which only this sweep ever
     /// refreshes. The invariant worth keeping: this covers every kind's own
     /// set, pinned by `a_reconnect_covers_every_kind`; that the family read
     /// rides it, and nothing else, is pinned by
@@ -803,7 +837,10 @@ impl StaleSurfaces {
             address_book: true,
             media: true,
             family: true,
+            own_thresholds: true,
             mail_spam: true,
+            mail_export: true,
+            mail_import: true,
         }
     }
 
@@ -865,9 +902,22 @@ impl StaleSurfaces {
                     ..Self::NONE
                 }
             }
+            "fauna.bridges.push.export_progress"
+            | "fauna.bridges.push.export_error"
+            | "fauna.bridges.push.export_complete" => Self {
+                mail_export: true,
+                ..Self::NONE
+            },
+            "fauna.bridges.push.import_progress"
+            | "fauna.bridges.push.import_error"
+            | "fauna.bridges.push.import_complete" => Self {
+                mail_import: true,
+                ..Self::NONE
+            },
             "fauna.protocol.resync_required" => Self {
                 feed: false,
                 family: false,
+                own_thresholds: false,
                 ..Self::on_reconnect()
             },
             _ => Self::NONE,
@@ -887,7 +937,10 @@ impl StaleSurfaces {
             && (self.address_book || !other.address_book)
             && (self.media || !other.media)
             && (self.family || !other.family)
+            && (self.own_thresholds || !other.own_thresholds)
             && (self.mail_spam || !other.mail_spam)
+            && (self.mail_export || !other.mail_export)
+            && (self.mail_import || !other.mail_import)
     }
 
     /// Both sets' surfaces — for a caller accumulating several pushes into one
@@ -904,7 +957,10 @@ impl StaleSurfaces {
             address_book: self.address_book || other.address_book,
             media: self.media || other.media,
             family: self.family || other.family,
+            own_thresholds: self.own_thresholds || other.own_thresholds,
             mail_spam: self.mail_spam || other.mail_spam,
+            mail_export: self.mail_export || other.mail_export,
+            mail_import: self.mail_import || other.mail_import,
         }
     }
 
@@ -924,7 +980,10 @@ impl StaleSurfaces {
             && !self.address_book
             && !self.media
             && !self.family
+            && !self.own_thresholds
             && !self.mail_spam
+            && !self.mail_export
+            && !self.mail_import
     }
 }
 
@@ -989,11 +1048,13 @@ impl PushEvent {
             // The nest's outbound channel for this subscriber overflowed and it
             // dropped pushes (§ Backpressure and `ResyncRequired`). Everything a
             // *dropped* push could have staled is therefore stale — which is
-            // every surface but the two no push feeds (the feed, the family
-            // read): a dropped push cannot have staled what no push touches.
+            // every surface but the three no push feeds (the feed, the family
+            // read, the own-threshold read): a dropped push cannot have staled
+            // what no push touches.
             PushEvent::ResyncRequired(_) => StaleSurfaces {
                 feed: false,
                 family: false,
+                own_thresholds: false,
                 ..StaleSurfaces::on_reconnect()
             },
 
@@ -1025,19 +1086,29 @@ impl PushEvent {
             | PushEvent::BridgeAtprotoProjectionReady(_)
             | PushEvent::BridgeAtprotoIssuerKeyRotated(_)
             | PushEvent::BridgeAtprotoPermissionSetRequested(_)
+            | PushEvent::BridgeAtprotoServiceAuthRequested(_)
             | PushEvent::BridgeOutboundReady(_)
             | PushEvent::BridgeRescoreReady(_)
-            | PushEvent::BridgeSpamBaselinePublish(_)
-            | PushEvent::BridgeImportProgress(_)
-            | PushEvent::BridgeImportError(_)
-            | PushEvent::BridgeImportComplete(_)
-            // The mail-export wizard's own page re-reads from the push
-            // payload's counters, not from a list re-fetch — the session row
-            // it renders is the one the push describes. Nothing else on any
-            // app goes stale, so no surface is named here.
-            | PushEvent::BridgeExportProgress(_)
+            | PushEvent::BridgeSpamBaselinePublish(_) => StaleSurfaces::NONE,
+            // A session of the actor's own export moved — on this device or
+            // another — so the open export page re-reads its listing
+            // (`mail-export.md` § A failed export is a record the wizard shows
+            // until the user moves on). A nudge, never a source: no app writes
+            // the payload's counts or reason into its view.
+            PushEvent::BridgeExportProgress(_)
             | PushEvent::BridgeExportError(_)
-            | PushEvent::BridgeExportComplete(_) => StaleSurfaces::NONE,
+            | PushEvent::BridgeExportComplete(_) => StaleSurfaces {
+                mail_export: true,
+                ..StaleSurfaces::NONE
+            },
+            // The import twin (`mailbox-migration.md` § A failed import is a
+            // record the wizard shows until the user moves on).
+            PushEvent::BridgeImportProgress(_)
+            | PushEvent::BridgeImportError(_)
+            | PushEvent::BridgeImportComplete(_) => StaleSurfaces {
+                mail_import: true,
+                ..StaleSurfaces::NONE
+            },
             // A bridged room changed. Its consumer is the shared conversations
             // receive loop's bridged poll (`poll_inbound_bridged`), which holds
             // its own subscription — the `MailReceived` arm's reason.
@@ -1283,6 +1354,16 @@ impl PushEvent {
                     payload,
                 })
             }),
+            "fauna.bridges.atproto.service_auth_requested" => fauna_cbor::decode_strict::<
+                crate::atproto_pds::BridgeAtprotoServiceAuthRequestedPush,
+            >(&payload_bytes)
+            .map(PushEvent::BridgeAtprotoServiceAuthRequested)
+            .unwrap_or_else(|_| {
+                PushEvent::Unknown(Unknown {
+                    kind: kind.to_string(),
+                    payload,
+                })
+            }),
             "fauna.bridges.outbound_ready" => fauna_cbor::decode_strict::<
                 crate::bridge_routing::BridgeOutboundReadyPush,
             >(&payload_bytes)
@@ -1466,6 +1547,9 @@ impl PushEvent {
             PushEvent::AtprotoConsentRequested(_) => "fauna.atproto.consent_requested",
             PushEvent::BridgeAtprotoPermissionSetRequested(_) => {
                 "fauna.bridges.atproto.permission_set_requested"
+            }
+            PushEvent::BridgeAtprotoServiceAuthRequested(_) => {
+                "fauna.bridges.atproto.service_auth_requested"
             }
             PushEvent::BridgeOutboundReady(_) => "fauna.bridges.outbound_ready",
             PushEvent::BridgeRescoreReady(_) => "fauna.bridges.rescore_ready",
@@ -2283,6 +2367,94 @@ mod tests {
         })
     }
 
+    /// The three export events — what a mail-export page re-reads on.
+    fn export_events() -> [PushEvent; 3] {
+        use crate::bridge_routing::{
+            BridgeExportCompletePush, BridgeExportErrorPush, BridgeExportProgressPush,
+        };
+        [
+            PushEvent::BridgeExportProgress(BridgeExportProgressPush {
+                session_id: "s".into(),
+                exported_count: 1,
+                skipped_count: 0,
+                errored_count: 0,
+                extra: BTreeMap::new(),
+            }),
+            PushEvent::BridgeExportError(BridgeExportErrorPush {
+                session_id: "s".into(),
+                reason: "r".into(),
+                extra: BTreeMap::new(),
+            }),
+            PushEvent::BridgeExportComplete(BridgeExportCompletePush {
+                session_id: "s".into(),
+                download_url: "/api/v1/export/s".into(),
+                blob_bytes: 1,
+                extra: BTreeMap::new(),
+            }),
+        ]
+    }
+
+    /// The import twin's three events.
+    fn import_events() -> [PushEvent; 3] {
+        use crate::bridge_routing::{
+            BridgeImportCompletePush, BridgeImportErrorPush, BridgeImportProgressPush,
+        };
+        [
+            PushEvent::BridgeImportProgress(BridgeImportProgressPush {
+                session_id: "s".into(),
+                imported_count: 1,
+                skipped_count: 0,
+                errored_count: 0,
+            }),
+            PushEvent::BridgeImportError(BridgeImportErrorPush {
+                session_id: "s".into(),
+                reason: "r".into(),
+            }),
+            PushEvent::BridgeImportComplete(BridgeImportCompletePush {
+                session_id: "s".into(),
+                imported_count: 1,
+                skipped_count: 0,
+                errored_count: 0,
+            }),
+        ]
+    }
+
+    /// `mail-export.md` § A failed export is a record the wizard shows until
+    /// the user moves on (and its import twin in `mailbox-migration.md`): the
+    /// three events of each wizard stale that wizard's page and nothing else —
+    /// on both boundaries, and inside the reconnect sweep.
+    #[test]
+    fn the_export_and_import_events_stale_their_own_wizard_page() {
+        let reconnect = StaleSurfaces::on_reconnect();
+        for (events, want) in [
+            (
+                export_events(),
+                StaleSurfaces {
+                    mail_export: true,
+                    ..StaleSurfaces::NONE
+                },
+            ),
+            (
+                import_events(),
+                StaleSurfaces {
+                    mail_import: true,
+                    ..StaleSurfaces::NONE
+                },
+            ),
+        ] {
+            for event in events {
+                assert_eq!(event.invalidates(), want, "{:?}", event.kind());
+                assert_eq!(
+                    StaleSurfaces::for_kind(event.kind()),
+                    want,
+                    "{:?}",
+                    event.kind()
+                );
+                assert!(reconnect.covers(&want), "{:?}", event.kind());
+            }
+        }
+    }
+
     /// Every kind that carries a user-visible surface, and what it stales.
     #[test]
     fn each_push_kind_stales_its_own_surface() {
@@ -2395,9 +2567,9 @@ mod tests {
         }
     }
 
-    /// The feed and the family read are the surfaces no push feeds, so only a
-    /// full reconnect recovers them — `ResyncRequired` deliberately leaves both
-    /// alone and stales everything else.
+    /// The feed, the family read and the own-threshold read are the surfaces no
+    /// push feeds, so only a full reconnect recovers them — `ResyncRequired`
+    /// deliberately leaves all three alone and stales everything else.
     #[test]
     fn only_a_reconnect_stales_the_feed() {
         assert!(StaleSurfaces::on_reconnect().feed);
@@ -2406,6 +2578,7 @@ mod tests {
             StaleSurfaces {
                 feed: false,
                 family: false,
+                own_thresholds: false,
                 ..StaleSurfaces::on_reconnect()
             },
             resync_required().invalidates(),
@@ -2475,6 +2648,44 @@ mod tests {
             assert!(
                 !StaleSurfaces::for_kind(event.kind()).family,
                 "for_kind({:?}) stales the family read, but no push feeds it",
+                event.kind()
+            );
+        }
+    }
+
+    /// The viewer's own thresholds (`fauna.spam.get_preferences`) are the other
+    /// reconnect-only render input: they compose into the same render fold as
+    /// the guardian floor, and no push feeds them. Before this flag existed a
+    /// login whose read lost the socket (`The connection to the nest was
+    /// lost`) left the own-threshold collapse off for the whole session —
+    /// `test_own_spam_threshold_collapses_flagged_conversation_message` went
+    /// red on tui exactly that way.
+    #[test]
+    fn a_reconnect_stales_the_own_thresholds_and_no_push_does() {
+        assert!(StaleSurfaces::on_reconnect().own_thresholds);
+        const { assert!(!StaleSurfaces::NONE.own_thresholds) };
+        for event in [
+            knock(),
+            notification(),
+            account_updated(),
+            calendar_changed(),
+            address_book_changed(),
+            sync_changed(),
+            consent_requested(),
+            resync_required(),
+            mail_received(),
+            mail_flags_changed(),
+            spam_model_updated(),
+            spam_model_reset(),
+        ] {
+            assert!(
+                !event.invalidates().own_thresholds,
+                "{:?} stales the own-threshold read, but no push feeds it",
+                event.kind()
+            );
+            assert!(
+                !StaleSurfaces::for_kind(event.kind()).own_thresholds,
+                "for_kind({:?}) stales the own-threshold read, but no push feeds it",
                 event.kind()
             );
         }

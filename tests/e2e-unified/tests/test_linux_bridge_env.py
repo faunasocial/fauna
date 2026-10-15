@@ -271,3 +271,31 @@ class TestBuildLaunchEnvIsolatesTheInstance:
         assert env["XDG_CONFIG_HOME"] == str(tmp_path / "config")
         assert "FAUNA_E2E_CREDENTIAL_DIR" not in env
         assert env.get("XDG_RUNTIME_DIR") == os.environ.get("XDG_RUNTIME_DIR")
+
+
+def test_build_launch_env_keeps_an_exported_rust_log_beside_the_configured_one(
+    tmp_path, monkeypatch
+):
+    """A human's exported ``RUST_LOG`` survives a launch config that sets its own.
+
+    The linux launch config sets ``RUST_LOG`` to the harness's diagnostic
+    targets, and ``env.update`` replaced the exported value wholesale — a
+    diagnosis run asking for ``fauna_ws_substrate=debug`` got only the
+    harness's targets, silently. Both sets of directives must reach the app,
+    as on tui (``test_tui_driver_env.py``).
+    """
+    monkeypatch.setenv("RUST_LOG", "fauna_ws_substrate=debug")
+    env = build_launch_env(
+        {"environment": {"RUST_LOG": "info,fauna_conversations=debug"}}, 1, str(tmp_path)
+    )
+    assert env["RUST_LOG"] == "info,fauna_conversations=debug,fauna_ws_substrate=debug"
+
+
+def test_build_launch_env_uses_the_configured_rust_log_when_none_is_exported(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("RUST_LOG", raising=False)
+    env = build_launch_env(
+        {"environment": {"RUST_LOG": "info,fauna_conversations=debug"}}, 1, str(tmp_path)
+    )
+    assert env["RUST_LOG"] == "info,fauna_conversations=debug"

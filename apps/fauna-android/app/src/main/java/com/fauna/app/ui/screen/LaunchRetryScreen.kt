@@ -24,13 +24,21 @@ import social.fauna.generated.Ids
  *
  * Element IDs match the cross-app convention established by Web
  * and adopted by Windows — `launch-transient-error`,
- * `launch-retry-button`, `launch-fallthrough-button` (per the new
+ * `launch-retry-button`, `launch-fallthrough-button`, plus the optional
+ * `launch-recover-button` (surviving-device recovery entry, shown only when
+ * the device knows of ≥1 custodied box; per the new
  * `launch_retry` page block in `tests/e2e-unified/ui.yaml`).
  */
 @Composable
 fun LaunchRetryScreen(
     onRetry: () -> Unit,
     onUseDifferentNest: () -> Unit,
+    /** The custodied boxes the device knows of; `launch-recover-button` shows iff non-empty. */
+    recoverableBoxes: List<String> = emptyList(),
+    onRecover: () -> Unit = {},
+    /** `launch-retire-button`: always shown — it needs only a cloud token, no
+     *  custodied seed (`nest-retirement.md` § Layout & flow). */
+    onRetire: () -> Unit = {},
 ) {
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
@@ -50,6 +58,22 @@ fun LaunchRetryScreen(
                 .fillMaxWidth()
                 .testTag(Ids.LAUNCH_RETRY_BUTTON),
         ) { Text(stringResource(R.string.launch_retry_button)) }
+        if (recoverableBoxes.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onRecover,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(Ids.LAUNCH_RECOVER_BUTTON),
+            ) { Text(stringResource(R.string.onboarding_launch_recover_lost_box)) }
+        }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = onRetire,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(Ids.LAUNCH_RETIRE_BUTTON),
+        ) { Text(stringResource(R.string.onboarding_launch_retire_server)) }
         Spacer(Modifier.height(8.dp))
         OutlinedButton(
             onClick = onUseDifferentNest,

@@ -42,7 +42,7 @@ use fauna_core::identity::ActorId;
 use fauna_mls::wrapped_blob::generation_wraps::open_generation_key_as_device;
 use fauna_protocol::merge_policy::{
     KIND_DEVICE_SET, KIND_ESCROW_RECEIPT, KIND_GENERATION_CLOSED, KIND_GENERATION_MINT,
-    KIND_GENERATION_WRAP,
+    KIND_GENERATION_SHRED, KIND_GENERATION_WRAP,
 };
 
 /// The bundle's custody face for **retained generation keys** (T10 — the
@@ -68,11 +68,13 @@ use fauna_protocol::merge_policy::{
 ///   generation-axis ruling) — real crypto-shredding at generation
 ///   granularity. A retained key that survived its generation's shred would
 ///   quietly defeat that deletion on every machine whose slot carries it, so
-///   any observation of an **authored** `Shredded` mint drops the entry —
-///   one a reader's [`FleetView`] admits
-///   ([`GenerationMintRecord::shred_is_authored`]); an unauthored one drops
-///   nothing, since any `BackupKey` holder can write it (`account-data-taxonomy.md`
-///   § *Fleet-scope reclamation* → *the authored shred*). The drop is eventual
+///   any observation of an **authored** shred drops the entry — an
+///   attestation in a verified member's own `fauna.state.generation-shred`
+///   cell, at a reader's [`FleetView`]
+///   ([`fauna_core::generation::authored_shred_generations`]); a mint row's
+///   `Shredded` marker alone drops nothing, since any `BackupKey` holder can
+///   write it (`fleet-scope-reclamation.md` § *Fleet-scope reclamation* →
+///   *the authored shred*, *the shred cell*). The drop is eventual
 ///   and idempotent across the read below, the walk's hook and the
 ///   reclamation pass, since the shredder's own enrollment can merge after its
 ///   shred. (The shred *calling surface* — user-gated, not yet built — owes
@@ -424,12 +426,13 @@ pub async fn key_for_tip<B: StoreBackend>(
 ///
 /// `view` is this replica's [`FleetView`], built ONCE per pass by the caller
 /// (this sits on the per-row open path, so it never reads the device set
-/// itself), and is consulted for one question only: is a `Shredded` mint
-/// row authored ([`GenerationMintRecord::shred_is_authored`])? Authored →
+/// itself), and is consulted for one question only: does an authored shred
+/// cell stand beside a `Shredded` mint row
+/// ([`fauna_core::generation::authored_shred_generations`])? Authored →
 /// the retained key is dropped and nothing keys the generation; unauthored —
 /// or `None`, which never reads authored — → the retained bundle answers as if
 /// the mint row were absent, because the plane's wraps are gone either way
-/// and custody is then the only source (`account-data-taxonomy.md`
+/// and custody is then the only source (`fleet-scope-reclamation.md`
 /// § *Fleet-scope reclamation* → *the authored shred*).
 pub async fn generation_key_for<B: StoreBackend>(
     store: &AccountStore<B>,
@@ -473,22 +476,35 @@ pub async fn generation_key_for<B: StoreBackend>(
             minter_sig: _,
             wraps,
         } => (core, wraps),
-        shred @ GenerationMintRecord::Shredded { .. } => {
-            // Authored (by a verified member of this replica's current view,
-            // over THIS row's id): the crypto-shred contract — the wraps are
-            // gone from the plane by design, AND the device-side half is to
-            // drop the retained key, or every slot that carried it would
-            // quietly defeat the deletion ([`RetainedKeyCustody`], duty
-            // three).
-            if view.is_some_and(|v| shred.shred_is_authored(v) == Ok(*generation_id)) {
+        GenerationMintRecord::Shredded { .. } => {
+            // Authored (an attestation in a verified member's own shred
+            // cell, over THIS generation's id): the crypto-shred contract —
+            // the wraps are gone from the plane by design, AND the
+            // device-side half is to drop the retained key, or every slot
+            // that carried it would quietly defeat the deletion
+            // ([`RetainedKeyCustody`], duty three). Read only here, behind a
+            // marker, so the live path reads nothing extra.
+            let authored = match view {
+                Some(view) => {
+                    let cells = live_rows(store, KIND_GENERATION_SHRED).await?;
+                    fauna_core::generation::authored_shred_generations(
+                        view,
+                        cells.iter().map(row_ref),
+                    )
+                    .contains(generation_id)
+                }
+                None => false,
+            };
+            if authored {
                 if let Some(custody) = custody {
                     custody.drop_generation_key(generation_id);
                 }
                 return Ok(None);
             }
-            // Unauthored — any `BackupKey` holder can write one: the
-            // generation is out of candidacy (the resolver's act), but no key
-            // drops on it, so the bundle answers as if the row were absent.
+            // A marker with no authored cell — any `BackupKey` holder can
+            // write one: the generation is out of candidacy (the resolver's
+            // act), but no key drops on it, so the bundle answers as if the
+            // row were absent.
             return Ok(consult());
         }
     };
@@ -619,8 +635,8 @@ async fn topup_wraps<B: StoreBackend>(
 mod tests {
     use super::*;
     use crate::generation_fixture_test_support::{
-        Bundle, ESCROW_SEED, THEM, US, device_id_of, device_key, enrollment_row, fixture,
-        machinery_row, member_of,
+        Bundle, ESCROW_SEED, THEM, US, authored_shred_rows, device_id_of, device_key,
+        enrollment_row, fixture, machinery_row, member_of, shred_marker_row,
     };
     use fauna_core::generation::{EscrowTargetRecord, derive_escrow_xwing_keypair};
     use fauna_mls::wrapped_blob::generation_wraps::build_mint;
@@ -738,15 +754,11 @@ mod tests {
     /// Absorb `g`'s mint row to `record` (a `Shredded` one), as a merge would.
     async fn shred_to(
         f: &crate::generation_fixture_test_support::Fixture,
-        g: &[u8; 32],
-        record: &GenerationMintRecord,
+        rows: impl IntoIterator<Item = StateEntry>,
     ) {
-        f.put(machinery_row(
-            KIND_GENERATION_MINT,
-            fauna_core::hex32::encode(g),
-            record,
-        ))
-        .await;
+        for row in rows {
+            f.put(row).await;
+        }
     }
 
     /// This fixture's verified view (US enrolled), built once as a pass would.
@@ -756,14 +768,14 @@ mod tests {
             .unwrap()
     }
 
-    /// **An unauthored shred drops no key** (`account-data-taxonomy.md`
-    /// § *Fleet-scope reclamation* → *the authored shred*): a sig-less
-    /// `Shredded` for a generation this device keys — what any `BackupKey`
-    /// holder can write — leaves the retained key in custody and served, as
-    /// if the mint row were absent; so does one signed by a device that is
-    /// no member. Red-verified: with the `Shredded` arm gated on
-    /// `matches!(.., Shredded { .. })` again, the key is dropped and `None`
-    /// returned.
+    /// **An unauthored shred drops no key** (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation* → *the authored shred*, *the shred
+    /// cell*): a `Shredded` marker with no authored cell, for a generation
+    /// this device keys — what any `BackupKey` holder can write — leaves the
+    /// retained key in custody and served, as if the mint row were absent; so
+    /// does one beside a cell by a device that is no member. Red-verified:
+    /// with the `Shredded` arm dropping on the marker alone, the key is
+    /// dropped and `None` returned.
     #[tokio::test]
     async fn an_unauthored_shred_leaves_the_retained_key_served_and_in_custody() {
         let f = fixture().await;
@@ -774,15 +786,12 @@ mod tests {
         let view = view_of(&f).await;
 
         for forged in [
-            GenerationMintRecord::Shredded {
-                core: core.clone(),
-                shredded_at_ms: 9_000,
-                shredded_by: device_id_of(US),
-                shredder_sig: vec![],
-            },
-            fauna_core::generation::sign_shred(&device_key(THEM), core.clone(), 9_000).unwrap(),
+            // The marker alone, naming a verified member.
+            vec![shred_marker_row(US, core.clone(), 9_000)],
+            // Beside a verifying cell by a device that is no member.
+            authored_shred_rows(THEM, core.clone(), 9_000).to_vec(),
         ] {
-            shred_to(&f, &g, &forged).await;
+            shred_to(&f, forged).await;
             let served =
                 generation_key_for(&f.store, &g, &f.writer_key, Some(&bundle), Some(&view))
                     .await
@@ -799,9 +808,10 @@ mod tests {
         }
     }
 
-    /// **An authored shred drops the key — and only under a view.** Signed by
-    /// a verified member, the shred drops the retained key and keys nothing;
-    /// with no view in hand the same row reads unauthored, never authored.
+    /// **An authored shred drops the key — and only under a view.** Attested
+    /// in a verified member's own cell, the shred drops the retained key and
+    /// keys nothing; with no view in hand the same rows read unauthored,
+    /// never authored.
     #[tokio::test]
     async fn an_authored_shred_drops_the_retained_key_and_a_viewless_read_never_does() {
         let f = fixture().await;
@@ -809,8 +819,7 @@ mod tests {
         let (g, key, core) = f.mint_over(&[member_of(US)]).await;
         let bundle = Bundle::default();
         bundle.record_generation_key(&g, &key);
-        let authored = fauna_core::generation::sign_shred(&device_key(US), core, 9_000).unwrap();
-        shred_to(&f, &g, &authored).await;
+        shred_to(&f, authored_shred_rows(US, core, 9_000)).await;
 
         let viewless = generation_key_for(&f.store, &g, &f.writer_key, Some(&bundle), None)
             .await

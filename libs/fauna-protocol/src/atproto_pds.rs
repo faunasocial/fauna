@@ -258,6 +258,17 @@ pub struct AtprotoSessionInfo {
     pub created_at: i64,
     pub last_refreshed_at: Option<i64>,
     pub expires_at: i64,
+    /// The oracle's record at the `atproto.commit` door for this session
+    /// (`key-material-hierarchy.md` § *The oracle* → *The ATProto classes
+    /// ride the protocol's own door*, property (iii)) — its writes in the
+    /// ceiling's current window, every write it made, and the newest one
+    /// (class [`crate::principals::ATPROTO_COMMIT_CLASS`], detail
+    /// `<action> <collection>/<rkey>`). Absent for a session that has written
+    /// nothing. An app-password session's row reads it here, having no
+    /// principal; an OAuth session's writes reach its principal's roster row
+    /// through `fauna.principals.list` instead. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle: Option<crate::principals::OracleSummary>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -609,6 +620,14 @@ pub struct GetIntegrationStatusReply {
     pub handle_preview: String,
     /// The caller's hosted identity, when one exists (any status).
     pub identity: Option<AtprotoIdentitySummary>,
+    /// How many of the caller's posts a history backfill would publish —
+    /// the public projection stream's servable posts, counted from genesis.
+    /// The history opt-in's label names it ("Also publish my N existing
+    /// public posts"), because the count is part of the consent
+    /// (`atproto-pds-bridge.md` § Projection & backfill). Additive: an older
+    /// nest omits it and the client reads 0.
+    #[serde(default)]
+    pub public_post_count: u64,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -982,9 +1001,31 @@ pub struct IngestExternalWriteRequest {
     /// The batch, in the order the caller sent it. The reply's results are
     /// positionally aligned with this list.
     pub writes: Vec<ExternalWrite>,
+    /// The session family the XRPC call authenticated under (`xrpc.Caller.
+    /// SessionID` — `atproto_sessions.session_id`, which is also the OAuth
+    /// grant id). Present, it makes this round trip the oracle's per-write
+    /// moment at the `atproto.commit` door (`key-material-hierarchy.md` §
+    /// *The oracle* → *The ATProto classes ride the protocol's own door*): the
+    /// nest refuses the whole batch for a revoked or expired session or grant
+    /// ([`EXTERNAL_WRITE_REFUSAL_SESSION_REVOKED`]), admits it through the
+    /// per-session ceiling ([`EXTERNAL_WRITE_REFUSAL_RATE_LIMITED`]), and
+    /// records each applied write against the session. Absent — an older
+    /// bridge — none of the three applies.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_bytes")]
+    pub session_id: Option<Vec<u8>>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
+
+/// The refusal sub-type for a batch whose session (or its OAuth grant) is
+/// revoked, expired or unknown. Every row of the batch carries it; the bridge
+/// answers the uniform `AuthenticationRequired`.
+pub const EXTERNAL_WRITE_REFUSAL_SESSION_REVOKED: &str = "session_revoked";
+
+/// The refusal sub-type for a batch the per-session ceiling
+/// (`fauna_core::identity_op::RateWindow`) refuses. Every row of the batch
+/// carries it; the bridge answers XRPC `RateLimitExceeded`.
+pub const EXTERNAL_WRITE_REFUSAL_RATE_LIMITED: &str = "rate_limited";
 
 /// Why one write in a batch was refused, sub-typed per D6.
 ///
@@ -994,7 +1035,9 @@ pub struct IngestExternalWriteRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ExternalWriteRefusal {
     /// `policy` | `fauna_surface` | `deferred` — the serialized spelling of
-    /// `fauna_bridge_atproto::membership::RefusalSubType`.
+    /// `fauna_bridge_atproto::membership::RefusalSubType` — or one of the two
+    /// whole-batch oracle refusals, [`EXTERNAL_WRITE_REFUSAL_SESSION_REVOKED`]
+    /// and [`EXTERNAL_WRITE_REFUSAL_RATE_LIMITED`].
     pub sub_type: String,
     /// Human-readable reason, surfaced in the XRPC error message.
     pub message: String,
@@ -1202,6 +1245,14 @@ pub struct ConsentInstallInfo {
     /// (empty when it declares none) — the card's settings summary.
     #[serde(default)]
     pub settings: Vec<String>,
+    /// The same `settings_schema` in the `BridgeProvider` settings
+    /// vocabulary — each field's key, label, type and options, its `value`
+    /// the schema's default — parsed by the one
+    /// [`crate::plugins::plugin_settings_rows`] the settings card uses, so the
+    /// card's summary can name each field's type. Additive beside
+    /// [`Self::settings`], which keeps the names alone.
+    #[serde(default)]
+    pub settings_fields: Vec<crate::bridges_ui::BridgeSetting>,
     /// `publisher.domain` — the document's own host.
     pub publisher_domain: String,
     /// `publisher.key`, as the `did:key` the manifest names.
@@ -1211,9 +1262,20 @@ pub struct ConsentInstallInfo {
     /// The hosts the plugin may dial; empty reaches nothing.
     #[serde(default)]
     pub hosts: Vec<String>,
-    /// The `ingress` paths the nest would terminate for it.
+    /// The `ingress` paths the nest would terminate for it, on its own host.
     #[serde(default)]
     pub ingress_paths: Vec<String>,
+    /// A development plugin (`third-party.md` § Developer loop): a local
+    /// component synthesized under the loopback publisher, with no publisher
+    /// key — the card shows its publisher as
+    /// [`crate::plugins::DEVELOPMENT_PLUGIN_NAME`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub development: bool,
+    /// The whole names the nest would terminate for it — each `sni` label
+    /// the manifest claims, under this nest's apex (`matrix.nest.example`),
+    /// so the card shows the name as it will resolve.
+    #[serde(default)]
+    pub ingress_names: Vec<String>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -1342,6 +1404,70 @@ pub struct DeliverPermissionSetRequest {
 /// and never an error: a late answer is ordinary, not a fault.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct DeliverPermissionSetReply {
+    pub accepted: bool,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// `fauna.bridges.atproto.service_auth_requested` — the nest→bridge half of
+/// the oracle's `atproto.service_auth` class
+/// (`key-material-hierarchy.md` § The oracle → *The bridge-held custodian*):
+/// the nest's door `fauna.atproto.oracle.service_auth` has decided, and asks
+/// every connected approved `atproto.pds` bridge — the repo signing key's only
+/// holder — to mint the token.
+///
+/// **A request, not a nudge**, composed exactly as
+/// [`BridgeAtprotoPermissionSetRequestedPush`] is: the bridge answers with
+/// [`DeliverServiceAuthRequest`], correlated by `request_id`, and the nest's
+/// deadline answers a push that never lands. The bridge adds no policy: the
+/// push arrived over its authenticated nest connection, and the door IS the
+/// decision.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct BridgeAtprotoServiceAuthRequestedPush {
+    /// 16 random bytes minted per request; the bridge echoes them back.
+    #[serde(with = "serde_bytes")]
+    pub request_id: Vec<u8>,
+    /// The account whose repo signing key signs.
+    #[serde(with = "serde_bytes")]
+    pub actor_id: Vec<u8>,
+    /// The token's `iss` — the account's active ATProto DID, as the nest
+    /// resolves it (the one rule `fetch_app_credential_verifiers`'s
+    /// `login_did` carries: the bridge never reads identity status nor
+    /// invents a DID).
+    pub did: String,
+    /// The target service's DID, already admitted by the door.
+    pub aud: String,
+    /// The one method the token authorizes, already admitted by the door.
+    pub lxm: String,
+    /// The absolute expiry (unix seconds), already clamped to the class's cap
+    /// (`fauna_bridge_atproto::service_auth`); the bridge clamps again.
+    pub exp: i64,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// `fauna.bridges.atproto.deliver_service_auth` — BRIDGE class. The
+/// bridge→nest half of the `atproto.service_auth` class: the answer to one
+/// [`BridgeAtprotoServiceAuthRequestedPush`].
+///
+/// `token` is the minted compact JWS; `None` means the bridge could not mint
+/// (no signer for the account, a key it could not open). The reason stays in
+/// the bridge's log: it describes bridge-internal key state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DeliverServiceAuthRequest {
+    #[serde(with = "serde_bytes")]
+    pub request_id: Vec<u8>,
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Reply to [`DeliverServiceAuthRequest`]. `accepted` is `false` when no door
+/// waits under that id — the deadline already refused, or the id was never
+/// minted — which is a log line for the bridge, never an error.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DeliverServiceAuthReply {
     pub accepted: bool,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
@@ -1490,6 +1616,7 @@ mod tests {
                 tombstone_requested: false,
                 extra: Default::default(),
             }),
+            public_post_count: 42,
             extra: Default::default(),
         };
         let bytes = encode_canonical(&with_identity).unwrap();
@@ -1653,12 +1780,28 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            session_id: Some(vec![7u8; 16]),
             extra: Default::default(),
         };
         let bytes = encode_canonical(&req).unwrap();
         assert_eq!(
             decode_strict::<IngestExternalWriteRequest>(&bytes).unwrap(),
             req
+        );
+        // An older bridge omits the session: absent on the wire (never a CBOR
+        // null), and it decodes back to `None`.
+        let older = IngestExternalWriteRequest {
+            session_id: None,
+            ..req.clone()
+        };
+        let bytes = encode_canonical(&older).unwrap();
+        assert!(
+            !bytes.windows(10).any(|w| w == b"session_id"),
+            "an absent session is omitted, not encoded"
+        );
+        assert_eq!(
+            decode_strict::<IngestExternalWriteRequest>(&bytes).unwrap(),
+            older
         );
 
         // The reply mixes an applied row with a sub-typed refusal — the shape

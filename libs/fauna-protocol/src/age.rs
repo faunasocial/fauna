@@ -237,6 +237,23 @@ pub fn age_claim_label(band: Option<&str>, provenance: Option<&str>) -> Localize
     }
 }
 
+/// The onboarding `invite-code-supervised-notice` text for a verified
+/// supervised code: the guardian, and — when the code was minted with a band
+/// this client can name — the band as a NESTED key ("… as a 13–15 account";
+/// `family-safety.md` § App surface → *Age-band surfaces*: the band rides the
+/// existing notice, never a second one). An absent or unnamed band keeps the
+/// band-less sentence. Resolve with [`LocalizedText::resolve_nested`]; the
+/// handle is data and misses the lookup.
+pub fn supervised_notice(guardian: &str, band: Option<&str>) -> LocalizedText {
+    match band.and_then(AgeBand::from_wire) {
+        Some(band) => LocalizedText::key_args(
+            "family.supervised_notice_onboarding_band",
+            [("guardian", guardian), ("band", band.label_key())],
+        ),
+        None => LocalizedText::key_arg("family.supervised_notice_onboarding", "guardian", guardian),
+    }
+}
+
 /// The onboarding `invite-request-age-notice` text — what the nest will
 /// record, shown before submit/redeem so the user knows what the application
 /// carries (D3; `family-safety.md` § App surface → *Age-band surfaces*).
@@ -305,19 +322,31 @@ pub const AGE_ATTESTATION_PLATFORM_ANDROID: &str = "android";
 
 /// The genuine Fauna iOS app's App ID — `<Apple team id>.social.fauna.fauna`
 /// ([`fauna_core::platform_ids::APPLE_IOS_APP_ID`], the owner of the team id
-/// and bundle id). It is the `application_id` of [`age_claim_signed_message`]
-/// on the iOS arm and the RP-ID the App Attest `authData` hashes.
-///
-/// **The arming point of the nest's iOS verifier.** While this is `None` the
-/// nest holds no iOS verifier: it leaves `ios` out of
+/// and bundle id). App Attest signs under the RUNNING bundle's App ID, so it
+/// is the RP-ID the main app's `authData` hashes and the `application_id` of
+/// that app's [`age_claim_signed_message`].
+pub const FAUNA_IOS_APP_ID: &str = fauna_core::platform_ids::APPLE_IOS_APP_ID;
+
+/// The Fauna Kids iOS app's App ID — `<Apple team id>.social.fauna.faunakids`
+/// ([`fauna_core::platform_ids::APPLE_IOS_KIDS_APP_ID`]): the RP-ID and the
+/// signed `application_id` of a kids-app attestation, exactly as
+/// [`FAUNA_IOS_APP_ID`] is the main app's. The kids FFI build hands it to the
+/// app (`fauna_ffi::ios_age_attestation_app_id` under `kids-floor`).
+pub const FAUNA_IOS_KIDS_APP_ID: &str = fauna_core::platform_ids::APPLE_IOS_KIDS_APP_ID;
+
+/// Every App ID the nest's iOS verifier accepts — **the arming point of the
+/// nest's iOS verifier.** The nest picks the entry whose SHA-256 equals the
+/// attestation's RP-ID hash and rebuilds the signed message with THAT App ID;
+/// no App ID is ever read from the client. While this is empty the nest holds
+/// no iOS verifier: it leaves `ios` out of
 /// [`AgeNonceReply::attestation_platforms`] and ignores an iOS attestation
 /// unread, handling the claim as declared-only (`family-safety.md` § The
 /// account age band → *An attestation the nest cannot check*) — never an
-/// App-ID check that silently checks nothing. The iOS app reads the same
-/// constant (`fauna_ffi::ios_age_attestation_app_id`) only for the signed
+/// App-ID check that silently checks nothing. An app reads its own build's
+/// App ID (`fauna_ffi::ios_age_attestation_app_id`) only for the signed
 /// message's `application_id`; whether to attach is the addressed nest's
 /// list, never this app build's arming.
-pub const FAUNA_IOS_APP_ID: Option<&str> = Some(fauna_core::platform_ids::APPLE_IOS_APP_ID);
+pub const FAUNA_IOS_APP_IDS: &[&str] = &[FAUNA_IOS_APP_ID, FAUNA_IOS_KIDS_APP_ID];
 
 /// A platform attestation over `{nest-issued nonce, band, application id,
 /// actor}` — the hardening D5 adopted. The nest verifies it **nest-locally**
@@ -544,6 +573,21 @@ mod tests {
         assert_eq!(age_notice("kid", Some(AGE_ATTESTATION_PLATFORM_IOS)), None);
     }
 
+    /// The band rides the supervised notice; a band-less (or unnameable) code
+    /// keeps the original sentence.
+    #[test]
+    fn supervised_notice_carries_the_band_only_when_named() {
+        let banded = supervised_notice("guardian1", Some("13-15"));
+        assert_eq!(banded.key, "family.supervised_notice_onboarding_band");
+        assert_eq!(banded.args["guardian"], "guardian1");
+        assert_eq!(banded.args["band"], "family.age_band.teen_13_15");
+        for band in [None, Some("kid")] {
+            let plain = supervised_notice("guardian1", band);
+            assert_eq!(plain.key, "family.supervised_notice_onboarding");
+            assert!(!plain.args.contains_key("band"));
+        }
+    }
+
     #[test]
     fn minor_arm_covers_every_band_below_adult() {
         assert!(AgeBand::U13.is_minor());
@@ -629,19 +673,26 @@ mod tests {
         assert_eq!(decode::<AgeNonceReply>(&bytes).expect("decode"), reply);
     }
 
-    /// Once armed, the App ID must be the team-prefixed shape App Attest's
-    /// RP-ID uses — a bare bundle id would make every genuine attestation fail
-    /// the nest's RP-ID hash check.
+    /// Every pinned App ID must be the team-prefixed shape App Attest's RP-ID
+    /// uses — a bare bundle id would make every genuine attestation fail the
+    /// nest's RP-ID hash check — and the pinned set is exactly the main app
+    /// and the kids app, under one team.
     #[test]
     fn ios_app_id_when_armed_is_team_prefixed_bundle_id() {
-        if let Some(app_id) = FAUNA_IOS_APP_ID {
+        let mut teams = Vec::new();
+        let mut bundles = Vec::new();
+        for app_id in FAUNA_IOS_APP_IDS {
             let (team, bundle) = app_id.split_once('.').expect("<team>.<bundle>");
-            assert_eq!(bundle, "social.fauna.fauna");
             assert_eq!(team.len(), 10, "Apple team ids are 10 characters");
             assert!(
                 team.chars()
                     .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
             );
+            teams.push(team);
+            bundles.push(bundle);
         }
+        assert_eq!(bundles, ["social.fauna.fauna", "social.fauna.faunakids"]);
+        assert!(teams.windows(2).all(|w| w[0] == w[1]), "one team");
+        assert_eq!(FAUNA_IOS_APP_IDS, [FAUNA_IOS_APP_ID, FAUNA_IOS_KIDS_APP_ID]);
     }
 }

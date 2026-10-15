@@ -545,6 +545,79 @@ pub async fn run_blocklist_self_check(
     out
 }
 
+// ── The daily pass's schedule ──────────────────────────────────────
+
+/// The daily pass's UTC slot before the per-deployment offset: 03:00
+/// (`mail-deliverability.md` § The check).
+pub const DAILY_PASS_SLOT_UTC_SECS: i64 = 3 * 3600;
+
+/// The per-deployment offset spans the hour after the slot, so the fleet's
+/// deployments do not query the DNSBLs in one synchronized storm.
+pub const DAILY_PASS_OFFSET_SPAN_SECS: i64 = 3600;
+
+/// How often the daily-pass loop asks [`DailyPassSchedule::due`] — the grain
+/// the pass lands on after its slot. A clock read and a comparison, nothing
+/// more, so the poll is cheap.
+pub const DAILY_PASS_POLL_SECS: u64 = 300;
+
+const DAY_SECS: i64 = 86_400;
+
+/// The deployment's offset into the slot hour, in `[0, DAILY_PASS_OFFSET_SPAN_SECS)`:
+/// a fixed rule over the nest's public key (the deployment signing key's), so
+/// every boot of one deployment lands on the same moment and two deployments
+/// almost never share one. Not a knob — nobody would choose it.
+pub fn daily_pass_offset_secs(nest_public_key: &[u8; 32]) -> i64 {
+    let mut head = [0u8; 8];
+    head.copy_from_slice(&nest_public_key[..8]);
+    (u64::from_le_bytes(head) % DAILY_PASS_OFFSET_SPAN_SECS as u64) as i64
+}
+
+/// The newest slot moment (03:00 UTC + `offset_secs` on some day) at or
+/// before `now`, in epoch seconds.
+pub fn latest_daily_pass_slot(now: i64, offset_secs: i64) -> i64 {
+    let first = DAILY_PASS_SLOT_UTC_SECS + offset_secs;
+    now - (now - first).rem_euclid(DAY_SECS)
+}
+
+/// When the nest's own daily pass (the blocklist self-check, its diagnostics
+/// run and the retention prunes riding it) is next due — on the mail clock
+/// (`AppState::outbound_now`), restart-safe.
+///
+/// The pass is due once a slot has passed that no pass has covered. At boot the
+/// cover is the newest diagnostics run the nest made itself (an all-zero
+/// `ran_by_actor_id`), so a restart after today's pass does not run it again
+/// and a nest that was down across a slot catches up at once; with no such row
+/// (a fresh nest, or one with mail off) the slot already passed counts as
+/// covered and the first pass is the next slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DailyPassSchedule {
+    offset_secs: i64,
+    covered_through: i64,
+}
+
+impl DailyPassSchedule {
+    /// The schedule at boot: `now` on the mail clock, `newest_nest_run` the
+    /// `ran_at` of the newest diagnostics run the nest made itself, if any.
+    pub fn at_boot(offset_secs: i64, now: i64, newest_nest_run: Option<i64>) -> Self {
+        Self {
+            offset_secs,
+            covered_through: newest_nest_run
+                .unwrap_or_else(|| latest_daily_pass_slot(now, offset_secs)),
+        }
+    }
+
+    /// Whether a pass is due at `now` (mail clock): the newest slot at or
+    /// before `now` is later than the last pass's cover.
+    pub fn due(&self, now: i64) -> bool {
+        latest_daily_pass_slot(now, self.offset_secs) > self.covered_through
+    }
+
+    /// Record that a pass ran at `now` (mail clock).
+    pub fn ran(&mut self, now: i64) {
+        self.covered_through = now;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,5 +824,90 @@ mod tests {
         // Unresolved IP → every row is an error row.
         let none = run_blocklist_self_check(&r, None, &servers, None).await;
         assert!(none.iter().all(|x| x.error == "outbound IP unresolved"));
+    }
+
+    // ── The daily pass's schedule (a mocked clock: plain epoch seconds) ──
+
+    /// 2026-10-13 00:00:00 UTC.
+    const MIDNIGHT: i64 = 1_791_849_600;
+    const HOUR: i64 = 3600;
+    const DAY: i64 = 86_400;
+
+    #[test]
+    fn daily_pass_offset_is_stable_per_deployment_and_inside_the_hour() {
+        let a = [7u8; 32];
+        let mut b = [7u8; 32];
+        b[0] = 8;
+        assert_eq!(daily_pass_offset_secs(&a), daily_pass_offset_secs(&a));
+        assert_ne!(daily_pass_offset_secs(&a), daily_pass_offset_secs(&b));
+        for key in [a, b, [0u8; 32], [0xffu8; 32]] {
+            assert!((0..DAILY_PASS_OFFSET_SPAN_SECS).contains(&daily_pass_offset_secs(&key)));
+        }
+    }
+
+    #[test]
+    fn latest_slot_is_three_utc_plus_offset_at_or_before_now() {
+        let slot = MIDNIGHT + 3 * HOUR + 600;
+        assert_eq!(latest_daily_pass_slot(slot, 600), slot);
+        assert_eq!(latest_daily_pass_slot(slot + 1, 600), slot);
+        assert_eq!(latest_daily_pass_slot(slot - 1, 600), slot - DAY);
+        assert_eq!(latest_daily_pass_slot(MIDNIGHT + 23 * HOUR, 600), slot);
+    }
+
+    #[test]
+    fn a_fresh_nest_runs_its_first_pass_at_the_next_slot_not_at_boot() {
+        let boot = MIDNIGHT + 10 * HOUR;
+        let s = DailyPassSchedule::at_boot(600, boot, None);
+        assert!(!s.due(boot));
+        assert!(!s.due(MIDNIGHT + DAY + 3 * HOUR + 599));
+        assert!(s.due(MIDNIGHT + DAY + 3 * HOUR + 600));
+    }
+
+    #[test]
+    fn the_pass_runs_once_a_day_on_the_mail_clock() {
+        let boot = MIDNIGHT + HOUR;
+        let mut s = DailyPassSchedule::at_boot(0, boot, None);
+        let slot = MIDNIGHT + 3 * HOUR;
+        assert!(!s.due(slot - 1));
+        assert!(s.due(slot));
+        s.ran(slot + 30);
+        assert!(!s.due(slot + 300));
+        assert!(!s.due(slot + DAY - 1));
+        assert!(s.due(slot + DAY));
+    }
+
+    #[test]
+    fn a_restart_after_todays_pass_does_not_run_it_again() {
+        let slot = MIDNIGHT + 3 * HOUR + 600;
+        let ran = slot + 120;
+        let s = DailyPassSchedule::at_boot(600, slot + 2 * HOUR, Some(ran));
+        assert!(!s.due(slot + 2 * HOUR));
+        assert!(!s.due(slot + DAY - 1));
+        assert!(s.due(slot + DAY));
+    }
+
+    #[test]
+    fn a_nest_down_across_its_slot_catches_up_at_boot() {
+        let slot = MIDNIGHT + 3 * HOUR + 600;
+        // Yesterday's pass ran; the nest was down across today's slot.
+        let s = DailyPassSchedule::at_boot(600, slot + 5 * HOUR, Some(slot - DAY + 60));
+        assert!(s.due(slot + 5 * HOUR));
+    }
+
+    #[test]
+    fn a_restart_before_todays_slot_waits_for_it() {
+        let slot = MIDNIGHT + 3 * HOUR + 600;
+        let s = DailyPassSchedule::at_boot(600, slot - HOUR, Some(slot - DAY + 60));
+        assert!(!s.due(slot - HOUR));
+        assert!(s.due(slot));
+    }
+
+    #[test]
+    fn a_mail_clock_moved_days_ahead_runs_one_pass_not_one_per_day() {
+        let mut s = DailyPassSchedule::at_boot(0, MIDNIGHT + HOUR, None);
+        let jumped = MIDNIGHT + 31 * DAY + 12 * HOUR;
+        assert!(s.due(jumped));
+        s.ran(jumped);
+        assert!(!s.due(jumped + 1));
     }
 }

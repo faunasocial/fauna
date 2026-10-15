@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import Foundation
 
 /// Native background auto-renew cadence for TLS certificates (macOS + iOS, shared
@@ -71,3 +74,4 @@ public final class DnsAutoRenewCadence {
         _ = await machine.autoRenewIssue(domains: due, targetNestId: nestId)
     }
 }
+#endif // !FAUNA_KIDS

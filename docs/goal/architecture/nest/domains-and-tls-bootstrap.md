@@ -184,7 +184,11 @@ admin client calls `fauna.dns.set_host_address` as part of onboarding, and again
 converges without re-onboarding. This is an **IPC call the client makes, not a UI
 element** — so it is uniform across all 7 apps (priority #1: identical behavior)
 without being a priority-#1 *UI* deviation (see § Implementation status for the
-current per-app wiring — **all 7 landed**).
+current per-app wiring — **all 7 landed**). (A provisioned box's host-published
+`host-addresses` file — the IP bridge cert's second source,
+[`tls-certificates.md`](tls-certificates.md) § B-IP *When* — is a different fact
+with that one consumer; it never feeds `nest_host_address`, and the nest still
+self-detects nothing here.)
 
 **The LAN case — the client MUST report the nest's PUBLIC address, never its
 observed connect-address.** An admin frequently sets up a box from the **same LAN**

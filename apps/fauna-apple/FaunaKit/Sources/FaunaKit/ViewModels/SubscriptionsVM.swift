@@ -269,6 +269,7 @@ public final class SubscriptionsVM {
         showForm = false
     }
 
+#if !FAUNA_KIDS
     /// Create or update the tier depending on `editingTier`, then refresh.
     public func saveForm() async {
         guard let api else { return }
@@ -305,6 +306,7 @@ public final class SubscriptionsVM {
             errorMessage = DisplayError.message(error)
         }
     }
+#endif
 
     public func deleteTier(_ name: String) async {
         guard let api else { return }
@@ -319,6 +321,7 @@ public final class SubscriptionsVM {
 
     // MARK: - §2 requests
 
+#if !FAUNA_KIDS
     /// Approve a pending request — the transparent mint+upload; shows the busy
     /// indicator for its duration.
     public func approve(_ request: FfiPendingRequest) async {
@@ -333,6 +336,7 @@ public final class SubscriptionsVM {
         isApproving = false
         await hydrate()
     }
+#endif
 
     public func reject(requestId: Int64) async {
         guard let api else { return }
@@ -352,6 +356,7 @@ public final class SubscriptionsVM {
         await refreshRoster()
     }
 
+#if !FAUNA_KIDS
     /// Remove a subscriber from `tierName` — rotates the period key + re-mints.
     public func remove(subscriberId: Data, tierName: String) async {
         guard let api else { return }
@@ -363,6 +368,7 @@ public final class SubscriptionsVM {
             errorMessage = DisplayError.message(error)
         }
     }
+#endif
 
     // MARK: - §4 Payment providers
 

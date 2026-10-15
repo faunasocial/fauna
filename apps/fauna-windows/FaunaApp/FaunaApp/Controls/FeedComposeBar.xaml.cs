@@ -603,6 +603,7 @@ public sealed partial class FeedComposeBar : UserControl
         {
             succeeded = await PostRequested.Invoke(text, tags, _attachedBytes, audience);
         }
+        FaunaApp.Core.Logs.E2eTrace.Write($"[feed-compose] press: text len={text.Length}, went out={succeeded}");
         if (!succeeded)
         {
             // Refused (empty text / an unresolved attachment / an aborted upload) — the

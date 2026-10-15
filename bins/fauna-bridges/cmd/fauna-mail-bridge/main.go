@@ -702,6 +702,19 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 				Logger:       logger,
 			})
 		},
+		// A revoked bridge's reconnect never reaches whoami: nest's bearer
+		// validator refuses its upgrade (401) once its standing is revoked,
+		// so the loop asks the pre-identity status surface instead
+		// (mail-bridge-lifecycle.md § Service-user re-keying step 4). Any
+		// error there is transient — the loop keeps retrying.
+		CheckRevoked: func(c context.Context) bool {
+			status, serr := wsrpc.EnrollmentStatus(c, *nestEndpoint, newEnrollID(), logger, nestHTTP)
+			if serr != nil {
+				logger.Warn("reconnect: enrollment status check failed; will retry", "err", serr)
+				return false
+			}
+			return status == wsrpc.StatusRevoked
+		},
 		OnConnect: func(c context.Context, cc wsrpc.Caller) error {
 			wctx, wcancel := context.WithTimeout(c, rpcDeadline)
 			wh, werr := wsrpc.Whoami(wctx, cc)

@@ -186,6 +186,43 @@ impl ChunkManifest {
         }
     }
 
+    /// The size table must tell the truth about the chunk list: one size per
+    /// chunk (counted by [`Self::stored_hashes`] when present, since a sealed
+    /// manifest's `chunk_hashes` is empty until opened), none above
+    /// [`crate::chunker::MAX_CHUNK`] (no chunker emits one), and a
+    /// [`Self::total_size`] equal to their sum. The sizes and the total are
+    /// plaintext on every manifest shape, so this runs before the hashes are
+    /// opened — and before a progress event reports `total_size` — and a
+    /// counterparty cannot declare a size its own chunk list contradicts.
+    pub fn check_sizes(&self) -> anyhow::Result<()> {
+        let chunks = self
+            .stored_hashes
+            .as_ref()
+            .map_or(self.chunk_hashes.len(), Vec::len);
+        if self.chunk_sizes.len() != chunks {
+            anyhow::bail!(
+                "manifest lists {chunks} chunks but {} chunk sizes",
+                self.chunk_sizes.len()
+            );
+        }
+        let mut sum = 0u64;
+        for &size in &self.chunk_sizes {
+            if size > u64::from(crate::chunker::MAX_CHUNK) {
+                anyhow::bail!("manifest chunk size {size} exceeds the chunk maximum");
+            }
+            sum = sum
+                .checked_add(size)
+                .ok_or_else(|| anyhow::anyhow!("manifest chunk sizes overflow"))?;
+        }
+        if sum != self.total_size {
+            anyhow::bail!(
+                "manifest declares total size {} but its chunks sum to {sum}",
+                self.total_size
+            );
+        }
+        Ok(())
+    }
+
     /// Open [`Self::sealed_hashes`] under the set's chunk root and return the
     /// manifest with `file_hash`/`chunk_hashes` restored (the plaintext view
     /// every downstream consumer expects). A plaintext manifest is returned
@@ -322,6 +359,54 @@ mod tests {
         let mut arr = [0u8; 32];
         arr[0] = b;
         ContentHash::from_digest_raw(arr)
+    }
+
+    fn sized(sizes: &[u64], total: u64, sealed: bool) -> ChunkManifest {
+        let hashes: Vec<ContentHash> = (0..sizes.len()).map(|i| hash_from_byte(i as u8)).collect();
+        ChunkManifest {
+            file_hash: if sealed {
+                blank_file_hash()
+            } else {
+                hash_from_byte(9)
+            },
+            total_size: total,
+            chunk_hashes: if sealed { Vec::new() } else { hashes.clone() },
+            chunk_sizes: sizes.to_vec(),
+            stored_hashes: sealed.then_some(hashes),
+            sealed_hashes: sealed.then(|| vec![0u8; 4]),
+            min_reader: None,
+        }
+    }
+
+    #[test]
+    fn check_sizes_accepts_honest_manifests() {
+        let max = u64::from(crate::chunker::MAX_CHUNK);
+        for sealed in [false, true] {
+            sized(&[], 0, sealed).check_sizes().unwrap();
+            sized(&[10], 10, sealed).check_sizes().unwrap();
+            sized(&[max, max], 2 * max, sealed).check_sizes().unwrap();
+            sized(&[max, 1], max + 1, sealed).check_sizes().unwrap();
+        }
+    }
+
+    #[test]
+    fn check_sizes_refuses_a_table_that_contradicts_the_chunk_list() {
+        let max = u64::from(crate::chunker::MAX_CHUNK);
+        for sealed in [false, true] {
+            // total_size not the sum (both directions, and the empty file).
+            assert!(sized(&[10], 11, sealed).check_sizes().is_err());
+            assert!(sized(&[10, 5], 10, sealed).check_sizes().is_err());
+            assert!(sized(&[], 1, sealed).check_sizes().is_err());
+            assert!(sized(&[10], u64::MAX, sealed).check_sizes().is_err());
+            // An oversize chunk, even with a consistent total.
+            assert!(sized(&[max + 1], max + 1, sealed).check_sizes().is_err());
+            // Sum overflow.
+            assert!(sized(&[max, u64::MAX], 0, sealed).check_sizes().is_err());
+            // Size count vs chunk count.
+            let mut short = sized(&[10, 5], 15, sealed);
+            short.chunk_sizes.pop();
+            assert!(short.check_sizes().is_err());
+        }
     }
 
     #[test]

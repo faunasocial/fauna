@@ -27,7 +27,6 @@ use fauna_client_recovery::ceremony::{LandedSuccession, STOLEN_CONFIRM_WORD, Sto
 use fauna_core::secret::SecretString;
 use fauna_i18n::strings::onboarding::launch as l;
 use fauna_i18n::strings::settings::recovery_kit as rk;
-use fauna_launch_machine::{LaunchPhase, LaunchSnapshot};
 use fauna_ui_ids as ids;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -189,24 +188,11 @@ pub fn follow_snapshot(app: &mut App, tx: &UnboundedSender<UiMessage>) {
         return;
     };
     let snapshot = machine.snapshot();
-    if still_parked(&snapshot, locked_until_secs) {
+    if snapshot.lock_notice_holds(locked_until_secs) {
         return;
     }
     crate::launch::route(app, tx, snapshot);
     app.focus = 0;
-}
-
-/// Whether `snapshot` gives the notice nothing to do: the machine is still on
-/// this lock, or it is mid-flight (its refresh is running and the settled
-/// state arrives as a later change).
-fn still_parked(snapshot: &LaunchSnapshot, shown: u64) -> bool {
-    match snapshot.phase {
-        LaunchPhase::Boot
-        | LaunchPhase::Hydrating
-        | LaunchPhase::SilentChallenge { .. }
-        | LaunchPhase::Refreshing { .. } => true,
-        _ => snapshot.locked_until_secs == Some(shown),
-    }
 }
 
 /// What `identity-stolen-button` needs off the render thread: everything the
@@ -228,18 +214,31 @@ impl StolenJob {
             // The ceremony never started — nothing moved.
             Err(e) => return StolenOutcome::not_landed(e),
         };
-        let accounts = fauna_client_accounts::AccountRegistry::new(
+        let accounts = crate::session::registry_over(
             self.credentials as Arc<dyn fauna_client_accounts::SecretStore>,
         );
-        fauna_client_recovery::ceremony::succeed_stolen_identity(
+        let outcome = fauna_client_recovery::ceremony::succeed_stolen_identity(
             &self.nest_url,
             &identity,
             self.phrase.as_str(),
             None,
+            None,
             &accounts,
             crate::settings::successor_db_path,
         )
-        .await
+        .await;
+        // The departed fleet, before the fold's switch: no runtime is up on
+        // this surface, so the predecessor's store is read at rest.
+        if let StolenOutcome::Landed(_) = &outcome {
+            fauna_client_account_runtime::record_departed_fleet(
+                None,
+                &accounts,
+                fauna_sync_engine::root::StoreRoot::platform(),
+                &identity,
+            )
+            .await;
+        }
+        outcome
     }
 }
 
@@ -362,6 +361,7 @@ pub fn spawn_submit(app: &mut App, tx: &UnboundedSender<UiMessage>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fauna_launch_machine::{LaunchPhase, LaunchSnapshot};
 
     const UNTIL: u64 = 1_800_000_000;
 
@@ -521,61 +521,6 @@ mod tests {
         };
         app.locked.phrase = "ab".repeat(32).into();
         assert!(begin_stolen(&mut app).is_none());
-    }
-
-    /// The notice holds while the machine is on this lock or mid-flight, and
-    /// gives way to any settled snapshot that is not this lock.
-    #[test]
-    fn the_notice_holds_on_this_lock_and_yields_to_any_other_settled_state() {
-        assert!(still_parked(&locked_snapshot(), UNTIL), "the same lock");
-        for phase in [
-            LaunchPhase::Boot,
-            LaunchPhase::Hydrating,
-            LaunchPhase::SilentChallenge { attempt: 2 },
-        ] {
-            assert!(
-                still_parked(
-                    &LaunchSnapshot {
-                        phase,
-                        locked_until_secs: None,
-                        ..LaunchSnapshot::initial()
-                    },
-                    UNTIL
-                ),
-                "mid-flight: the settled state arrives as a later change"
-            );
-        }
-        assert!(
-            !still_parked(
-                &LaunchSnapshot {
-                    phase: LaunchPhase::Online,
-                    ..LaunchSnapshot::initial()
-                },
-                UNTIL
-            ),
-            "the lock lapsed and the refresh signed in"
-        );
-        assert!(
-            !still_parked(
-                &LaunchSnapshot {
-                    locked_until_secs: Some(UNTIL + 86_400),
-                    ..locked_snapshot()
-                },
-                UNTIL
-            ),
-            "a different unlock time is a new lock — the notice repaints"
-        );
-        assert!(
-            !still_parked(
-                &LaunchSnapshot {
-                    phase: LaunchPhase::Offline { transient: true },
-                    locked_until_secs: None,
-                    ..LaunchSnapshot::initial()
-                },
-                UNTIL
-            ),
-            "the refresh failed transiently — the ordinary retry surface"
-        );
     }
 
     /// The surface follows the machine out with no timer of its own

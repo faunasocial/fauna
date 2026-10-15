@@ -67,6 +67,10 @@ pub struct WsChallengeBearer {
     /// tell "the nest refused this" from "no nest answered" — see
     /// [`LastAuthRefusal`].
     last_refusal: LastAuthRefusal,
+    /// The identity the latest successful mint's `VerifyReply` confirmed —
+    /// [`BearerSource::subscribe_self_identity`]'s source. Written by
+    /// [`Self::settle_mint`] on success only: a refusal leaves it untouched.
+    identity: tokio::sync::watch::Sender<Option<fauna_anon_client::MintedIdentity>>,
 }
 
 impl WsChallengeBearer {
@@ -98,6 +102,7 @@ impl WsChallengeBearer {
             superseded: SupersededLatch::default(),
             locked: LockedLatch::default(),
             last_refusal: LastAuthRefusal::default(),
+            identity: tokio::sync::watch::Sender::new(None),
         }
     }
 
@@ -160,18 +165,44 @@ impl WsChallengeBearer {
         // latches: this is the path the reconnect loop drives, so it is the
         // one that must not drop a supersession — or an ordinary refusal's
         // cause — on the floor.
-        match fauna_anon_client::mint_bearer_over_silent_challenge(&url, &self.signing_key).await {
+        let result =
+            fauna_anon_client::mint_bearer_over_silent_challenge(&url, &self.signing_key).await;
+        self.settle_mint(result, &url)
+    }
+
+    /// Fold one mint attempt's outcome into this source's side channels — the
+    /// latches and the identity watch — and map it for the cache. Split from
+    /// [`Self::fetch_mint`] so the bookkeeping is testable without a nest.
+    fn settle_mint(
+        &self,
+        result: Result<MintedBearer, AnonClientError>,
+        url: &str,
+    ) -> Result<MintedBearer, ApiError> {
+        match result {
             Ok(minted) => {
                 // A fresh mint proves the last attempt was not a refusal —
                 // clear it so a caller reading the latch after THIS success
                 // never sees an earlier attempt's stale cause.
                 self.last_refusal.set(None);
                 self.locked.clear();
+                // Publish who this mint signed in as. Replaced on every mint, so
+                // a server-side handle rename reaches the app at the next
+                // re-mint; `send_if_modified` keeps an unchanged identity from
+                // waking every subscriber once an hour.
+                if let Some(identity) = &minted.identity {
+                    self.identity.send_if_modified(|current| {
+                        if current.as_ref() == Some(identity) {
+                            return false;
+                        }
+                        *current = Some(identity.clone());
+                        true
+                    });
+                }
                 Ok(minted)
             }
             Err(e) => Err(map_anon_err_latching(
                 e,
-                &url,
+                url,
                 &self.superseded,
                 &self.locked,
                 &self.last_refusal,
@@ -237,6 +268,10 @@ impl BearerSource for WsChallengeBearer {
 
     async fn current_token_id(&self) -> Option<String> {
         self.token_cache.current_token_id().await
+    }
+
+    fn subscribe_self_identity(&self) -> Option<fauna_nest_http::SelfIdentityWatch> {
+        Some(self.identity.subscribe())
     }
 }
 
@@ -443,6 +478,15 @@ pub(crate) fn map_anon_err(e: AnonClientError, nest_url: &str) -> ApiError {
                 None => ApiError::Transport(e.to_string()),
             }
         }
+        // The nest needs updating (the degraded boot's `fauna.nest.outdated`):
+        // its own variant, so the reconnect supervisor stops on it instead of
+        // re-minting behind "Connecting…" (`version-compatibility.md`
+        // § Dimension 4). Classified by action, like every app-side reading.
+        AnonClientError::Rpc(err)
+            if err.action() == fauna_protocol::RpcErrorAction::NeedsUpdate =>
+        {
+            ApiError::NestOutdated
+        }
         AnonClientError::Rpc(err) => {
             // Mirror the HTTP twin's status mapping (auth_handlers.rs
             // `auth_error_to_rpc` is the inverse of the old HTTP status map).
@@ -470,6 +514,12 @@ pub(crate) fn map_anon_err(e: AnonClientError, nest_url: &str) -> ApiError {
         | AnonClientError::WebSocket(_)
         | AnonClientError::RpcDisconnected { .. }
         | AnonClientError::RpcTimeout) => ApiError::Transport(e.to_string()),
+        // The nest refused this app's subprotocol at the mint's upgrade — the
+        // app is too old for it. Its own typed carry, so a mint-first reconnect
+        // stops on it as the authenticated connect stops on the same 426,
+        // instead of backing off for ever (`version-compatibility.md`
+        // § Dimension 4).
+        AnonClientError::SubprotocolMismatch => ApiError::SubprotocolMismatch,
     }
 }
 
@@ -741,6 +791,39 @@ mod tests {
         assert!(superseded.get().is_none());
     }
 
+    /// A handshake refused because the nest needs updating (the degraded boot's
+    /// `fauna.nest.outdated`, or any code `RpcError::action` classifies
+    /// `NeedsUpdate`) maps to the typed [`ApiError::NestOutdated`] — never a
+    /// representative `Status` the reconnect supervisor reads as a retryable
+    /// "couldn't obtain a token".
+    #[test]
+    fn a_needs_update_refusal_maps_to_nest_outdated() {
+        assert_eq!(
+            map_anon_err(AnonClientError::Rpc(RpcError::nest_outdated()), TEST_URL),
+            ApiError::NestOutdated
+        );
+        assert_eq!(
+            map_anon_err(
+                AnonClientError::Rpc(RpcError::nest_schema_mismatch()),
+                TEST_URL
+            ),
+            ApiError::NestOutdated
+        );
+    }
+
+    /// A mint whose upgrade the nest refused with HTTP 426 (the app is too old
+    /// for it) maps to the typed [`ApiError::SubprotocolMismatch`] — never the
+    /// `Transport` fault a mint-first reconnect would back off on for ever,
+    /// and never [`ApiError::NestOutdated`], which names the other side of the
+    /// skew (`version-compatibility.md` § Dimension 4).
+    #[test]
+    fn a_subprotocol_mismatch_at_the_mint_maps_to_its_typed_carry() {
+        assert_eq!(
+            map_anon_err(AnonClientError::SubprotocolMismatch, TEST_URL),
+            ApiError::SubprotocolMismatch
+        );
+    }
+
     /// A transport fault clears any refusal a PRIOR attempt latched — the
     /// exact staleness this channel exists to avoid: a caller reading it
     /// right after this failure must not attribute it to an earlier, now
@@ -938,6 +1021,101 @@ mod tests {
         assert_eq!(
             b.superseded_latch().get().and_then(|e| e.superseded_by()),
             Some(successor)
+        );
+    }
+
+    fn minted_as(handle: &str) -> MintedBearer {
+        MintedBearer {
+            token: "t".into(),
+            token_id: "id".into(),
+            expires_at: 1_800_000_000,
+            identity: Some(fauna_anon_client::MintedIdentity {
+                handle: handle.into(),
+                domain: "nest.example".into(),
+                tier: "free".into(),
+            }),
+        }
+    }
+
+    /// A successful mint publishes the identity its reply confirmed on the
+    /// watch — what lets an app learn who its session is signed in as without
+    /// a second challenge (`transport-connection.md` § The dial budget) — and
+    /// a later mint naming a renamed handle replaces it.
+    #[test]
+    fn a_mint_publishes_its_identity_on_the_watch() {
+        let kp = fauna_core::identity::ActorKeypair::generate();
+        let b = WsChallengeBearer::new(TEST_URL, kp.actor_id().0, kp.signing_key().clone());
+        let mut rx = b
+            .subscribe_self_identity()
+            .expect("a challenge mint can say");
+        assert_eq!(*rx.borrow_and_update(), None, "nothing minted yet");
+
+        b.settle_mint(Ok(minted_as("alice")), TEST_URL)
+            .expect("a mint settles");
+        assert!(
+            rx.has_changed().unwrap(),
+            "a first mint wakes the subscriber"
+        );
+        assert_eq!(
+            rx.borrow_and_update().as_ref().map(|i| i.handle.as_str()),
+            Some("alice")
+        );
+
+        // The hourly re-mint with nothing changed wakes nobody.
+        b.settle_mint(Ok(minted_as("alice")), TEST_URL)
+            .expect("a mint settles");
+        assert!(
+            !rx.has_changed().unwrap(),
+            "an unchanged identity is not news"
+        );
+
+        b.settle_mint(Ok(minted_as("alice2")), TEST_URL)
+            .expect("a mint settles");
+        assert_eq!(
+            rx.borrow_and_update().as_ref().map(|i| i.handle.as_str()),
+            Some("alice2"),
+            "a server-side rename lands at the next re-mint"
+        );
+    }
+
+    /// A refused mint proves nothing about who the session is — the last
+    /// confirmed identity stands, untouched.
+    #[test]
+    fn a_refusal_leaves_the_identity_watch_untouched() {
+        let kp = fauna_core::identity::ActorKeypair::generate();
+        let b = WsChallengeBearer::new(TEST_URL, kp.actor_id().0, kp.signing_key().clone());
+        let mut rx = b
+            .subscribe_self_identity()
+            .expect("a challenge mint can say");
+        b.settle_mint(Ok(minted_as("alice")), TEST_URL)
+            .expect("a mint settles");
+        rx.borrow_and_update();
+
+        let refusal = RpcError {
+            code: "fauna.auth.not_registered".into(),
+            message: Box::new(LocalizedText::new("error.x")),
+            details: None,
+            extra: Default::default(),
+        };
+        // `MintedBearer` holds a token and so has no `Debug` — assert the arm.
+        assert!(
+            b.settle_mint(Err(AnonClientError::Rpc(refusal)), TEST_URL)
+                .is_err(),
+            "a refusal mints nothing"
+        );
+        assert!(
+            b.settle_mint(
+                Err(AnonClientError::WebSocket("unreachable".into())),
+                TEST_URL,
+            )
+            .is_err(),
+            "a transport fault mints nothing"
+        );
+
+        assert!(!rx.has_changed().unwrap(), "a failure is not news");
+        assert_eq!(
+            rx.borrow().as_ref().map(|i| i.handle.as_str()),
+            Some("alice")
         );
     }
 

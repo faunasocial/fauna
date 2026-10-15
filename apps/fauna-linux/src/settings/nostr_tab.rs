@@ -553,6 +553,9 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
         .model(&gtk::StringList::new(&mode_label_refs))
         .build();
     set_test_id(&link_mode_combo, ids::NOSTR_LINK_MODE);
+    // The picker's tokens (`generate`/`import`/`remote`), so `select` matches
+    // them like every other app's token-keyed picker, not only the labels.
+    crate::testid::set_test_option_keys(&link_mode_combo, &LINK_MODES);
     actions_group.add(&link_mode_combo);
 
     let nsec_row = adw::PasswordEntryRow::builder()
@@ -1588,6 +1591,29 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
                     }
                 }
             });
+        });
+    }
+
+    // The settings shell builds every sub-page once at app init, so the gate
+    // above would otherwise reflect the feature plane as of that first load.
+    // Re-reading it whenever the page is shown makes a policy flip (zaps
+    // denied/restored) land on the next visit, as on tui/web.
+    #[cfg(feature = "zaps")]
+    {
+        let linked_state = Rc::clone(&linked_state);
+        let zap_signer_add_btn = zap_signer_add_btn.clone();
+        let zap_signer_gate_reason_label = zap_signer_gate_reason_label.clone();
+        page.connect_map(move |_| {
+            if !linked_state.get() {
+                return;
+            }
+            if let Some(client) = super::get_client() {
+                refresh_zap_signer_gate(
+                    &client,
+                    &zap_signer_add_btn,
+                    &zap_signer_gate_reason_label,
+                );
+            }
         });
     }
 

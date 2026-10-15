@@ -99,14 +99,19 @@ class LinkedNestsContentTest {
         mintDefaultDuration = mintDefaultDuration,
         trustBackups = trustBackups,
         trustGenerations = trustGenerations,
+        trustHoldersUnreachable = false,
     )
 
     private fun pairingRow(
         capabilities: List<String> = listOf("mls_pull", "namespace_sync"),
         expiresAt: Long? = null,
+        capabilityLabels: List<LocalizedText> = emptyList(),
     ) = LinkedNestRow(
         nestId = "bb".repeat(32),
         capabilities = capabilities,
+        // The UniFFI record defaults this to an empty list, so a test that wants
+        // the user-voice labels must pass them.
+        capabilityLabels = capabilityLabels,
         expiresAt = expiresAt,
         createdAt = 0L,
         label = "My other nest",
@@ -124,6 +129,7 @@ class LinkedNestsContentTest {
         // Same reasoning: recovery is addressed to the OWNER's backup
         // destinations, which hang off the home row, never off a pairing.
         trustGenerations = emptyList(),
+        trustHoldersUnreachable = false,
     )
 
     private fun grant(
@@ -334,6 +340,23 @@ class LinkedNestsContentTest {
         composeTestRule.onAllNodesWithTag("nests-item-unlink-button").assertCountEquals(1)
         composeTestRule.onAllNodesWithTag("nests-item-capabilities").assertCountEquals(1)
         composeTestRule.onAllNodesWithTag("nests-item-expiry").assertCountEquals(1)
+    }
+
+    @Test
+    fun capabilitiesLineShowsUserVoiceLabelNotWireString() {
+        render(
+            snapshot(
+                pairings = listOf(
+                    pairingRow(
+                        capabilities = listOf("account_replica"),
+                        capabilityLabels = listOf(LocalizedText("nests.capability_account_replica", emptyMap())),
+                    ),
+                ),
+            ),
+        )
+        composeTestRule.onNodeWithTag("nests-item-capabilities")
+            .assertTextContains("sealed copy of your account settings", substring = true)
+        composeTestRule.onAllNodesWithText("account_replica", substring = true).assertCountEquals(0)
     }
 
     @Test

@@ -170,6 +170,13 @@ def _android_value(text: str) -> str:
     result = result.replace("'", "\\'")
     # An unescaped double quote is an AAPT2 quoting delimiter and is dropped.
     result = result.replace('"', '\\"')
+    # AAPT2 trims unquoted leading/trailing whitespace from a string, which would
+    # flatten a template that is its own indent (`connected_apps.bullet` =
+    # "  • {text}"). ` ` survives the trim.
+    stripped = result.lstrip(" ")
+    result = "\\u0020" * (len(result) - len(stripped)) + stripped
+    stripped = result.rstrip(" ")
+    result = stripped + "\\u0020" * (len(result) - len(stripped))
     return result
 
 

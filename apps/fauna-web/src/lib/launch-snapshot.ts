@@ -39,6 +39,18 @@ export interface LaunchSnapshot {
    *  § App-launch routing → the previously-signed-in row). Unlike every other
    *  terminal surface, its page offers Retry. */
   sign_in_refused?: boolean;
+  /** The `IdentityChanged` phase is FORK evidence (a second distinct head at an
+   *  accepted seq, or a chain that does not extend the accepted head) — an
+   *  additive side channel on the same pattern; the heads come from the phase.
+   *  Read it through `identityForkOf` (`box-recovery.md` § Client acceptance). */
+  identity_fork?: boolean;
+  /** The account is LOCKED until this time (epoch seconds) — the verify
+   *  refusal `fauna.auth.account_locked` parked the machine. An additive side
+   *  channel on the `superseded_successor` pattern: the phase is still
+   *  `Offline { transient: false }`, so the routing checks this BEFORE the
+   *  generic "update needed" row (`devices.md` § The locked state; ui.yaml
+   *  page `launch_account_locked`). Read it through `lockedUntilOf`. */
+  locked_until_secs?: number | null;
 }
 
 /** `LaunchSnapshot.account_index_refusal`, normalized to one shape regardless
@@ -139,6 +151,18 @@ export function identityChangedOf(
   return { pinnedHex: ic.pinned_hex ?? '', seenHex: ic.seen_hex ?? null };
 }
 
+/** The two heads of a fork, else `null`: the `IdentityChanged` phase AND the
+ *  snapshot's `identity_fork` bit. The bit is only a flag — the pinned and seen
+ *  heads come from the phase — and a fork has no withdrawn case, so a missing
+ *  `seen_hex` is not fork evidence. Mirrors tui's `LaunchSurface::IdentityForked`
+ *  guard arm; the ordinary changed surface is untouched when the bit is clear. */
+export function identityForkOf(snap: LaunchSnapshot): { pinnedHex: string; seenHex: string } | null {
+  if (snap.identity_fork !== true) return null;
+  const changed = identityChangedOf(snap);
+  if (!changed || changed.seenHex === null) return null;
+  return { pinnedHex: changed.pinnedHex, seenHex: changed.seenHex };
+}
+
 /** `TokenStatus::Valid { expires_at_secs }` → unix seconds, else `null`. Paired
  *  with `currentBearer()` to prime the SPA's bearer cache from the machine's
  *  token, so the app doesn't re-mint one on its first request. */
@@ -146,4 +170,13 @@ export function tokenExpiryOf(snap: LaunchSnapshot): number | null {
   const token = snap.token as { Valid?: { expires_at_secs?: number } } | string | undefined;
   if (!token || typeof token === 'string') return null;
   return token.Valid?.expires_at_secs ?? null;
+}
+
+/** `LaunchSnapshot.locked_until_secs` → the unlock time (epoch seconds) while
+ *  the machine is parked on a lock, else `null`. Keyed on the field alone, as
+ *  `supersededSuccessorOf` is: the phase it rides is shared with the outdated
+ *  nest row. */
+export function lockedUntilOf(snap: LaunchSnapshot): number | null {
+  const v = snap.locked_until_secs;
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }

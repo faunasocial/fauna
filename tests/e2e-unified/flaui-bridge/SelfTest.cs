@@ -430,4 +430,78 @@ static class SelfTest
             : $"[self-test] {failures} FAILURE(S)");
         return failures;
     }
+
+    /// <summary>
+    /// Pins <see cref="PackedAttr"/> — the reading of a HelpText that carries SEVERAL
+    /// attributes (<c>state=playing;position=1.250;source=…</c>, the
+    /// <c>video-thumbnail</c> player's three) as one value per key, so a test reads
+    /// <c>get_attr("video-thumbnail", "position")</c> on windows exactly as it does on
+    /// every other app. UIA gives an element one application-supplied string; until this
+    /// existed every attribute read answered that whole string, which no shared test could
+    /// compare against.
+    ///
+    /// <para>The load-bearing checks are the NEGATIVE ones: a HelpText that is not a pack
+    /// must keep answering verbatim, because dozens of elements publish a single bare value
+    /// there (<c>painted</c>, <c>true</c>, a backup id that may end in base64 <c>=</c>) and
+    /// a reader that mistook one for a pack would quietly answer <c>null</c> for it.</para>
+    ///
+    /// <para>Run: <c>FauiBridge.exe --self-test-packed-attr</c>; exit code = failures.</para>
+    /// </summary>
+    public static int PackedAttrChecks()
+    {
+        var failures = 0;
+        void Check(bool condition, string description)
+        {
+            Console.WriteLine(condition
+                ? $"[self-test] PASS: {description}"
+                : $"[self-test] FAIL: {description}");
+            if (!condition) failures++;
+        }
+
+        const string Player = "state=playing;position=1.250;source=http://127.0.0.1:3000/api/v1/blob/ab12";
+
+        // 1. Each key of a pack answers its own value.
+        Check(PackedAttr.TryRead(Player, "state", out var state) && state == "playing",
+            $"state reads its own value off the pack (got {state ?? "null"})");
+        Check(PackedAttr.TryRead(Player, "position", out var position) && position == "1.250",
+            $"position reads its own value off the pack (got {position ?? "null"})");
+        Check(PackedAttr.TryRead(Player, "source", out var source)
+                && source == "http://127.0.0.1:3000/api/v1/blob/ab12",
+            $"source keeps every character after its first '=' (got {source ?? "null"})");
+
+        // 2. A key the pack does not name is absent — never another key's value.
+        Check(PackedAttr.TryRead(Player, "selected", out var missing) && missing is null,
+            $"a key the pack lacks answers null (got {missing ?? "null"})");
+
+        // 3. An empty value is a value.
+        Check(PackedAttr.TryRead("state=idle;source=", "source", out var empty) && empty == "",
+            $"an empty value reads as \"\" (got {empty ?? "null"})");
+
+        // 4. The packer's escapes come back out.
+        Check(PackedAttr.TryRead("a=x%3By;b=50%25", "a", out var semi) && semi == "x;y",
+            $"%3B unescapes to ';' (got {semi ?? "null"})");
+        Check(PackedAttr.TryRead("a=x%3By;b=50%25", "b", out var pct) && pct == "50%",
+            $"%25 unescapes to '%' (got {pct ?? "null"})");
+
+        // 5. Not a pack → the caller keeps the HelpText verbatim.
+        Check(!PackedAttr.TryRead("painted", "state", out _), "a bare value is not a pack");
+        Check(!PackedAttr.TryRead("true", "checked", out _), "a bare true is not a pack");
+        Check(!PackedAttr.TryRead("YWJjZA==", "state", out _),
+            "a base64 id ending in '=' is not a pack");
+        Check(!PackedAttr.TryRead("state=idle", "state", out _),
+            "a single pair is not a pack (one value needs no packing)");
+        Check(!PackedAttr.TryRead("Waiting for x=1; y=2", "state", out _),
+            "free text holding '=' and ';' is not a pack");
+        Check(!PackedAttr.TryRead("state=idle;", "state", out _),
+            "a trailing ';' is not a pack (the packer never writes one)");
+        Check(!PackedAttr.TryRead("State=idle;position=0", "state", out _),
+            "an upper-case key is not a pack key");
+        Check(!PackedAttr.TryRead("", "state", out _) && !PackedAttr.TryRead(null, "state", out _),
+            "no HelpText is not a pack");
+
+        Console.WriteLine(failures == 0
+            ? "[self-test] PASS — a packed HelpText reads one value per key, and nothing else is mistaken for one."
+            : $"[self-test] {failures} FAILURE(S)");
+        return failures;
+    }
 }

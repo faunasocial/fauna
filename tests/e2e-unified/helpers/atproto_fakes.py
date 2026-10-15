@@ -468,6 +468,21 @@ class FakePlcDirectory:
         with self._lock:
             self._tampered_senior_key = did_key
 
+    def backdate(self, did: str, cid: str, seconds: int) -> None:
+        """CLOCK HOOK: move the stored ``createdAt`` of op ``cid`` in ``did``'s
+        log ``seconds`` into the past. PLC's recovery window is measured from
+        an op's ``createdAt`` (72 h), so a seizure backdated past it is the
+        honest ``window-closed`` shape — the directory would no longer accept
+        a fork over it — without the test waiting three days. Only the
+        served timestamp moves; the op, its signature and its CID are
+        untouched (``createdAt`` is directory metadata, not op content)."""
+        from datetime import timedelta
+
+        with self._lock:
+            entry = next(e for e in self._log[did] if e["cid"] == cid)
+            moved = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+            entry["created_at"] = moved.strftime("%Y-%m-%dT%H:%M:%SZ")
+
     def set_unreadable(self, unreadable: bool) -> None:
         """OUTAGE HOOK: while set, every ``GET /{did}/log/audit`` answers 503,
         so a client's audit read fails the way an unreachable directory does.
@@ -548,6 +563,34 @@ class FakePlcDirectory:
             standing = [e for e in self._log.get(did, []) if not e["nullified"]]
             return list(standing[-1]["op"].get("rotationKeys", [])) if standing else []
 
+    def minted_dids(self) -> list[str]:
+        """Every DID minted here, oldest first — one per accepted genesis."""
+        with self._lock:
+            return [did for did, op in self.submissions if op.get("prev") is None]
+
+    def genesis_op(self, did: str) -> dict | None:
+        """The genesis op ``did`` was minted with; ``None`` if it never was."""
+        with self._lock:
+            entries = self._log.get(did, [])
+            return dict(entries[0]["op"]) if entries else None
+
+    def standing_op_type(self, did: str) -> str | None:
+        """``type`` of the newest STANDING op — ``plc_tombstone`` once the
+        identity is retired. ``None`` before the DID was submitted."""
+        with self._lock:
+            standing = [e for e in self._log.get(did, []) if not e["nullified"]]
+            return standing[-1]["op"].get("type") if standing else None
+
+    def standing_signing_key(self, did: str) -> str | None:
+        """``verificationMethods.atproto`` of the newest STANDING op — the
+        repo signing key the DID document publishes, which a service JWT for
+        this DID verifies against. ``None`` before the DID was submitted."""
+        with self._lock:
+            standing = [e for e in self._log.get(did, []) if not e["nullified"]]
+            if not standing:
+                return None
+            return (standing[-1]["op"].get("verificationMethods") or {}).get("atproto")
+
     def close(self):
         self._server.shutdown()
         self._server.server_close()
@@ -610,6 +653,64 @@ class FakeDNS:
         self._server.server_close()
 
 
+class FakeRelay:
+    """``POST /xrpc/com.atproto.sync.requestCrawl`` → 200, recording each
+    announced ``hostname`` — the relay the bridge's e2e flavor announces to when
+    ``FAUNA_ATPROTO_RELAY_URL`` names it (unset, the e2e bridge announces to no
+    relay at all). It never crawls back: the witness is the announce itself,
+    and the repo it would crawl is asserted through the bridge's own XRPC
+    surface.
+    """
+
+    PATH = "/xrpc/com.atproto.sync.requestCrawl"
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.announced: list[str] = []
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b""
+                if self.path != FakeRelay.PATH:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                try:
+                    hostname = json.loads(raw).get("hostname", "")
+                except (ValueError, AttributeError):
+                    hostname = ""
+                if not hostname:
+                    self.send_response(400)
+                    self.end_headers()
+                    return
+                with outer._lock:
+                    outer.announced.append(hostname)
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self._server.server_address[1]}"
+
+    def snapshot(self) -> list[str]:
+        with self._lock:
+            return list(self.announced)
+
+    def close(self):
+        self._server.shutdown()
+        self._server.server_close()
+
+
 class FakeAppView:
     """A plain-HTTP stand-in AppView for the F3 service-proxy tier_3.
 
@@ -624,9 +725,13 @@ class FakeAppView:
     the absence of the caller's PDS access token.
     """
 
-    def __init__(self, timeline: dict | None = None):
+    def __init__(self, timeline: dict | None = None, routes: dict | None = None):
         self.requests = []  # (path, query, headers-dict, body-bytes)
         self._timeline = timeline or {"feed": [], "cursor": ""}
+        # Extra GET answers keyed by NSID (``chat.bsky.convo.listConvos`` →
+        # payload) — how the same fake stands in for a second service (the chat
+        # service) without a second class.
+        self._routes = {f"/xrpc/{nsid}": body for nsid, body in (routes or {}).items()}
         self._lock = threading.Lock()
         outer = self
 
@@ -651,6 +756,8 @@ class FakeAppView:
                 path = self._record()
                 if path == "/xrpc/app.bsky.feed.getTimeline":
                     self._json(200, outer._timeline)
+                elif path in outer._routes:
+                    self._json(200, outer._routes[path])
                 else:
                     self._json(404, {"error": "MethodNotImplemented",
                                      "message": "fake appview: " + path})
@@ -692,7 +799,10 @@ class FakeAtprotoFarEnd:
     talks to — handle resolution, the PLC directory, the PDS's protected-
     resource metadata, the authorization server (metadata, PAR, token), and
     the PDS's XRPC (``getProfile``, ``getTimeline``, ``getFeed``,
-    ``getRecord``, ``createRecord``).
+    ``getRecord``, ``createRecord``, ``deleteRecord``), and the chat service
+    behind it (``chat.bsky.convo`` ``listConvos``, ``getMessages``,
+    ``getConvoForMembers``, ``sendMessage`` — the DM leg's calls, which the
+    nest proxies through the PDS host).
 
     Reached through the nest's ``FAUNA_TEST_ATPROTO_FAR_END`` seam (compiled
     only under ``test-hooks``, loopback-only — ``bins/fauna-nest/src/state.rs``
@@ -715,9 +825,29 @@ class FakeAtprotoFarEnd:
         self.issuer = f"https://auth.{handle}"
         self.par_states: list[str] = []
         self.created_records: list[dict] = []
+        self.deleted_records: list[dict] = []
         self.requests: list[tuple[str, str, str]] = []  # (method, host, path)
+        # The timeline's feed items, oldest first: ``{"post": view}``, plus a
+        # ``reason`` for a repost (:meth:`repost`).
         self._timeline: list[dict] = []
+        # Each custom feed generator's page (`getFeed`), keyed by its AT-URI.
+        self._feeds: dict[str, list[dict]] = {}
         self._records: dict[str, dict] = {}  # at-uri -> {"cid", "value"}
+        # Every published post's view, and its parent (`getPostThread`).
+        self._views: dict[str, dict] = {}  # at-uri -> post view
+        self._parents: dict[str, str] = {}  # reply at-uri -> parent at-uri
+        self._gone: dict[str, str] = {}  # at-uri -> "notFound" | "blocked"
+        # `chat.bsky.convo`: each conversation's member DIDs and messages
+        # (oldest first), the handle each far member is known by, every
+        # `getConvoForMembers` member list and `sendMessage` the nest made.
+        self._convos: dict[str, dict] = {}
+        self._chat_handles: dict[str, str] = {}
+        # Far Bluesky users `getProfile` knows besides the linked account:
+        # lowercase handle -> DID (:meth:`register_profile`).
+        self._profiles: dict[str, str] = {}
+        self._chat_seq = 0
+        self.convo_lookups: list[list[str]] = []
+        self.sent_messages: list[dict] = []
         self._lock = threading.Lock()
         outer = self
 
@@ -816,13 +946,30 @@ class FakeAtprotoFarEnd:
 
     def _xrpc(self, method, nsid, params, body):
         if nsid == "app.bsky.actor.getProfile":
-            return 200, {"did": self.did, "handle": self.handle}, None
+            # Per `actor`, as the real AppView answers: the linked account
+            # itself (or no `actor` at all), a profile a test registered
+            # (:meth:`register_profile`), else the service's 400.
+            actor = (params.get("actor") or [self.did])[0]
+            if actor in (self.did, self.handle):
+                return 200, {"did": self.did, "handle": self.handle}, None
+            with self._lock:
+                did = self._profiles.get(actor.lower())
+                handle = next((h for h, d in self._profiles.items() if d == actor), None)
+            if did is not None:
+                return 200, {"did": did, "handle": actor.lower()}, None
+            if handle is not None:
+                return 200, {"did": actor, "handle": handle}, None
+            return 400, {"error": "InvalidRequest", "message": "Profile not found"}, None
         if nsid == "app.bsky.feed.getTimeline":
             with self._lock:
-                feed = [{"post": p} for p in reversed(self._timeline)]
+                feed = [dict(item) for item in reversed(self._timeline)]
             return 200, {"feed": feed}, None
         if nsid == "app.bsky.feed.getFeed":
-            return 200, {"feed": []}, None
+            with self._lock:
+                feed = [{"post": p} for p in reversed(self._feeds.get(params["feed"][0], []))]
+            return 200, {"feed": feed}, None
+        if nsid == "app.bsky.feed.getPostThread":
+            return 200, {"thread": self._thread_view(params["uri"][0])}, None
         if nsid == "com.atproto.repo.getRecord":
             uri = (f"at://{params['repo'][0]}/{params['collection'][0]}/"
                    f"{params['rkey'][0]}")
@@ -838,28 +985,222 @@ class FakeAtprotoFarEnd:
                 n = len(self.created_records)
             uri = f"at://{self.did}/{payload.get('collection')}/fake{n}"
             return 200, {"uri": uri, "cid": op_cid({"created": n})}, None
+        if method == "POST" and nsid == "com.atproto.repo.deleteRecord":
+            payload = json.loads(body or b"{}")
+            with self._lock:
+                self.deleted_records.append(payload)
+            return 200, {}, None
+        if nsid.startswith("chat.bsky.convo."):
+            return self._chat(method, nsid.removeprefix("chat.bsky.convo."), params, body)
         return 400, {"error": "MethodNotImplemented",
                      "message": f"fake far end: {nsid}"}, None
 
+    # -- chat.bsky.convo -----------------------------------------------------
+
+    def _chat(self, method, call, params, body):
+        """The chat service's four calls the nest's DM leg makes
+        (``fauna_bridge_atproto::chat``) — reached here because the nest's
+        client sends them to the PDS host with the ``atproto-proxy`` header,
+        which this fake does not need to read."""
+        if method == "GET" and call == "listConvos":
+            with self._lock:
+                convos = [self._convo_view(c) for c in self._convos]
+            return 200, {"convos": convos}, None
+        if method == "GET" and call == "getMessages":
+            convo_id = params["convoId"][0]
+            with self._lock:
+                convo = self._convos.get(convo_id)
+                if convo is None:
+                    return 400, {"error": "InvalidRequest", "message": convo_id}, None
+                # The service lists newest first.
+                messages = [self._message_view(m) for m in reversed(convo["messages"])]
+            return 200, {"messages": messages}, None
+        if method == "GET" and call == "getConvoForMembers":
+            members = params.get("members", [])
+            with self._lock:
+                self.convo_lookups.append(list(members))
+                convo_id = self._convo_for(members)
+                view = self._convo_view(convo_id)
+            return 200, {"convo": view}, None
+        if method == "POST" and call == "sendMessage":
+            payload = json.loads(body or b"{}")
+            convo_id = payload.get("convoId", "")
+            text = (payload.get("message") or {}).get("text", "")
+            with self._lock:
+                convo = self._convos.get(convo_id)
+                if convo is None:
+                    return 400, {"error": "InvalidRequest", "message": convo_id}, None
+                message = self._append_message(convo, self.did, text)
+                self.sent_messages.append({
+                    "convo_id": convo_id,
+                    "members": list(convo["members"]),
+                    "text": text,
+                })
+                view = self._message_view(message)
+            return 200, view, None
+        return 400, {"error": "MethodNotImplemented",
+                     "message": f"fake far end: chat.bsky.convo.{call}"}, None
+
+    def _convo_for(self, members) -> str:
+        """The one-to-one (or n-way) conversation of the linked account with
+        ``members``, opened if none exists. Caller holds the lock."""
+        wanted = sorted({self.did, *members})
+        for convo_id, convo in self._convos.items():
+            if sorted(convo["members"]) == wanted:
+                return convo_id
+        convo_id = f"fakeconvo{len(self._convos) + 1}"
+        self._convos[convo_id] = {"members": wanted, "messages": []}
+        return convo_id
+
+    def _append_message(self, convo: dict, sender: str, text: str) -> dict:
+        self._chat_seq += 1
+        message = {"id": f"fakemsg{self._chat_seq}", "rev": f"{self._chat_seq:016d}",
+                   "sender": sender, "text": text, "sentAt": _now_rfc3339()}
+        convo["messages"].append(message)
+        return message
+
+    @staticmethod
+    def _message_view(message: dict) -> dict:
+        return {"$type": "chat.bsky.convo.defs#messageView",
+                "id": message["id"], "rev": message["rev"], "text": message["text"],
+                "sender": {"did": message["sender"]}, "sentAt": message["sentAt"]}
+
+    def _convo_view(self, convo_id: str) -> dict:
+        convo = self._convos[convo_id]
+        handles = {self.did: self.handle, **self._chat_handles}
+        view = {
+            "id": convo_id,
+            "rev": convo["messages"][-1]["rev"] if convo["messages"] else "0",
+            "members": [{"did": d, "handle": handles.get(d, "handle.invalid")}
+                        for d in convo["members"]],
+            "muted": False,
+            "unreadCount": 0,
+        }
+        if convo["messages"]:
+            view["lastMessage"] = self._message_view(convo["messages"][-1])
+        return view
+
+    def send_dm(self, *, sender_did: str, sender_handle: str, text: str) -> str:
+        """``sender_did`` writes ``text`` to the linked account in their
+        one-to-one conversation (opened if none exists); returns the
+        conversation's id."""
+        with self._lock:
+            self._chat_handles[sender_did] = sender_handle
+            convo_id = self._convo_for([sender_did])
+            self._append_message(self._convos[convo_id], sender_did, text)
+        return convo_id
+
+    def register_profile(self, *, handle: str, did: str) -> None:
+        """Make the far Bluesky user ``handle`` known to ``getProfile`` as
+        ``did`` — the answer the nest's handle resolution asks for when the
+        user types the handle into the recipient picker — and to the chat
+        service's conversation views by that handle."""
+        with self._lock:
+            self._profiles[handle.lower()] = did
+            self._chat_handles[did] = handle.lower()
+
+    def sent_snapshot(self) -> list[dict]:
+        """Every ``sendMessage`` the nest made, oldest first — each its
+        ``convo_id``, the conversation's ``members`` (the linked account's DID
+        included) and the ``text``."""
+        with self._lock:
+            return list(self.sent_messages)
+
     # -- the test's levers --------------------------------------------------
 
+    def _thread_view(self, uri: str) -> dict:
+        """``getPostThread``'s answer for ``uri``: a ``threadViewPost`` whose
+        ``parent`` chain climbs to the root and whose ``replies`` are the
+        direct replies; a post :meth:`remove_post` took answers
+        ``notFoundPost`` / ``blockedPost`` instead."""
+        defs = "app.bsky.feed.defs"
+        with self._lock:
+            gone = self._gone.get(uri)
+            view = self._views.get(uri)
+            if gone == "blocked":
+                did = uri.removeprefix("at://").split("/", 1)[0]
+                return {"$type": f"{defs}#blockedPost", "uri": uri, "blocked": True,
+                        "author": {"did": did}}
+            if gone or view is None:
+                return {"$type": f"{defs}#notFoundPost", "uri": uri, "notFound": True}
+
+            def node(u: str, with_replies: bool) -> dict:
+                n = {"$type": f"{defs}#threadViewPost", "post": self._views[u]}
+                if with_replies:
+                    n["replies"] = [
+                        {"$type": f"{defs}#threadViewPost", "post": self._views[r]}
+                        for r, p in self._parents.items()
+                        if p == u and r in self._views and r not in self._gone
+                    ]
+                return n
+
+            focal = node(uri, True)
+            child = focal
+            parent = self._parents.get(uri)
+            while parent is not None and parent in self._views:
+                up = node(parent, False)
+                child["parent"] = up
+                child, parent = up, self._parents.get(parent)
+            return focal
+
+    def remove_post(self, uri: str, *, blocked: bool = False) -> None:
+        """The post is gone at its origin (``notFoundPost``) — or, with
+        ``blocked``, hidden from the linked account by a block
+        (``blockedPost``)."""
+        with self._lock:
+            self._gone[uri] = "blocked" if blocked else "notFound"
+
     def publish_post(self, *, author_did: str, author_handle: str, rkey: str,
-                     text: str, image_urls: tuple[str, ...] = ()) -> str:
+                     text: str, image_urls: tuple[str, ...] = (),
+                     reply_to: str | None = None, on_timeline: bool = True,
+                     feed_uri: str | None = None,
+                     display_name: str | None = None,
+                     labels: tuple[str, ...] = ()) -> str:
         """Put a post by someone the linked account follows on its timeline
         (newest last) and in the repo ``getRecord`` reads; returns its AT-URI.
 
         ``image_urls`` become the post view's ``app.bsky.embed.images#view``
         embed (each url its ``fullsize`` and ``thumb``) — the CDN urls the
-        nest's ingest rewrites behind its ``bluesky/media`` proxy."""
+        nest's ingest rewrites behind its ``bluesky/media`` proxy.
+
+        ``reply_to`` makes it a reply to that AT-URI (its record carries
+        ``reply.parent`` / ``reply.root``, and ``getPostThread`` places it);
+        ``on_timeline=False`` keeps it off the timeline — a post by someone
+        the account does not follow, reachable only through a thread.
+
+        ``feed_uri`` also puts it on that custom feed generator's ``getFeed``
+        page (an ``at://…/app.bsky.feed.generator/…`` URI the linked account
+        subscribed to); with ``on_timeline=False`` the generator is the only
+        place the nest can find it.
+
+        ``display_name`` is the author's ``displayName`` on the post view —
+        the name the nest's ingest stores for a bridged author.
+
+        ``labels`` are the author's self-labels, each a ``com.atproto.label.
+        defs#label`` on the post view (``val`` the label, ``src`` the author)
+        — the first becomes the ingested post's content warning."""
         uri = f"at://{author_did}/app.bsky.feed.post/{rkey}"
         record = {"$type": "app.bsky.feed.post", "text": text,
                   "createdAt": _now_rfc3339()}
+        if reply_to is not None:
+            with self._lock:
+                root = reply_to
+                while root in self._parents:
+                    root = self._parents[root]
+                strong = lambda u: {"uri": u, "cid": self._records[u]["cid"]}  # noqa: E731
+                record["reply"] = {"parent": strong(reply_to), "root": strong(root)}
         cid = op_cid({"uri": uri, "text": text})
         view = {
             "uri": uri, "cid": cid,
-            "author": {"did": author_did, "handle": author_handle},
+            "author": {"did": author_did, "handle": author_handle,
+                       **({"displayName": display_name} if display_name else {})},
             "record": record, "indexedAt": _now_rfc3339(),
         }
+        if labels:
+            view["labels"] = [
+                {"src": author_did, "uri": uri, "val": v, "cts": _now_rfc3339()}
+                for v in labels
+            ]
         if image_urls:
             view["embed"] = {
                 "$type": "app.bsky.embed.images#view",
@@ -867,12 +1208,42 @@ class FakeAtprotoFarEnd:
             }
         with self._lock:
             self._records[uri] = {"cid": cid, "value": record}
-            self._timeline.append(view)
+            self._views[uri] = view
+            if reply_to is not None:
+                self._parents[uri] = reply_to
+            if on_timeline:
+                self._timeline.append({"post": view})
+            if feed_uri is not None:
+                self._feeds.setdefault(feed_uri, []).append(view)
         return uri
+
+    def repost(self, uri: str, *, by_did: str, by_handle: str) -> None:
+        """Someone the linked account follows reposts the published post at
+        ``uri``: its view lands on the timeline (newest last) as a feed item
+        whose ``reason`` is ``app.bsky.feed.defs#reasonRepost`` naming the
+        reposter — the post itself stays its author's."""
+        with self._lock:
+            view = self._views[uri]
+            self._timeline.append({
+                "post": view,
+                "reason": {
+                    "$type": "app.bsky.feed.defs#reasonRepost",
+                    "by": {"did": by_did, "handle": by_handle},
+                    "indexedAt": _now_rfc3339(),
+                },
+            })
 
     def created_snapshot(self) -> list[dict]:
         with self._lock:
             return list(self.created_records)
+
+    def deleted_snapshot(self) -> list[dict]:
+        """Every ``deleteRecord`` body the nest sent (``repo``,
+        ``collection``, ``rkey``), oldest first — the undo twin of
+        :meth:`created_snapshot`. A record the ``createRecord`` answer named
+        ``at://<did>/<collection>/fake<n>`` comes back as ``rkey == "fake<n>"``."""
+        with self._lock:
+            return list(self.deleted_records)
 
     @property
     def url(self) -> str:

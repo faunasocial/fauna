@@ -138,7 +138,15 @@ pub struct RpcDispatcher {
     /// Unset on the federation / peer / sidecar dispatchers, where it should be
     /// (see that method's doc).
     kind_registry: OnceLock<KindRegistry>,
+    /// This connection's process-unique number ([`Self::connection_id`]).
+    connection_id: u64,
 }
+
+/// The mint behind [`RpcDispatcher::connection_id`]: one process-wide counter,
+/// so no two dispatchers a process ever builds share a number — a memo keyed
+/// on it can never alias a later connection, which a pointer could once the
+/// earlier dispatcher is freed.
+static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
 impl RpcDispatcher {
     /// Build the dispatcher and its driver future. Consumer provides a
@@ -356,9 +364,22 @@ impl RpcDispatcher {
                 inbound_req_rx: StdMutex::new(Some(inbound_req_rx)),
                 inbound_cancel_rx: StdMutex::new(Some(inbound_cancel_rx)),
                 kind_registry: OnceLock::new(),
+                connection_id: NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed),
             },
             driver,
         )
+    }
+
+    /// The number of the connection this dispatcher drives — unique within
+    /// the process for the process's life, never reused. A dispatcher is
+    /// built per connection on every transport (the native supervisor and
+    /// the wasm reconnect loop both rebuild it on each (re)connect), so this
+    /// is the one token that names *a connection*: what a client remembers
+    /// about the nest at the far end ([`crate::ProvenIdentityMemo`]) is keyed
+    /// on it, and a reconnect — to the same address or another box behind it
+    /// — is a new number that remembers nothing.
+    pub fn connection_id(&self) -> u64 {
+        self.connection_id
     }
 
     /// Attach the kind registry this dispatcher's requests are described by.

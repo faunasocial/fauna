@@ -14,9 +14,9 @@ the loop (the app leg is `test_pending_actions.py`'s target-side journey):
 * the target cancels it, and the admin who scheduled it is told who did.
 
 The co-admin half (every other admin told at scheduling, on execution, on a
-cancel and on an unapproved expiry) needs a second admin, which the 24 h
-`admin.add` delay puts out of this harness's reach; it is pinned in the nest
-(`pending_actions::security_notice_tests`). Nothing here waits on time: every
+cancel and on an unapproved expiry) needs a second admin, granted through the
+`pending_actions/run_due` test hook: it lives in `test_admin_roster.py`, beside
+the nest's own pin (`pending_actions::security_notice_tests`). Nothing here waits on time: every
 notice is written before the scheduling call's reply (convention 14).
 """
 

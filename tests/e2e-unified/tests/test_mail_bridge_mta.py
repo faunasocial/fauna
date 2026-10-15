@@ -21,21 +21,37 @@ import json
 import secrets
 import socket
 import sqlite3
+import ssl
 import time
 import urllib.request
 
 import pytest
 
-from helpers.budgets import MAIL_OUTBOUND_CYCLE_S
+from helpers.budgets import MAIL_BRIDGE_RECONNECT_S, MAIL_OUTBOUND_CYCLE_S, RPC_ROUNDTRIP_S
 from helpers.mail_wire import (
+    _SmtpConn,
     _connect_smtp_starttls,
     _connect_submission_tls,
     _find_tagged,
+    _open_mail_gate_and_wait_for_the_mta,
     _poke_outbound_bridge,
+    _read_final_reply,
     _smtp_auth_plain,
     _wait_for_tagged,
+    await_outbound_row,
+    await_outbound_terminal as _await_bounce_decided,
+    dkim_selector_pair,
     dkim_signature_tag,
+    dkim_signature_tags,
+    outbound_attempt_at,
+    outbound_clock_on_real_time,
+    outbound_msgid_key as _msgid_key,
+    outbound_queue as _outbound_queue,
+    outbound_row,
+    submit_one_message,
+    verify_each_dkim_signature,
 )
+from helpers.app_surface import skip_environment
 from helpers.waiting import wait_until
 from helpers.mail_aliases import add_exact_alias
 
@@ -68,7 +84,8 @@ def _register_harness_seal_key(nest, actor_id: bytes) -> None:
 def role_address_venue(request, nest_mode, tmp_path_factory):
     """A claimed mail nest of this module's own, for the journeys whose mail is
     delivered to the deployment ADMIN — role addresses (`postmaster@`, …) route
-    there (smtp-server.md § abuse@/postmaster@ routing).
+    there (smtp-server.md § abuse@/postmaster@ routing) — or to members a test
+    mints on it (`_venue_member`), which no other module's app ever signs in as.
 
     Not the session `mail_bridge_mta`: that nest's admin is shared with every
     `admin_app` test, and a seal key the harness writes for it is one the
@@ -90,56 +107,15 @@ def role_address_venue(request, nest_mode, tmp_path_factory):
         cleanup()
 
 
-def _mx_accepts(port: int) -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=1.0):
-            return True
-    except OSError:
-        return False
-
-
-def _open_mail_gate_and_wait_for_the_mta(handle, budget_s: float = 120.0) -> None:
-    """The admin opens the deployment's mail gate; return once the MTA serves.
-
-    A venue starts with the gate shut, and the admin's act has TWO possible
-    outcomes depending on a race this setup cannot see. The MTA is spawned
-    without waiting to serve, and its first config fetch may land after the
-    gate opens: it then serves at once and never exits. Or it has already
-    idled: then it exits for rebind, and the venue's `rebind_after_enable`
-    plays the supervisor. Either outcome is observable through the venue's own
-    methods (the listener accepting, or `assert_mta_running` failing), so the
-    wait ends on whichever state the MTA reaches. Waiting only for the exit
-    timed out against an MTA that was already serving.
-    """
-    handle.admin_opens_mail_gate()
-
-    def _state():
-        if _mx_accepts(handle.mx_port):
-            return "serving"
-        try:
-            handle.assert_mta_running()
-        except AssertionError:
-            return "exited"
-        return None
-
-    state = wait_until(
-        _state,
-        budget_s,
-        interval=0.5,
-        diagnose=lambda: f"the MTA neither served nor exited for rebind; {handle.bridge_log_hint('mta')}",
-    )
-    if state == "exited":
-        handle.rebind_after_enable(mda=False)
-
-
 @pytest.mark.feature("mail-server")
 def test_inbound_mx_round_trip(mail_bridge_mta):
     """SMTP MAIL/RCPT/DATA against port 25 lands as inbound mail in nest.
 
     E.2: end-to-end inbound MX exercise of fauna.bridges.validate_recipient
     + fauna.bridges.ingest_inbound_mail through the real bridge binary
-    against a real fauna-nest. Port 25 is plaintext (no STARTTLS); no
-    submission auth involved.
+    against a real fauna-nest. Port 25 requires STARTTLS before MAIL FROM
+    (`InboundTLSMode=required`, smtp-server.md § TLS posture); no submission
+    auth involved.
 
     A single SMTP transaction completes: the fixture's `put_spam_policy`
     override clears DNSBL, disables greylist, and sets
@@ -349,6 +325,277 @@ def test_inbound_over_admin_lowered_quota_552_but_role_address_bypasses(
             conn.cmd("QUIT", "221", deadline)
     finally:
         _set_imap_storage_cap(1 << 30)
+
+
+def _venue_member(handle):
+    """A member of `handle`'s nest whose mail the harness can receive: registered,
+    with a recipient seal key the harness holds."""
+    from conftest import _make_user
+
+    member = _make_user(handle.nest)
+    _register_harness_seal_key(handle.nest, member["actor_id_bytes"])
+    return member
+
+
+def _messages_held(nest, member) -> int:
+    """How many messages `member`'s mailbox holds — the member's OWN quota read
+    (`fauna.bridges.get_mail_quotas`), so a delivery is attributed to exactly the
+    actor it landed on, over the wire, in every nest mode."""
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    with WsRpcAdminClient(
+        nest["url"],
+        actor_id=bytes(member["signing_key"].verify_key),
+        signing_key=bytes(member["signing_key"]),
+    ) as ws:
+        return ws.call("fauna.bridges.get_mail_quotas", {})["message_count_used"]
+
+
+def _deliver(handle, rcpt: str, subject: str) -> None:
+    """One inbound transaction to `rcpt`, asserting the 250 on end-of-DATA."""
+    lines = [
+        "From: External Sender <sender@external.test>",
+        f"To: {rcpt}",
+        f"Subject: {subject}",
+        f"Message-ID: <d-{secrets.token_hex(6)}@external.test>",
+        "Date: Tue, 13 Oct 2026 12:00:00 +0000",
+        "MIME-Version: 1.0",
+        "Content-Type: text/plain; charset=utf-8",
+        "",
+        "Delivered by the removed-domain and role-address witnesses.",
+    ]
+    deadline = time.monotonic() + 30.0
+    with _connect_smtp_starttls(handle.mx_port, handle.domain, deadline) as conn:
+        conn.cmd("MAIL FROM:<sender@external.test>", "250", deadline)
+        conn.cmd(f"RCPT TO:<{rcpt}>", "250", deadline)
+        conn.cmd("DATA", "354", deadline)
+        conn.send_raw(("\r\n".join(lines) + "\r\n").encode())
+        conn.cmd(".", "250", deadline)
+        conn.cmd("QUIT", "221", deadline)
+
+
+def _await_rcpt_code(handle, rcpt: str, want: str, why: str) -> None:
+    """Poll fresh connections until the MTA answers `want` at RCPT for `rcpt`.
+
+    A domain change reaches the MTA as `config_changed`, hot-applied
+    asynchronously and bound at the NEXT connection's `NewSession`, so the
+    settled verdict is polled for under a named budget (convention 14)."""
+    from helpers.budgets import MAIL_CONFIG_HOT_APPLY_S
+
+    got = []
+
+    def _settled() -> bool:
+        d = time.monotonic() + RPC_ROUNDTRIP_S
+        with _connect_smtp_starttls(handle.mx_port, handle.domain, d) as conn:
+            conn.cmd("MAIL FROM:<sender@external.test>", "250", d)
+            got.append(_rcpt_status(conn, rcpt, d))
+            conn.cmd("QUIT", "221", d)
+        return got[-1] == want
+
+    wait_until(
+        _settled,
+        MAIL_CONFIG_HOT_APPLY_S,
+        interval=1.0,
+        diagnose=lambda: f"RCPT to {rcpt} stayed {got[-1:]!r}, expected {want!r} ({why})",
+    )
+
+
+def _admin_call(nest, kind: str, payload: dict) -> dict:
+    with _admin_ws(nest) as ws:
+        return ws.call(kind, payload)
+
+
+@pytest.mark.feature("admin-dns-and-certificates")
+def test_removed_domain_addresses_stop_receiving_and_restore_brings_them_back(
+    role_address_venue,
+):
+    """Outcome 33: while a domain is removed, a member's address on it and its
+    catch-all stop receiving; a restore brings both back untouched.
+
+    On real binaries: a second domain with a member's address and a catch-all
+    member each take a delivery (counted on that member's own mailbox); the admin
+    removes the domain → the MTA's local-domains gate refuses both addresses at
+    RCPT; the admin restores it → both deliver again with no re-provisioning, the
+    catch-all designation still in place (`mail-multidomain.md` § Re-add within
+    30 days — the aliases were never mutated at remove time)."""
+    handle = role_address_venue
+    nest = handle.nest
+    domain = f"restore-{secrets.token_hex(4)}.test"
+    member, catch_all = _venue_member(handle), _venue_member(handle)
+    local = f"m{secrets.token_hex(3)}"
+    stray = f"nobody{secrets.token_hex(3)}@{domain}"
+
+    _admin_call(nest, "fauna.bridges.add_local_domain",
+                {"domain": domain, "mta_sts_cert_mode": "per_host"})
+    try:
+        address = add_exact_alias(nest["url"], member["signing_key"], domain, local)
+        _admin_call(nest, "fauna.bridges.set_catch_all_actor",
+                    {"domain": domain, "actor_id": catch_all["actor_id_bytes"]})
+        _await_rcpt_code(handle, address, "250", "the added domain hot-applies")
+
+        def counts() -> tuple[int, int]:
+            return _messages_held(nest, member), _messages_held(nest, catch_all)
+
+        start = counts()
+        _deliver(handle, address, "before removal")
+        _deliver(handle, stray, "before removal, catch-all")
+        assert counts() == (start[0] + 1, start[1] + 1), (start, counts())
+
+        _admin_call(nest, "fauna.bridges.remove_local_domain", {"domain": domain})
+        _await_rcpt_code(handle, address, "550", "the removed domain stops receiving")
+        _await_rcpt_code(handle, stray, "550", "its catch-all stops receiving too")
+        assert counts() == (start[0] + 1, start[1] + 1), "nothing delivered while removed"
+
+        _admin_call(nest, "fauna.bridges.restore_local_domain", {"domain": domain})
+        _await_rcpt_code(handle, address, "250", "the restored domain receives again")
+        _deliver(handle, address, "after restore")
+        _deliver(handle, stray, "after restore, catch-all")
+        assert counts() == (start[0] + 2, start[1] + 2), (start, counts())
+
+        active = _admin_call(nest, "fauna.bridges.list_local_domains", {})["active"]
+        row = [d for d in active if d["domain_name"] == domain]
+        assert row and bytes(row[0]["catch_all_actor_id"]) == catch_all["actor_id_bytes"], row
+    finally:
+        # Off the module venue's local domains again; a failure mid-way may have
+        # left it removed already, which is the state this asks for.
+        from clients.ws_rpc_admin_client import RpcCallError
+
+        try:
+            _admin_call(nest, "fauna.bridges.remove_local_domain", {"domain": domain})
+        except RpcCallError:
+            pass
+
+
+@pytest.mark.feature("admin-dns-and-certificates")
+def test_delegated_role_address_mail_reaches_the_delegated_member(role_address_venue):
+    """Outcome 37: mail to a domain's postmaster, abuse, noc and security address
+    reaches the member the admin delegated each one to on that domain — counted on
+    the delegate's own mailbox, and not on the admin's, which keeps every role
+    not delegated (`mail-multidomain.md` § Per-domain override)."""
+    handle = role_address_venue
+    nest = handle.nest
+    domain = handle.domain
+    delegate = _venue_member(handle)
+    admin = {"signing_key": nest["admin"]["signing_key"]}
+
+    try:
+        for role in ("postmaster", "abuse", "noc", "security"):
+            _admin_call(nest, "fauna.bridges.set_role_address",
+                        {"domain": domain, "role": role,
+                         "actor_id": delegate["actor_id_bytes"]})
+            before = _messages_held(nest, delegate), _messages_held(nest, admin)
+            _deliver(handle, f"{role}@{domain}", f"to the delegated {role}")
+            after = _messages_held(nest, delegate), _messages_held(nest, admin)
+            assert after == (before[0] + 1, before[1]), (role, before, after)
+    finally:
+        for role in ("postmaster", "abuse", "noc", "security"):
+            _admin_call(nest, "fauna.bridges.set_role_address",
+                        {"domain": domain, "role": role, "actor_id": None})
+
+
+def _deliver_to_each(handle, rcpts_and_codes, subject: str) -> list[str]:
+    """One inbound transaction whose RCPTs must get the codes given, in order;
+    DATA runs when any was accepted. Returns each RCPT's reply line."""
+    lines = [
+        "From: External Sender <sender@external.test>",
+        f"To: {', '.join(r for r, _ in rcpts_and_codes)}",
+        f"Subject: {subject}",
+        f"Message-ID: <d-{secrets.token_hex(6)}@external.test>",
+        "Date: Tue, 13 Oct 2026 12:00:00 +0000",
+        "MIME-Version: 1.0",
+        "Content-Type: text/plain; charset=utf-8",
+        "",
+        "Delivered by the per-recipient refusal witnesses.",
+    ]
+    deadline = time.monotonic() + 30.0
+    replies = []
+    with _connect_smtp_starttls(handle.mx_port, handle.domain, deadline) as conn:
+        conn.cmd("MAIL FROM:<sender@external.test>", "250", deadline)
+        for rcpt, code in rcpts_and_codes:
+            replies.append(conn.cmd(f"RCPT TO:<{rcpt}>", code, deadline))
+        if any(code == "250" for _, code in rcpts_and_codes):
+            conn.cmd("DATA", "354", deadline)
+            conn.send_raw(("\r\n".join(lines) + "\r\n").encode())
+            conn.cmd(".", "250", deadline)
+        conn.cmd("QUIT", "221", deadline)
+    return replies
+
+
+@pytest.mark.feature("mail-server")
+def test_mail_to_a_member_who_never_turned_mail_on_is_refused_for_that_recipient_alone(
+    role_address_venue,
+):
+    """Outcome 14: a member with an address but no encryption key on file (mail
+    never turned on, not a successor) is refused `550 5.1.1` at their own RCPT,
+    and the other recipient of the same transaction still gets the message —
+    counted on that member's own mailbox (`smtp-server.md` § Error / tempfail
+    strategy, the no-key row)."""
+    from conftest import _make_user
+
+    handle = role_address_venue
+    nest = handle.nest
+    tag = secrets.token_hex(3)
+    keyless = _make_user(nest)
+    keyed = _venue_member(handle)
+    keyless_addr = add_exact_alias(nest["url"], keyless["signing_key"], handle.domain, f"nokey{tag}")
+    keyed_addr = add_exact_alias(nest["url"], keyed["signing_key"], handle.domain, f"haskey{tag}")
+
+    before = _messages_held(nest, keyed)
+    refused, _ = _deliver_to_each(
+        handle, [(keyless_addr, "550"), (keyed_addr, "250")], "one refused, one delivered"
+    )
+    assert "5.1.1" in refused, f"the key-less member's refusal must be 5.1.1; got {refused!r}"
+    assert _messages_held(nest, keyed) == before + 1, (
+        "the other recipient of the same transaction must still get the message"
+    )
+
+
+@pytest.mark.feature("mail-server")
+def test_mail_to_an_account_just_passed_to_a_successor_is_put_off_until_it_signs_in(
+    role_address_venue,
+):
+    """Outcome 15: once a member's account passes to a successor (a real
+    succession ceremony: a registered recovery kit, a signed statement the nest
+    verifies), mail to the member's address is put off with `451 4.7.1`, never
+    refused — the successor holds no key until it first signs in
+    (`smtp-server.md` § Error / tempfail strategy, the succession-pending row).
+    When the successor's key lands (what its first sign-in provisions), the same
+    sending server's retry is accepted and the message reaches the successor's
+    own mailbox."""
+    from nacl.signing import SigningKey
+
+    from helpers.succession import register_recovery_kit, succeed_identity
+
+    handle = role_address_venue
+    nest = handle.nest
+    member = _venue_member(handle)
+    address = add_exact_alias(
+        nest["url"], member["signing_key"], handle.domain, f"heir{secrets.token_hex(3)}"
+    )
+    seed_hex = bytes(member["signing_key"]).hex()
+    kit_secret = register_recovery_kit(
+        nest["url"], actor_id_hex=member["actor_id_hex"], identity_seed_hex=seed_hex
+    )
+    successor_seed = secrets.token_bytes(32)
+    successor_hex = succeed_identity(
+        nest["url"],
+        old_actor_id_hex=member["actor_id_hex"],
+        recovery_secret_hex=kit_secret,
+        successor_seed_hex=successor_seed.hex(),
+        old_seed_hex=seed_hex,
+    )
+
+    (deferred,) = _deliver_to_each(handle, [(address, "451")], "put off for the successor")
+    assert "4.7.1" in deferred, f"the deferral must be 451 4.7.1; got {deferred!r}"
+
+    successor = {"signing_key": SigningKey(successor_seed)}
+    assert bytes(successor["signing_key"].verify_key).hex() == successor_hex
+    _register_harness_seal_key(nest, bytes.fromhex(successor_hex))
+    before = _messages_held(nest, successor)
+    _deliver_to_each(handle, [(address, "250")], "the retry after the successor signs in")
+    assert _messages_held(nest, successor) == before + 1, (
+        "the retried message must land in the successor's mailbox"
+    )
 
 
 @pytest.mark.feature("mail-server")
@@ -692,6 +939,440 @@ def test_inbound_admin_forwarder_redirects_to_external(mail_bridge_mta, nest_ins
     )
 
 
+# ── Admin external forwarders through the dispatch (mail-forwarding.md
+# § Admin external forwarders) ──────────────────────────────────────────
+#
+# The witnesses below drive a forwarder past the queued row the test above
+# stops at: on to the stub MX (`external.test` is routed there by the
+# fixture's `mta_mx_override`), round a loop, over the admin's hourly cap and
+# into the queue ceiling, and in from a member's submission. Each mints its own
+# forwarder address and external target, so its rows are isolable on the
+# session-shared queue.
+
+
+def _create_admin_forwarder(nest, domain: str, local: str, target: str) -> None:
+    """Register `local@domain` → `target` through the production Admin RPC."""
+    with _admin_ws(nest) as ws:
+        ws.call(
+            "fauna.bridges.create_forwarder",
+            {"local_domain": domain, "pattern": local, "forward_target": target},
+        )
+
+
+def _forwarder_message(sender: str, rcpt: str, token: str, extra_headers=()) -> bytes:
+    lines = [
+        *extra_headers,
+        f"From: External Sender <{sender}>",
+        f"To: {rcpt}",
+        f"Subject: admin forwarder {token}",
+        f"Message-ID: <{token}@orig.test>",
+        "Date: Mon, 01 Jun 2026 12:00:00 +0000",
+        "MIME-Version: 1.0",
+        "Content-Type: text/plain; charset=utf-8",
+        "",
+        f"Forwarder witness {token}.",
+    ]
+    return ("\r\n".join(lines) + "\r\n").encode()
+
+
+def _send_to_forwarder(conn, sender: str, rcpt: str, token: str, deadline: float,
+                       *, extra_headers=()) -> str:
+    """One inbound transaction on an open port-25 connection; returns the reply
+    to the final `.` WITHOUT asserting it (a forwarder answers 250 or 451)."""
+    conn.cmd(f"MAIL FROM:<{sender}>", "250", deadline)
+    conn.cmd(f"RCPT TO:<{rcpt}>", "250", deadline)
+    conn.cmd("DATA", "354", deadline)
+    conn.send_raw(_forwarder_message(sender, rcpt, token, extra_headers))
+    conn.send_raw(b".\r\n")
+    return _read_final_reply(conn, deadline)
+
+
+def _forward_rows(db_path, target: str) -> list:
+    """`outbound_mail_queue` forward rows addressed to `target`."""
+    db = sqlite3.connect(db_path, timeout=10.0)
+    try:
+        return db.execute(
+            "SELECT original_msgid, forward_rule_id, forward_actor_id, forward_copy_mode"
+            " FROM outbound_mail_queue WHERE is_forwarded = 1 AND recipient = ?",
+            (target,),
+        ).fetchall()
+    finally:
+        db.close()
+
+
+def _parked_forwards(db_path, *, target: str | None = None, actor: bytes | None = None) -> list:
+    """`forward_queue` rows (parked over the hourly cap), by destination or actor."""
+    column, value = ("destination_address", target) if target else ("actor_id", actor)
+    db = sqlite3.connect(db_path, timeout=10.0)
+    try:
+        return db.execute(
+            "SELECT source_message_id, copy_mode, rule_id_or_forward_all"
+            f" FROM forward_queue WHERE {column} = ?",
+            (value,),
+        ).fetchall()
+    finally:
+        db.close()
+
+
+def _stub_record(stub_mx, token: str):
+    """The stub MX's `(envelope MAIL FROM, raw)` for the message tagged `token`."""
+    for env_from, raw in stub_mx.records():
+        if token.encode() in raw:
+            return env_from, raw
+    return None
+
+
+class _AdminForwardCap:
+    """Hold the admin's `mail.account.forward_per_hour` at `value` for a block,
+    then put back exactly what was there (the row, or its absence).
+
+    Seeded into `mail_account_settings` directly, as the forward-all rate-cap
+    test seeds the member's: the product's own setter
+    (`fauna.bridges.set_forward_per_hour`) is a User-class door, and the admin
+    actor that an external forwarder charges is Admin-class
+    (`bridge_method_allowlist.rs`), so no product door reaches this value for
+    it. The cap the dispatch reads is the same row either way."""
+
+    def __init__(self, db_path, actor: bytes, value: int):
+        self.db_path, self.actor, self.value = db_path, actor, value
+        self.prior = None
+
+    def __enter__(self):
+        db = sqlite3.connect(self.db_path, timeout=10.0)
+        try:
+            self.prior = db.execute(
+                "SELECT forward_per_hour FROM mail_account_settings WHERE actor_id = ?",
+                (self.actor,),
+            ).fetchone()
+            db.execute(
+                "INSERT INTO mail_account_settings (actor_id, forward_per_hour, updated_at)"
+                " VALUES (?, ?, ?)"
+                " ON CONFLICT(actor_id) DO UPDATE SET"
+                " forward_per_hour = excluded.forward_per_hour,"
+                " updated_at = excluded.updated_at",
+                (self.actor, self.value, int(time.time())),
+            )
+            db.commit()
+        finally:
+            db.close()
+        return self
+
+    def __exit__(self, *_exc):
+        db = sqlite3.connect(self.db_path, timeout=10.0)
+        try:
+            if self.prior is None:
+                db.execute("DELETE FROM mail_account_settings WHERE actor_id = ?", (self.actor,))
+            else:
+                db.execute(
+                    "UPDATE mail_account_settings SET forward_per_hour = ? WHERE actor_id = ?",
+                    (self.prior[0], self.actor),
+                )
+            db.commit()
+        finally:
+            db.close()
+
+
+@pytest.mark.feature("admin-forwarders")
+def test_inbound_admin_forwarder_delivers_to_external_mx_under_srs(mail_bridge_mta, nest_instance):
+    """Mail sent to an admin forwarder reaches the outside address's mail
+    server, and leaves under an SRS envelope sender on the nest's own domain
+    (mail-forwarding.md § Admin external forwarders — "the identical pipeline —
+    SRS envelope rewrite (with the admin as the SRS forwarder-actor)").
+
+    The forward-all sibling (`test_inbound_forward_all_dispatches_under_srs`)
+    proves the SRS rewrite for a member's forward; this drives the admin shape
+    through the same dispatch on to the stub MX the fixture routes
+    `external.test` at, and reads the envelope it recorded."""
+    handle = mail_bridge_mta
+    domain = handle.domain
+    stamp = int(time.time() * 1000)
+    forwarder_addr = f"af-srs-{stamp}@{domain}"
+    target = f"af-srs-dest-{stamp}@external.test"
+    sender = f"af-srs-orig-{stamp}@orig.test"
+    token = f"af-srs-{stamp}"
+    _create_admin_forwarder(nest_instance, domain, forwarder_addr.split("@")[0], target)
+
+    deadline = time.monotonic() + 30.0
+    with _connect_smtp_starttls(handle.mx_port, domain, deadline) as conn:
+        reply = _send_to_forwarder(conn, sender, forwarder_addr, token, deadline)
+        conn.cmd("QUIT", "221", deadline)
+    assert reply.startswith("250"), f"the forwarder must accept the mail: {reply!r}"
+
+    # The forward-enqueue nudge drains the row on the worker's next poll; the
+    # poke is the barrier should the nudge have been coalesced away.
+    def _delivered():
+        _poke_outbound_bridge(handle.nest_url)
+        return _stub_record(handle.stub_mx, token)
+
+    mail_from, raw = wait_until(
+        _delivered, MAIL_OUTBOUND_CYCLE_S, interval=1.0,
+        diagnose=lambda: f"queue rows for {target}: {_forward_rows(nest_instance['db_path'], target)}; "
+                         f"bridge log: {handle.log_file}",
+    )
+    assert f"Forwarder witness {token}.".encode() in raw, "the forwarded body must arrive intact"
+    assert mail_from.startswith("SRS0="), (
+        f"a forwarder's mail must leave under an SRS envelope, got MAIL FROM {mail_from!r}"
+    )
+    assert mail_from.endswith(f"@{domain}"), (
+        f"the SRS envelope must sit on the nest's own domain {domain!r}, got {mail_from!r}"
+    )
+    assert "orig.test" in mail_from, (
+        f"the SRS payload must carry the original sender's domain: {mail_from!r}"
+    )
+
+
+@pytest.mark.feature("admin-forwarders")
+def test_inbound_admin_forwarder_loop_is_not_forwarded_again(mail_bridge_mta, nest_instance):
+    """Mail that has already been round a forwarding loop is not sent round
+    again (mail-forwarding.md § Admin external forwarders — the shared
+    dispatch's loop detection; "a loop floor is still a drop").
+
+    The first message forwards once. The same mail coming back to the
+    forwarder carrying our own `X-Fauna-Forwarded-By` stamp for the admin — the
+    copy a looping destination hands back — is answered 250 and forwarded
+    nowhere: no second outbound row, nothing parked, no local copy."""
+    handle = mail_bridge_mta
+    domain = handle.domain
+    db_path = nest_instance["db_path"]
+    admin_hex = nest_instance["admin"]["actor_id_bytes"].hex()
+    stamp = int(time.time() * 1000)
+    local = f"af-loop-{stamp}"
+    forwarder_addr = f"{local}@{domain}"
+    target = f"af-loop-dest-{stamp}@external.test"
+    sender = "sender@orig.test"
+    _create_admin_forwarder(nest_instance, domain, local, target)
+
+    deadline = time.monotonic() + 30.0
+    with _connect_smtp_starttls(handle.mx_port, domain, deadline) as conn:
+        first = _send_to_forwarder(conn, sender, forwarder_addr, f"af-loop-a-{stamp}", deadline)
+        assert first.startswith("250"), f"first pass: {first!r}"
+        assert len(_forward_rows(db_path, target)) == 1, "the first pass must forward once"
+
+        loop_stamp = f"X-Fauna-Forwarded-By: actor={admin_hex}; t=1; rule=forwarder"
+        second = _send_to_forwarder(conn, sender, forwarder_addr, f"af-loop-b-{stamp}",
+                                    deadline, extra_headers=[loop_stamp])
+        conn.cmd("QUIT", "221", deadline)
+    assert second.startswith("250"), (
+        f"a looped message to a forwarder is a deliberate drop, not a tempfail: {second!r}"
+    )
+    rows = _forward_rows(db_path, target)
+    assert len(rows) == 1, f"a message carrying our own forward stamp went round again: {rows}"
+    assert f"af-loop-a-{stamp}" in rows[0][0], f"the one forward is the first pass's: {rows}"
+    assert _parked_forwards(db_path, target=target) == [], "a looped forward must not be parked"
+
+
+@pytest.mark.feature("admin-forwarders")
+def test_admin_forwarder_over_hourly_cap_waits_and_goes_out_later(mail_bridge_mta, nest_instance):
+    """Forwards from a forwarder count against the ADMIN's hourly forwarding
+    limit, and those over it wait and go out later (mail-forwarding.md § Admin
+    external forwarders — "the per-account forward rate-cap (charged to the
+    admin actor)"; § Per-account forward rate-limit; § Queue ceiling — a
+    `redirect` row is parked, never evicted).
+
+    With the admin's cap held at 1, two forwards in a row leave at least the
+    second over the cap: it is parked in `forward_queue` as a `redirect`, not
+    dispatched and not dropped. Moving the nest's outbound clock past the hour
+    (`outbound_clock`, convention 14 — never wall-clock) lets the rate-cap
+    promotion in `fetch_outbound_due` release it, and the parked mail reaches
+    the stub MX. The clock is put back as it was found."""
+    from helpers.mail_wire import outbound_clock, outbound_clock_now, restore_outbound_clock
+
+    handle = mail_bridge_mta
+    domain = handle.domain
+    db_path = nest_instance["db_path"]
+    nest_url = nest_instance["url"]
+    admin_actor = nest_instance["admin"]["actor_id_bytes"]
+    stamp = int(time.time() * 1000)
+    local = f"af-cap-{stamp}"
+    forwarder_addr = f"{local}@{domain}"
+    target = f"af-cap-dest-{stamp}@external.test"
+    sender = "sender@orig.test"
+    tokens = [f"af-cap-a-{stamp}", f"af-cap-b-{stamp}"]
+    _create_admin_forwarder(nest_instance, domain, local, target)
+
+    prior_clock = outbound_clock_now(nest_url)
+    try:
+        with _AdminForwardCap(db_path, admin_actor, 1):
+            deadline = time.monotonic() + 30.0
+            with _connect_smtp_starttls(handle.mx_port, domain, deadline) as conn:
+                for token in tokens:
+                    reply = _send_to_forwarder(conn, sender, forwarder_addr, token, deadline)
+                    assert reply.startswith("250"), f"{token}: {reply!r}"
+                conn.cmd("QUIT", "221", deadline)
+
+            # After the first forward the admin's window holds at least one, so
+            # the second is over the cap of 1: parked as a redirect, not sent.
+            parked = _parked_forwards(db_path, target=target)
+            assert any(tokens[1] in msgid for msgid, _m, _r in parked), (
+                f"the over-cap forward must wait in the queue: parked={parked}, "
+                f"dispatched={_forward_rows(db_path, target)}"
+            )
+            assert all(mode == "redirect" and rule == "forwarder" for _id, mode, rule in parked), (
+                f"a forwarder's parked row is the only copy (redirect): {parked}"
+            )
+            dispatched = _forward_rows(db_path, target)
+            assert len(parked) + len(dispatched) == 2, (
+                f"each forward is either sent or waiting, none dropped: "
+                f"parked={parked}, dispatched={dispatched}"
+            )
+            assert not any(tokens[1] in row[0] for row in dispatched), (
+                "the over-cap forward must not have been dispatched"
+            )
+
+            # Each hour the clock moves on releases one more (cap 1).
+            for _ in range(len(parked)):
+                outbound_clock(nest_url, advance=3700)
+
+                def _released(before=len(_parked_forwards(db_path, target=target))):
+                    _poke_outbound_bridge(nest_url)
+                    return len(_parked_forwards(db_path, target=target)) < before
+
+                wait_until(_released, MAIL_OUTBOUND_CYCLE_S, interval=1.0,
+                           diagnose=lambda: f"still parked: {_parked_forwards(db_path, target=target)}")
+
+            def _arrived():
+                _poke_outbound_bridge(nest_url)
+                return _stub_record(handle.stub_mx, tokens[1])
+
+            wait_until(_arrived, MAIL_OUTBOUND_CYCLE_S, interval=1.0,
+                       diagnose=lambda: f"rows for {target}: {_forward_rows(db_path, target)}; "
+                                        f"bridge log: {handle.log_file}")
+            promoted = [r for r in _forward_rows(db_path, target) if tokens[1] in r[0]]
+            assert len(promoted) == 1 and promoted[0][3] == "redirect", (
+                f"the promoted forward keeps its redirect mode: {promoted}"
+            )
+            assert bytes(promoted[0][2]) == admin_actor, "the forward stays the admin's"
+    finally:
+        restore_outbound_clock(nest_url, prior_clock)
+
+
+@pytest.mark.feature("admin-forwarders")
+def test_admin_forwarder_queue_full_answers_451_and_retry_is_kept(mail_bridge_mta, nest_instance):
+    """When the nest cannot take a forward on, the sending server is told to try
+    again later; the mail is never accepted and then lost (mail-forwarding.md
+    § Admin external forwarders — a forward nest did not durably enqueue answers
+    `451`, never `250`; § Queue ceiling — a `redirect` over the ceiling is
+    refused with `forward_queue_full`, never evicted).
+
+    With the admin's cap held at 1 the queue ceiling is 24 (`cap × 24`). Mail
+    to the forwarder is accepted and parked until the queue holds 24 of the
+    admin's forwards; the next is refused at the end of DATA with `451 4.3.0`.
+    Once the cap is back, the sender's retry of that same message is accepted
+    and kept. The parked forwards drain on their own afterwards, at the
+    restored cap."""
+    handle = mail_bridge_mta
+    domain = handle.domain
+    db_path = nest_instance["db_path"]
+    admin_actor = nest_instance["admin"]["actor_id_bytes"]
+    stamp = int(time.time() * 1000)
+    local = f"af-full-{stamp}"
+    forwarder_addr = f"{local}@{domain}"
+    target = f"af-full-dest-{stamp}@external.test"
+    sender = "sender@orig.test"
+    ceiling = 1 * 24
+    _create_admin_forwarder(nest_instance, domain, local, target)
+
+    refused_token = None
+    with _AdminForwardCap(db_path, admin_actor, 1):
+        deadline = time.monotonic() + 120.0
+        with _connect_smtp_starttls(handle.mx_port, domain, deadline) as conn:
+            # At most one forward dispatches (the window may already be full),
+            # then `ceiling` park; one more than that must be refused.
+            for i in range(ceiling + 2):
+                token = f"af-full-{i}-{stamp}"
+                reply = _send_to_forwarder(conn, sender, forwarder_addr, token, deadline)
+                if reply.startswith("451"):
+                    refused_token = token
+                    break
+                assert reply.startswith("250"), f"{token}: {reply!r}"
+            conn.cmd("QUIT", "221", deadline)
+        assert refused_token is not None, (
+            f"no 451 after {ceiling + 2} forwards at cap 1; parked: "
+            f"{len(_parked_forwards(db_path, actor=admin_actor))}"
+        )
+        assert "4.3.0" in reply, f"expected the forwarder tempfail 451 4.3.0, got {reply!r}"
+        assert len(_parked_forwards(db_path, actor=admin_actor)) == ceiling, (
+            "the refusal comes exactly at the admin's queue ceiling"
+        )
+        assert not any(refused_token in r[0] for r in _forward_rows(db_path, target)), (
+            "a 451ed forward must not have been enqueued"
+        )
+        assert not any(refused_token in r[0] for r in _parked_forwards(db_path, target=target)), (
+            "a 451ed forward must not have been parked"
+        )
+
+    # The sending server retries; with room again the same message is kept.
+    deadline = time.monotonic() + 30.0
+    with _connect_smtp_starttls(handle.mx_port, domain, deadline) as conn:
+        retry = _send_to_forwarder(conn, sender, forwarder_addr, refused_token, deadline)
+        conn.cmd("QUIT", "221", deadline)
+    assert retry.startswith("250"), f"the retry must be accepted: {retry!r}"
+    kept = [r for r in _forward_rows(db_path, target) if refused_token in r[0]] + [
+        r for r in _parked_forwards(db_path, target=target) if refused_token in r[0]
+    ]
+    assert len(kept) == 1, f"the retried forward must be kept exactly once: {kept}"
+
+
+@pytest.mark.feature("admin-forwarders")
+def test_submission_to_admin_forwarder_reaches_external_mx(mail_bridge_mta, nest_instance):
+    """A member who writes to a forwarder address from inside the nest reaches
+    the outside address too (mail-forwarding.md § Implementation status today;
+    the submission arm of the shared dispatch, `submission.go`'s forwarder
+    redirect).
+
+    The fixture's submission sender authenticates on 465 and sends to a
+    forwarder on the nest's own domain; the message is forwarded under the
+    admin's attribution and arrives at the stub MX `external.test` routes to."""
+    handle = mail_bridge_mta
+    domain = handle.domain
+    db_path = nest_instance["db_path"]
+    admin_actor = nest_instance["admin"]["actor_id_bytes"]
+    stamp = int(time.time() * 1000)
+    local = f"af-sub-{stamp}"
+    forwarder_addr = f"{local}@{domain}"
+    target = f"af-sub-dest-{stamp}@external.test"
+    sender = f"{handle.submission_sender_local}@{domain}"
+    token = f"af-sub-{stamp}"
+    _create_admin_forwarder(nest_instance, domain, local, target)
+
+    body = "\r\n".join([
+        f"From: Sender <{sender}>",
+        f"To: {forwarder_addr}",
+        f"Subject: member to forwarder {token}",
+        f"Message-ID: <{token}@{domain}>",
+        "Date: Mon, 01 Jun 2026 12:00:00 +0000",
+        "MIME-Version: 1.0",
+        "Content-Type: text/plain; charset=utf-8",
+        "",
+        f"Member writes to a forwarder {token}.",
+    ]) + "\r\n"
+
+    deadline = time.monotonic() + 30.0
+    with _connect_submission_tls(handle.submission_port_465, domain) as conn:
+        conn.expect("220", deadline)
+        conn.cmd(f"EHLO {domain}", "250", deadline)
+        _smtp_auth_plain(conn, sender, handle.submission_credential.decode(), deadline)
+        conn.cmd(f"MAIL FROM:<{sender}>", "250", deadline)
+        conn.cmd(f"RCPT TO:<{forwarder_addr}>", "250", deadline)
+        conn.cmd("DATA", "354", deadline)
+        conn.send_raw(body.encode())
+        conn.cmd(".", "250", deadline)
+        conn.cmd("QUIT", "221", deadline)
+
+    def _arrived():
+        _poke_outbound_bridge(handle.nest_url)
+        return _stub_record(handle.stub_mx, token)
+
+    wait_until(_arrived, MAIL_OUTBOUND_CYCLE_S, interval=1.0,
+               diagnose=lambda: f"rows for {target}: {_forward_rows(db_path, target)}; "
+                                f"bridge log: {handle.log_file}")
+    rows = _forward_rows(db_path, target)
+    assert len(rows) == 1, f"one forward to the outside address: {rows}"
+    _msgid, rule, actor, mode = rows[0]
+    assert rule == "forwarder" and mode == "redirect", f"forwarder redirect row: {rows[0]}"
+    assert bytes(actor) == admin_actor, "the forward is attributed to the managing admin"
+
+
 @pytest.mark.feature("mail-filter-rules")
 def test_inbound_forward_all_dispatches_under_srs(mail_bridge_mta, nest_instance):
     """Forward-all set → the forwarded message leaves the box with an
@@ -945,6 +1626,139 @@ def test_inbound_srs_bounce_routes_to_forwarder(mail_bridge_mta, nest_instance):
             # decode_srs_bounce → mac_fail → hard-reject (mail-forwarding.md:100).
             conn.cmd(f"RCPT TO:<{forged_addr}>", "550", deadline3)
             conn.cmd("QUIT", "221", deadline3)
+    finally:
+        _seed_forward_config(None)
+
+
+@pytest.mark.feature("admin-mail-policy")
+def test_srs_bounce_to_mail_forwarded_before_a_secret_rotation_still_reaches_the_forwarder(
+    mail_bridge_mta, nest_instance,
+):
+    """After the admin rotates the forwarding (SRS) secret, a bounce to mail
+    forwarded BEFORE the rotation still finds its way back to the forwarder
+    (`mail-forwarding.md` § SRS scheme: the prior secret is held through the
+    rotation overlap and `decode_srs_bounce` tries every retained one).
+
+    Forward a message, rotate, forward a second message from the same sender:
+    the second leaves under a different `SRS0=` address (the new secret signs
+    it — proof the rotation took effect), and a downstream bounce to the FIRST
+    address is still accepted and delivered to the forwarder's mailbox."""
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    handle = mail_bridge_mta
+    domain = handle.domain
+    recipient_addr = f"{handle.recipient_local_part}@{domain}"
+    recipient_actor = handle.recipient_actor["actor_id_bytes"]
+    db_path = nest_instance["db_path"]
+    stamp = int(time.time() * 1000)
+    forward_target = f"srs-rot-{stamp}@external.test"
+    sender = f"srs-rot-orig-{stamp}@orig.test"
+
+    def _seed_forward_config(value):
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        try:
+            conn.execute(
+                "INSERT INTO mail_account_settings (actor_id, forward_all_to, updated_at)"
+                " VALUES (?, ?, ?)"
+                " ON CONFLICT(actor_id) DO UPDATE SET"
+                " forward_all_to = excluded.forward_all_to, updated_at = excluded.updated_at",
+                (recipient_actor, value, int(time.time())),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _inbox_count():
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        try:
+            (n,) = conn.execute(
+                "SELECT COUNT(*) FROM bridge_imap_messages"
+                " WHERE actor_id = ? AND mailbox = 'INBOX'",
+                (recipient_actor,),
+            ).fetchone()
+            return n
+        finally:
+            conn.close()
+
+    def _forward_and_capture_srs(token: str) -> str:
+        """Deliver one message from `sender`; the `SRS0=` envelope its
+        forward left under."""
+        body = "\r\n".join([
+            f"From: External Sender <{sender}>",
+            f"To: {recipient_addr}",
+            f"Subject: srs rotation {token}",
+            f"Message-ID: <{token}@orig.test>",
+            "Date: Thu, 16 May 2026 12:00:00 +0000",
+            "MIME-Version: 1.0",
+            "Content-Type: text/plain; charset=utf-8",
+            "",
+            "Forward me so a bounce comes back.",
+        ]) + "\r\n"
+        deadline = time.monotonic() + 30.0
+        with _connect_smtp_starttls(handle.mx_port, domain, deadline) as conn:
+            conn.cmd(f"MAIL FROM:<{sender}>", "250", deadline)
+            conn.cmd(f"RCPT TO:<{recipient_addr}>", "250", deadline)
+            conn.cmd("DATA", "354", deadline)
+            conn.send_raw(body.encode())
+            conn.cmd(".", "250", deadline)
+            conn.cmd("QUIT", "221", deadline)
+        return wait_until(
+            lambda: next(
+                (env_from for env_from, raw in handle.stub_mx.records()
+                 if token.encode() in raw and env_from.startswith("SRS0=")),
+                None,
+            ),
+            MAIL_OUTBOUND_CYCLE_S,
+            diagnose=lambda: f"no SRS-rewritten forward of {token} reached the stub MX "
+                             f"(bridge log: {handle.log_file})",
+        )
+
+    _seed_forward_config(forward_target)
+    try:
+        before_rotation = _forward_and_capture_srs(f"srs-rot-a-{stamp}")
+
+        admin = nest_instance["admin"]
+        with WsRpcAdminClient(
+            nest_instance["url"],
+            actor_id=bytes(admin["signing_key"].verify_key),
+            signing_key=bytes(admin["signing_key"]),
+        ) as ws:
+            ws.call("fauna.bridges.rotate_srs_secret", {})
+
+        after_rotation = _forward_and_capture_srs(f"srs-rot-b-{stamp}")
+        assert after_rotation != before_rotation, (
+            "the same sender forwarded the same day must leave under a new SRS0= "
+            f"address once the secret is rotated: {before_rotation!r} both times"
+        )
+
+        # The downstream MX bounces the message forwarded before the rotation.
+        before = _inbox_count()
+        dsn = "\r\n".join([
+            "From: Mail Delivery System <MAILER-DAEMON@external.test>",
+            f"To: <{before_rotation}>",
+            "Subject: Delivery Status Notification (Failure)",
+            f"Message-ID: <dsn-rot-{stamp}@external.test>",
+            "Date: Thu, 16 May 2026 12:05:00 +0000",
+            "Content-Type: text/plain; charset=utf-8",
+            "",
+            f"Your message to {forward_target} could not be delivered.",
+            "550 5.1.1 mailbox unavailable",
+        ]) + "\r\n"
+        deadline = time.monotonic() + 30.0
+        with _connect_smtp_starttls(handle.mx_port, domain, deadline) as conn:
+            conn.cmd("MAIL FROM:<>", "250", deadline)
+            # Decoded under the retained prior secret → accepted.
+            conn.cmd(f"RCPT TO:<{before_rotation}>", "250", deadline)
+            conn.cmd("DATA", "354", deadline)
+            conn.send_raw(dsn.encode())
+            conn.cmd(".", "250", deadline)
+            conn.cmd("QUIT", "221", deadline)
+        wait_until(
+            lambda: _inbox_count() > before,
+            10.0,
+            diagnose=lambda: f"the forwarder's INBOX is still {_inbox_count()} (was {before})",
+        )
+        assert _inbox_count() == before + 1, "the bounce must land once in the forwarder's mailbox"
     finally:
         _seed_forward_config(None)
 
@@ -1430,6 +2244,100 @@ def test_inbound_graceful_shutdown_drains_and_421s(disposable_mta_bridge):
     assert rc == 0, f"clean drain should exit 0, got exit code {rc}; see {handle.log_file}"
 
 
+def _inbound_attempt(port: int, domain: str, sender: str, rcpt: str, token: str,
+                     deadline: float) -> str:
+    """One whole inbound attempt as a sending MTA makes it; returns the first
+    non-250 reply (the attempt stops there) or the final `.` reply."""
+    with _connect_smtp_starttls(port, domain, deadline) as conn:
+        for command in (f"MAIL FROM:<{sender}>", f"RCPT TO:<{rcpt}>"):
+            conn.send_raw(f"{command}\r\n".encode())
+            reply = _read_final_reply(conn, deadline)
+            if not reply.startswith("250"):
+                return reply
+        conn.cmd("DATA", "354", deadline)
+        conn.send_raw(_forwarder_message(sender, rcpt, token))
+        conn.send_raw(b".\r\n")
+        reply = _read_final_reply(conn, deadline)
+        conn.cmd("QUIT", "221", deadline)
+        return reply
+
+
+@pytest.mark.feature("mail-server")
+def test_inbound_while_nest_unreachable_tempfails_then_delivers(mail_bridge_mta, nest_instance):
+    """While the nest is briefly unreachable the mail helpers keep answering and
+    ask senders to retry, so mail arrives once the nest is back
+    (mail-bridge-lifecycle.md § Reconnecting — listeners stay up across
+    reconnect attempts; a verdict-needing RPC fails at once with
+    `ErrReconnecting`, which the MTA maps to a transient `451`).
+
+    The nest under the session bridge is stopped through the harness's own
+    handle (`stop_nest`, never by signal or name) — the restart target is the
+    nest, not the bridge, so the bridge process every other test shares stays
+    up throughout, exactly as the outcome needs. While it is down a fresh
+    connection is still accepted and upgraded, and the recipient is answered
+    `451`. The nest comes back on the same data dir (`start_nest_in_place`), and
+    the sender's retries are accepted once the bridge has reconnected; the
+    mail is in the recipient's inbox exactly once. The test ends with the
+    session bridge reconnected, which its own final delivery proves."""
+    from common.nest import start_nest_in_place, stop_nest
+
+    handle = mail_bridge_mta
+    domain = handle.domain
+    db_path = nest_instance["db_path"]
+    recipient_addr = f"{handle.recipient_local_part}@{domain}"
+    recipient_actor = handle.recipient_actor["actor_id_bytes"]
+    sender = "sender@external.test"
+    token = f"nest-gap-{int(time.time() * 1000)}"
+
+    def _inbox_count():
+        db = sqlite3.connect(db_path, timeout=10.0)
+        try:
+            return db.execute(
+                "SELECT COUNT(*) FROM bridge_imap_messages"
+                " WHERE actor_id = ? AND mailbox = 'INBOX'",
+                (recipient_actor,),
+            ).fetchone()[0]
+        finally:
+            db.close()
+
+    before = _inbox_count()
+    nest_down = False
+    try:
+        stop_nest(nest_instance, graceful=True)
+        nest_down = True
+        deadline = time.monotonic() + 30.0
+        # The listener answers, STARTTLS completes (both inside the connect
+        # helper) — and the recipient is deferred, not refused or accepted.
+        gap_reply = _inbound_attempt(handle.mx_port, domain, sender, recipient_addr,
+                                     token, deadline)
+        assert gap_reply.startswith("451"), (
+            f"with the nest unreachable the sender must be told to retry (451), "
+            f"got {gap_reply!r}; bridge log: {handle.log_file}"
+        )
+    finally:
+        if nest_down:
+            start_nest_in_place(nest_instance)
+
+    replies = []
+
+    def _retry_delivers():
+        reply = _inbound_attempt(handle.mx_port, domain, sender, recipient_addr, token,
+                                 time.monotonic() + 30.0)
+        replies.append(reply)
+        if reply.startswith("250"):
+            return True
+        assert reply.startswith("4"), (
+            f"while the bridge reconnects the answer stays a temporary one: {reply!r}"
+        )
+        return False
+
+    wait_until(_retry_delivers, MAIL_BRIDGE_RECONNECT_S, interval=2.0,
+               diagnose=lambda: f"replies: {replies[-3:]}; bridge log: {handle.log_file}")
+    assert _inbox_count() == before + 1, (
+        "the retried mail must arrive exactly once once the nest is back"
+    )
+
+
 def _scan_body(recipient_addr: str, *, infected: bool) -> bytes:
     """An inbound message body for the content-scan tests.
 
@@ -1738,9 +2646,12 @@ _dkim_sig_tag = dkim_signature_tag
 
 @pytest.mark.feature("standard-mail-apps", "mail-server")
 def test_submission_dkim_signature_verifies(mail_bridge_mta):
-    """The outbound DKIM-Signature cryptographically VERIFIES against
-    the selector's published public-key TXT — the in-CI proxy for Gmail's
-    `dkim=pass` (mail-deployment-vps-critical-path.md Stage 4: send, DKIM-aligned).
+    """Both outbound DKIM-Signatures — RSA-2048 under `default-rsa` and
+    Ed25519 under `default-ed25519` (`mail-multidomain.md` § Per-domain DKIM →
+    *Key shape*) — cryptographically VERIFY, each against its own selector's
+    published public-key TXT. The RSA one is the in-CI proxy for Gmail's
+    `dkim=pass` (receivers that do not verify Ed25519 still see a passing RSA
+    signature; mail-deployment-vps-critical-path.md Stage 4: send, DKIM-aligned).
 
     Closes the gap `test_submission_round_trip` defers (it asserts only that a
     DKIM-Signature header is *present*). Here an independent third-party verifier
@@ -1759,13 +2670,11 @@ def test_submission_dkim_signature_verifies(mail_bridge_mta):
 
     smtp-server.md § Outbound delivery — DKIM signing pipeline (c=relaxed/relaxed).
     """
-    import dkim  # dkimpy — independent verifier; fleet venv dep (internal dev note)
-
     handle = mail_bridge_mta
     domain = handle.domain
-    assert handle.dkim_public_dns_value, (
-        "fixture read no DKIM record (handle.dkim_public_dns_value unset) — "
-        "the verify test cannot run without the published TXT value"
+    assert handle.dkim_records, (
+        "fixture read no DKIM records (handle.dkim_records unset) — "
+        "the verify test cannot run without the published TXT values"
     )
     sender = f"{handle.submission_sender_local}@{domain}"
     password = handle.submission_credential.decode()
@@ -1807,26 +2716,18 @@ def test_submission_dkim_signature_verifies(mail_bridge_mta):
         f"outbound delivery did not complete (bridge log: {handle.log_file})"
     )
 
-    # Feed dkimpy the published TXT via a custom dnsfunc — no real DNS query
-    # fires. dkimpy queries the name it derives from the signature's own d=/s=
-    # tags; we answer ONLY for the aligned `<selector>._domainkey.<domain>.`
-    # so a misaligned signature returns None → verify fails.
-    expected_query = f"{handle.dkim_selector}._domainkey.{domain}.".encode()
-    seen_queries: list[bytes] = []
-
-    def dnsfunc(name, timeout=5):
-        seen_queries.append(name)
-        return handle.dkim_public_dns_value if name == expected_query else None
-
-    verified = dkim.verify(received, dnsfunc=dnsfunc)
-    assert verified, (
-        "dkimpy rejected the DKIM-Signature — the delivered message "
-        "would fail `dkim=pass` at a real receiver (Gmail). dnsfunc queries: "
-        f"{seen_queries!r}. First 600 bytes:\n{received[:600]!r}"
+    # Feed dkimpy the published TXTs via a custom dnsfunc — no real DNS query
+    # fires. dkimpy queries the name it derives from each signature's own
+    # d=/s= tags; only the aligned `<selector>._domainkey.<domain>.` names
+    # answer, so a misaligned signature returns None → verify fails.
+    verified, seen_queries = verify_each_dkim_signature(
+        received, domain, handle.dkim_records
     )
-    assert expected_query in seen_queries, (
-        f"dkimpy never queried {expected_query!r}; the signature's d=/s= are not "
-        f"aligned to the provisioned selector. Queries: {seen_queries!r}"
+    assert verified == list(handle.dkim_records), (
+        f"dkimpy verified {verified!r} of {list(handle.dkim_records)!r} — the "
+        "delivered message would fail `dkim=pass` at a real receiver (Gmail "
+        "reads the RSA one). dnsfunc queries: "
+        f"{seen_queries!r}. First 900 bytes:\n{received[:900]!r}"
     )
 
     # DMARC alignment: the d= signing domain must equal the From: header domain.
@@ -1848,9 +2749,10 @@ def test_submission_dkim_per_domain_from_selects_second_domain_key(mail_bridge_m
     The nest holds one key per active mail_domains row and, at the outbound
     hand-out, signs with the key of the From: header domain. Here the authenticated sender submits with its
     From: header on the SECOND (non-primary) domain; the envelope MAIL FROM uses
-    the same authed local-part on that domain (the submission MAIL-FROM gate
-    requires localPart == authed identity and domain ∈ local_domains, not that
-    the domain equals the authed identity's). An independent verifier (dkimpy)
+    the same authed local-part on that domain, which the fixture gives the
+    sender as an alias there (an alias is owned on the one domain it names, so
+    the address is the sender's only once it holds it — § From: header
+    ownership). An independent verifier (dkimpy)
     re-derives the signature against the SECOND domain's published key record at
     `default._domainkey.second.test` — a DISTINCT key from the primary's at
     `default._domainkey.fauna.test` — and only that name is answered, so a pass
@@ -1863,20 +2765,18 @@ def test_submission_dkim_per_domain_from_selects_second_domain_key(mail_bridge_m
     key — together they prove the set routes per From-domain, not one key for
     all domains.
     """
-    import dkim  # dkimpy — independent verifier; fleet venv dep (internal dev note)
-
     handle = mail_bridge_mta
     second_domain = handle.second_domain
-    assert second_domain and handle.second_dkim_public_dns_value, (
-        "fixture read no DKIM record for the second domain "
-        "(handle.second_dkim_public_dns_value unset) — the per-domain verify "
+    assert second_domain and handle.second_dkim_records, (
+        "fixture read no DKIM records for the second domain "
+        "(handle.second_dkim_records unset) — the per-domain verify "
         "test cannot run"
     )
     primary = handle.domain
     auth_local = handle.submission_sender_local
     # AUTH on the primary identity; From: + envelope on the SECOND domain. The
-    # MAIL-FROM gate accepts <auth_local>@<any local domain>, and DKIM selects
-    # on the From: header domain → the second domain's key must sign.
+    # sender holds <auth_local>@<second domain> as an alias (the fixture's), and
+    # DKIM selects on the From: header domain → the second domain's key must sign.
     auth_user = f"{auth_local}@{primary}"
     second_addr = f"{auth_local}@{second_domain}"
     password = handle.submission_credential.decode()
@@ -1920,44 +2820,48 @@ def test_submission_dkim_per_domain_from_selects_second_domain_key(mail_bridge_m
         f"outbound delivery did not complete (bridge log: {handle.log_file})"
     )
 
-    # dkimpy queries the name it derives from the signature's own d=/s= tags; we
-    # answer ONLY for the SECOND domain's selector, so a signature that used the
-    # primary's key (d=primary) queries a name we don't answer → verify fails.
-    expected_query = (
-        f"{handle.second_dkim_selector}._domainkey.{second_domain}.".encode()
+    # dkimpy queries the name it derives from each signature's own d=/s= tags;
+    # we answer ONLY for the SECOND domain's selectors, so a signature that
+    # used the primary's key (d=primary) queries a name we don't answer →
+    # verify fails.
+    verified, seen_queries = verify_each_dkim_signature(
+        received, second_domain, handle.second_dkim_records
     )
-    seen_queries: list[bytes] = []
-
-    def dnsfunc(name, timeout=5):
-        seen_queries.append(name)
-        return (
-            handle.second_dkim_public_dns_value
-            if name == expected_query
-            else None
-        )
-
-    verified = dkim.verify(received, dnsfunc=dnsfunc)
-    assert verified, (
-        "dkimpy rejected the signature — the second domain was NOT signed with "
-        "its own key (it would carry the primary's d=/s= or none). dnsfunc "
-        f"queries: {seen_queries!r}. First 600 bytes:\n{received[:600]!r}"
-    )
-    assert expected_query in seen_queries, (
-        f"dkimpy never queried {expected_query!r}; the signature's d=/s= are not "
-        f"aligned to the second domain's selector. Queries: {seen_queries!r}"
+    assert verified == list(handle.second_dkim_records), (
+        f"dkimpy verified {verified!r} of {list(handle.second_dkim_records)!r} — "
+        "the second domain was NOT signed with its own keys (it would carry the "
+        f"primary's d= or none). dnsfunc queries: {seen_queries!r}. First 900 "
+        f"bytes:\n{received[:900]!r}"
     )
 
-    # The d=/s= tags must name the SECOND domain + its selector — not the primary.
-    d_tag = dkim_signature_tag(received, "d")
-    s_tag = dkim_signature_tag(received, "s")
-    assert d_tag == second_domain, (
-        f"DKIM d= ({d_tag!r}) is not the From: header domain ({second_domain!r}) "
+    # Every d= must name the SECOND domain — not the primary.
+    d_tags = dkim_signature_tags(received, "d")
+    assert d_tags == [second_domain, second_domain], (
+        f"DKIM d= ({d_tags!r}) is not the From: header domain ({second_domain!r}) "
         "— per-domain selection signed with the wrong domain's key"
     )
-    assert s_tag == handle.second_dkim_selector, (
-        f"DKIM s= ({s_tag!r}) is not the second domain's selector "
-        f"({handle.second_dkim_selector!r})"
+
+
+def _own_login_local_on(handle, domain):
+    """Give the submission sender ``<login local-part>@<domain>``, through the
+    member's own alias write, and return it.
+
+    The sender actor has no handle — its login ``sender`` is an exact alias on
+    the primary — and an alias is owned on the one domain it names, so an
+    address on a freshly added local domain is refused ``550 5.7.1`` — at
+    MAIL FROM by the bridge, with the nest's enqueue-door check behind it —
+    until the sender holds it there (`mail-multidomain.md` § From: header
+    ownership).
+    """
+    return add_exact_alias(
+        handle.nest_url, handle.submission_sender_actor["signing_key"], domain,
+        handle.submission_sender_local,
     )
+
+
+# The one refusal `_wait_until_signed_with_selector` retries: a freshly added
+# domain not yet in the bridge's `local_domains` (`Mail`'s closed-relay check).
+_PROPAGATION_REFUSAL = "553 5.7.1 MAIL FROM domain is not a local domain"
 
 
 def _submit_dkim_signable(
@@ -1999,91 +2903,93 @@ def _submit_dkim_signable(
 
 
 def _wait_until_signed_with_selector(
-    handle, *, sni_host, from_addr, auth_plain, external_rcpt, selector,
+    handle, *, sni_host, from_addr, auth_plain, external_rcpt, label,
     timeout=45.0,
 ):
-    """Poll-submit From ``from_addr`` until the delivered message's DKIM
-    signature carries ``s=<selector>``; ``pytest.fail`` after ``timeout``.
+    """Poll-submit From ``from_addr`` until the delivered message's two DKIM
+    signatures carry ``s=<label>-rsa`` then ``s=<label>-ed25519`` (the
+    selector label's pair, `mail-multidomain.md` § Per-domain DKIM → *Key
+    shape*); ``pytest.fail`` after ``timeout``.
 
     The bridge applies a ``config_changed`` push (a freshly-added local domain)
     asynchronously, so this absorbs the brief propagation window: during it a
     submission can be rejected (the new domain isn't yet in ``local_domains`` →
-    MAIL FROM ``550``, an ``AssertionError``) — retried, as is a message signed
-    with the previous selector. The assertion is on the observable end-state
-    (the signature's ``s=`` tag, which the nest stamps at the outbound
+    MAIL FROM ``553``, an ``AssertionError``) — retried, as is a message signed
+    with the previous label. The assertion is on the observable end-state
+    (the signatures' ``s=`` tags, which the nest stamps at the outbound
     hand-out), not any log line, so it stays decoupled from internals.
+
+    Only that propagation refusal is retried. Any other refusal (a 535 at AUTH,
+    a 550 for a sender the actor does not own) fails at once: it is not a
+    window that closes, and every retried AUTH spends the submission-token
+    door's rate limit that the module's later submission tests share.
     """
+    want = dkim_selector_pair(label)
     deadline = time.monotonic() + timeout
     last = "<no message delivered>"
     attempt = 0
     while time.monotonic() < deadline:
         attempt += 1
-        token = f"rotate-{selector}-{attempt}-{secrets.token_hex(4)}"
+        token = f"rotate-{label}-{attempt}-{secrets.token_hex(4)}"
         try:
             received = _submit_dkim_signable(
                 handle, sni_host=sni_host, from_addr=from_addr,
                 auth_plain=auth_plain, external_rcpt=external_rcpt, token=token,
             )
-        except (AssertionError, OSError) as exc:
-            last = f"submission rejected (propagation window): {exc}"
-            time.sleep(1.0)
-            continue
-        if received is None:
-            last = "message not delivered to stub MX within 15s"
-            time.sleep(1.0)
-            continue
-        s = dkim_signature_tag(received, "s")
-        if s == selector:
-            return received
-        last = f"signed s={s!r} (waiting for s={selector!r})"
+        except AssertionError as exc:
+            if _PROPAGATION_REFUSAL not in str(exc):
+                pytest.fail(
+                    f"submission From:{from_addr} refused other than by the "
+                    f"propagation window — not retried: {exc}. Bridge log: "
+                    f"{handle.log_file}"
+                )
+            received, last = None, f"submission rejected (propagation window): {exc}"
+        except OSError as exc:
+            received, last = None, f"submission connection failed: {exc}"
+        else:
+            if received is None:
+                last = "message not delivered to stub MX within 15s"
+            else:
+                s = dkim_signature_tags(received, "s")
+                if s == want:
+                    return received
+                last = f"signed s={s!r} (waiting for s={want!r})"
         time.sleep(1.0)
     pytest.fail(
-        f"no delivered From:{from_addr} message was signed s={selector} within "
+        f"no delivered From:{from_addr} message was signed s={want} within "
         f"{timeout:.0f}s — the nest did not sign with the domain's active "
-        f"selector at the hand-out (last: {last}). Bridge log: {handle.log_file}"
+        f"label at the hand-out (last: {last}). Bridge log: {handle.log_file}"
     )
 
 
-def _assert_dkim_selector(received, domain, selector, public_dns_value, dkim_mod):
-    """dkimpy-verify ``received`` answering ONLY the ``(domain, selector)``
-    record, then assert its d=/s= tags name that domain + selector.
+def _assert_dkim_selector(received, domain, label, records):
+    """dkimpy-verify EACH of ``received``'s signatures answering ONLY the
+    ``records`` of ``(domain, label)`` (``{selector: TXT value}``), then
+    assert both verified, RSA first, and every d= names that domain.
 
-    Answering only this one name means a signature under any other
+    Answering only these names means a signature under any other
     selector/domain queries a name the ``dnsfunc`` returns ``None`` for and
-    fails to verify — so a pass proves the signature used exactly this key, not
-    merely that *some* valid signature is present.
+    fails to verify — so a pass proves each signature used exactly its key,
+    not merely that *some* valid signature is present.
     """
-    expected_query = f"{selector}._domainkey.{domain}.".encode()
-    seen = []
-
-    def dnsfunc(name, timeout=5):
-        seen.append(name)
-        return public_dns_value if name == expected_query else None
-
-    verified = dkim_mod.verify(received, dnsfunc=dnsfunc)
-    assert verified, (
-        f"dkimpy rejected the signature for s={selector} d={domain} — the "
-        f"nest did not sign with the {selector!r} key. dnsfunc queries: "
-        f"{seen!r}. First 600 bytes:\n{received[:600]!r}"
+    want = dkim_selector_pair(label)
+    verified, seen = verify_each_dkim_signature(received, domain, records)
+    assert verified == want, (
+        f"dkimpy verified {verified!r} of the expected {want!r} for d={domain} "
+        f"— the nest did not sign with both of the {label!r} keys. dnsfunc "
+        f"queries: {seen!r}. First 900 bytes:\n{received[:900]!r}"
     )
-    assert expected_query in seen, (
-        f"dkimpy never queried {expected_query!r}; the signature's d=/s= are "
-        f"not aligned to {selector}._domainkey.{domain}. Queries: {seen!r}"
-    )
-    d_tag = dkim_signature_tag(received, "d")
-    s_tag = dkim_signature_tag(received, "s")
-    assert d_tag == domain, (
-        f"DKIM d= ({d_tag!r}) is not the From: header domain ({domain!r})"
-    )
-    assert s_tag == selector, (
-        f"DKIM s= ({s_tag!r}) is not the active selector ({selector!r})"
+    d_tags = dkim_signature_tags(received, "d")
+    assert d_tags == [domain, domain], (
+        f"DKIM d= ({d_tags!r}) is not the From: header domain ({domain!r})"
     )
 
 
-def _wait_for_minted_selector(admin_ws_factory, domain, expected_selector, timeout=45.0):
-    """Poll ``fauna.bridges.list_dkim_selectors(domain)`` until the nest-minted
-    ``expected_selector`` appears with a populated Ed25519 public DNS value;
-    return that value. ``pytest.fail`` after ``timeout``.
+def _wait_for_minted_selector(admin_ws_factory, domain, label, timeout=45.0):
+    """Poll ``fauna.bridges.list_dkim_selectors(domain)`` until the nest has
+    minted both selectors of ``label`` — ``<label>-rsa`` with an RSA public DNS
+    value and ``<label>-ed25519`` with an Ed25519 one; return them as
+    ``{selector: TXT value}``. ``pytest.fail`` after ``timeout``.
 
     The scheduled rotation-mint (``run_scheduled_dkim_rotation_mint``) runs on
     the nest's background-expiry tick, accelerated to a few seconds in tests via
@@ -2091,22 +2997,27 @@ def _wait_for_minted_selector(admin_ws_factory, domain, expected_selector, timeo
     up-to-one-tick wait without coupling to the cadence. The assertion is on the
     observable end-state (the selector listed by nest), not any log line.
     """
+    rsa, ed25519 = dkim_selector_pair(label)
     deadline = time.monotonic() + timeout
     seen: list[str] = []
     while time.monotonic() < deadline:
         with admin_ws_factory() as a:
             reply = a.call("fauna.bridges.list_dkim_selectors", {"domain": domain})
-        selectors = {s["selector"]: s for s in reply.get("selectors", [])}
-        seen = sorted(selectors)
-        info = selectors.get(expected_selector)
-        if info and info.get("public_dns_value", "").startswith("v=DKIM1; k=ed25519;"):
-            return info["public_dns_value"]
+        values = {
+            s["selector"]: s.get("public_dns_value", "")
+            for s in reply.get("selectors", [])
+        }
+        seen = sorted(values)
+        if values.get(rsa, "").startswith("v=DKIM1; k=rsa;") and values.get(
+            ed25519, ""
+        ).startswith("v=DKIM1; k=ed25519;"):
+            return {rsa: values[rsa], ed25519: values[ed25519]}
         time.sleep(1.0)
     pytest.fail(
-        f"nest never minted DKIM selector {expected_selector!r} for {domain} "
-        f"within {timeout:.0f}s (saw selectors {seen!r}) — "
+        f"nest never minted DKIM label {label!r} ({rsa!r} + {ed25519!r}) for "
+        f"{domain} within {timeout:.0f}s (saw selectors {seen!r}) — "
         f"run_scheduled_dkim_rotation_mint did not provision the due domain's "
-        f"rotation key"
+        f"rotation keys"
     )
 
 
@@ -2143,8 +3054,7 @@ def test_force_rotate_dkim_flips_active_selector_live(mail_bridge_mta, nest_inst
          LIVE under a running bridge, and the same test holds both sides of the
          flip.
     """
-    import dkim  # dkimpy — independent verifier; fleet venv dep (internal dev note)
-    from conftest import _published_dkim_record
+    from conftest import _published_dkim_records
     from clients.ws_rpc_admin_client import WsRpcAdminClient
 
     handle = mail_bridge_mta
@@ -2156,7 +3066,7 @@ def test_force_rotate_dkim_flips_active_selector_live(mail_bridge_mta, nest_inst
     new_selector = time.strftime("%Y%m", time.gmtime())
 
     # AUTH on the primary identity; From: + envelope on rotate.test. The
-    # submission MAIL-FROM gate accepts <auth_local>@<any local domain>, and
+    # sender is given <auth_local>@rotate.test once the domain exists, and
     # DKIM selects on the From: header domain → rotate.test's active key signs.
     auth_local = handle.submission_sender_local
     auth_user = f"{auth_local}@{primary}"
@@ -2188,12 +3098,13 @@ def test_force_rotate_dkim_flips_active_selector_live(mail_bridge_mta, nest_inst
                 "mta_sts_cert_mode": "per_host",
             },
         )
-    old_dns = _published_dkim_record(nest_instance, rotate_domain, old_selector)
+    _own_login_local_on(handle, rotate_domain)
+    old_dns = _published_dkim_records(nest_instance, rotate_domain, old_selector)
     received_before = _wait_until_signed_with_selector(
         handle, sni_host=primary, from_addr=from_addr, auth_plain=auth_plain,
-        external_rcpt=external_rcpt, selector=old_selector,
+        external_rcpt=external_rcpt, label=old_selector,
     )
-    _assert_dkim_selector(received_before, rotate_domain, old_selector, old_dns, dkim)
+    _assert_dkim_selector(received_before, rotate_domain, old_selector, old_dns)
 
     # ── FLIP: the nest mints the second selector's key, then force_rotate ──
     with _admin_ws() as a:
@@ -2203,19 +3114,19 @@ def test_force_rotate_dkim_flips_active_selector_live(mail_bridge_mta, nest_inst
             {"domain": rotate_domain, "rotation_days": 0},
         )
     new_dns = _wait_for_minted_selector(_admin_ws, rotate_domain, new_selector)
-    assert new_dns != old_dns, (
-        f"the nest published the same DKIM record for {new_selector!r} as for "
-        f"{old_selector!r} — a rotation must mint a distinct key"
+    assert not set(new_dns.values()) & set(old_dns.values()), (
+        f"the nest published a DKIM record for {new_selector!r} that "
+        f"{old_selector!r} already had — a rotation must mint distinct keys"
     )
     with _admin_ws() as a:
         a.force_rotate_dkim(rotate_domain)
 
-    # ── AFTER: the next outbound is signed s=<YYYYMM>, no restart ──
+    # ── AFTER: the next outbound is signed s=<YYYYMM>-*, no restart ──
     received_after = _wait_until_signed_with_selector(
         handle, sni_host=primary, from_addr=from_addr, auth_plain=auth_plain,
-        external_rcpt=external_rcpt, selector=new_selector,
+        external_rcpt=external_rcpt, label=new_selector,
     )
-    _assert_dkim_selector(received_after, rotate_domain, new_selector, new_dns, dkim)
+    _assert_dkim_selector(received_after, rotate_domain, new_selector, new_dns)
 
 
 @pytest.mark.feature("mail-server")
@@ -2251,7 +3162,6 @@ def test_scheduled_rotation_mints_new_selector_nestside(mail_bridge_mta, nest_in
          signature verifying proves the nest signs with the key whose public
          half it publishes.
     """
-    import dkim  # dkimpy — independent verifier; fleet venv dep (internal dev note)
     from clients.ws_rpc_admin_client import WsRpcAdminClient
 
     handle = mail_bridge_mta
@@ -2294,6 +3204,7 @@ def test_scheduled_rotation_mints_new_selector_nestside(mail_bridge_mta, nest_in
             {"domain": rotate_domain, "rotation_days": 0},
         )
 
+    _own_login_local_on(handle, rotate_domain)
     # ── MINT: the nest provisions the fresh <YYYYMM> key on its scheduled tick ──
     minted_dns = _wait_for_minted_selector(_admin_ws, rotate_domain, expected_selector)
     assert expected_selector != "default"
@@ -2303,9 +3214,133 @@ def test_scheduled_rotation_mints_new_selector_nestside(mail_bridge_mta, nest_in
         a.force_rotate_dkim(rotate_domain)
     received = _wait_until_signed_with_selector(
         handle, sni_host=primary, from_addr=from_addr, auth_plain=auth_plain,
-        external_rcpt=external_rcpt, selector=expected_selector,
+        external_rcpt=external_rcpt, label=expected_selector,
     )
-    _assert_dkim_selector(received, rotate_domain, expected_selector, minted_dns, dkim)
+    _assert_dkim_selector(received, rotate_domain, expected_selector, minted_dns)
+
+
+def _seed_dns_record(
+    nest_url: str, name: str, record_type: str, values: list, *,
+    transient: bool = False, empty: bool = False,
+) -> None:
+    """Seed one ``(name, type)`` answer into the nest's DNS resolver seam.
+
+    Hits ``POST /api/v1/test/dns/record`` (gated on ``--features test-hooks``
+    alone, which ``build_node()`` enables): the nest answers the seeded values
+    ahead of the real resolver, so a record reads as published with no real DNS.
+    ``transient`` makes the lookup fail instead; ``empty`` makes it answer that
+    no such record exists. An ``MX`` seed also answers the outbound MX lookup
+    (``dns_seed_test_hook::SeededMxRrsetResolver``), where a value is
+    ``"<pref> <host>"`` or ``"<pref> <host>:<port>"``.
+    """
+    body = json.dumps(
+        {"name": name, "record_type": record_type, "values": values,
+         "transient": transient, "empty": empty}
+    ).encode()
+    req = urllib.request.Request(
+        f"{nest_url}/api/v1/test/dns/record",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=5.0) as resp:
+        assert resp.status == 200, f"dns seed hook returned {resp.status}"
+
+
+@pytest.mark.feature("mail-server")
+def test_scheduled_flip_waits_for_publication(mail_bridge_mta, nest_instance):
+    """The scheduled DKIM flip waits for publication, not for age
+    (mail-multidomain.md § Rotation → *The flip waits for publication*): a
+    due domain's freshly minted selector does NOT become the signing key while
+    its TXT is unpublished, however long that lasts; once the nest's scheduled
+    tick sees the record published it stamps the sighting, and the flip lands
+    only after the 24 h peer-cache warm-up past that sighting. The scheduled
+    path end to end — never ``force_rotate_dkim``.
+
+    Neither the day nor DNS is real: ``POST /api/v1/test/outbound/clock``
+    moves the flip's clock (``AppState::outbound_now``) and
+    ``POST /api/v1/test/dns/record`` makes the record "published". The tick
+    runs every few seconds (``FAUNA_EXPIRY_INTERVAL_SECS``), so each phase
+    sleeps several ticks before it observes. Dedicated ``pubflip.test`` domain
+    (an active-selector flip is persistent state on the session-scoped nest).
+    The gate is per LABEL: with only the Ed25519 record of the pair
+    published, a day passes unflipped — receivers could not verify the RSA
+    signature yet.
+    """
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    handle = mail_bridge_mta
+    primary = handle.domain
+    rotate_domain = "pubflip.test"
+    new_selector = time.strftime("%Y%m", time.gmtime())
+    day_plus = 24 * 3600 + 3600  # past the 24 h window with an hour's margin
+    ticks = 10.0  # several FAUNA_EXPIRY_INTERVAL_SECS ticks
+
+    auth_local = handle.submission_sender_local
+    auth_user = f"{auth_local}@{primary}"
+    password = handle.submission_credential.decode()
+    auth_plain = base64.b64encode(
+        b"\x00" + auth_user.encode() + b"\x00" + password.encode()
+    ).decode()
+    from_addr = f"{auth_local}@{rotate_domain}"
+    external_rcpt = "recipient@external.test"
+    send = dict(
+        sni_host=primary, from_addr=from_addr, auth_plain=auth_plain,
+        external_rcpt=external_rcpt,
+    )
+
+    admin = nest_instance["admin"]
+
+    def _admin_ws():
+        return WsRpcAdminClient(
+            handle.nest_url,
+            actor_id=bytes(admin["signing_key"].verify_key),
+            signing_key=bytes(admin["signing_key"]),
+        )
+
+    with _admin_ws() as a:
+        a.call(
+            "fauna.bridges.add_local_domain",
+            {"domain": rotate_domain, "mta_sts_cert_mode": "per_host"},
+        )
+        a.call(
+            "fauna.bridges.set_dkim_rotation_days",
+            {"domain": rotate_domain, "rotation_days": 0},
+        )
+    _own_login_local_on(handle, rotate_domain)
+    minted_dns = _wait_for_minted_selector(_admin_ws, rotate_domain, new_selector)
+    assert new_selector != "default"
+    rsa_selector, ed25519_selector = dkim_selector_pair(new_selector)
+    # The domain reached the bridge and signs under its first label.
+    _wait_until_signed_with_selector(handle, label="default", **send)
+
+    # (a) Only the new label's Ed25519 record is published; a day passes: the
+    # tick stamps that one sighting, but the RSA record is not fetchable, so
+    # the old label keeps signing.
+    _seed_dns_record(
+        handle.nest_url, f"{ed25519_selector}._domainkey.{rotate_domain}", "TXT",
+        [minted_dns[ed25519_selector]],
+    )
+    time.sleep(ticks)  # sleep-ok: let the tick stamp the one sighting; the stamp has no wire surface to anchor on
+    _advance_outbound_clock(handle.nest_url, day_plus)
+    time.sleep(ticks)  # sleep-ok: negative assertion — several scheduled ticks must run unflipped; the stamp has no wire surface to anchor on
+    _wait_until_signed_with_selector(handle, label="default", **send)
+
+    # (b) The RSA record is published too: the next tick stamps that sighting,
+    # but the warm-up runs from the later of the two, so the old label still
+    # signs...
+    _seed_dns_record(
+        handle.nest_url, f"{rsa_selector}._domainkey.{rotate_domain}", "TXT",
+        [minted_dns[rsa_selector]],
+    )
+    time.sleep(ticks)  # sleep-ok: let the tick stamp the sighting; the stamp has no wire surface to anchor on
+    _wait_until_signed_with_selector(handle, label="default", **send)
+
+    # ...and a day after that sighting the scheduled tick flips onto the new
+    # label.
+    _advance_outbound_clock(handle.nest_url, day_plus)
+    received = _wait_until_signed_with_selector(handle, label=new_selector, **send)
+    _assert_dkim_selector(received, rotate_domain, new_selector, minted_dns)
 
 
 @pytest.mark.feature("mail-server")
@@ -2321,15 +3356,13 @@ def test_submission_multipart_dkim_verifies(mail_bridge_mta):
     strip → sign → enqueue → outbound-worker → MX-deliver → stub-capture path
     preserves the body byte-for-byte through realistic MIME — i.e. a multipart
     Gmail send won't fail DKIM at Stage 5 for a body-mangling reason. Same
-    fixture + inline-dnsfunc verification shape as the single-part test above.
+    fixture + per-signature verification shape as the single-part test above.
     """
-    import dkim  # dkimpy — independent verifier; fleet venv dep (internal dev note)
-
     handle = mail_bridge_mta
     domain = handle.domain
-    assert handle.dkim_public_dns_value, (
-        "fixture read no DKIM record (handle.dkim_public_dns_value unset) — "
-        "the verify test cannot run without the published TXT value"
+    assert handle.dkim_records, (
+        "fixture read no DKIM records (handle.dkim_records unset) — "
+        "the verify test cannot run without the published TXT values"
     )
     sender = f"{handle.submission_sender_local}@{domain}"
     password = handle.submission_credential.decode()
@@ -2394,19 +3427,14 @@ def test_submission_multipart_dkim_verifies(mail_bridge_mta):
         f"body was altered in transit. First 800 bytes:\n{received[:800]!r}"
     )
 
-    expected_query = f"{handle.dkim_selector}._domainkey.{domain}.".encode()
-    seen_queries: list[bytes] = []
-
-    def dnsfunc(name, timeout=5):
-        seen_queries.append(name)
-        return handle.dkim_public_dns_value if name == expected_query else None
-
-    verified = dkim.verify(received, dnsfunc=dnsfunc)
-    assert verified, (
-        "dkimpy rejected the multipart message's DKIM-Signature — the body-hash "
-        "over the multipart body did not match, i.e. the body was mangled "
-        f"between signing and delivery. dnsfunc queries: {seen_queries!r}. "
-        f"First 800 bytes:\n{received[:800]!r}"
+    verified, seen_queries = verify_each_dkim_signature(
+        received, domain, handle.dkim_records
+    )
+    assert verified == list(handle.dkim_records), (
+        f"dkimpy verified {verified!r} of {list(handle.dkim_records)!r} on the "
+        "multipart message — the body-hash over the multipart body did not "
+        "match, i.e. the body was mangled between signing and delivery. "
+        f"dnsfunc queries: {seen_queries!r}. First 800 bytes:\n{received[:800]!r}"
     )
     d_tag = _dkim_sig_tag(received, "d")
     from_domain = sender.split("@", 1)[1]
@@ -2738,85 +3766,12 @@ def _advance_outbound_clock(nest_url: str, advance_seconds: int) -> None:
 
 
 
-def _outbound_queue(nest_url: str) -> list:
-    """Snapshot nest's `outbound_mail_queue` rows (any status), ordered by id.
-
-    `GET /api/v1/test/outbound/queue`, same `test-hooks` gate. Projects
-    scheduling state only — `attempt_count`, `next_attempt_at`,
-    `delay_warned_at`, `status` — never message bodies.
-    """
-    req = urllib.request.Request(f"{nest_url}/api/v1/test/outbound/queue", method="GET")
-    with urllib.request.urlopen(req, timeout=5.0) as resp:
-        assert resp.status == 200, f"outbound queue hook returned {resp.status}"
-        return json.loads(resp.read().decode())["rows"]
-
-
 def _attempts_for(nest_url: str, recipient: str):
     """The `attempt_count` of the queued row addressed to `recipient`, or None."""
     for row in _outbound_queue(nest_url):
         if row["recipient"] == recipient:
             return row["attempt_count"]
     return None
-
-
-def _msgid_key(msgid: str) -> str:
-    """A Message-ID normalized for comparison against `original_msgid`.
-
-    ⚠ The queue stores the two provenances of a msgid differently, and the
-    difference is invisible until an assertion silently never matches: a msgid
-    **parsed from a message header** is stored bare (`t12bounce-…@fauna.test`),
-    while one nest **mints itself** keeps its angle brackets (`<delay-…>`,
-    `<bounce-…>` — see `_count_delay_warning_rows`). Callers hold the header
-    form, so normalizing both sides is what makes a lookup work for either.
-    """
-    return msgid.strip().lstrip("<").rstrip(">")
-
-
-def _await_bounce_decided(nest_url: str, msgid: str, recipient: str) -> dict:
-    """Barrier: wait until the queue row for `(msgid, recipient)` is terminal.
-
-    The causal anchor every "the DSN must NOT be relayed out" guard rests on
-    (`e2e-conventions.md` § convention 14 — negative asserts anchor to causal
-    order, never to a settle window). nest's `mark_outbound_bounced` handler
-    runs the **entire** NDR generation before it flips the row off `pending`,
-    and `submit_outbound` — the single chokepoint where a DSN could ever be
-    enqueued for MX relay — is inside that span:
-
-      * to-sender NDR: `submit_outbound` (`outbound_bounce.rs:174-200`) then
-        `mark_outbound_bounced_with_reason` (`:206`);
-      * forwarder NDR: `seal_and_ingest_local` (`:321-337`) then
-        `mark_outbound_bounced_with_reason` (`:343`);
-      * both of the handler's own fallback arms mark the row bounced too
-        (`bridge_routing_handlers.rs:6300-6330`), so the status leaves
-        `pending` on every path.
-
-    So a row observed terminal proves that message's relay decision has already
-    been made, and any row it would have enqueued is **already in the queue**.
-    "No DSN was relayed out" becomes a statement about state rather than about
-    elapsed time — and it is strictly stronger than reading the stub MX, which
-    could only see a relayed DSN after a further outbound drain cycle (the
-    worker's `PollInterval` is 30 s, so the 2 s settle windows this replaced
-    could not reliably have caught the regression at all).
-
-    Returns the terminal row, so a caller can assert on the status it reached.
-    """
-    return wait_until(
-        lambda: next(
-            (
-                row
-                for row in _outbound_queue(nest_url)
-                if _msgid_key(row["original_msgid"]) == _msgid_key(msgid)
-                and row["recipient"] == recipient
-                and row["status"] != "pending"
-            ),
-            None,
-        ),
-        MAIL_OUTBOUND_CYCLE_S,
-        diagnose=lambda: (
-            f"no terminal outbound row for msgid={msgid!r} recipient={recipient!r}; "
-            f"queue={[(r['original_msgid'], r['recipient'], r['status']) for r in _outbound_queue(nest_url)]}"
-        ),
-    )
 
 
 def _hairpinned_dsn_rows(nest_url: str, since_id: int, domain: str) -> list:
@@ -2861,24 +3816,36 @@ def _max_queue_id(nest_url: str) -> int:
     return max((row["id"] for row in _outbound_queue(nest_url)), default=0)
 
 
-def _count_delay_warning_rows(nest_url: str, sender: str) -> int:
-    """Delay-warning DSN rows nest has ENQUEUED back to `sender`.
+def _count_delay_warning_rows(nest_url: str, sender: str, row_id: int) -> int:
+    """Delay-warning DSN rows nest has ENQUEUED back to `sender` for the queue
+    row `row_id`.
 
     The enqueue side of the once-per-message gate: `enqueue_delay_warning`
     inserts a null-envelope-sender row whose `original_msgid` is minted as
     `<delay-{now}-{row id}@{mta}>`. Counting these sees a duplicate warning the
     moment nest decides to emit it, without waiting for the extra drain cycle
-    its delivery to the stub MX would need.
+    its delivery to the stub MX would need. Scoped to `row_id`: the session's
+    other tempfailing rows to the same sender cross the same fast-forwarded
+    4 h mark and are warned about too — correctly, once each.
     """
     return sum(
         1
         for row in _outbound_queue(nest_url)
-        if row["original_msgid"].startswith("<delay-") and row["recipient"] == sender
+        if row["original_msgid"].startswith("<delay-")
+        and f"-{row_id}@" in row["original_msgid"]
+        and row["recipient"] == sender
     )
 
 
-def _count_delayed(stub_mx) -> int:
-    return sum(1 for m in stub_mx.messages() if b"action: delayed" in m.lower())
+def _delayed_dsns_for(stub_mx, msgid_token: str) -> list:
+    """Delayed DSNs on the stub that report the message whose Message-ID
+    carries `msgid_token` (the DSN quotes the original's headers)."""
+    token = msgid_token.lower().encode()
+    return [
+        m for m in stub_mx.messages()
+        if b"multipart/report" in m.lower() and b"action: delayed" in m.lower()
+        and token in m.lower()
+    ]
 
 
 @pytest.mark.feature("mail-server")
@@ -2909,6 +3876,7 @@ def test_outbound_delay_warning_emitted_once(mail_bridge_mta):
     sender = f"{handle.submission_sender_local}@{domain}"
     password = handle.submission_credential.decode()
     tempfail_rcpt = "tempfail@external.test"
+    msgid_token = f"t13delay-{int(time.time() * 1000)}"
 
     auth_plain = base64.b64encode(
         b"\x00" + sender.encode() + b"\x00" + password.encode()
@@ -2917,7 +3885,7 @@ def test_outbound_delay_warning_emitted_once(mail_bridge_mta):
         f"From: Sender <{sender}>",
         f"To: {tempfail_rcpt}",
         "Subject: T1.3 delay warning on a tempfailing recipient",
-        f"Message-ID: <t13delay-{int(time.time() * 1000)}@{domain}>",
+        f"Message-ID: <{msgid_token}@{domain}>",
         "Date: Sat, 23 May 2026 12:00:00 +0000",
         "MIME-Version: 1.0",
         "Content-Type: text/plain; charset=utf-8",
@@ -2941,9 +3909,22 @@ def test_outbound_delay_warning_emitted_once(mail_bridge_mta):
         conn.cmd("QUIT", "221", deadline)
 
     # Attempt 1 fires immediately (submission Data triggers the worker) and
-    # the stub 451s the RCPT → mark_outbound_failed. Let it land so the row's
-    # created_at is set on the real clock before we freeze + fast-forward.
-    time.sleep(1.0)
+    # the stub 451s the RCPT → mark_outbound_failed. Wait for that attempt to
+    # be RECORDED (the row's attempt_count) before freezing + fast-forwarding,
+    # so the row and its created_at exist on the real clock — a causal anchor,
+    # never a settle sleep (convention 14).
+    row = wait_until(
+        lambda: next(
+            (
+                r for r in _outbound_queue(handle.nest_url)
+                if _msgid_key(r["original_msgid"]) == _msgid_key(f"<{msgid_token}@{domain}>")
+                and r["recipient"] == tempfail_rcpt and r["attempt_count"] >= 1
+            ),
+            None,
+        ),
+        MAIL_OUTBOUND_CYCLE_S,
+        diagnose=lambda: f"no recorded attempt for {tempfail_rcpt!r}",
+    )
     _advance_outbound_clock(handle.nest_url, 4 * 3600 + 120)
 
     # The worker re-polls within its PollInterval; the next attempt crosses
@@ -2952,12 +3933,9 @@ def test_outbound_delay_warning_emitted_once(mail_bridge_mta):
     dsn = None
     poll_deadline = time.monotonic() + 75.0
     while time.monotonic() < poll_deadline:
-        for msg in handle.stub_mx.messages():
-            low = msg.lower()
-            if b"multipart/report" in low and b"action: delayed" in low:
-                dsn = msg
-                break
-        if dsn is not None:
+        found = _delayed_dsns_for(handle.stub_mx, msgid_token)
+        if found:
+            dsn = found[0]
             break
         time.sleep(0.5)
     assert dsn is not None, (
@@ -3000,13 +3978,13 @@ def test_outbound_delay_warning_emitted_once(mail_bridge_mta):
     )
 
     # Enqueue side: nest decided, this attempt, whether to warn again.
-    assert _count_delay_warning_rows(handle.nest_url, sender) == 1, (
+    assert _count_delay_warning_rows(handle.nest_url, sender, row["id"]) == 1, (
         "nest enqueued more than one delay-warning DSN — the 4 h warning must be "
         "emitted once per message, not on every subsequent attempt "
         "(delay_warned_at gate)"
     )
     # Delivery side: and no second one reached the sender over the wire.
-    assert _count_delayed(handle.stub_mx) == 1, (
+    assert len(_delayed_dsns_for(handle.stub_mx, msgid_token)) == 1, (
         "more than one delayed DSN reached the sender — the 4 h delay-warning "
         "must be emitted once per message, not on every subsequent attempt"
     )
@@ -3079,24 +4057,47 @@ def _submit(handle, external_rcpt: str, token: str) -> None:
         conn.cmd("QUIT", "221", deadline)
 
 
-def _assert_not_delivered(stub_mx, token: str, window: float) -> None:
-    """Assert no message tagged `token` reaches the stub within `window`.
+def _assert_attempt_refused(nest_url: str, stub_mx, recipient: str, token: str,
+                            reason: str) -> None:
+    """Assert the delivery attempt to `recipient` was REFUSED for `reason`.
 
-    A bounded-time negative: the submission triggers an immediate worker
-    poll, so a would-be delivery lands within a couple of seconds; this
-    window is generously above that. The session-scoped stub accumulates
-    every test's mail (and background DSN re-deliveries to the primary
-    domain), hence the per-token filter — only *this* message's absence
-    is asserted.
+    Read off the attempt's recorded outcome, never a quiet window
+    (`e2e-conventions.md` convention 14): the worker reports a refused attempt
+    as `mark_outbound_failed` with its reason, which nest records on the queue
+    row (`attempt_count`, `last_error`) and reschedules (`status` stays
+    `pending` — never a bounce). Once that record exists the attempt is over,
+    so the stub holding nothing tagged `token` is a statement about state: the
+    refused attempt delivered nothing. The session-scoped stub accumulates
+    every test's mail, hence the per-token filter.
     """
-    deadline = time.monotonic() + window
-    while time.monotonic() < deadline:
-        msg = _find_tagged(stub_mx, token)
-        assert msg is None, (
-            f"a message tagged {token!r} reached the stub MX — MTA-STS "
-            f"enforcement failed to refuse delivery. First 400 bytes:\n{msg[:400]!r}"
-        )
-        time.sleep(0.5)
+    row = wait_until(
+        lambda: next(
+            (
+                r
+                for r in _outbound_queue(nest_url)
+                if r["recipient"] == recipient and r["attempt_count"] >= 1
+                and r["last_error"]
+            ),
+            None,
+        ),
+        MAIL_OUTBOUND_CYCLE_S,
+        diagnose=lambda: (
+            f"no failed attempt recorded for {recipient!r}; queue="
+            f"{[(r['recipient'], r['status'], r['attempt_count'], r['last_error']) for r in _outbound_queue(nest_url)]}"
+        ),
+    )
+    assert row["status"] == "pending", (
+        f"a refused attempt must be rescheduled, never bounced or delivered: {row!r}"
+    )
+    assert reason in row["last_error"], (
+        f"the attempt failed, but not for the expected reason {reason!r}: "
+        f"last_error={row['last_error']!r}"
+    )
+    msg = _find_tagged(stub_mx, token)
+    assert msg is None, (
+        f"a message tagged {token!r} reached the stub MX although its attempt "
+        f"was recorded refused. First 400 bytes:\n{msg[:400]!r}"
+    )
 
 
 @pytest.mark.feature("mail-server")
@@ -3132,9 +4133,10 @@ def test_outbound_mta_sts_enforce_refuses_mismatched_mx(mail_bridge_mta):
     )
     _submit(handle, external_rcpt, token)
 
-    # Bounded negative: 127.0.0.1 matches no mx: pattern → every host is
-    # enforce-refused → reschedule, no delivery.
-    _assert_not_delivered(handle.stub_mx, token, window=10.0)
+    # 127.0.0.1 matches no mx: pattern → every host is enforce-refused →
+    # the attempt is recorded failed and rescheduled, no delivery.
+    _assert_attempt_refused(handle.nest_url, handle.stub_mx, external_rcpt, token,
+                            "mta-sts enforce: no MX host matched policy")
 
 
 @pytest.mark.feature("mail-server")
@@ -3167,9 +4169,10 @@ def test_outbound_mta_sts_enforce_requires_starttls(mail_bridge_mta):
     )
     _submit(handle, external_rcpt, token)
 
-    # Bounded negative: host matches, but enforce requires STARTTLS and the
-    # stub offers none → TemporaryError, reschedule, no plaintext delivery.
-    _assert_not_delivered(handle.stub_mx, token, window=10.0)
+    # Host matches, but enforce requires STARTTLS and the stub offers none →
+    # TemporaryError, recorded and rescheduled, no plaintext delivery.
+    _assert_attempt_refused(handle.nest_url, handle.stub_mx, external_rcpt, token,
+                            "does not offer STARTTLS")
 
 
 @pytest.mark.feature("mail-server")
@@ -3295,9 +4298,10 @@ def test_outbound_dane_pin_mismatch_refuses(mail_bridge_mta):
     )
     _submit(handle, external_rcpt, token)
 
-    # Bounded negative: the pin mismatch fails the handshake → TemporaryError
-    # → reschedule, no delivery.
-    _assert_not_delivered(handle.tls_stub_mx, token, window=10.0)
+    # The pin mismatch fails the handshake → TemporaryError, recorded and
+    # rescheduled, no delivery.
+    _assert_attempt_refused(handle.nest_url, handle.tls_stub_mx, external_rcpt, token,
+                            "satisfies no published TLSA record")
 
 
 # ── TLSRPT outbound reporter (T2.4) ────────────────────────────────────
@@ -3316,11 +4320,10 @@ def _record_tls_attempt(
     bucket) and records the outcome. `result_type=None` is a successful TLS
     session; a token is an RFC 8460 §4.3 failure.
 
-    Seeded directly rather than via a live outbound delivery because the
-    submission Sent-copy path (`fauna_recipient.go::dispatchFaunaRecipients`)
-    is pre-existing-red on this branch (`451 4.7.0`, unrelated to TLSRPT), so a
-    real submit→enqueue→deliver round-trip can't reach the outbound worker
-    here. The Go-side classification + the report_tls_attempt wire are covered
+    Seeded directly rather than via a live outbound delivery: no live
+    submit→enqueue→deliver→report test has been written (the submission path
+    itself is green now — see `test_submission_round_trip` — so one is
+    possible). The Go-side classification + the report_tls_attempt wire are covered
     by `internal/mta/outbound_tlsrpt_test.go` and the nest handler unit tests.
     """
     body: dict = {"recipient_domain": recipient_domain, "mx_host": mx_host}
@@ -3395,9 +4398,8 @@ def test_outbound_tlsrpt_emit_persists_aggregated_report(mail_bridge_mta):
     → an `https:` rua persists without an HTTP server and with no outbound-queue
     side effect), and the daily emitter's drain/fetch/build/persist/clear loop.
 
-    The Go-MTA → `report_tls_attempt` WS half is NOT exercised here: the
-    submission Sent-copy path is pre-existing-red on this branch (see
-    `_record_tls_attempt`), so a live outbound delivery can't reach the worker.
+    The Go-MTA → `report_tls_attempt` WS half is NOT exercised here: no live
+    outbound-delivery test exists yet (see `_record_tls_attempt`).
     That half is covered by `internal/mta/outbound_tlsrpt_test.go` (classifier +
     deliverOne report-flow) and the nest `report_tls_attempt` handler unit tests.
     """
@@ -3406,7 +4408,7 @@ def test_outbound_tlsrpt_emit_persists_aggregated_report(mail_bridge_mta):
 
     # Three attempts of differing result-types → one `no-policy-found` bucket
     # with one successful TLS session and two distinct failure tokens. (No live
-    # outbound delivery has happened — submission is red — so the aggregator
+    # outbound delivery has happened in this test, so the aggregator
     # holds only what this test seeds.)
     _record_tls_attempt(nest, domain, "mx.tlsrpt-e2e.test", None)
     _record_tls_attempt(nest, domain, "mx.tlsrpt-e2e.test", "starttls-not-supported")
@@ -3442,6 +4444,89 @@ def test_outbound_tlsrpt_emit_persists_aggregated_report(mail_bridge_mta):
     assert _aggregator_domain(nest, domain) is None, (
         f"emit pass did not clear {domain} from the aggregator"
     )
+
+
+@pytest.mark.feature("admin-mail-policy")
+def test_outbound_tlsrpt_switched_off_sends_no_report(mail_bridge_mta, nest_instance):
+    """With the admin's outbound TLS reports switched off
+    (`put_outbound_policy {tlsrpt_send_reports: false}`), the daily emit pass
+    sends nothing to a domain that publishes a reporting address, and drops the
+    day's counts; switched back on, the next pass sends again.
+
+    Same seed + emit hooks as `test_outbound_tlsrpt_emit_persists_aggregated_report`
+    (the https `rua` persists through the always-200 poster), so the only
+    variable is the admin's switch.
+    """
+    nest = mail_bridge_mta.nest_url
+    domain = "tlsrpt-off-e2e.test"
+    rua = {domain: [f"https://reports.{domain}/v1"]}
+    now = 1_780_086_400  # a fixed day-boundary epoch (2026-05-29 UTC)
+
+    def _rows() -> list[dict]:
+        return [r for r in _tlsrpt_persisted(nest) if r["recipient_domain"] == domain]
+
+    with _admin_ws(nest_instance) as ws:
+        ws.call("fauna.bridges.put_outbound_policy", {"tlsrpt_send_reports": False})
+    try:
+        _record_tls_attempt(nest, domain, f"mx.{domain}", "validation-failure")
+        assert _aggregator_domain(nest, domain) is not None
+        _emit_tlsrpt_now(nest, now, rua)
+        assert _rows() == [], f"reports switched off, yet one was sent: {_rows()!r}"
+        assert _aggregator_domain(nest, domain) is None, (
+            "the opted-out day's counts must be dropped, not carried to a later report"
+        )
+    finally:
+        with _admin_ws(nest_instance) as ws:
+            ws.call("fauna.bridges.put_outbound_policy", {})
+
+    _record_tls_attempt(nest, domain, f"mx.{domain}", "validation-failure")
+    _emit_tlsrpt_now(nest, now + 86_400, rua)
+    assert _rows(), "switched back on, the next pass must send the report"
+
+
+@pytest.mark.feature("mail-server")
+def test_a_domain_publishing_a_mailto_report_address_receives_its_daily_tls_report(
+    mail_bridge_mta,
+):
+    """Outcome 22: the daily TLS report REACHES a domain that asks for one by
+    mail. A recorded failed attempt to the domain, then one daily emit pass whose
+    policy fetch answers `rua=mailto:` an address the stub MX receives for: the
+    report leaves through the real outbound queue and MTA and arrives as an
+    RFC 8460 report — an `application/tlsrpt+gzip` part whose JSON names the
+    domain and counts the failure (`smtp-server.md` § TLSRPT outbound reporter).
+
+    `test_outbound_tlsrpt_emit_persists_aggregated_report` pins the aggregation
+    and the https leg's persistence; this is the delivery half."""
+    import email
+    import gzip
+
+    handle = mail_bridge_mta
+    nest = handle.nest_url
+    domain = f"tlsrpt-mail-{secrets.token_hex(4)}.test"
+    rua_addr = f"tls-reports-{secrets.token_hex(4)}@external.test"
+
+    _record_tls_attempt(nest, domain, f"mx.{domain}", "starttls-not-supported")
+    _emit_tlsrpt_now(nest, int(time.time()), {domain: [f"mailto:{rua_addr}"]})
+    _poke_outbound_bridge(nest)
+
+    received = _wait_for_tagged(handle.stub_mx, domain, timeout=MAIL_OUTBOUND_CYCLE_S)
+    assert received is not None, (
+        f"no report for {domain} reached the stub MX — persisted rows: "
+        f"{[r for r in _tlsrpt_persisted(nest) if r['recipient_domain'] == domain]!r} "
+        f"(bridge log: {handle.log_file})"
+    )
+    msg = email.message_from_bytes(received)
+    reports = [p for p in msg.walk() if p.get_content_type() == "application/tlsrpt+gzip"]
+    assert len(reports) == 1, (
+        f"the message must carry one application/tlsrpt+gzip part; parts: "
+        f"{[p.get_content_type() for p in msg.walk()]!r}"
+    )
+    report = json.loads(gzip.decompress(reports[0].get_payload(decode=True)))
+    (policy,) = report["policies"]
+    assert policy["policy"]["policy-domain"] == domain, report
+    assert policy["summary"]["total-failure-session-count"] == 1, report
+    failures = {d["result-type"]: d["failed-session-count"] for d in policy["failure-details"]}
+    assert failures == {"starttls-not-supported": 1}, report
 
 
 def _rcpt_status(conn, rcpt_addr: str, deadline: float) -> str:
@@ -3565,20 +4650,6 @@ def test_mta_local_domains_hot_reloads_without_restart(mail_bridge_mta, nest_ins
     # 4) After removal, the gate hot-reverts → 550 again (no restart).
     _poll_rcpt_code("550", "remove_local_domain config_changed hot-revert")
     assert handle.proc.pid == pid_before, "bridge process was restarted (PID changed)"
-
-
-def _read_final_reply(conn, deadline: float) -> str:
-    """Read reply lines until a non-continuation arrives — WITHOUT asserting a code.
-
-    `_SmtpConn.expect` asserts the code it was handed, which is exactly what we
-    must not do here: the whole point of the oversized-message test is to
-    *discover* which of {deliver, defer, bounce, silently-drop} the stack picks.
-    """
-    while True:
-        line = conn.recv_line(deadline)
-        if len(line) >= 4 and line[3] == "-":
-            continue
-        return line
 
 
 @pytest.mark.feature("mail-server")
@@ -3854,3 +4925,736 @@ def test_inbound_message_formerly_over_the_at_rest_ceiling_now_delivers(
     assert _stored() > before, (
         f"the MTA ACKed the message with {reply!r} but nest stored nothing. A 250 must mean stored."
     )
+
+
+# ── Inbound TLS posture (smtp-server.md § TLS posture per port) ──────────────
+
+
+def _tls_client(*, versions, ciphers=None):
+    """A client TLS context pinned to `versions` (min, max) and, for TLS 1.2,
+    to the OpenSSL cipher string `ciphers`. Security level 0 so the local
+    OpenSSL is willing to OFFER what the server must refuse — the refusal then
+    has to come from the server, which `_assert_server_refused` confirms."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    ctx.minimum_version, ctx.maximum_version = versions
+    ctx.set_ciphers(f"{ciphers or 'DEFAULT'}:@SECLEVEL=0")
+    return ctx
+
+
+def _ecdhe_tls12_suites(*, aead: bool) -> str:
+    """Every pre-1.3 ECDHE suite the local OpenSSL knows whose cipher is (or is
+    not) AEAD, as a cipher string — read from OpenSSL's own catalogue rather
+    than spelled out, so the CBC side is exhaustive."""
+    probe = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    probe.set_ciphers("ALL:@SECLEVEL=0")
+    names = [
+        c["name"]
+        for c in probe.get_ciphers()
+        if c["kea"] == "kx-ecdhe" and c["protocol"] != "TLSv1.3" and c["aead"] == aead
+    ]
+    assert names, f"the local OpenSSL offers no ECDHE {'AEAD' if aead else 'non-AEAD'} suite"
+    return ":".join(names)
+
+
+def _handshake(port: int, server_name: str, ctx, *, starttls: bool):
+    """Open the TLS layer of one mail port under `ctx` — after STARTTLS on port
+    25, at once on the implicit-TLS 465. Returns None on a completed handshake,
+    else the `ssl.SSLError` the client saw."""
+    deadline = time.monotonic() + 30.0
+    raw = socket.create_connection(("127.0.0.1", port), timeout=15.0)
+    try:
+        if starttls:
+            plain = _SmtpConn(raw)
+            plain.expect("220", deadline)
+            plain.cmd("EHLO external.test", "250", deadline)
+            plain.cmd("STARTTLS", "220", deadline)
+        try:
+            tls = ctx.wrap_socket(raw, server_hostname=server_name)
+        except ssl.SSLError as exc:
+            return exc
+        tls.close()
+        return None
+    finally:
+        raw.close()
+
+
+def _assert_server_refused(err, what: str) -> None:
+    """The handshake failed BECAUSE THE SERVER SAID NO: OpenSSL names a
+    received alert `…ALERT…` (protocol_version, handshake_failure). A failure
+    without one would be the local stack declining to offer, which proves
+    nothing about the nest."""
+    assert err is not None, f"{what}: the handshake completed"
+    assert "ALERT" in (err.reason or "").upper() or "alert" in str(err).lower(), (
+        f"{what}: the handshake failed without a server alert, so the refusal "
+        f"may be local: {err!r}"
+    )
+
+
+@pytest.mark.feature("mail-server")
+def test_port25_refuses_mail_before_starttls(mail_bridge_mta):
+    """An outside server that will not switch to an encrypted connection cannot
+    hand mail over on port 25, and is told encryption is required (`530 5.7.x`)
+    — port 25 ships in `required` mode only (smtp-server.md § TLS posture per
+    port). The same sender, after STARTTLS, is accepted: the refusal is about
+    the cleartext, not the sender."""
+    handle = mail_bridge_mta
+    deadline = time.monotonic() + 30.0
+    raw = socket.create_connection(("127.0.0.1", handle.mx_port), timeout=15.0)
+    with _SmtpConn(raw) as conn:
+        conn.expect("220", deadline)
+        conn.cmd("EHLO external.test", "250", deadline)
+        reply = conn.cmd("MAIL FROM:<sender@external.test>", "530", deadline)
+        assert "5.7." in reply, f"the refusal must say encryption is required; got {reply!r}"
+    with _connect_smtp_starttls(handle.mx_port, handle.domain, deadline) as conn:
+        conn.cmd("MAIL FROM:<sender@external.test>", "250", deadline)
+        conn.cmd("QUIT", "221", deadline)
+
+
+@pytest.mark.feature("mail-server")
+def test_mail_ports_refuse_outdated_tls_versions(mail_bridge_mta):
+    """A server or mail app offering only TLS 1.0/1.1 cannot connect to port
+    25 (after STARTTLS) or to the implicit-TLS submission port 465: the
+    bridge's floor is TLS 1.2 (RFC 8996). A TLS 1.2 client gets through on
+    both, so the client stack is not what refuses."""
+    handle = mail_bridge_mta
+    old = _tls_client(versions=(ssl.TLSVersion.TLSv1, ssl.TLSVersion.TLSv1_1))
+    tls12 = _tls_client(versions=(ssl.TLSVersion.TLSv1_2, ssl.TLSVersion.TLSv1_2))
+    for port, starttls in ((handle.mx_port, True), (handle.submission_port_465, False)):
+        _assert_server_refused(
+            _handshake(port, handle.domain, old, starttls=starttls),
+            f"a TLS 1.0/1.1-only client on port {port}",
+        )
+        assert _handshake(port, handle.domain, tls12, starttls=starttls) is None, (
+            f"a TLS 1.2 client must connect on port {port}"
+        )
+
+
+@pytest.mark.feature("mail-server")
+def test_mail_ports_refuse_weak_cbc_only_ciphers(mail_bridge_mta):
+    """A server or mail app offering only older CBC-mode ciphers cannot connect
+    to port 25 or 465: TLS 1.2 is pinned to the ECDHE + AEAD list
+    (smtp-server.md § TLS posture per port). The same client offering an AEAD
+    suite connects, so it is the cipher, not the version, that is refused."""
+    handle = mail_bridge_mta
+    v12 = (ssl.TLSVersion.TLSv1_2, ssl.TLSVersion.TLSv1_2)
+    cbc = _tls_client(versions=v12, ciphers=_ecdhe_tls12_suites(aead=False))
+    aead = _tls_client(versions=v12, ciphers=_ecdhe_tls12_suites(aead=True))
+    for port, starttls in ((handle.mx_port, True), (handle.submission_port_465, False)):
+        _assert_server_refused(
+            _handshake(port, handle.domain, cbc, starttls=starttls),
+            f"a CBC-only client on port {port}",
+        )
+        assert _handshake(port, handle.domain, aead, starttls=starttls) is None, (
+            f"an AEAD client must connect on port {port}"
+        )
+
+
+# ── Greylisting and the role addresses (smtp-server.md § Greylisting,
+#    § abuse@ / postmaster@ role-address routing) ─────────────────────────────
+
+
+def _put_greylist(nest, *, enabled: bool, delay_secs: int = 0) -> None:
+    """Set the greylist on top of the fixtures' spam posture (`put_spam_policy`
+    replaces the whole group, so the rest of the posture is re-sent)."""
+    from conftest import MTA_FIXTURE_SPAM_POSTURE
+
+    with _admin_ws(nest) as ws:
+        ws.call(
+            "fauna.bridges.put_spam_policy",
+            {**MTA_FIXTURE_SPAM_POSTURE, "greylist_enabled": enabled, "greylist_delay_secs": delay_secs},
+        )
+
+
+def _rcpt_reply(port: int, domain: str, sender: str, rcpt: str) -> str:
+    """One fresh connection: MAIL FROM `sender`, RCPT TO `rcpt`; the RCPT reply."""
+    deadline = time.monotonic() + 30.0
+    with _connect_smtp_starttls(port, domain, deadline) as conn:
+        conn.cmd(f"MAIL FROM:<{sender}>", "250", deadline)
+        conn.send_raw(f"RCPT TO:<{rcpt}>\r\n".encode())
+        reply = _read_final_reply(conn, deadline)
+        conn.cmd("QUIT", "221", deadline)
+    return reply
+
+
+def _admin_alias(handle) -> str:
+    """An ordinary (non-role) address the venue's admin holds — the control
+    recipient beside a role address, which also routes to the admin."""
+    local = f"admin-box-{secrets.token_hex(4)}"
+    add_exact_alias(handle.nest["url"], handle.nest["admin"]["signing_key"], handle.domain, local)
+    return f"{local}@{handle.domain}"
+
+
+@pytest.mark.feature("mail-server")
+def test_role_address_accepted_first_try_under_greylisting(role_address_venue):
+    """With greylisting ON, mail to `postmaster@` from a sender the nest has
+    never seen is accepted at the first RCPT, while a never-seen sender to an
+    ordinary address of the same admin is deferred `451` — so the greylist is
+    live and the role address is what skips it."""
+    handle = role_address_venue
+    control = _admin_alias(handle)
+    _put_greylist(handle.nest, enabled=True)
+    try:
+        sender = f"ops@grey-role-{secrets.token_hex(4)}.external.test"
+        role = _rcpt_reply(handle.mx_port, handle.domain, sender, f"postmaster@{handle.domain}")
+        assert role.startswith("250"), f"postmaster@ must be accepted first try; got {role!r}"
+        other = f"ops@grey-ctl-{secrets.token_hex(4)}.external.test"
+        ordinary = _rcpt_reply(handle.mx_port, handle.domain, other, control)
+        assert ordinary.startswith("451"), (
+            f"control: a never-seen sender to an ordinary address must be greylisted; got {ordinary!r}"
+        )
+    finally:
+        _put_greylist(handle.nest, enabled=False)
+
+
+@pytest.mark.feature("mail-server")
+def test_greylist_passed_sender_is_accepted_first_try_afterwards(mail_bridge_mta, nest_instance):
+    """Once a sender got through by retrying, its later mail to the same person
+    is accepted at once even while a NEW sender still has to wait out the hold:
+    deferred, then passed on retry (hold 0); then the hold is raised to an hour
+    — the passed sender's next message is accepted on the first try, while a
+    fresh sender's immediate retry is still deferred. The thirty-day length of
+    that allowance is pinned in `fauna_mail::greylist`."""
+    handle = mail_bridge_mta
+    rcpt = f"{handle.recipient_local_part}@{handle.domain}"
+    passed = f"op@grey-pass-{secrets.token_hex(4)}.external.test"
+    fresh = f"op@grey-fresh-{secrets.token_hex(4)}.external.test"
+    _put_greylist(nest_instance, enabled=True, delay_secs=0)
+    try:
+        first = _rcpt_reply(handle.mx_port, handle.domain, passed, rcpt)
+        assert first.startswith("451"), f"first contact must be deferred; got {first!r}"
+        retry = _rcpt_reply(handle.mx_port, handle.domain, passed, rcpt)
+        assert retry.startswith("250"), f"the retry must pass; got {retry!r}"
+
+        _put_greylist(nest_instance, enabled=True, delay_secs=3600)
+        later = _rcpt_reply(handle.mx_port, handle.domain, passed, rcpt)
+        assert later.startswith("250"), (
+            f"a sender that already got through must be accepted first try; got {later!r}"
+        )
+        for attempt in ("first contact", "immediate retry"):
+            reply = _rcpt_reply(handle.mx_port, handle.domain, fresh, rcpt)
+            assert reply.startswith("451"), (
+                f"control: a fresh sender's {attempt} inside the hour's hold must be deferred; got {reply!r}"
+            )
+    finally:
+        _put_greylist(nest_instance, enabled=False)
+
+
+@pytest.mark.feature("mail-server")
+def test_no_automatic_reply_is_sent_from_a_role_address(role_address_venue):
+    """The admin has an automatic reply on. Mail to `postmaster@` reaches the
+    admin's mailbox but queues no reply; the same rule DOES reply to mail sent
+    to the admin's ordinary address. Each reply is queued before its DATA's
+    `250` (the auto-reply stage runs inside the transaction), so reading the
+    queue after both transactions is latency-independent."""
+    handle = role_address_venue
+    control = _admin_alias(handle)
+    with _admin_ws(handle.nest) as ws:
+        ws.call("fauna.email.filters.create", {
+            "name": "vacation",
+            "rules": [{"SenderDomain": {"domain": "role-vacation.test"}}],
+            "combination": "all",
+            "action": {"AutoReply": {"subject": "Out of office", "body": "away", "interval_hours": 24}},
+            "priority": 0,
+        })
+
+    def _deliver(sender: str, rcpt: str) -> None:
+        deadline = time.monotonic() + 30.0
+        body = "\r\n".join([
+            f"From: Sender <{sender}>",
+            f"To: {rcpt}",
+            "Subject: are you there?",
+            f"Message-ID: <{secrets.token_hex(8)}@role-vacation.test>",
+            "Date: Fri, 09 Oct 2026 12:00:00 +0000",
+            "MIME-Version: 1.0",
+            "Content-Type: text/plain; charset=utf-8",
+            "",
+            "hello",
+        ]) + "\r\n"
+        with _connect_smtp_starttls(handle.mx_port, handle.domain, deadline) as conn:
+            conn.cmd(f"MAIL FROM:<{sender}>", "250", deadline)
+            conn.cmd(f"RCPT TO:<{rcpt}>", "250", deadline)
+            conn.cmd("DATA", "354", deadline)
+            conn.send_raw(body.encode())
+            conn.cmd(".", "250", deadline)
+            conn.cmd("QUIT", "221", deadline)
+
+    to_role = f"a-{secrets.token_hex(4)}@role-vacation.test"
+    to_box = f"b-{secrets.token_hex(4)}@role-vacation.test"
+    _deliver(to_role, f"postmaster@{handle.domain}")
+    _deliver(to_box, control)
+
+    recipients = [row["recipient"] for row in _outbound_queue(handle.nest["url"])]
+    assert to_box in recipients, (
+        f"control: the rule must reply to mail at the admin's own address; queue={recipients}"
+    )
+    assert to_role not in recipients, (
+        f"an automatic reply was queued from postmaster@ to {to_role}; queue={recipients}"
+    )
+
+
+@pytest.mark.feature("mail-server")
+def test_a_blocklist_listing_never_stops_outbound_delivery(mail_bridge_mta, nest_instance):
+    """Outcome 34: with the nest's outbound address LISTED on every blocklist its
+    self-check asks (the DNS seam answers each list's query with a listing, and a
+    real self-check run reads all three as listed), a message to an outside
+    recipient is still handed to the receiving server — the stub MX gets it
+    (`mail-deliverability.md` § Architectural rules: a listing is non-blocking;
+    the receiving servers decide)."""
+    from helpers.mail_health_seeds import LISTS, answer_listed, run_self_check, seeded_outbound
+    from helpers.mail_wire import submit_one_message
+
+    handle = mail_bridge_mta
+    token = f"listed-{secrets.token_hex(6)}"
+    with seeded_outbound(nest_instance):
+        for server in LISTS:
+            answer_listed(nest_instance, server, "Listed by the blocklist witness")
+        run = run_self_check(nest_instance)
+        listed = {r["server"] for r in run["results"] if r["listed"]}
+        assert listed == set(LISTS), f"every list must read the address as listed: {run!r}"
+
+        submit_one_message(handle, f"{token}@external.test", token)
+        _poke_outbound_bridge(handle.nest_url)
+        received = _wait_for_tagged(handle.stub_mx, token, timeout=MAIL_OUTBOUND_CYCLE_S)
+    assert received is not None, (
+        f"a listed nest must still deliver: the stub MX never received {token} "
+        f"(bridge log: {handle.log_file})"
+    )
+
+
+def _published_dkim(nest, domain: str) -> dict[str, str]:
+    """Every DKIM record the nest publishes for `domain`, selector → TXT value."""
+    with _admin_ws(nest) as ws:
+        rows = ws.call("fauna.bridges.list_dkim_selectors", {"domain": domain})["selectors"]
+    return {r["selector"]: r["public_dns_value"] for r in rows}
+
+
+def _sent_and_received(venue, token: str) -> bytes:
+    """Submit one message tagged `token` to an outside recipient through the
+    venue's MTA and return it as the stub MX received it."""
+    from helpers.mail_wire import submit_one_message
+
+    submit_one_message(venue, f"{token}@external.test", token)
+    _poke_outbound_bridge(venue.nest_url)
+    received = _wait_for_tagged(venue.stub_mx, token, timeout=MAIL_OUTBOUND_CYCLE_S)
+    assert received is not None, (
+        f"the stub MX never received {token} (bridge log: {venue.log_file})"
+    )
+    return received
+
+
+def _assert_signed_by(received: bytes, domain: str, records: dict[str, str], when: str) -> list:
+    signed_with = dkim_signature_tags(received, "s")
+    verified, queries = verify_each_dkim_signature(received, domain, records)
+    assert signed_with and verified == signed_with, (
+        f"{when}: every signature ({signed_with!r}) must verify against the records "
+        f"published at the start; verified {verified!r}, dnsfunc queries {queries!r}"
+    )
+    return signed_with
+
+
+@pytest.mark.feature("mail-server")
+def test_the_nest_keeps_signing_with_the_same_key_across_a_restart(restartable_mta_nest):
+    """Outcome 29: the nest keeps signing with the same key until it rotates it,
+    so a record published once keeps verifying — across a nest restart. A message
+    sent before the restart and one sent after it both verify (dkimpy, an
+    independent verifier) against the records the nest published at the start,
+    under the same selectors, and the published records are unchanged
+    (`mail-bridge-lifecycle.md` § DKIM provisioning (automatic): nest-held stable
+    keys, rotated only by the nest's own schedule).
+
+    The MTA is never touched: it rides the restart on its own reconnect
+    (`mail-bridge-lifecycle.md` § Reconnecting), and the second send is retried
+    until the bridge is serving again."""
+    from common.nest import restart_nest
+    from helpers.budgets import MAIL_BRIDGE_RECONNECT_S
+    from helpers.mail_wire import submit_one_message
+
+    venue = restartable_mta_nest
+    published = _published_dkim(venue.nest, venue.domain)
+    before = _sent_and_received(venue, f"pre-restart-{secrets.token_hex(6)}")
+    selectors = _assert_signed_by(before, venue.domain, published, "before the restart")
+
+    restart_nest(venue.nest)
+    token = f"post-restart-{secrets.token_hex(6)}"
+    refusals = []
+
+    def _accepted() -> bool:
+        try:
+            submit_one_message(venue, f"{token}@external.test", token)
+        except AssertionError as exc:  # the bridge is not serving again yet
+            refusals.append(str(exc))
+            return False
+        return True
+
+    wait_until(
+        _accepted,
+        MAIL_BRIDGE_RECONNECT_S,
+        interval=1.0,
+        diagnose=lambda: f"the MTA never accepted a submission after the restart: "
+        f"{refusals[-1:]!r} (bridge log: {venue.log_file})",
+    )
+    _poke_outbound_bridge(venue.nest_url)
+    after = _wait_for_tagged(venue.stub_mx, token, timeout=MAIL_OUTBOUND_CYCLE_S)
+    assert after is not None, f"the stub MX never received {token} (bridge log: {venue.log_file})"
+    assert _assert_signed_by(after, venue.domain, published, "after the restart") == selectors
+    assert _published_dkim(venue.nest, venue.domain) == published, (
+        "a nest restart must leave the published DKIM records untouched"
+    )
+
+
+def _tls_handshake_error(port: int, server_name: str, *, starttls: bool) -> str | None:
+    """Try one TLS handshake on the MTA — implicit TLS on 465, or STARTTLS on
+    port 25 — and return None when it completes, else what refused it. The TCP
+    connect (and, on 25, the plaintext greeting up to the STARTTLS `220`) must
+    succeed: a listener that is not there is not the cert-less state."""
+    from helpers.mail_wire import _connect_smtp_starttls, _connect_submission_tls
+
+    deadline = time.monotonic() + RPC_ROUNDTRIP_S
+    try:
+        if starttls:
+            conn = _connect_smtp_starttls(port, server_name, deadline)
+        else:
+            conn = _connect_submission_tls(port, server_name)
+    except (ssl.SSLError, ConnectionResetError) as exc:
+        return f"{type(exc).__name__}: {exc}"
+    with conn:
+        return None
+
+
+@pytest.mark.feature("mail-server")
+def test_mail_started_before_its_certificate_offers_encryption_without_a_restart(
+    certless_mta_nest,
+):
+    """Outcome 31: mail started before its certificate is ready begins offering
+    encryption within about a minute, with no restart
+    (`mail-bridge-lifecycle.md` § Implementation status today: a bridge that
+    boots with no cert self-heals — its refresh loop retries on the 1 m
+    cadence, and a `"tls"` `config_changed` push heals it sooner).
+
+    The fixture booted the MTA with its first TLS fetch withheld (the nest's
+    test-only `tls-cert-withhold` seam, armed before the spawn). The test first
+    proves the bridge really is cert-less — a handshake on 465 and on 25 after
+    STARTTLS both fail while the listeners accept — then lets the fetch through
+    and provisions the domain's self-signed cert (which pushes the `"tls"`
+    `config_changed`), and polls until both handshakes complete. EHLO
+    advertising STARTTLS is not the observable: port 25 advertises it whenever
+    a TLS provider exists, cert or not. The bridge process is the same one
+    throughout."""
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from conftest import tls_cert_withhold
+    from helpers.budgets import MAIL_CONFIG_HOT_APPLY_S
+
+    venue = certless_mta_nest
+    proc = venue.mta.proc
+    pid = proc.pid
+
+    def _handshakes():
+        return {
+            "465": _tls_handshake_error(
+                venue.submission_port_465, venue.domain, starttls=False,
+            ),
+            "25": _tls_handshake_error(venue.mx_port, venue.domain, starttls=True),
+        }
+
+    before = _handshakes()
+    assert all(before.values()), (
+        "precondition: the MTA must start cert-less, but a TLS handshake completed "
+        f"before any cert was provisioned: {before!r} (bridge log: {venue.log_file})"
+    )
+
+    tls_cert_withhold(venue.nest, "mta", venue.mta.bridge_id, withhold=False)
+    admin = venue.nest["admin"]
+    with WsRpcAdminClient(
+        venue.nest_url,
+        actor_id=bytes(admin["signing_key"].verify_key),
+        signing_key=bytes(admin["signing_key"]),
+    ) as admin_ws:
+        admin_ws.call(
+            "fauna.bridges.provision_self_signed_cert",
+            {"domain": venue.domain, "additional_dns_sans": []},
+        )
+
+    seen = []
+
+    def _encrypted() -> bool:
+        assert proc.poll() is None, (
+            f"the MTA exited (code {proc.returncode}) instead of picking the cert "
+            f"up in place (bridge log: {venue.log_file})"
+        )
+        seen.append(_handshakes())
+        return not any(seen[-1].values())
+
+    wait_until(
+        _encrypted,
+        MAIL_CONFIG_HOT_APPLY_S,
+        interval=1.0,
+        diagnose=lambda: f"the MTA never began offering encryption: last handshakes "
+        f"{seen[-1:]!r} (bridge log: {venue.log_file})",
+    )
+    assert proc.poll() is None and proc.pid == pid, "the MTA must heal with no restart"
+
+
+# ── Retry, backscatter and MX selection (mail-server outcomes 16, 18–21) ──
+
+
+_DAY_S = 86400
+
+
+@pytest.mark.feature("mail-server")
+def test_outbound_retries_each_recipient_on_its_own_for_five_days_then_bounces(mail_bridge_mta):
+    """One message to two outside recipients behind the same server: the one
+    the server takes is delivered at once, the one it keeps putting off is
+    retried on its own — still waiting just short of five days, given up and
+    bounced once five days have passed (`smtp-server.md` § Retry schedule: the
+    per-recipient queue, the 5-day permanent-failure timeout).
+
+    The stub MX answers `451` at RCPT for `tempfail*` and `250` for anyone else,
+    in the same transaction. The retry clock is the nest's outbound clock,
+    moved with the `test-hooks` clock endpoint (convention 14 — no sleep)."""
+    handle = mail_bridge_mta
+    nest_url = handle.nest_url
+    token = f"o16-{secrets.token_hex(6)}"
+    waiting = f"tempfail-{token}@external.test"
+    taken = f"someone-{token}@external.test"
+    with outbound_clock_on_real_time(nest_url):
+        submit_one_message(handle, waiting, token, extra_rcpts=(taken,))
+
+        sent = await_outbound_row(
+            nest_url, token, taken, lambda r: r["status"] != "pending",
+            "the recipient the server accepts leaving the queue")
+        assert sent["status"] == "sent", f"the accepted recipient must be delivered: {sent!r}"
+        held = await_outbound_row(
+            nest_url, token, waiting, lambda r: r["attempt_count"] >= 1,
+            "the first attempt for the recipient the server puts off")
+        assert held["status"] == "pending", (
+            f"the put-off recipient must keep its own queue row and wait: {held!r}")
+        assert _wait_for_tagged(handle.stub_mx, token, MAIL_OUTBOUND_CYCLE_S) is not None, (
+            "the accepted recipient's copy never reached the server")
+
+        five_days = held["created_at"] + 5 * _DAY_S
+        # An hour short of five days: tried again, still waiting.
+        before = outbound_attempt_at(
+            nest_url, token, waiting, max(five_days - 3600, held["next_attempt_at"] + 1))
+        assert before["status"] == "pending", (
+            f"the message must still be retried before five days are up: {before!r}")
+        assert before["attempt_count"] > held["attempt_count"], before
+
+        # Past five days: the next attempt gives up and the message bounces.
+        after = outbound_attempt_at(
+            nest_url, token, waiting, max(five_days + 60, before["next_attempt_at"] + 1))
+        assert after["status"] == "bounced", (
+            f"after five days of retries the message must come back as undeliverable: {after!r}")
+
+        # Giving up on one recipient never touched the other's delivery.
+        assert outbound_row(nest_url, token, taken)["status"] == "sent"
+
+
+@pytest.mark.feature("mail-server")
+def test_inbound_bounce_to_a_forwarding_user_produces_no_bounce(mail_bridge_mta, nest_instance):
+    """Mail that is itself a bounce (the null sender `MAIL FROM:<>`) never makes
+    the nest send a bounce of its own (`smtp-server.md` § Backscatter
+    suppression; the bounce envelope is the null sender, § Permanent-failure
+    bounce generation).
+
+    The one place an inbound message could turn into outbound mail that then
+    fails is a forward. The recipient forwards everything to an address the
+    stub MX refuses for good. A normal-sender message is the control: it is
+    forwarded, the forward fails and the forwarding user gets a bounce. The
+    null-sender message is kept locally but never forwarded, so no queue row
+    exists for it and no bounce can follow from it.
+
+    The forward decision runs before end-of-DATA's `250` (`server.go`
+    `maybeForwardForRecipient`), and the control's forward is awaited terminal
+    after the null-sender one was accepted, so the negative assertions read
+    state that has already settled (convention 14)."""
+    handle = mail_bridge_mta
+    domain = handle.domain
+    recipient_addr = f"{handle.recipient_local_part}@{domain}"
+    recipient_actor = handle.recipient_actor["actor_id_bytes"]
+    db_path = nest_instance["db_path"]
+    stamp = secrets.token_hex(6)
+    forward_target = f"nonexistent-o18-{stamp}@external.test"
+    bounce_token = f"o18-bounce-{stamp}"
+    control_token = f"o18-control-{stamp}"
+
+    def _seed_forward_all(value):
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        try:
+            conn.execute(
+                "INSERT INTO mail_account_settings (actor_id, forward_all_to, updated_at)"
+                " VALUES (?, ?, ?)"
+                " ON CONFLICT(actor_id) DO UPDATE SET"
+                " forward_all_to = excluded.forward_all_to, updated_at = excluded.updated_at",
+                (recipient_actor, value, int(time.time())),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _inbox(where: str = "", args: tuple = ()) -> int:
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        try:
+            (n,) = conn.execute(
+                "SELECT COUNT(*) FROM bridge_imap_messages"
+                " WHERE actor_id = ? AND mailbox = 'INBOX'" + where,
+                (recipient_actor, *args),
+            ).fetchone()
+            return n
+        finally:
+            conn.close()
+
+    def _bounces() -> int:
+        # A bounce sealed to the forwarder is `From: postmaster@<our domain>`;
+        # both inbound messages come from `o18-orig.test`.
+        return _inbox(" AND LOWER(from_norm) = LOWER(?)", (domain,))
+
+    def _deliver(sender: str, token: str) -> None:
+        body = "\r\n".join([
+            f"From: <{sender or 'mailer-daemon@o18-orig.test'}>",
+            f"To: {recipient_addr}",
+            f"Subject: o18 {token}",
+            f"Message-ID: <{token}@o18-orig.test>",
+            "Date: Thu, 16 May 2026 12:00:00 +0000",
+            "MIME-Version: 1.0",
+            "Content-Type: text/plain; charset=utf-8",
+            "",
+            f"o18 marker {token}",
+        ]) + "\r\n"
+        deadline = time.monotonic() + 30.0
+        with _connect_smtp_starttls(handle.mx_port, domain, deadline) as conn:
+            conn.cmd(f"MAIL FROM:<{sender}>", "250", deadline)
+            conn.cmd(f"RCPT TO:<{recipient_addr}>", "250", deadline)
+            conn.cmd("DATA", "354", deadline)
+            conn.send_raw(body.encode())
+            conn.cmd(".", "250", deadline)
+            conn.cmd("QUIT", "221", deadline)
+
+    before_inbox = _inbox()
+    before_bounces = _bounces()
+    _seed_forward_all(forward_target)
+    try:
+        _deliver("", bounce_token)
+        _deliver(f"o18-sender-{stamp}@o18-orig.test", control_token)
+
+        # Control: the normal message's forward fails for good and bounces.
+        control = _await_bounce_decided(
+            handle.nest_url, msgid=f"<{control_token}@o18-orig.test>", recipient=forward_target)
+        assert control["status"] == "bounced", (
+            f"control: the forward of a normal message must fail for good: {control!r}")
+        assert _bounces() == before_bounces + 1, (
+            "control: the failed forward of the normal message must bounce to the "
+            f"forwarding user (bounces {before_bounces} → {_bounces()})")
+
+        # The bounce itself: kept locally, never forwarded, so nothing to bounce.
+        assert _inbox() == before_inbox + 3, (
+            "the forwarding user keeps both messages plus the control's bounce: "
+            f"INBOX {before_inbox} → {_inbox()} (expected +3)")
+        forwarded = [r for r in _outbound_queue(handle.nest_url)
+                     if _msgid_key(r["original_msgid"]).startswith(bounce_token)]
+        assert forwarded == [], (
+            f"a null-sender message must never be sent on: queue rows {forwarded!r}")
+        assert _find_tagged(handle.stub_mx, bounce_token) is None, (
+            "the null-sender message reached the outside server")
+    finally:
+        _seed_forward_all(None)
+
+
+@pytest.mark.feature("mail-server")
+def test_outbound_no_mx_goes_to_the_domain_but_a_failed_lookup_waits(mail_bridge_mta):
+    """A domain that publishes no MX record is delivered to the domain's own
+    address (the implicit MX); a domain whose MX lookup FAILS is not — the
+    message waits in the retry curve instead (`smtp-server.md` § MX resolution
+    + IPv4/IPv6 mixed handling, item 1: implicit MX applies only on an
+    authoritative no-MX answer).
+
+    Both answers are seeded through the nest's DNS seam, which the outbound MX
+    lookup (`fauna.bridges.resolve_mx`) reads in a `test-hooks` build. The
+    domain's own address is unreachable from a test box (a `.test` name on port
+    25), so the attempt's recorded error is what shows which way the message
+    went: a dial of `<domain>:25` for the implicit MX, the lookup's own failure
+    for the other."""
+    handle = mail_bridge_mta
+    nest_url = handle.nest_url
+    token_bare = f"o19-bare-{secrets.token_hex(6)}"
+    token_down = f"o19-down-{secrets.token_hex(6)}"
+    bare = f"{token_bare}.test"
+    down = f"{token_down}.test"
+    _seed_dns_record(nest_url, bare, "MX", [], empty=True)
+    _seed_dns_record(nest_url, down, "MX", [], transient=True)
+    try:
+        submit_one_message(handle, f"someone@{bare}", token_bare)
+        submit_one_message(handle, f"someone@{down}", token_down)
+        first = lambda r: r["attempt_count"] >= 1 or r["status"] != "pending"  # noqa: E731
+
+        row = await_outbound_row(nest_url, token_bare, f"someone@{bare}", first,
+                                 "the first attempt to the domain with no MX")
+        assert row["status"] == "pending", row
+        assert (row["last_error"] or "").startswith(f"dial {bare}:25"), (
+            "with no MX record the message must go to the domain's own address "
+            f"(a dial of {bare}:25): {row!r}")
+
+        row = await_outbound_row(nest_url, token_down, f"someone@{down}", first,
+                                 "the first attempt to the domain whose lookup fails")
+        assert row["status"] == "pending", (
+            f"a failed MX lookup must leave the message waiting to be retried: {row!r}")
+        err = row["last_error"] or ""
+        assert err.startswith(f"mx lookup {down}"), (
+            f"the wait must be the failed lookup's: {row!r}")
+        assert "dial" not in err, (
+            f"a failed lookup must never fall back to the domain's own address: {row!r}")
+    finally:
+        _seed_dns_record(nest_url, bare, "MX", [])
+        _seed_dns_record(nest_url, down, "MX", [])
+
+
+@pytest.mark.feature("mail-server")
+def test_outbound_unreachable_preferred_mx_delivers_through_the_next(mail_bridge_mta):
+    """The recipient's preferred mail server cannot be reached, so the message
+    goes through its next one (`smtp-server.md` § MX resolution + IPv4/IPv6
+    mixed handling: MX records in priority order).
+
+    The domain's seeded MX set has the preferred server on a closed loopback
+    port and the second one at the stub MX."""
+    from drivers.port_util import find_free_port
+
+    handle = mail_bridge_mta
+    nest_url = handle.nest_url
+    token = f"o20-{secrets.token_hex(6)}"
+    domain = f"{token}.test"
+    rcpt = f"someone@{domain}"
+    closed = find_free_port()
+    _seed_dns_record(nest_url, domain, "MX",
+                     [f"10 127.0.0.1:{closed}", f"20 {handle.stub_mx.target}"])
+    try:
+        submit_one_message(handle, rcpt, token)
+        row = await_outbound_row(nest_url, token, rcpt, lambda r: r["status"] != "pending",
+                                 "delivery through the second MX")
+        assert row["status"] == "sent", (
+            f"the message must be delivered through the next MX: {row!r}")
+        assert _wait_for_tagged(handle.stub_mx, token, MAIL_OUTBOUND_CYCLE_S) is not None, (
+            "the second MX never received the message")
+    finally:
+        _seed_dns_record(nest_url, domain, "MX", [])
+
+
+@pytest.mark.feature("mail-server")
+def test_outbound_reaches_mail_servers_on_one_address_family(mail_bridge_mta):
+    """A recipient whose mail server answers over IPv4 only, and one whose
+    server answers over IPv6 only, both get the mail (`smtp-server.md` § MX
+    resolution + IPv4/IPv6 mixed handling, at the default policy).
+
+    `external.test` is routed at a stub MX listening on `127.0.0.1` alone,
+    `v6only.test` at one on `::1` alone."""
+    handle = mail_bridge_mta
+    if handle.v6_stub_mx is None:
+        skip_environment("no IPv6 loopback on this box: the IPv6-only stub MX could not bind ::1")
+    v4_token = f"o21-v4-{secrets.token_hex(6)}"
+    v6_token = f"o21-v6-{secrets.token_hex(6)}"
+    submit_one_message(handle, f"someone-{v4_token}@external.test", v4_token)
+    submit_one_message(handle, f"someone-{v6_token}@{handle.v6_domain}", v6_token)
+    assert _wait_for_tagged(handle.stub_mx, v4_token, MAIL_OUTBOUND_CYCLE_S) is not None, (
+        "the IPv4-only server never received its message")
+    assert _wait_for_tagged(handle.v6_stub_mx, v6_token, MAIL_OUTBOUND_CYCLE_S) is not None, (
+        "the IPv6-only server never received its message")

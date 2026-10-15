@@ -166,6 +166,12 @@ pub struct WebContentService {
     /// which side of the deadline it is on instead of racing a clock
     /// ([`Self::with_withdrawal_deadline`]).
     withdrawal_deadline: std::time::Duration,
+    /// Actors whose renders fail on purpose — the render-fault door
+    /// (`crate::web_render_fault_test_hook`), the outside way to put the
+    /// restore retry through a pass that still fails. Compiled out of every
+    /// build without `test-hooks`.
+    #[cfg(feature = "test-hooks")]
+    render_faults: std::sync::Mutex<std::collections::HashSet<[u8; 32]>>,
 }
 
 impl Drop for WebContentService {
@@ -190,6 +196,8 @@ impl WebContentService {
             restore_wake: Arc::new(tokio::sync::Notify::new()),
             restore_retry_started: std::sync::atomic::AtomicBool::new(false),
             withdrawal_deadline: WITHDRAWAL_DEADLINE,
+            #[cfg(feature = "test-hooks")]
+            render_faults: Default::default(),
         }
     }
 
@@ -737,6 +745,15 @@ impl WebContentService {
     /// before calling — the listing below is this function's first read.
     async fn render_published_posts_now(&self, claim: &RenderClaim) -> Result<RenderOutcome> {
         let actor_id = claim.actor_id();
+        #[cfg(feature = "test-hooks")]
+        if self
+            .render_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(actor_id)
+        {
+            anyhow::bail!("render fault set by the test-hooks door");
+        }
         self.render_invocations
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let published = self
@@ -823,6 +840,8 @@ impl WebContentService {
                     tier: gated.tier.clone(),
                     price_hint: tier_row.as_ref().and_then(|t| t.price_hint.clone()),
                     payment_url: tier_row.as_ref().and_then(|t| t.payment_url.clone()),
+                    path: format!("post/{}.html", ctx.slug),
+                    redeem_url: super::render::paywall_redeem_url(),
                 });
                 full = self
                     .decrypt_gated_full_text(actor_id, &post_id, gated, grant_set.as_deref(), now)
@@ -1008,6 +1027,38 @@ impl WebContentService {
             }
         }
         Ok(still_dark)
+    }
+
+    /// Make `actor_id`'s renders fail, or stop failing — the render-fault
+    /// door's half (`crate::web_render_fault_test_hook`). Turning the fault on
+    /// also re-renders the site through [`Self::rerender_fail_closed`], so the
+    /// clear, the owed-restore row and the restore retry's wake are the
+    /// production writer's; `Ok` means that clear landed. Lifting it renders
+    /// nothing: the site comes back by the next render any door triggers.
+    #[cfg(feature = "test-hooks")]
+    pub async fn set_render_fault(&self, actor_id: &[u8; 32], fail: bool) -> Result<()> {
+        {
+            let mut faults = self
+                .render_faults
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !fail {
+                faults.remove(actor_id);
+                return Ok(());
+            }
+            faults.insert(*actor_id);
+        }
+        let render_err = match self
+            .rerender_fail_closed(actor_id, "a test-hooks render fault")
+            .await
+        {
+            Ok(()) => anyhow::bail!("the render succeeded under its fault"),
+            Err(e) => e,
+        };
+        match self.db.web_restore_owed_nonce(actor_id).await? {
+            Some(_) => Ok(()),
+            None => Err(render_err),
+        }
     }
 
     /// The **restore retry**: between boots, re-render the sites a fail-closed

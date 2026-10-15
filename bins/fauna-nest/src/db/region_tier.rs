@@ -493,6 +493,39 @@ impl crate::db::CacheDb {
         }
     }
 
+    /// Move one payload kind's refresh record back by `secs`: every stored
+    /// stamp (`checked_at`, `first_attempted_at`, `reached_at`) moves as if the
+    /// attempts had happened `secs` earlier. Returns whether a record existed.
+    /// Test-only: the `region_status_test_hook` seam.
+    #[cfg(feature = "test-hooks")]
+    pub async fn test_age_region_refresh(&self, payload_kind: &str, secs: i64) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE region_refresh SET
+                   checked_at = checked_at - ?1,
+                   first_attempted_at = first_attempted_at - ?1,
+                   reached_at = reached_at - ?1
+                 WHERE payload_kind = ?2",
+                rusqlite::params![secs, payload_kind],
+            )
+            .context("test_age_region_refresh")?;
+        Ok(n > 0)
+    }
+
+    /// Drop one payload kind's refresh record, returning the nest to "never
+    /// attempted". Test-only: the `region_status_test_hook` seam's `clear`.
+    #[cfg(feature = "test-hooks")]
+    pub async fn test_forget_region_refresh(&self, payload_kind: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "DELETE FROM region_refresh WHERE payload_kind = ?1",
+            rusqlite::params![payload_kind],
+        )
+        .context("test_forget_region_refresh")?;
+        Ok(())
+    }
+
     pub async fn region_refresh_state(&self, payload_kind: &str) -> Result<Option<RefreshState>> {
         let conn = self.conn.lock().await;
         conn.query_row(

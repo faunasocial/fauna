@@ -63,8 +63,8 @@ pytestmark = pytest.mark.tier_3
 
 #: A real handle domain, so the subdomain resolver has a `.<domain>` suffix to
 #: strip and the reserved-host guard has an apex to key off. Deliberately not
-#: `example.com` / `example.com`: the publish scrub rewrites the former to the
-#: latter, and a nest apex on the scrub target would collapse against the custom
+#: `example.com`: the publish scrub rewrites a retired production name to
+#: it, and a nest apex on the scrub target would collapse against the custom
 #: domain below in the public tree only (`web_content::domain::tests`' ⚠ note).
 NEST_DOMAIN = "sub.example"
 INFO_PAGE_MARKER = "Fauna Nest API"

@@ -247,7 +247,7 @@ fun ContactsScreen(
                                 val sent = knockAsk.peer == resolved.actorId && knockAsk.knockSent
                                 val inFlight = knockAsk.peer == resolved.actorId && knockAsk.knockInFlight
                                 Button(
-                                    onClick = { vm.addContact(resolved.actorId) },
+                                    onClick = { vm.addContact(resolved.actorId, resolved.nestUrl) },
                                     enabled = !sent && !inFlight,
                                     modifier = Modifier.testTag(Ids.CONTACTS_ADD_BUTTON)
                                 ) {

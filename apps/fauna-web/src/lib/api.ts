@@ -1,20 +1,22 @@
 import {
+  blobContentHashHex,
   challengeVerify,
-  nestInfo as wasmNestInfo,
   hexFull,
 } from './wasm';
+import { assertEchoedBlobHash } from './blob-upload-hash';
 import type { FeedDefinition, FilterRule, FeedPost, FeedQueryResult, Knock, Contact } from './types';
 // Cyclic with this module by construction (the escalation drops the bearer cache
 // that lives here). Inert: neither side touches the other's bindings during
 // module evaluation — both are called only from inside functions.
 import { escalateIfTerminalAuthVerdict } from './post-auth-escalation';
-import { SignInRefusedError } from './auth-errors';
+import { AccountLockedError, SignInRefusedError } from './auth-errors';
 import { toArrayBufferView } from './bytes';
 import { isSafeNodeUrl } from './safe-url';
 import { tabNestUrl, tabPin } from './tabPin';
 import { accountsActiveSessionMaterial } from './accounts';
 import * as rpc from './rpc';
 import { OwnSessionIds } from './own-session-ids';
+import { LockLatch } from './lock-latch';
 import { deadlineOnOwnClock } from './token-deadline';
 import { launchClockForTest } from './wasm-launch';
 
@@ -178,6 +180,11 @@ const tokenCache = new Map<string, { token: string; expiresAt: number; tokenId: 
  *  keep folding into "this app" rather than turning into a stranger. */
 const ownSessionIds = new Map<string, OwnSessionIds>();
 
+/** Locks the nest answered, per cache key: a mint refused
+ *  `fauna.auth.account_locked` is answered from here until the unlock time
+ *  rather than re-dialled (`./lock-latch`; `devices.md` § The locked state). */
+const lockLatch = new LockLatch();
+
 /** The set for `key`, created on first use. */
 function ownIdsFor(key: string): OwnSessionIds {
   let own = ownSessionIds.get(key);
@@ -295,7 +302,14 @@ export function primeTokenCache(
   tokenId = '',
 ): void {
   const key = tokenKey(base, secretHex);
-  tokenCache.set(key, { token, expiresAt, tokenId });
+  // Never displace a NEWER bearer: the launch path primes after the machine
+  // settles, and by then `getAuthToken` may already have minted a later one
+  // the tab's socket rides (the own-id set orders by deadline for the same
+  // reason — `./own-session-ids`).
+  const cached = tokenCache.get(key);
+  if (!cached || cached.expiresAt <= expiresAt) {
+    tokenCache.set(key, { token, expiresAt, tokenId });
+  }
   // The launch token is minted by the machine, not by `getAuthToken`, so this
   // is the only place it can be folded into the own-id set. Defaulted for a
   // caller that cannot name it (a machine with no token id to name): `record` ignores an empty
@@ -330,10 +344,20 @@ export async function getAuthToken(secretHex: string, targetNode?: string, force
     return cached.token;
   }
 
+  // A lock this key already met stands until its time: answered here, never
+  // re-dialled — the reconnect loop must not keep asking a nest that said no
+  // until a stated time (the native mints' latch, `devices.md` § The locked
+  // state). Not escalated again: the first refusal already did.
+  const lockedUntil = lockLatch.standing(key, clientNowSecs());
+  if (lockedUntil !== null) {
+    throw new AccountLockedError(lockedUntil);
+  }
+
   let verified;
   try {
     verified = await challengeVerify(secretHex, base);
   } catch (e) {
+    if (e instanceof AccountLockedError) lockLatch.latch(key, e.lockedUntilSecs);
     // The re-mint is a full anonymous connect, so it runs the possession-verify
     // + pin compare too — making it web's post-auth re-check point #1
     // (`security.md` § Transport trust → § Post-auth surfacing). Route the
@@ -381,6 +405,7 @@ export async function getAuthToken(secretHex: string, targetNode?: string, force
     }
     throw refused;
   }
+  lockLatch.clear(key);
   storeMinted(key, verified);
   return verified.token;
 }
@@ -403,24 +428,6 @@ export async function authHeaders(secretHex: string, targetNode?: string): Promi
 }
 
 // --- Registration & account management ---
-
-export interface NodeRegistrationInfo {
-  tiers: string[];
-  handle_domain: string;
-}
-
-export interface NestInfoResponse {
-  domain: string;
-  version: string;
-  registration: NodeRegistrationInfo | null;
-}
-
-/** Public node metadata over the pre-identity anonymous WS-RPC `fauna.nest.info`
- *  kind (replacing the deleted HTTP `GET /api/v1/node-info`; `api-layers.md` §
- *  Public). The wasm face resolves the same `discovery_core` the twin did. */
-export async function fetchNestInfo(): Promise<NestInfoResponse> {
-  return (await wasmNestInfo(nodeUrl())) as NestInfoResponse;
-}
 
 // (`checkHandleAvailable` — the old HTTP `GET /api/v1/handle-available` helper —
 // was removed: it had no caller. Web onboarding validates handles inside the
@@ -466,11 +473,32 @@ export async function silentSignIn(
   targetNode?: string,
 ): Promise<ChallengeVerifiedActor | null> {
   const base = targetNode || nodeUrl();
-  const verified = await challengeVerify(secretHex, base);
+  const key = tokenKey(base, secretHex);
+  // The same latch `getAuthToken` keeps: a standing lock is answered here,
+  // never re-dialled (the store's background refresh would otherwise retry
+  // into the nest's refusal).
+  const lockedUntil = lockLatch.standing(key, clientNowSecs());
+  if (lockedUntil !== null) throw new AccountLockedError(lockedUntil);
+  let verified;
+  try {
+    verified = await challengeVerify(secretHex, base);
+  } catch (e) {
+    if (e instanceof AccountLockedError) lockLatch.latch(key, e.lockedUntilSecs);
+    throw e;
+  }
   if (verified) {
-    storeMinted(tokenKey(base, secretHex), verified);
+    lockLatch.clear(key);
+    storeMinted(key, verified);
   }
   return verified;
+}
+
+/** The launch machine met a lock on the home nest for `secretHex` (the locked
+ *  surface, `devices.md` § The locked state): latch it, so neither mint path
+ *  dials the nest again before `lockedUntil`. The machine's own refresh at the
+ *  unlock time is the one way back. */
+export function latchAccountLocked(secretHex: string, lockedUntil: number): void {
+  lockLatch.latch(tokenKey(nodeUrl(), secretHex), lockedUntil);
 }
 
 // Invite-request management — both halves are off HTTP. The user-side helpers
@@ -619,6 +647,10 @@ export async function succeedIdentityWithHeldKit(
  * set `Content-Type` ourselves — the browser fills in the `multipart/form-data`
  * boundary when the body is a `FormData`.
  *
+ * The nest's echoed hash is checked against the blake3 of `bytes` computed here
+ * before it is returned — every caller signs over it (`security.md` § Signed-envelope
+ * shape, the client-computed media hash rule).
+ *
  * (Wire design tracked internally.)
  */
 export async function uploadBlobMultipart(
@@ -637,7 +669,7 @@ export async function uploadBlobMultipart(
   });
   if (!res.ok) throw new Error(`blob upload failed: ${res.status}`);
   const json = await res.json();
-  return json.hash;
+  return assertEchoedBlobHash(json.hash, bytes, blobContentHashHex);
 }
 
 /**
@@ -873,9 +905,15 @@ export async function confirmContact(secretHex: string, peerId: string): Promise
 /** Send a knock (contact request) to `peerId`. Rides `fauna.inbox.send` with a
  *  shared-Rust-composed payload — the successor of the deleted
  *  `POST /api/v1/contacts/{actor_id}/knock` twin
- *  (`api-layers.md` § Contacts & Knocks). */
-export async function sendKnock(secretHex: string, peerId: string): Promise<void> {
-  await rpc.sendKnock(secretHex, peerId);
+ *  (`api-layers.md` § Contacts & Knocks). `recipientNestUrl` is the peer nest a
+ *  foreign Find User lookup resolved on (`null`: this nest) — carried from the
+ *  lookup, never re-derived. */
+export async function sendKnock(
+  secretHex: string,
+  peerId: string,
+  recipientNestUrl: string | null = null,
+): Promise<void> {
+  await rpc.sendKnock(secretHex, peerId, recipientNestUrl);
 }
 
 export async function getInboxMode(secretHex: string): Promise<string> {

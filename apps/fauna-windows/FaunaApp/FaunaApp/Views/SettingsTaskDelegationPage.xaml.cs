@@ -43,7 +43,7 @@ public sealed partial class SettingsTaskDelegationPage : Page
         base.OnNavigatedTo(e);
         if (e.Parameter is ServiceClients clients && _vm is null)
         {
-            _vm = new TaskDelegationViewModel(clients.Rpc!, clients.Account.DeviceId ?? "");
+            _vm = new TaskDelegationViewModel(clients.Rpc!, clients.Account.ResolveDeviceId() ?? "");
             _vm.PropertyChanged += ViewModel_PropertyChanged;
         }
     }
@@ -57,6 +57,20 @@ public sealed partial class SettingsTaskDelegationPage : Page
         LoadProgress.IsActive = false;
         LoadProgress.Visibility = Visibility.Collapsed;
         RenderRows();
+        // The shared store-change notice (account-runtime.md § A runtime's own
+        // pump is a source of the notice too): a pin another device made paints
+        // on this open page with no re-visit.
+        _vm.StoreResynced -= RenderRows;
+        _vm.StoreResynced += RenderRows;
+        _vm.WatchStore();
+    }
+
+    protected override void OnNavigatedFrom(NavigationEventArgs e)
+    {
+        base.OnNavigatedFrom(e);
+        if (_vm is null) return;
+        _vm.CleanupStoreChange();
+        _vm.StoreResynced -= RenderRows;
     }
 
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)

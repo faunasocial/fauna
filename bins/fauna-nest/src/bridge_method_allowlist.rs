@@ -32,6 +32,24 @@ pub enum CallerClass {
     /// `fauna.capabilities.revoke` deletes the row and this class evaporates
     /// with it, severing even a live session at its next dispatch.
     Custodian,
+    /// An OWNER-FLEET device reading back what this nest holds as a CUSTODIAN
+    /// — the custodian-NEST serve door (`account-replica-posture.md` §
+    /// Replica posture → *The custody grant + ceremony*, the custodian-NEST
+    /// serve door bullet, rulings 2–4): an otherwise-unknown key that a
+    /// `custody_hosting_fleet` register row names, whose owner has a live
+    /// hosting row here, and which the owner's grants do not name as removed.
+    /// Authenticated by `fauna.auth.custodied_fleet_handshake` (device-key PoP
+    /// plus the inline root-signed `DeviceAuthorization`). **Least-privilege by
+    /// the allowlist, the mirror of `Custodian`**: its whole WS reach is
+    /// `fauna.sync.changes.list` and `fauna.segments.list`, both answered from
+    /// the custodied store (`crate::custody_fleet`), never the nest's own
+    /// tables. ⚠ The byte half — `GET /api/v1/segments/{kind}/{actor}/{id}
+    /// [/meta]` — is HTTP and outside this allowlist; it runs the same
+    /// predicate behind `BearerAuth`, so widening this class's reach means
+    /// auditing both surfaces. Derived per request from the rows themselves —
+    /// the remove teardown, an expiry, an owner-nest refusal or a removal each
+    /// end the class at the next dispatch.
+    CustodiedFleet,
     /// A generic content-processing bridge (scorer / FTS-indexer — the dual of
     /// the MDA), the holder class for user-minted capability grants. Its only
     /// gated reach is `fauna.capabilities.fetch` (holder-pubkey-scoped); the
@@ -117,7 +135,12 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // Bridge-only because the delivered bytes feed an authorization
         // decision as VERIFIED: only the attested PDS host runs the chain that
         // verified them.
-        | "fauna.bridges.atproto.deliver_permission_set" => matches!(class, BridgeAtprotoPds),
+        | "fauna.bridges.atproto.deliver_permission_set"
+        // The bridge→nest half of the oracle's `atproto.service_auth` class:
+        // the token the PDS bridge minted with the repo signing key only it
+        // holds. Bridge-only because the nest hands it on as the custodian's
+        // own — only the attested PDS host holds that key.
+        | "fauna.bridges.atproto.deliver_service_auth" => matches!(class, BridgeAtprotoPds),
         "fauna.bridges.atproto.provision_app_credential"
         | "fauna.bridges.atproto.list_app_credentials"
         | "fauna.bridges.atproto.revoke_app_credential"
@@ -423,6 +446,7 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         "fauna.bridges.start_import_session" => matches!(class, User),
         "fauna.bridges.import_message" => matches!(class, User),
         "fauna.bridges.import_message_batch" => matches!(class, User),
+        "fauna.bridges.record_import_outcomes" => matches!(class, User),
         "fauna.bridges.list_import_sessions" => matches!(class, User),
         "fauna.bridges.pause_import_session" => matches!(class, User),
         "fauna.bridges.resume_import_session" => matches!(class, User),
@@ -510,6 +534,19 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         "fauna.bridges.set_forward_per_hour" => matches!(class, User),
         "fauna.bridges.get_spam_threshold_override" => matches!(class, User),
         "fauna.bridges.set_spam_threshold_override" => matches!(class, User),
+        // The caller's own receive and send switches (`mail-policy-config.md`
+        // § Tier 3); the handler reads/writes only the caller's row.
+        "fauna.bridges.get_mail_switches" => matches!(class, User),
+        "fauna.bridges.set_mail_switches" => matches!(class, User),
+        // The caller's own mailbox + submission quotas (`imap-server.md`
+        // § Composition with submission quota); `()` request, caller-scoped.
+        // `get_quota` (a target `actor_id`) stays BridgeMda-only.
+        "fauna.bridges.get_mail_quotas" => matches!(class, User),
+        // The caller's own received message's scan verdict
+        // (`mail-content-scanning.md` § User sees their own message's row).
+        // Caller-scoped in the query (`delivered_to_actor = caller`); no
+        // target actor, so Admin gets exactly its own rows via Admin ⊇ User.
+        "fauna.bridges.get_message_scan_result" => matches!(class, User),
         // Per-rail draft persistence: any
         // authenticated actor persists/reads only their own drafts (the nest
         // derives the owning actor from the connection, neither kind carries an
@@ -579,6 +616,11 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // the effective alias policy to hydrate before edit (these knobs are
         // not in `FetchConfigReply`, so they have their own read kind).
         "fauna.bridges.get_alias_policy" => matches!(class, Admin),
+        // The deployment-wide `mail.dmarc.*` catalog (NOT projected to the
+        // bridge — read by the DNS surface's record assembler + the daily
+        // report prunes) and its admin read twin.
+        "fauna.bridges.put_dmarc_policy" => matches!(class, Admin),
+        "fauna.bridges.get_dmarc_policy" => matches!(class, Admin),
         // Nest-OWN transport/abuse policy (NOT a mail policy, NOT projected to
         // the bridge): the per-source-IP concurrent-connection cap on nest's
         // own client-facing TLS listener, read nest-side by `serve_tls`.
@@ -597,6 +639,12 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         "fauna.bridges.restore_local_domain" => matches!(class, Admin),
         "fauna.bridges.list_local_domains" => matches!(class, Admin),
         "fauna.bridges.update_local_domain_config" => matches!(class, Admin),
+        "fauna.bridges.list_dmarc_aggregate_reports" => matches!(class, Admin),
+        "fauna.bridges.get_dmarc_aggregate_report" => matches!(class, Admin),
+        "fauna.bridges.list_dmarc_forensic_reports" => matches!(class, Admin),
+        "fauna.bridges.get_dmarc_forensic_report" => matches!(class, Admin),
+        "fauna.bridges.list_tlsrpt_inbound_reports" => matches!(class, Admin),
+        "fauna.bridges.get_tlsrpt_inbound_report" => matches!(class, Admin),
         // Primary-domain rename (mail-primary-domain-rename.md § Wire shapes).
         "fauna.bridges.start_primary_domain_rename" => matches!(class, Admin),
         "fauna.bridges.get_primary_domain_rename_status" => matches!(class, Admin),
@@ -665,7 +713,9 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // lists or ends it. Never bridge-callable, and never callable by a
         // principal itself: a third party cannot enumerate or revoke its
         // siblings.
-        "fauna.principals.list" | "fauna.principals.revoke" => matches!(class, User),
+        "fauna.principals.list" | "fauna.principals.ops" | "fauna.principals.revoke" => {
+            matches!(class, User)
+        }
         // The events doors' poll (`transport.md` § Push events → *Third-party
         // event doors*). ThirdParty ONLY — the account's own apps hear the
         // unfiltered nudges on their own sockets; the principal handler
@@ -679,6 +729,15 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // install, list or uninstall plugins.
         "fauna.plugins.install" | "fauna.plugins.list" | "fauna.plugins.uninstall" => {
             matches!(class, Admin)
+        }
+        // The user's half: install grants nothing, so each account binds a
+        // plugin by its own consent from the plugin's settings card. USER,
+        // self-scoped — the roster of what is installed, the bind card's
+        // start, and the account's own settings. Never bridge-callable, and
+        // never callable by a principal: a plugin cannot bind itself to an
+        // account or write an account's settings.
+        "fauna.plugins.available" | "fauna.plugins.bind" | "fauna.plugins.set_settings" => {
+            matches!(class, User)
         }
         // The consent starts' user half (`authorization-server.md` § Consent):
         // self-scoped acts on the caller's own consent rows and blocks, User
@@ -698,8 +757,13 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // `ThirdParty` since Phase G (`apps/bridges.md` § Bridge-kind
         // catalogue): a conversation bridge seals each deposit to the user's
         // recipient key — its own account's only (the principal handler).
+        // `User` (and so `Admin`, ⊇ User) reads its own standing key back
+        // (the handler enforces `target == caller` for both): the connect-time mail refresh compares it with
+        // the generations its custody holds before it re-seals
+        // (`mail-credentials.md` § Hard revoke → *Published before the nest
+        // moves*, the stale-sibling rule).
         "fauna.bridges.fetch_recipient_mls_pubkey" => {
-            matches!(class, BridgeMta | BridgeMda | ThirdParty)
+            matches!(class, BridgeMta | BridgeMda | ThirdParty | User)
         }
         // Phase G — the bridged-conversation family. The bridge's six are
         // `ThirdParty` only; the user's four are `User` and caller-scoped.
@@ -736,6 +800,13 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // runs `ingest_inbound_mail`. Metadata only (no message bytes). See
         // `docs/goal/behavior/mail-content-scanning.md` § Actions.
         "fauna.bridges.report_rejected_scan" => matches!(class, BridgeMta),
+        // DMARC report receive (`dmarc-reporting.md` § Wire shapes):
+        // the MTA ingests (aggregate + forensic, the nest classifies); the
+        // admin client reads the stored reports back.
+        "fauna.bridges.ingest_dmarc_report" => matches!(class, BridgeMta),
+        // TLSRPT inbound receive (`smtp-server.md` § TLSRPT inbound report
+        // listener): the MTA ingests; the admin reads back with the list/get pair.
+        "fauna.bridges.ingest_tlsrpt_report" => matches!(class, BridgeMta),
         // I4 Phase D.5 — outbound-queue (MTA worker polls + reports back).
         "fauna.bridges.fetch_outbound_due" => matches!(class, BridgeMta),
         "fauna.bridges.mark_outbound_delivered" => matches!(class, BridgeMta),
@@ -790,6 +861,9 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         "fauna.bridges.resolve_mx" => matches!(class, BridgeMta),
         // T2.4 — per-attempt TLS outcome report (MTA reports, nest buckets).
         "fauna.bridges.report_tls_attempt" => matches!(class, BridgeMta),
+        // Per-message DMARC observation for the outbound aggregate report
+        // (MTA verifies at the perimeter, nest buckets — the TLSRPT shape).
+        "fauna.bridges.report_dmarc_observation" => matches!(class, BridgeMta),
         "fauna.bridges.list_mailboxes" => matches!(class, BridgeMda),
         "fauna.bridges.select_mailbox" => matches!(class, BridgeMda),
         // C.2 — message-metadata fetch.
@@ -1036,6 +1110,29 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // roster above; the principal handler requires a live `identity.op`
         // grant, and every later request re-resolves it at the signer.
         "fauna.nostr.bunker.bind" => matches!(class, ThirdParty),
+        // The oracle's ActivityPub door (TP11, the same table row's
+        // `activitypub.http_sig` class): a principal asks for an HTTP
+        // Signature with the account's actor key. ThirdParty ONLY — the
+        // account's own outbound delivery signs in the worker; the principal
+        // handler re-resolves the live grant and the declared peer set per
+        // request (`activitypub/oracle.rs`).
+        "fauna.activitypub.oracle.http_sig" => matches!(class, ThirdParty),
+        // The oracle's posting door (TP11, the `post.author` row): a
+        // principal authors a public post as the account, or retracts one it
+        // authored, signed with the account's delegated authoring sub-key.
+        // ThirdParty ONLY — the account's own apps sign their own posts and
+        // use `fauna.posts.create`/`delete`; the principal handler
+        // re-resolves the live grant, the delegation and the switch per
+        // request (`post_author_oracle.rs`).
+        "fauna.posts.author.create" => matches!(class, ThirdParty),
+        "fauna.posts.author.delete" => matches!(class, ThirdParty),
+        // The oracle's ATProto door (TP11, the `atproto.service_auth` row): a
+        // principal asks for a service JWT for one declared `(aud, lxm)`.
+        // ThirdParty ONLY — the account's own apps reach `getServiceAuth`
+        // over their ATProto session; the door re-resolves the live grant and
+        // the declared set per request, then the PDS bridge mints
+        // (`atproto_oracle.rs`).
+        "fauna.atproto.oracle.service_auth" => matches!(class, ThirdParty),
         // NIP-57 zap trust root (`fauna.nostr.zap_signers.*`,
         // `docs/goal/behavior/monetization.md` § Zap receipts — the trust
         // model): the payee's own list of signers allowed to speak for their
@@ -1134,6 +1231,10 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // counts, so those two stay User-only.
         "fauna.conversations.keypackage.fetch" => matches!(class, User | BridgeMda),
         "fauna.conversations.keypackage.count" => matches!(class, User),
+        // The boolean reachability probe for a bare actor id — the authed twin
+        // of `fauna.actor.by_handle`'s `addressable` bit (`federation.md` § Key
+        // packages — privacy & exhaustion). User-class like `count`.
+        "fauna.conversations.keypackage.addressable" => matches!(class, User),
         // Conversations T3 — same-nest MLS Welcome delivery. The
         // welcomer (caller) is User-class; the HTTP twin's cross-nest
         // path (foreign client → recipient nest, `?nest_url=&...`) stays
@@ -1364,15 +1465,20 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // were unauthenticated on HTTP and become User-authed on WS-RPC,
         // matching T1's `fauna.posts.get` treatment. The per-feed ownership
         // checks stay inside the handler cores.
-        "fauna.feed.list" => matches!(class, User),
+        // The three custom-feed reads are also `ThirdParty` reach, under
+        // `fauna:feed:read:account` (`principal_reach`): the account's own
+        // feeds over public posts only — the principal handler's read.
+        "fauna.feed.list" => matches!(class, User | ThirdParty),
         "fauna.feed.create" => matches!(class, User),
-        "fauna.feed.get" => matches!(class, User),
+        "fauna.feed.get" => matches!(class, User | ThirdParty),
         "fauna.feed.update" => matches!(class, User),
         "fauna.feed.delete" => matches!(class, User),
-        "fauna.feed.posts" => matches!(class, User),
+        "fauna.feed.posts" => matches!(class, User | ThirdParty),
         // The two public timelines are also the first `ThirdParty` reach, under
-        // `fauna:feed:read` (`principal_reach`): public posts only, nothing of
-        // the account's own state — the principal handler's read, not this one.
+        // `fauna:feed:read` (`principal_reach`): public posts only — the
+        // principal handler's read, not this one, which fills the account's
+        // viewer state only for a session also holding the refining
+        // `fauna:feed:read:account`.
         "fauna.feed.local.posts" => matches!(class, User | ThirdParty),
         "fauna.feed.trending.posts" => matches!(class, User | ThirdParty),
         "fauna.feed.contributors.list" => matches!(class, User),
@@ -1385,9 +1491,13 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // per-actor personal-preference surface scoped to the calling actor
         // (owner-scoping is by construction in the handlers); bridge actors
         // and admin have no role here — the blob is nest-opaque, sealed
-        // under the user's BackupKey.
-        "fauna.personalization.model.fetch" => matches!(class, User),
-        "fauna.personalization.model.put" => matches!(class, User),
+        // under the delegable pair of `fauna.personalization.model`.
+        // `ThirdParty`: the `fauna:personalization:rw` arm's fetch and put, for
+        // the principal's account (`authorization-server.md` § Scope grammar →
+        // *The fifth arm*); `delete` stays the owner's — destruction is the
+        // owner's affordance.
+        "fauna.personalization.model.fetch" => matches!(class, User | ThirdParty),
+        "fauna.personalization.model.put" => matches!(class, User | ThirdParty),
         "fauna.personalization.model.delete" => matches!(class, User),
         // Notifications slice (T1) — the
         // list / mark-read / count plane. User-only on the same reasoning
@@ -1678,6 +1788,11 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // browser that opens `/app/` sees the redirect).
         "fauna.admin.web_app_origin.get" => matches!(class, Admin),
         "fauna.admin.web_app_origin.set" => matches!(class, Admin),
+        // The update channel (`nest/update-channel.md`). Admin-only both ways:
+        // what the box follows is the admin's choice, and what an updater needs
+        // rides the anonymous `/api/v1/health`. Never a bridge.
+        "fauna.admin.update_channel.get" => matches!(class, Admin),
+        "fauna.admin.update_channel.set" => matches!(class, Admin),
         // The app-facing relay: any user may fetch its own region's
         // published artifact (region-blocking.md § The content plane). User —
         // and so an admin's app too (Admin ⊇ User, above) — never a bridge or
@@ -1833,11 +1948,19 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // requires a scope naming the folder and a live keyless `deposit`
         // grant, re-resolved at every deposit.
         "fauna.folders.deposit" => matches!(class, ThirdParty),
-        // The owner's half of that inbox — adoption's list and retire, the
-        // account's own folders only (resolved from the connection).
+        // The same ingress for a file larger than one message — the staged
+        // upload, its sealed parts and the atomic commit, under the same
+        // checks at every call.
+        "fauna.folders.deposit.begin" => matches!(class, ThirdParty),
+        "fauna.folders.deposit.part" => matches!(class, ThirdParty),
+        "fauna.folders.deposit.commit" => matches!(class, ThirdParty),
+        // The owner's half of that inbox — adoption's list, part read and
+        // retire, the account's own folders only (resolved from the
+        // connection).
         "fauna.folders.deposits.list" | "fauna.folders.deposits.retire" => {
             matches!(class, User | Admin)
         }
+        "fauna.folders.deposits.part" => matches!(class, User | Admin),
         "fauna.folders.lease.release" => matches!(class, User | Admin),
         // The publicly-synced follow (phase 4 slice 4f-i): any account may read
         // a public folder — the plane's gate is the folder's own audience, not
@@ -1866,10 +1989,13 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // records as the user's actor → `User`. Bridge actors have no
         // device-sync surface → denied.
         "fauna.sync.register" => matches!(class, User | Admin),
-        // `ThirdParty`: the `records` arm's list of the principal's own
-        // `ext:<kind>` scopes — the principal handler serves only a scope its
-        // grant covers (`third-party-kinds.md` § The record doors).
-        "fauna.sync.changes.list" => matches!(class, User | Admin | Custodian | ThirdParty),
+        // `ThirdParty`: scope-dispatched — the `records` arm's list of the
+        // principal's own `ext:<kind>` scopes, and the personalization arm's
+        // read-only list of `state` (`third-party-kinds.md` § The record
+        // doors); the principal handler serves only a scope its grant covers.
+        "fauna.sync.changes.list" => {
+            matches!(class, User | Admin | Custodian | CustodiedFleet | ThirdParty)
+        }
         "fauna.sync.changes.record" => matches!(class, User | Admin),
         "fauna.sync.changes.supersede" => matches!(class, User | Admin),
         "fauna.sync.status" => matches!(class, User | Admin),
@@ -2008,9 +2134,16 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         "fauna.subscriptions.offers.list" => matches!(class, User),
         "fauna.subscriptions.post_unlock.get" => matches!(class, User),
         "fauna.subscriptions.mine.list" => matches!(class, User),
-        "fauna.subscriptions.status.get" => matches!(class, User),
-        "fauna.subscriptions.subscribe" => matches!(class, User),
-        "fauna.subscriptions.unsubscribe" => matches!(class, User),
+        // `ThirdParty`: the `fauna:follow:write` arm (`authorization-server.md`
+        // § Scope grammar → *The sixth arm*) — the principal handlers narrow
+        // all three to the free `followers` tier and never name a paid one.
+        "fauna.subscriptions.status.get" => matches!(class, User | ThirdParty),
+        "fauna.subscriptions.subscribe" => matches!(class, User | ThirdParty),
+        "fauna.subscriptions.unsubscribe" => matches!(class, User | ThirdParty),
+        // The account's subscriber encapsulation-key registry entry
+        // (`post-quantum.md` § surface B), published by its own apps — never a
+        // principal's: the key derives from the identity seed.
+        "fauna.subscriptions.encaps_key.publish" => matches!(class, User),
         "fauna.subscriptions.subscribers.list" => matches!(class, User),
         "fauna.subscriptions.subscribers.remove" => matches!(class, User),
         "fauna.subscriptions.requests.list" => matches!(class, User),
@@ -2049,6 +2182,8 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         "fauna.payments.claims.mint" => matches!(class, User),
         #[cfg(feature = "payments")]
         "fauna.payments.claims.list" => matches!(class, User),
+        #[cfg(feature = "payments")]
+        "fauna.payments.claims.void" => matches!(class, User),
 
         // The feature plane's transparency read (`dynamic-features.md`
         // § Transparency & auditability, boundary 4: *"there is no restriction
@@ -2086,7 +2221,10 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // `not_owner` a stranger gets. `compact` stays `User`-only on purpose:
         // it MUTATES the owner's store, and custody is a read capability
         // (`account-data-plane.md` § The custody grant + ceremony).
-        "fauna.segments.list" => matches!(class, User | Custodian),
+        // `CustodiedFleet` is the custodian-NEST serve door's bulk half: an
+        // owner device listing the segments this nest holds for its owner,
+        // answered from the custodied store (`crate::custody_fleet`).
+        "fauna.segments.list" => matches!(class, User | Custodian | CustodiedFleet),
         "fauna.segments.compact" => matches!(class, User),
         // The counter floor MUTATES the owner's store too, so it is `User`
         // only for compact's reason — custody is a read capability.
@@ -2185,6 +2323,13 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // owner's store). Ratified by the goal doc's REJECTED alternatives:
         // app-relay carriage and owner-side pulls both lose to this arm.
         "fauna.custody.receipt.deposit" => matches!(class, Custodian),
+        // The custodian copy's pull (`identity-succession.md` § Seed escrow →
+        // *The custodian copy*, ruling 1): the custody pump reads the owner's
+        // seed-escrow blob into the pair store. A READ door of the custodian
+        // class, admitted by the handler exactly as the custody read doors are
+        // (a live `Account`-form custody row naming the caller as holder). The
+        // blob is ciphertext sealed to a RecoveryKey the custodian never holds.
+        "fauna.recovery.escrow.pull" => matches!(class, Custodian),
         // The owner's own fleet fetching its staged receipts at sync.
         "fauna.custody.receipt.list" => matches!(class, User),
         // Destination-side custody grace window (slice 3): the owner lists and
@@ -2357,6 +2502,13 @@ pub enum PrincipalReach {
     Session,
     /// Covered by exactly one arm of the Fauna scope family.
     Scope(fauna_bridge_atproto::fauna_scope::FaunaScopeArm),
+    /// A *scope-dispatched* kind (rule (c)'s first refinement): its request
+    /// names an account-plane scope, and the scope's family names the arm —
+    /// so the gate admits a session holding any arm of the set, and the
+    /// handler picks by the request's scope and refuses a spelling no held
+    /// arm covers. Today exactly `fauna.sync.changes.list`: `ext:<kind>` →
+    /// `records`, `state` → `personalization:rw` (read only).
+    ScopeDispatched(&'static [fauna_bridge_atproto::fauna_scope::FaunaScopeArm]),
     /// Covered by an `identity.op` scope (the
     /// [`fauna_bridge_atproto::fauna_scope::FaunaScopeArm::IdentityOp`] arm)
     /// whose class is performed by this custodian — class-aware, not
@@ -2378,18 +2530,48 @@ pub fn principal_reach(kind: &str) -> Option<PrincipalReach> {
     use fauna_bridge_atproto::fauna_scope::FaunaScopeArm;
     match kind {
         "fauna.capabilities.fetch" => Some(PrincipalReach::Session),
+        // The bare arm stays the two timelines' one arm; the refining
+        // `fauna:feed:read:account` adds the account's reading of them without
+        // entering this mapping — their handler reads it off the session's
+        // scopes (`apps/bridges.md` rule (c)'s refinement).
         "fauna.feed.trending.posts" | "fauna.feed.local.posts" => {
             Some(PrincipalReach::Scope(FaunaScopeArm::FeedRead))
         }
+        // The fourth arm (`authorization-server.md` § Scope grammar → *The
+        // fourth arm*): the account's own custom feeds, public posts only.
+        "fauna.feed.list" | "fauna.feed.get" | "fauna.feed.posts" => {
+            Some(PrincipalReach::Scope(FaunaScopeArm::FeedReadAccount))
+        }
         "fauna.nostr.bunker.bind" => Some(PrincipalReach::IdentityOp(
             fauna_core::identity_op::Custodian::NostrDepositedKey,
+        )),
+        "fauna.activitypub.oracle.http_sig" => Some(PrincipalReach::IdentityOp(
+            fauna_core::identity_op::Custodian::ActivityPubActorKey,
+        )),
+        "fauna.posts.author.create" => Some(PrincipalReach::IdentityOp(
+            fauna_core::identity_op::Custodian::AccountAuthoringKey,
+        )),
+        "fauna.posts.author.delete" => Some(PrincipalReach::IdentityOp(
+            fauna_core::identity_op::Custodian::AccountAuthoringKey,
+        )),
+        "fauna.atproto.oracle.service_auth" => Some(PrincipalReach::IdentityOp(
+            fauna_core::identity_op::Custodian::AtprotoRepoKey,
         )),
         // The `records` arm (`third-party-kinds.md` § The record doors). The
         // arm-wide check here is the gate's half; the per-kind half — the
         // request's `ext:<kind>` covered by one of the session's `records`
         // qualifiers — is each principal handler's, before anything else.
-        "fauna.account.state.put" | "fauna.sync.changes.list" => {
-            Some(PrincipalReach::Scope(FaunaScopeArm::Records))
+        "fauna.account.state.put" => Some(PrincipalReach::Scope(FaunaScopeArm::Records)),
+        // Scope-dispatched between `records` (`ext:<kind>`) and the fifth arm
+        // (`state`, read only); the handler picks by the request's scope.
+        "fauna.sync.changes.list" => Some(PrincipalReach::ScopeDispatched(&[
+            FaunaScopeArm::Records,
+            FaunaScopeArm::PersonalizationRw,
+        ])),
+        // The fifth arm (`authorization-server.md` § Scope grammar → *The
+        // fifth arm*): the sealed model plane, for the principal's account.
+        "fauna.personalization.model.fetch" | "fauna.personalization.model.put" => {
+            Some(PrincipalReach::Scope(FaunaScopeArm::PersonalizationRw))
         }
         // The `conversations:bridge` arm (`apps/bridges.md` § Bridge-kind
         // catalogue → Phase G).
@@ -2406,12 +2588,25 @@ pub fn principal_reach(kind: &str) -> Option<PrincipalReach> {
         // ingress). The arm-wide check here is the gate's half; the
         // per-folder half — the request's folder named by one of the
         // session's `folder:deposit` qualifiers — is the handler's.
-        "fauna.folders.deposit" => Some(PrincipalReach::Scope(FaunaScopeArm::FolderDeposit)),
+        "fauna.folders.deposit"
+        | "fauna.folders.deposit.begin"
+        | "fauna.folders.deposit.part"
+        | "fauna.folders.deposit.commit" => {
+            Some(PrincipalReach::Scope(FaunaScopeArm::FolderDeposit))
+        }
         // The `events` arm (`transport.md` § Push events → *Third-party event
         // doors*): the poll is the arm's ceiling kind; the filtered push and
         // the HTTP long-poll are that kind's other faces, under the same
         // per-scope filter (`fauna_scope::event_reaches`), the handler's half.
         "fauna.events.poll" => Some(PrincipalReach::Scope(FaunaScopeArm::EventsSubscribe)),
+        // The `follow:write` arm (`authorization-server.md` § Scope grammar →
+        // *The sixth arm*): the followers tier only — the narrowing is each
+        // principal handler's, before anything else.
+        "fauna.subscriptions.subscribe"
+        | "fauna.subscriptions.unsubscribe"
+        | "fauna.subscriptions.status.get" => {
+            Some(PrincipalReach::Scope(FaunaScopeArm::FollowWrite))
+        }
         _ => None,
     }
 }
@@ -2441,6 +2636,9 @@ pub fn scope_covers(scopes: &[String], kind: &str) -> bool {
         Some(PrincipalReach::Scope(arm)) => scopes
             .iter()
             .any(|s| fauna_bridge_atproto::fauna_scope::arm_of(s) == Some(arm)),
+        Some(PrincipalReach::ScopeDispatched(arms)) => scopes.iter().any(|s| {
+            fauna_bridge_atproto::fauna_scope::arm_of(s).is_some_and(|a| arms.contains(&a))
+        }),
         Some(PrincipalReach::IdentityOp(custodian)) => scopes
             .iter()
             .any(|s| identity_op_scope_reaches(s, custodian)),
@@ -2474,10 +2672,11 @@ pub fn scope_covers(scopes: &[String], kind: &str) -> bool {
 /// revocation probe keys on (`wsrpc/reconnect.go`).
 pub fn class_refusal_namespace(kind: &str) -> Option<&str> {
     use CallerClass::*;
-    const ALL: [CallerClass; 8] = [
+    const ALL: [CallerClass; 9] = [
         BridgeMta,
         BridgeMda,
         Custodian,
+        CustodiedFleet,
         ContentProcessor,
         BridgeAtprotoPds,
         User,
@@ -2588,6 +2787,14 @@ pub async fn caller_class_for_actor(
         // delete) ends the class immediately.
         if is_live_custody_holder(db, actor_id).await? {
             return Ok(Some(CallerClass::Custodian));
+        }
+        // The custodied-fleet fallback (the custodian-NEST serve door): an
+        // owner device this nest holds a live custody for, re-derived from the
+        // register row + the owner's hosting rows on every dispatch
+        // (`crate::custody_fleet`). After the custodian check, so a key that
+        // is somehow both keeps the narrower-known class it was granted first.
+        if crate::custody_fleet::is_custodied_fleet_device(db, actor_id).await? {
+            return Ok(Some(CallerClass::CustodiedFleet));
         }
         return Ok(None);
     };
@@ -2774,8 +2981,10 @@ mod tests {
     /// sentences that name the set.
     #[test]
     fn the_third_party_class_reaches_exactly_its_ceiling() {
-        const CEILING: [&str; 15] = [
+        const CEILING: [&str; 30] = [
             "fauna.account.state.put",
+            "fauna.activitypub.oracle.http_sig",
+            "fauna.atproto.oracle.service_auth",
             "fauna.bridges.conversation.deposit",
             "fauna.bridges.conversation.outbox.ack",
             "fauna.bridges.conversation.outbox.fetch",
@@ -2785,10 +2994,23 @@ mod tests {
             "fauna.bridges.fetch_recipient_mls_pubkey",
             "fauna.capabilities.fetch",
             "fauna.events.poll",
+            "fauna.feed.get",
+            "fauna.feed.list",
             "fauna.feed.local.posts",
+            "fauna.feed.posts",
             "fauna.feed.trending.posts",
             "fauna.folders.deposit",
+            "fauna.folders.deposit.begin",
+            "fauna.folders.deposit.commit",
+            "fauna.folders.deposit.part",
             "fauna.nostr.bunker.bind",
+            "fauna.personalization.model.fetch",
+            "fauna.personalization.model.put",
+            "fauna.posts.author.create",
+            "fauna.posts.author.delete",
+            "fauna.subscriptions.status.get",
+            "fauna.subscriptions.subscribe",
+            "fauna.subscriptions.unsubscribe",
             "fauna.sync.changes.list",
         ];
         let kinds = every_kind_arm_in_this_file();
@@ -2809,7 +3031,8 @@ mod tests {
         );
         // The account's own classes never leak in: Admin ⊇ User is a rule
         // about the account, and ThirdParty is not the account.
-        assert!(!is_permitted(CallerClass::ThirdParty, "fauna.feed.posts"));
+        assert!(!is_permitted(CallerClass::ThirdParty, "fauna.feed.create"));
+        assert!(!is_permitted(CallerClass::ThirdParty, "fauna.feed.update"));
         assert!(!is_permitted(
             CallerClass::ThirdParty,
             "fauna.capabilities.mint"
@@ -2851,10 +3074,12 @@ mod tests {
         let mut named: Vec<FaunaScopeArm> = every_kind_arm_in_this_file()
             .into_iter()
             .filter_map(principal_reach)
-            .filter_map(|r| match r {
-                PrincipalReach::Scope(arm) => Some(arm),
-                PrincipalReach::IdentityOp(_) => Some(FaunaScopeArm::IdentityOp),
-                PrincipalReach::Session => None,
+            .flat_map(|r| match r {
+                PrincipalReach::Scope(arm) => vec![arm],
+                // A scope-dispatched kind names every arm of its set.
+                PrincipalReach::ScopeDispatched(arms) => arms.to_vec(),
+                PrincipalReach::IdentityOp(_) => vec![FaunaScopeArm::IdentityOp],
+                PrincipalReach::Session => Vec::new(),
             })
             .collect();
         let mut live: Vec<FaunaScopeArm> = FaunaScopeArm::ALL
@@ -2898,6 +3123,19 @@ mod tests {
         assert!(!scope_covers(&feed, "fauna.feed.posts"));
         assert!(!scope_covers(&feed, "fauna.capabilities.mint"));
 
+        // The fourth arm covers exactly the three custom-feed reads; the bare
+        // arm alone covers none of them, and the account arm alone does not
+        // cover the two timelines — it refines them for a session that also
+        // holds the bare arm, without entering their mapping (rule (c)).
+        let account = vec!["fauna:feed:read:account".to_string()];
+        for k in ["fauna.feed.list", "fauna.feed.get", "fauna.feed.posts"] {
+            assert!(scope_covers(&account, k), "{k}");
+            assert!(!scope_covers(&feed, k), "{k}: the bare arm never covers it");
+        }
+        assert!(!scope_covers(&account, "fauna.feed.local.posts"));
+        assert!(!scope_covers(&account, "fauna.feed.trending.posts"));
+        assert!(!scope_covers(&account, "fauna.feed.create"));
+
         // The oracle's door is class-aware: either Nostr class covers bind,
         // `fauna:feed:read` does not, and a sovereign-named or unknown
         // `identity:op` string covers nothing.
@@ -2915,6 +3153,37 @@ mod tests {
             );
         }
         assert!(!scope_covers(&feed, "fauna.nostr.bunker.bind"));
+        // Class-aware both ways: the ActivityPub class opens its own
+        // custodian's door and never the Nostr signer's, nor the reverse.
+        let ap = ["fauna:identity:op:activitypub.http_sig".to_string()];
+        assert!(scope_covers(&ap, "fauna.activitypub.oracle.http_sig"));
+        assert!(!scope_covers(&ap, "fauna.nostr.bunker.bind"));
+        assert!(!scope_covers(
+            &["fauna:identity:op:nostr.sign_event".to_string()],
+            "fauna.activitypub.oracle.http_sig"
+        ));
+        assert!(!scope_covers(&feed, "fauna.activitypub.oracle.http_sig"));
+        // The posting class opens the posting door and no other custodian's;
+        // no other class opens it.
+        let post = ["fauna:identity:op:post.author".to_string()];
+        for kind in ["fauna.posts.author.create", "fauna.posts.author.delete"] {
+            assert!(scope_covers(&post, kind), "{kind}");
+            assert!(!scope_covers(&ap, kind), "{kind}");
+            assert!(!scope_covers(&feed, kind), "{kind}");
+        }
+        assert!(!scope_covers(&post, "fauna.activitypub.oracle.http_sig"));
+        assert!(!scope_covers(&post, "fauna.nostr.bunker.bind"));
+        // The ATProto class opens its own custodian's door and no other.
+        let at = ["fauna:identity:op:atproto.service_auth".to_string()];
+        assert!(scope_covers(&at, "fauna.atproto.oracle.service_auth"));
+        assert!(!scope_covers(&at, "fauna.activitypub.oracle.http_sig"));
+        assert!(!scope_covers(&at, "fauna.nostr.bunker.bind"));
+        assert!(!scope_covers(&ap, "fauna.atproto.oracle.service_auth"));
+        assert!(!scope_covers(
+            &["fauna:identity:op:nostr.sign_event".to_string()],
+            "fauna.atproto.oracle.service_auth"
+        ));
+        assert!(!scope_covers(&feed, "fauna.atproto.oracle.service_auth"));
         for s in [
             "fauna:identity:op:atproto.plc_rotate",
             "fauna:identity:op:identity.succession",
@@ -2927,6 +3196,40 @@ mod tests {
                 "{s}"
             );
         }
+
+        // The fifth arm covers exactly the model fetch and put; the owner
+        // keeps delete, and the records arm never reaches the models.
+        let personalization = vec!["fauna:personalization:rw".to_string()];
+        let records = vec!["fauna:records:rw:ext.app.example.*".to_string()];
+        for kind in [
+            "fauna.personalization.model.fetch",
+            "fauna.personalization.model.put",
+        ] {
+            assert!(scope_covers(&personalization, kind), "{kind}");
+            assert!(!scope_covers(&records, kind), "{kind}");
+            assert!(!scope_covers(&feed, kind), "{kind}");
+        }
+        assert!(!scope_covers(
+            &personalization,
+            "fauna.personalization.model.delete"
+        ));
+        assert!(!scope_covers(&personalization, "fauna.account.state.put"));
+        // The list is scope-dispatched: either arm opens the gate (the
+        // handler picks by the request's scope); neither, nothing.
+        assert_eq!(
+            principal_reach("fauna.sync.changes.list"),
+            Some(PrincipalReach::ScopeDispatched(&[
+                fauna_bridge_atproto::fauna_scope::FaunaScopeArm::Records,
+                fauna_bridge_atproto::fauna_scope::FaunaScopeArm::PersonalizationRw,
+            ]))
+        );
+        assert!(scope_covers(&personalization, "fauna.sync.changes.list"));
+        assert!(scope_covers(&records, "fauna.sync.changes.list"));
+        assert!(!scope_covers(&feed, "fauna.sync.changes.list"));
+        assert!(!scope_covers(
+            &["fauna:personalization:read".to_string()],
+            "fauna.sync.changes.list"
+        ));
     }
 
     /// `caller_class_for_actor` never answers `ThirdParty`, so a principal's
@@ -2951,10 +3254,15 @@ mod tests {
         // test's doc demands, with the goal-doc sentence moved beside it
         // (`account-data-plane.md` § Implementation status today —
         // the *Ruled — the nest-custodian identity fact* entry, stage (c)).
-        const EXPECTED: [&str; 3] = [
+        //
+        // Plus the custodian copy's READ door (2026-10-09,
+        // `identity-succession.md` § Seed escrow → *The custodian copy*,
+        // ruling 1): the owner's seed-escrow blob, keyless to the custodian.
+        const EXPECTED: [&str; 4] = [
             "fauna.sync.changes.list",
             "fauna.segments.list",
             "fauna.custody.receipt.deposit",
+            "fauna.recovery.escrow.pull",
         ];
 
         // Every `"fauna.…" =>` arm in this file's own match, read from source so
@@ -3017,6 +3325,33 @@ mod tests {
         assert!(
             !is_permitted(CallerClass::Custodian, "fauna.segments.compact"),
             "compact MUTATES the owner's segment store; custody is a read capability"
+        );
+    }
+
+    /// **The custodied-fleet class reaches exactly the two serve-door reads**
+    /// (`account-replica-posture.md` § the custodian-NEST serve door, ruling
+    /// 2: "confined by the allowlist to the four read doors" — the two WS
+    /// doors here, the byte pair behind `BearerAuth`). Like `Custodian`, it is
+    /// granted to an actor with no `users` row, by rows rather than identity,
+    /// so a widening must be one deliberate line here and a goal-doc sentence.
+    /// Derived from the source (`every_kind_arm_in_this_file`), so a new arm
+    /// anywhere in the file is inside this test's reach.
+    #[test]
+    fn the_custodied_fleet_class_reaches_exactly_its_declared_kinds() {
+        let reached: Vec<&str> = every_kind_arm_in_this_file()
+            .into_iter()
+            .filter(|k| is_permitted(CallerClass::CustodiedFleet, k))
+            .collect();
+        assert_eq!(
+            reached,
+            vec!["fauna.segments.list", "fauna.sync.changes.list"],
+            "the custodied-fleet class's reach changed. It reads another account's held copy \
+             without a `users` row; if the change is deliberate, update this list AND the \
+             custodian-NEST serve door bullet in `account-replica-posture.md`"
+        );
+        assert!(
+            !is_permitted(CallerClass::CustodiedFleet, "fauna.segments.compact"),
+            "compact mutates a segment store; the serve door is a read"
         );
     }
 
@@ -3147,10 +3482,44 @@ mod tests {
                 !is_permitted(class, "fauna.nostr.bunker.bind"),
                 "{class:?} must not bind"
             );
+            assert!(
+                !is_permitted(class, "fauna.activitypub.oracle.http_sig"),
+                "{class:?} must not reach the ActivityPub oracle"
+            );
+            for kind in ["fauna.posts.author.create", "fauna.posts.author.delete"] {
+                assert!(
+                    !is_permitted(class, kind),
+                    "{class:?} must not reach the posting oracle"
+                );
+            }
+            assert!(
+                !is_permitted(class, "fauna.atproto.oracle.service_auth"),
+                "{class:?} must not reach the ATProto oracle"
+            );
         }
+        assert!(!is_permitted(
+            CallerClass::BridgeAtprotoPds,
+            "fauna.atproto.oracle.service_auth"
+        ));
+        assert!(is_permitted(
+            CallerClass::ThirdParty,
+            "fauna.atproto.oracle.service_auth"
+        ));
         assert!(is_permitted(
             CallerClass::ThirdParty,
             "fauna.nostr.bunker.bind"
+        ));
+        assert!(is_permitted(
+            CallerClass::ThirdParty,
+            "fauna.activitypub.oracle.http_sig"
+        ));
+        assert!(is_permitted(
+            CallerClass::ThirdParty,
+            "fauna.posts.author.create"
+        ));
+        assert!(is_permitted(
+            CallerClass::ThirdParty,
+            "fauna.posts.author.delete"
         ));
     }
 
@@ -3322,6 +3691,29 @@ mod tests {
                 CallerClass::BridgeMta,
                 CallerClass::BridgeMda,
                 CallerClass::Custodian,
+                CallerClass::CustodiedFleet,
+                CallerClass::ContentProcessor,
+                CallerClass::BridgeAtprotoPds,
+                CallerClass::ThirdParty,
+            ] {
+                assert!(!is_permitted(class, kind), "{class:?} must not {kind}");
+            }
+        }
+    }
+
+    #[test]
+    fn plugins_user_half_is_user_only() {
+        for kind in [
+            "fauna.plugins.available",
+            "fauna.plugins.bind",
+            "fauna.plugins.set_settings",
+        ] {
+            assert!(is_permitted(CallerClass::User, kind), "User must {kind}");
+            for class in [
+                CallerClass::BridgeMta,
+                CallerClass::BridgeMda,
+                CallerClass::Custodian,
+                CallerClass::CustodiedFleet,
                 CallerClass::ContentProcessor,
                 CallerClass::BridgeAtprotoPds,
                 CallerClass::ThirdParty,
@@ -4391,6 +4783,26 @@ mod tests {
         assert!(!is_permitted(CallerClass::Admin, "fauna.bridges.get_quota"));
     }
 
+    #[test]
+    fn get_mail_quotas_is_user_class_only() {
+        assert!(is_permitted(
+            CallerClass::User,
+            "fauna.bridges.get_mail_quotas"
+        ));
+        assert!(is_permitted(
+            CallerClass::Admin,
+            "fauna.bridges.get_mail_quotas"
+        ));
+        assert!(!is_permitted(
+            CallerClass::BridgeMta,
+            "fauna.bridges.get_mail_quotas"
+        ));
+        assert!(!is_permitted(
+            CallerClass::BridgeMda,
+            "fauna.bridges.get_mail_quotas"
+        ));
+    }
+
     // I5 Phase D.5 — fetch_recipient_mls_pubkey + fetch_recipient_index_key
     // widened from BridgeMta-only to BridgeMta | BridgeMda.  The MDA needs
     // both pubkeys for APPEND seal-to-self (IMAP write surface).  Both
@@ -4414,16 +4826,19 @@ mod tests {
     }
 
     #[test]
-    fn fetch_recipient_mls_pubkey_user_denied() {
-        assert!(!is_permitted(
+    fn fetch_recipient_mls_pubkey_user_permitted() {
+        // Its own key only — the handler's `target == caller` check.
+        assert!(is_permitted(
             CallerClass::User,
             "fauna.bridges.fetch_recipient_mls_pubkey"
         ));
     }
 
     #[test]
-    fn fetch_recipient_mls_pubkey_admin_denied() {
-        assert!(!is_permitted(
+    fn fetch_recipient_mls_pubkey_admin_permitted_as_a_user() {
+        // Admin ⊇ User: an admin reads back its own key, under the same
+        // handler-side `target == caller` scope as any user.
+        assert!(is_permitted(
             CallerClass::Admin,
             "fauna.bridges.fetch_recipient_mls_pubkey"
         ));
@@ -4656,7 +5071,11 @@ mod tests {
 
     #[test]
     fn the_principal_roster_kinds_are_the_accounts_own() {
-        for kind in ["fauna.principals.list", "fauna.principals.revoke"] {
+        for kind in [
+            "fauna.principals.list",
+            "fauna.principals.ops",
+            "fauna.principals.revoke",
+        ] {
             assert!(is_permitted(CallerClass::User, kind), "{kind}: User");
             assert!(
                 is_permitted(CallerClass::Admin, kind),
@@ -5306,6 +5725,7 @@ mod tests {
             "fauna.conversations.keypackage.upload",
             "fauna.conversations.keypackage.fetch",
             "fauna.conversations.keypackage.count",
+            "fauna.conversations.keypackage.addressable",
         ] {
             assert!(
                 is_permitted(CallerClass::User, kind),
@@ -5316,13 +5736,14 @@ mod tests {
 
     #[test]
     fn conversations_keypackage_kinds_bridges_denied() {
-        // `upload` + `count` stay bridge-denied. `fetch` is excluded here — it
-        // was widened to `User | BridgeMda` for the MDA mailbox-less
-        // auto-schedule rail (caldav-server.md § Server-side auto-schedule, C3);
-        // its precise allow/deny matrix is pinned below.
+        // `upload` + `count` + `addressable` stay bridge-denied. `fetch` is
+        // excluded here — it was widened to `User | BridgeMda` for the MDA
+        // mailbox-less auto-schedule rail (caldav-server.md § Server-side
+        // auto-schedule, C3); its precise allow/deny matrix is pinned below.
         for kind in [
             "fauna.conversations.keypackage.upload",
             "fauna.conversations.keypackage.count",
+            "fauna.conversations.keypackage.addressable",
         ] {
             for class in [CallerClass::BridgeMta, CallerClass::BridgeMda] {
                 assert!(
@@ -5411,6 +5832,26 @@ mod tests {
         }
     }
 
+    // ── T1.4 — get_message_scan_result (the user's own row) ──
+
+    #[test]
+    fn get_message_scan_result_user_and_admin_only() {
+        assert!(is_permitted(
+            CallerClass::User,
+            "fauna.bridges.get_message_scan_result"
+        ));
+        assert!(is_permitted(
+            CallerClass::Admin,
+            "fauna.bridges.get_message_scan_result"
+        ));
+        for class in [CallerClass::BridgeMta, CallerClass::BridgeMda] {
+            assert!(
+                !is_permitted(class, "fauna.bridges.get_message_scan_result"),
+                "get_message_scan_result should be denied for {class:?}"
+            );
+        }
+    }
+
     // ── T1.4 — report_rejected_scan (MTA-class forensic row) ──
 
     #[test]
@@ -5445,6 +5886,9 @@ mod tests {
         "fauna.bridges.put_outbound_policy",
         // The nest-side alias-policy kind shares the Admin-only property.
         "fauna.bridges.put_alias_policy",
+        // So does the deployment-wide DMARC catalog pair.
+        "fauna.bridges.put_dmarc_policy",
+        "fauna.bridges.get_dmarc_policy",
     ];
 
     #[test]
@@ -6042,10 +6486,11 @@ mod tests {
     // flow) — User-class: the importer is the user's own Fauna app, caller-
     // scoped. Distinct from the BridgeMda-only `fauna.bridges.append` the
     // handlers share a write path with.
-    const IMPORT_KINDS: [&str; 9] = [
+    const IMPORT_KINDS: [&str; 10] = [
         "fauna.bridges.start_import_session",
         "fauna.bridges.import_message",
         "fauna.bridges.import_message_batch",
+        "fauna.bridges.record_import_outcomes",
         "fauna.bridges.list_import_sessions",
         "fauna.bridges.pause_import_session",
         "fauna.bridges.resume_import_session",
@@ -6301,6 +6746,7 @@ mod tests {
             // The receipt deposit arm (stage c) is the first CUSTODIAN-only
             // kind — reachable by no other class, which is its whole point.
             CallerClass::Custodian,
+            CallerClass::CustodiedFleet,
             CallerClass::ThirdParty,
         ];
         let mut ungated: Vec<&str> = Vec::new();
@@ -6344,6 +6790,7 @@ mod tests {
             CallerClass::User,
             CallerClass::Admin,
             CallerClass::Custodian,
+            CallerClass::CustodiedFleet,
             CallerClass::ThirdParty,
         ];
         for kind in router.iter_kinds() {

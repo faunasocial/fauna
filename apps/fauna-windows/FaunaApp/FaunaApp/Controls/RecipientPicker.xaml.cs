@@ -78,6 +78,56 @@ public sealed partial class RecipientPicker : UserControl
         ProspectiveClass.Visibility = Visibility.Visible;
     }
 
+    /// <summary>The line under the input naming the bridges that serve the account
+    /// (<c>ConversationsSnapshot.bridges</c> labels, as declared). The nest matches an
+    /// address to its bridge — the picker only lists (<c>conversations.md</c> § Where
+    /// logic lives → <i>The <c>Bridged</c> adapter</i>, ruling 2 (d)). Empty collapses it.</summary>
+    public void SetBridgeLabels(System.Collections.Generic.IReadOnlyList<string> labels)
+    {
+        if (labels.Count == 0)
+        {
+            BridgesLine.Visibility = Visibility.Collapsed;
+            return;
+        }
+        BridgesLine.Text = S.Get("conversations/unified/recipient_picker_bridges")
+            .Replace("{bridges}", string.Join(", ", labels));
+        BridgesLine.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>The home-nest toggle was pressed — the flipped choice (what the
+    /// composer should now stage through <c>set_new_thread_home_nest</c>).</summary>
+    public event EventHandler<bool>? HomeNestToggled;
+
+    /// <summary>
+    /// <c>recipient-picker-home-nest-toggle</c>: paint the composer's home-nest
+    /// choice, read off the picker state's shared <c>include_home_nest</c>.
+    /// <c>null</c> collapses the control (absent): every picker but the
+    /// new-thread composer's.
+    /// </summary>
+    public void SetHomeNest(bool? include)
+    {
+        if (include is not { } on)
+        {
+            HomeNestToggle.Visibility = Visibility.Collapsed;
+            return;
+        }
+        HomeNestToggle.Content = S.Get(on
+            ? "conversations/unified/room_home_nest_yes"
+            : "conversations/unified/room_home_nest_no");
+        // Programmatic IsChecked writes raise no Click, so this cannot loop.
+        HomeNestToggle.IsChecked = on;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
+            HomeNestToggle, on ? "true" : "false");
+        HomeNestToggle.Visibility = Visibility.Visible;
+    }
+
+    private void OnHomeNestClicked(object sender, RoutedEventArgs e)
+    {
+        // The toggle flipped itself on the click; hand the page the NEW value,
+        // which the snapshot tick then confirms back through SetHomeNest.
+        HomeNestToggled?.Invoke(this, HomeNestToggle.IsChecked == true);
+    }
+
     /// <summary>Resolve <paramref name="state"/> through the shared
     /// <c>RecipientResolveStatus</c> state→(token, label) map (conversations.md §
     /// Errors & edge cases) and update the visible/e2e status — the single call both

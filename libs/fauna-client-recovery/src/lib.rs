@@ -50,6 +50,7 @@
 //! | [`replacement::request_seed_alone_replacement`] / [`replacement::pending_replacement`] | authenticated |
 //! | [`replacement::veto_pending_replacement`] | anonymous (the owner holds only the phrase) |
 //! | [`succession::succeed_identity`] / [`succession::resolve_successor`] | anonymous |
+//! | [`lockout::lock_account_with_seed`] | anonymous (the signed-out door) |
 //! | [`replacement::reseal_escrow_with_held_kit`] | authenticated |
 
 /// The post-succession aftermath — the ordered pass (legs 1, 2, 4, 7, 6) a
@@ -84,6 +85,8 @@ pub mod ledger_aftermath;
 /// Clause (c) as one gesture — the seed-alone request and the veto at every
 /// linked nest, over the host's [`linked_fanout::LinkedNestDial`].
 pub mod linked_fanout;
+/// The signed-out door's ceremony: the seed-signed `fauna.account.lockout`.
+pub mod lockout;
 pub mod nest;
 pub mod replacement;
 pub mod restore;
@@ -108,6 +111,7 @@ pub use linked_fanout::{
     LinkedFanOut, LinkedNestAnswer, LinkedNestDial, LinkedNestOutcome,
     request_seed_alone_replacement_everywhere, veto_everywhere,
 };
+pub use lockout::{LockedAccount, lock_account_with_seed};
 pub use nest::{Challenge, RecoveryClient, kinds};
 pub use replacement::{
     PendingKit, PendingReplacement, REPLACE_GRACE_SECS, pending_replacement,

@@ -154,6 +154,99 @@ async fn start_nest(db: CacheDb) -> (String, Arc<AppState>) {
 
 // ── the world ──────────────────────────────────────────────────────────────
 
+/// A fresh owner on `state`'s nest, connected, with one folder named `folder`
+/// created and a device registered — the seeding every home nest needs before
+/// its folder can be flipped public and recorded into. Returns the owner's
+/// client, its actor id (hex) and its identity secret.
+async fn seed_home(
+    state: &AppState,
+    base: &str,
+    folder: &str,
+) -> (Arc<fauna_client::NestClient>, String, [u8; 32]) {
+    let mut owner_secret = [0u8; 32];
+    getrandom::fill(&mut owner_secret).unwrap();
+    let owner_id = ActorKeypair::from_secret(owner_secret).actor_id();
+    state
+        .db
+        .create_user(&owner_id.0, "free", "owner")
+        .await
+        .unwrap();
+    let owner = connected_client(base, ActorKeypair::from_secret(owner_secret)).await;
+    let _: FolderCreateReply = owner
+        .request(
+            "fauna.folders.create",
+            FolderCreateRequest {
+                name: folder.into(),
+                // The client-minted set nonce every signed record binds to.
+                set_nonce: common::set_nonce_field(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create folder");
+    let _: SyncRegisterReply = owner
+        .request(
+            "fauna.sync.register",
+            SyncRegisterRequest {
+                device_id: hex::encode(DEVICE_ID),
+                label: "seed".into(),
+                // `capabilities` defaults to the wire default "read,write"
+                // (`SyncRegisterRequest`'s hand-written `Default`).
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("register device");
+    (owner, hex::encode(owner_id.0), owner_secret)
+}
+
+/// Flip `folder`'s audience on its home nest through its owner's client.
+async fn set_folder_audience(owner: &fauna_client::NestClient, folder: &str, audience: &str) {
+    let reply: FolderUpdateReply = owner
+        .request(
+            "fauna.folders.update",
+            FolderUpdateRequest {
+                name: folder.into(),
+                audience: Some(audience.into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("set audience");
+    assert!(reply.ok, "audience flip to {audience} refused");
+}
+
+/// Record one plaintext row into `folder`, signed by the owner's identity key
+/// under the set's nonce (the nest refuses an unsigned one `signature_required`).
+async fn record_row(
+    owner: &fauna_client::NestClient,
+    owner_secret: [u8; 32],
+    folder: &str,
+    path: &str,
+    path_sealed: Option<Vec<u8>>,
+) -> i64 {
+    let req = common::signed_record(
+        SyncChangeRecordRequest {
+            folder: folder.into(),
+            device_id: hex::encode(DEVICE_ID),
+            path: path.into(),
+            // No bytes are fetched here (see the module docs), so the
+            // manifest ref only has to be a well-formed pointer.
+            manifest_hash: Some(hex::encode([0x11u8; 32])),
+            size_bytes: 11,
+            change_type: "create".into(),
+            path_sealed: path_sealed.map(serde_bytes::ByteBuf::from),
+            ..Default::default()
+        },
+        &ActorKeypair::from_secret(owner_secret),
+    );
+    let reply: SyncChangeRecordReply = owner
+        .request("fauna.sync.changes.record", req)
+        .await
+        .expect("record change");
+    reply.seq
+}
+
 /// H + F, an owner with a **public** folder holding one recorded row, and a
 /// follower seat on F that has never touched H.
 struct World {
@@ -179,14 +272,7 @@ impl World {
         let (home_base, h_state) = start_nest(CacheDb::open(&home_db_path).unwrap()).await;
         let (follower_base, f_state) = start_nest(CacheDb::open_in_memory().unwrap()).await;
 
-        let mut owner_secret = [0u8; 32];
-        getrandom::fill(&mut owner_secret).unwrap();
-        let owner_id = ActorKeypair::from_secret(owner_secret).actor_id();
-        h_state
-            .db
-            .create_user(&owner_id.0, "free", "owner")
-            .await
-            .unwrap();
+        let (owner, owner_hex, owner_secret) = seed_home(&h_state, &home_base, FOLDER).await;
 
         // The follower holds no account, roster row, grant or key on H. Its only
         // relationship to the home nest is that its own nest can reach it.
@@ -199,40 +285,13 @@ impl World {
             .await
             .unwrap();
 
-        let owner = connected_client(&home_base, ActorKeypair::from_secret(owner_secret)).await;
         let follower =
             connected_client(&follower_base, ActorKeypair::from_secret(follower_secret)).await;
-
-        let _: FolderCreateReply = owner
-            .request(
-                "fauna.folders.create",
-                FolderCreateRequest {
-                    name: FOLDER.into(),
-                    // The client-minted set nonce every signed record binds to.
-                    set_nonce: common::set_nonce_field(),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("create folder");
-        let _: SyncRegisterReply = owner
-            .request(
-                "fauna.sync.register",
-                SyncRegisterRequest {
-                    device_id: hex::encode(DEVICE_ID),
-                    label: "seed".into(),
-                    // `capabilities` defaults to the wire default "read,write"
-                    // (`SyncRegisterRequest`'s hand-written `Default`).
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("register device");
 
         let world = Self {
             home_base,
             owner,
-            owner_hex: hex::encode(owner_id.0),
+            owner_hex,
             owner_secret,
             follower,
             follows: Arc::new(fauna_client_config::test_helpers::FakeFollowsStore::empty()),
@@ -244,19 +303,7 @@ impl World {
     }
 
     async fn set_audience(&self, audience: &str) {
-        let reply: FolderUpdateReply = self
-            .owner
-            .request(
-                "fauna.folders.update",
-                FolderUpdateRequest {
-                    name: FOLDER.into(),
-                    audience: Some(audience.into()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("set audience");
-        assert!(reply.ok, "audience flip to {audience} refused");
+        set_folder_audience(&self.owner, FOLDER, audience).await;
     }
 
     /// Record one plaintext row. Only legal while the folder is public — a
@@ -269,31 +316,9 @@ impl World {
 
     /// Record one row, optionally carrying a `path_sealed` envelope beside its
     /// plaintext path — the shape an owner engine still sealing across a flip
-    /// to public writes (the nest stores the envelope as sent). Signed by the
-    /// owner's identity key under the set's nonce, as the owner's engine signs
-    /// every record (the nest refuses an unsigned one `signature_required`).
+    /// to public writes (the nest stores the envelope as sent).
     async fn record_with_seal(&self, path: &str, path_sealed: Option<Vec<u8>>) -> i64 {
-        let req = common::signed_record(
-            SyncChangeRecordRequest {
-                folder: FOLDER.into(),
-                device_id: hex::encode(DEVICE_ID),
-                path: path.into(),
-                // No bytes are fetched here (see the module docs), so the
-                // manifest ref only has to be a well-formed pointer.
-                manifest_hash: Some(hex::encode([0x11u8; 32])),
-                size_bytes: 11,
-                change_type: "create".into(),
-                path_sealed: path_sealed.map(serde_bytes::ByteBuf::from),
-                ..Default::default()
-            },
-            &ActorKeypair::from_secret(self.owner_secret),
-        );
-        let reply: SyncChangeRecordReply = self
-            .owner
-            .request("fauna.sync.changes.record", req)
-            .await
-            .expect("record change");
-        reply.seq
+        record_row(&self.owner, self.owner_secret, FOLDER, path, path_sealed).await
     }
 
     /// First contact over the relay, as an app makes it.
@@ -537,6 +562,86 @@ async fn fetch_listing_folds_the_live_log_and_feeds_the_shared_verdict() {
     assert!(
         !rows[0].available,
         "one verdict, two consumers — the browse fetch IS the probe"
+    );
+}
+
+/// Two follows that share one numeric `folder_id` on two different home nests
+/// must each keep their OWN availability verdict. `folders.id` is a per-nest
+/// AUTOINCREMENT, so the first folder on any fresh nest is id 1 — the collision
+/// is ordinary, and a publisher can reach a chosen id on purpose. The remembered
+/// verdict is keyed by the follow's full identity `(home_nest_url, folder_id)`
+/// (`media.md` § Followed public folders); keyed by `folder_id` alone, the second
+/// follow's within-TTL read returns the other follow's `display_name`,
+/// `available` and verified `owner_handle`.
+#[tokio::test]
+async fn two_follows_sharing_a_folder_id_keep_their_own_verdicts() {
+    use fauna_devices_machine::FollowedFoldersSource as _;
+
+    const OTHER_FOLDER: &str = "other-home-folder";
+
+    let world = World::build().await;
+    let (other_base, other_state) = start_nest(CacheDb::open_in_memory().unwrap()).await;
+    let (other_owner, other_owner_hex, other_secret) =
+        seed_home(&other_state, &other_base, OTHER_FOLDER).await;
+    set_folder_audience(&other_owner, OTHER_FOLDER, "public").await;
+    record_row(&other_owner, other_secret, OTHER_FOLDER, "other.txt", None).await;
+
+    let first = world.resolve().await.expect("resolve H").record;
+    let second = fauna_client_folders::public_follow::resolve_public_folder(
+        &world.follower,
+        &other_base,
+        &other_owner_hex,
+        OTHER_FOLDER,
+        0,
+    )
+    .await
+    .expect("resolve the second home")
+    .record;
+    assert_eq!(
+        first.folder_id, second.folder_id,
+        "precondition: two fresh nests mint the same first folder id"
+    );
+    assert_ne!(first.home_nest_url, second.home_nest_url);
+    for record in [&first, &second] {
+        fauna_client_config::save_follow(&*world.follows, record.clone())
+            .await
+            .expect("persist");
+    }
+
+    // Revoke the second home's folder BEFORE the first refresh, so the two
+    // follows carry different names and different availability from the start.
+    set_folder_audience(&other_owner, OTHER_FOLDER, "private").await;
+
+    let source = world.source();
+    let own = |rows: &[fauna_devices_machine::snapshots::FollowedFolderSummary], home: &str| {
+        rows.iter()
+            .find(|r| r.home_nest_url == home)
+            .cloned()
+            .unwrap_or_else(|| panic!("no row for {home}: {rows:?}"))
+    };
+
+    let rows = source.followed_folders().await;
+    assert_eq!(rows.len(), 2, "two follows, two rows: {rows:?}");
+    let (h1, h2) = (
+        own(&rows, &first.home_nest_url),
+        own(&rows, &second.home_nest_url),
+    );
+    assert!(h1.available && h1.display_name == FOLDER, "{h1:?}");
+    assert!(!h2.available, "the revoked follow is unavailable: {h2:?}");
+    assert_eq!(h2.display_name, OTHER_FOLDER, "{h2:?}");
+
+    // The second refresh is within the staleness budget, so it answers from the
+    // remembered verdicts — each must still be its own follow's.
+    let again = source.followed_folders().await;
+    assert_eq!(
+        own(&again, &first.home_nest_url),
+        h1,
+        "the first follow must not inherit the second home's verdict"
+    );
+    assert_eq!(
+        own(&again, &second.home_nest_url),
+        h2,
+        "the second follow must not inherit the first home's verdict"
     );
 }
 

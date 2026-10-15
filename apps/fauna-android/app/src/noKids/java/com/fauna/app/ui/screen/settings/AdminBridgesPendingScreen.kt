@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.settings
 
+import com.fauna.app.ui.navigation.exitAdminToPrimary
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -26,8 +27,6 @@ import uniffi.fauna_client_mail_settings.ApprovedBridgeView
 import uniffi.fauna_client_mail_settings.BridgeApprovalStatus
 import uniffi.fauna_client_mail_settings.PendingBridgeView
 import uniffi.fauna_client_mail_settings.bridgeDisplayName
-import java.text.DateFormat
-import java.util.Date
 import social.fauna.generated.Ids
 
 /**
@@ -66,10 +65,14 @@ fun AdminBridgesPendingScreen(
         // (fauna_client_mail_settings::bridge_display_name → LocalizedText key),
         // kept in the stateful Screen so the Content stays Robolectric-safe (no FFI).
         displayName = { role -> resolveLocalized(context, bridgeDisplayName(role)).orEmpty() },
-        onBack = { navController.popBackStack() },
+        onBack = { navController.exitAdminToPrimary() },
         onApprove = vm::approve,
         onReject = vm::reject,
         onRotate = vm::rotate,
+        // The shared absolute-local timestamp door (`value-formatting.md` § Absolute
+        // local timestamp display), injected so the stateless Content stays FFI-free
+        // under Robolectric (the DevicesScreen `memberEnrolledAt` idiom).
+        formatTimestamp = { ms -> com.fauna.ffi.formatUnixLocalMs(ms) },
     )
 }
 
@@ -84,6 +87,7 @@ fun AdminBridgesPendingContent(
     onApprove: (String, String) -> Unit,
     onReject: (String) -> Unit,
     onRotate: (String) -> Unit,
+    formatTimestamp: (Long) -> String = { "" },
 ) {
     Scaffold(
         topBar = {
@@ -139,6 +143,7 @@ fun AdminBridgesPendingContent(
                         bridge = bridge,
                         working = working,
                         displayName = displayName,
+                        formatTimestamp = formatTimestamp,
                         onApprove = onApprove,
                         onReject = onReject,
                     )
@@ -160,6 +165,7 @@ fun AdminBridgesPendingContent(
                         bridge = bridge,
                         working = working,
                         displayName = displayName,
+                        formatTimestamp = formatTimestamp,
                         onRotate = onRotate,
                     )
                 }
@@ -174,14 +180,12 @@ private fun PendingBridgeCard(
     bridge: PendingBridgeView,
     working: Boolean,
     displayName: (String) -> String,
+    formatTimestamp: (Long) -> String,
     onApprove: (String, String) -> Unit,
     onReject: (String) -> Unit,
 ) {
     var rejectArmed by remember { mutableStateOf(false) }
-    val firstSeen = remember(bridge.firstSeenAt) {
-        DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
-            .format(Date(bridge.firstSeenAt.toLong()))
-    }
+    val firstSeen = remember(bridge.firstSeenAt) { formatTimestamp(bridge.firstSeenAt.toLong()) }
 
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_BRIDGES_PENDING_CARD)) {
         Column(
@@ -279,13 +283,12 @@ private fun ApprovedBridgeCard(
     bridge: ApprovedBridgeView,
     working: Boolean,
     displayName: (String) -> String,
+    formatTimestamp: (Long) -> String,
     onRotate: (String) -> Unit,
 ) {
     var rotateOpen by remember { mutableStateOf(false) }
     val approvedAt = remember(bridge.approvedAt) {
-        bridge.approvedAt?.let {
-            DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(it.toLong()))
-        } ?: "—"
+        bridge.approvedAt?.let { formatTimestamp(it.toLong()) } ?: "—"
     }
 
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_BRIDGES_APPROVED_CARD)) {

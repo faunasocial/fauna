@@ -46,28 +46,26 @@
 
 import { get, writable, type Writable } from 'svelte/store';
 import type { LocalizedText } from './i18n/localized';
-import { identity, reconnectTick } from './store';
+import { identity, onSignedInActorChange, reconnectTick } from './store';
 import { guardSingletonBuild } from './singleton-build';
 import { registerActorScopedReset, sameActorSince } from './actorScope';
-import {
-  actorsServedByAnotherTab,
-  engineLockName,
-  removeAccountBlock,
-  tryHoldEngineRole,
-  type EngineRole,
-  type RemoveAccountBlock,
-} from './webLocks';
 import { accountsList, accountsTabSessionMaterial } from './accounts';
 import { ReceivePump, RECEIVE_PASS_CEILING_MS } from './receive-pump';
 import {
+  actorsServedByAnotherTab,
   autosaveDebounceMs,
+  contactOverlaysWithoutRuntime,
   ensureWasm,
+  isConversationsEngineRoleRefusal,
   logMessage,
-  postBodyText,
+  releaseConversationsEngineRole,
+  removeAccountBlock,
   setMlsResealSink,
   type LocalDetection,
+  type RemoveAccountBlock,
 } from './wasm';
 import { recordAftermathLeg } from './succession-aftermath';
+import { overlayFaces, type OverlayFace } from './contact-overlay';
 import { raiseNewMessageBanners, resetMessageBanners } from './message-banner';
 import {
   applySpamDisposition,
@@ -77,9 +75,7 @@ import {
   fetchSpamModel,
   getSpamScoringPolicy,
   mailSettingsMachine,
-  moderationTrain,
   onPushEvent,
-  postsGet,
   type InboxFetchReply,
 } from './rpc';
 import type {
@@ -121,6 +117,11 @@ export interface ConversationThreadRow {
 /** The `data.conversation_threads` e2e rows (the agent publishes this store). */
 export const conversationThreads: Writable<ConversationThreadRow[]> = writable([]);
 
+/** The `data.conversation_sort` e2e value: the active sort order as the bare
+ *  shared-Rust spelling (`"LatestActivity"` / `"OldestFirst"` / `"Unread"`),
+ *  or null before the manager exists. */
+export const conversationSort: Writable<string | null> = writable(null);
+
 /** The `data.succession_witness` report — the member side of a succession as
  *  this seat's driver saw it (what the inbound poll did with the statements it
  *  saw, what the peer-anchor harvest managed per peer, what the witness made of
@@ -158,14 +159,6 @@ export const unopenableMailCount: Writable<number> = writable(0);
 
 let manager: WasmConversationsManager | null = null;
 let managerPromise: Promise<WasmConversationsManager> | null = null;
-/** This tab's MLS-writing role for the current account, held for as long as the
- *  manager lives (released by `resetConversationsManager`, and for free when the
- *  tab closes). `null` while no manager is built. */
-let engineRole: EngineRole | null = null;
-/** The account `engineRole` was taken for — `null` exactly when it is. The
- *  sign-out guard's proof that this tab, not another, holds that account's role
- *  (`signOutBlockedByAnotherTab`). */
-let engineRoleActor: string | null = null;
 
 /** Whether another tab of this browser profile serves any account a sign-out
  *  would erase — every account in the registry plus the signed-in one, since
@@ -175,12 +168,10 @@ let engineRoleActor: string | null = null;
  *  ahead of its first `await`, and a recorded sign-out is finished by the next
  *  load whatever this tab does, so a refusal has to be decided first.
  *
- *  This tab's own role is consulted, never probed (`actorsServedByAnotherTab`).
- *  One transient false refusal is accepted: a build that has been granted the
- *  role but not yet parked it in `engineRole` probes as "held elsewhere"; the
- *  line tells the user to press sign-out again, which then succeeds. An
- *  unreadable registry degrades to the signed-in account alone, the same
- *  degrade-open posture the probe itself takes. */
+ *  This tab's own role is consulted, never probed (`actorsServedByAnotherTab`,
+ *  over the role's holds in `fauna_mls::engine_role`, which registers a hold
+ *  the moment it is granted). An unreadable registry degrades to the signed-in
+ *  account alone, the same degrade-open posture the probe itself takes. */
 export async function signOutBlockedByAnotherTab(): Promise<boolean> {
   const actorIds: string[] = [];
   const active = get(identity)?.actorId;
@@ -190,31 +181,21 @@ export async function signOutBlockedByAnotherTab(): Promise<boolean> {
   } catch (e) {
     logMessage('warn', 'fauna_web::conversations', `sign-out guard: account registry unreadable: ${e}`);
   }
-  return (await actorsServedByAnotherTab(actorIds, holdsEngineRoleHere)).length > 0;
+  return (await actorsServedByAnotherTab(actorIds)).length > 0;
 }
 
 /** Whether a remove-account of `actorId` must refuse, and with which line —
  *  `'this_tab'` when it is the account this tab serves, `'other_tab'` when
- *  another tab holds its engine role (`$lib/webLocks::removeAccountBlock`).
+ *  another tab holds its engine role (`fauna-wasm`'s `removeAccountBlock`).
  *  Asked before `accountsRemove`, which drops the account's secret slots. */
 export async function removeAccountBlocked(actorId: string): Promise<RemoveAccountBlock> {
-  return removeAccountBlock(actorId, get(identity)?.actorId, holdsEngineRoleHere);
-}
-
-/** Whether this tab holds `actorId`'s MLS-writing role — the erase guards'
- *  proof that no other tab does (`actorsServedByAnotherTab`'s `heldHere`). */
-function holdsEngineRoleHere(actorId: string): boolean {
-  return (
-    engineRole != null &&
-    engineRoleActor != null &&
-    engineLockName(engineRoleActor) === engineLockName(actorId)
-  );
+  return removeAccountBlock(actorId, get(identity)?.actorId);
 }
 
 /** True when this tab asked for the account's MLS-writing role and was refused —
  *  another tab of this browser profile holds it, or this embedding exposes no
- *  Web Locks manager and solitude cannot be proven (`$lib/webLocks`
- *  [`tryHoldEngineRole`], which fails closed).
+ *  Web Locks manager and solitude cannot be proven (the role fails closed;
+ *  `fauna_mls::engine_role` owns the posture, `conversationsManager` takes it).
  *
  *  The conversations page renders this through its `error-message` element: the
  *  losing tab must have a defined, *rendered* behaviour — never a crash, and
@@ -228,6 +209,8 @@ export const engineRoleDenied: Writable<boolean> = writable(false);
 // wasm-bindgen machine every tick while waiting for mail to be enabled.
 let settingsMachine: WasmMailSettingsMachine | null = null;
 let pollStarted = false;
+/** The receive poll's last manager-build failure, logged once per new reason. */
+let lastPollBuildFailure: string | null = null;
 // Independent paging cursors for the two server-side mailboxes the receive poll
 // drains: INBOX (received) and Sent (the actor's own outbound copies, e.g. mail
 // sent from an external MUA). The UIDs are per-mailbox sequences, so a shared
@@ -270,15 +253,56 @@ export function conversationsManagerIfReady(): WasmConversationsManager | null {
   return manager;
 }
 
-/** Make sure this tab's account runtime is starting — for a page that reads
- *  an account-plane kind (`fauna.state.backup` on the Backups page) but builds
- *  no conversations manager itself. The runtime starts once the manager
- *  exists (`$lib/account-runtime`), so a direct load of such a page would
- *  otherwise never get one, and every plane read on it would answer "the
- *  account store is not ready yet". Fire-and-forget: the plane seams wait out
- *  the start themselves, and a tab that does not hold the MLS-writing role
- *  (the build refuses) simply stays without a runtime, as before. */
-export function ensureAccountRuntime(): void {
+/** Moves whenever the names a surface keyed on a person may have changed —
+ *  the private contact overlay's projection moved, or the tab's manager was
+ *  built or reset (`docs/goal/ui/contacts.md` § The private overlay). No
+ *  observer reaches JS, so it is compared at every conversations re-read
+ *  (`refreshConversations`). A page reads names inside a `$derived` that
+ *  touches `$contactsRevision`. */
+export const contactsRevision: Writable<number> = writable(0);
+let seenOverlay: { face: OverlayFace; revision: number } | null = null;
+
+const overlayFaceFor = overlayFaces<WasmConversationsManager>(
+  (m) => m.contactOverlays() as unknown as OverlayFace,
+  contactOverlaysWithoutRuntime,
+);
+
+/** The private contact overlay's face for this tab: the manager's projection,
+ *  or — while the tab has no manager (still building, or it hosts no runtime:
+ *  `engineRoleDenied`) — the runtime-less face, whose names are the public
+ *  labels and whose Save is refused. Every surface keyed on a person reads its
+ *  names here; member chips and message senders read the snapshot instead. */
+export function contactOverlays(): OverlayFace {
+  return overlayFaceFor(manager);
+}
+
+/** Whether a private-section editor built now is the one this tab keeps: the
+ *  manager exists (this tab hosts the runtime), or the tab lost the
+ *  MLS-writing role and never will (`engineRoleDenied` — the runtime-less
+ *  face, whose Save is refused). Neither: the manager is still building, and
+ *  an editor built on the runtime-less face now would refuse a Save this tab
+ *  can make in a moment. */
+export function contactOverlaysSettled(): boolean {
+  return manager !== null || get(engineRoleDenied);
+}
+
+/** Bump `contactsRevision` when the face or its projection moved. */
+function noteContactsRevision(): void {
+  const face = contactOverlays();
+  const revision = face.revision();
+  if (seenOverlay?.face === face && seenOverlay.revision === revision) return;
+  seenOverlay = { face, revision };
+  contactsRevision.update((n) => n + 1);
+}
+
+/** Make sure this tab's account runtime is starting. It starts once the
+ *  conversations manager exists (`$lib/account-runtime`), and
+ *  `startReceivePoll` calls this on every signed-in actor change, so a page
+ *  that reads an account-plane kind (`fauna.state.backup` on the Backups page)
+ *  but builds no manager itself never calls it. Fire-and-forget: the plane
+ *  seams wait out the start themselves, and a tab that does not hold the
+ *  MLS-writing role (the build refuses) simply stays without a runtime. */
+function ensureAccountRuntime(): void {
   getConversationsManager().catch(() => {});
 }
 
@@ -297,12 +321,20 @@ export function getConversationsManager(): Promise<WasmConversationsManager> {
   const stillThisActor = sameActorSince();
   const build = async (stillWanted: () => boolean): Promise<WasmConversationsManager> => {
     await ensureWasm();
-    // ⚠ THE MLS-WRITING ROLE, BEFORE ANY ENGINE EXISTS — web's leg of the
-    // conversations-engine role lock (`account-scoping.md` § Concurrent
-    // instances → *Web*). Placed here for the same reason the native lock sits
-    // inside `SqliteStorage::open`: the role must be held before anything can
-    // advance the leaf, and the shared engine-construction path is the one
-    // place every writer passes through.
+    // ⚠ BEFORE the manager is built, not after. Leg 3 of the succession
+    // aftermath — the `__mls` re-seal — is a barrier inside the replica's own
+    // `load()`, which this constructor kicks off, so a sink registered
+    // afterwards would miss the pass entirely and the Recovery kit section
+    // would render no leg-3 line. The other
+    // five legs report through `runSuccessionAftermath`'s own callback; this is
+    // the same callback, reaching the one leg that cannot be handed it.
+    setMlsResealSink(recordAftermathLeg);
+    // ⚠ THE MLS-WRITING ROLE, BEFORE ANY ENGINE EXISTS — taken INSIDE
+    // `conversationsManager`, the wasm engine-construction path, for the same
+    // reason the native role lock sits inside `SqliteStorage::open`: the role
+    // must be held before anything can advance the leaf, and the shared
+    // engine-construction path is the one place every writer passes through
+    // (`fauna_mls::engine_role` owns the model and the fail-closed posture).
     //
     // It cannot be a gate on "sends" instead. This builder ALONE writes MLS
     // state four times, most of them before returning a manager to anyone —
@@ -312,56 +344,48 @@ export function getConversationsManager(): Promise<WasmConversationsManager> {
     // leg-3 re-seal barrier runs inside the replica's own
     // `load()`. A second tab reaching any of them has already forked the
     // ratchet, so the refusal has to land before the first of them.
-    if (!engineRole) {
-      const role = await tryHoldEngineRole(id.actorId);
-      // Both seams before the role lands in module state. The role is keyed per
-      // ACCOUNT, and the drop releases only what `engineRole` already holds: a
-      // switch landing inside this await would otherwise park the DEPARTING
-      // account's role in the slot, where the incoming actor's build reads it as
-      // "already held" and skips taking its own. An abandoned build hands it
-      // back for the same reason — its successor takes the role itself.
+    let built: WasmConversationsManager;
+    try {
+      built = await conversationsManager(id.secretHex, selfAddressFor(id));
+    } catch (e) {
+      if (!isConversationsEngineRoleRefusal(e)) throw e;
       if (!stillThisActor() || !stillWanted()) {
-        role?.release();
         throw new Error('conversations manager: superseded while taking the MLS-writing role');
       }
-      engineRole = role;
-      engineRoleActor = role ? id.actorId : null;
-      if (!engineRole) {
-        // Log the TRANSITION, not the state: `startReceivePoll` re-attempts the
-        // build on every tick (which is what lets this tab take over when the
-        // holder closes), so logging unconditionally would emit one warning per
-        // tick for as long as both tabs stay open.
-        if (!get(engineRoleDenied)) {
-          logMessage(
-            'warn',
-            'fauna_web::conversations',
-            'MLS-writing role refused for this account (another tab holds it, or this ' +
-              'embedding exposes no Web Locks manager) — running no engine in this tab',
-          );
-        }
-        engineRoleDenied.set(true);
-        // Clear the memo so a later attempt (the receive poll's next tick, or a
-        // reload after the holding tab closes) can win the role instead of
-        // being served this same rejection forever.
-        managerPromise = null;
-        throw new Error('conversations manager: this account is served by another tab');
+      // Log the TRANSITION, not the state: `startReceivePoll` re-attempts the
+      // build on every tick (which is what lets this tab take over when the
+      // holder closes), so logging unconditionally would emit one warning per
+      // tick for as long as both tabs stay open.
+      if (!get(engineRoleDenied)) {
+        logMessage(
+          'warn',
+          'fauna_web::conversations',
+          'MLS-writing role refused for this account (another tab holds it, or this ' +
+            'embedding exposes no Web Locks manager) — running no engine in this tab',
+        );
       }
-      engineRoleDenied.set(false);
+      engineRoleDenied.set(true);
+      // Clear the memo so a later attempt (the receive poll's next tick, or a
+      // reload after the holding tab closes) can win the role instead of
+      // being served this same rejection forever.
+      managerPromise = null;
+      throw new Error('conversations manager: this account is served by another tab');
     }
-    // ⚠ BEFORE the manager is built, not after. Leg 3 of the succession
-    // aftermath — the `__mls` re-seal — is a barrier inside the replica's own
-    // `load()`, which this constructor kicks off, so a sink registered
-    // afterwards would miss the pass entirely and the Recovery kit section
-    // would render no leg-3 line. The other
-    // five legs report through `runSuccessionAftermath`'s own callback; this is
-    // the same callback, reaching the one leg that cannot be handed it.
-    setMlsResealSink(recordAftermathLeg);
-    const built = await conversationsManager(id.secretHex, selfAddressFor(id));
     if (!stillThisActor()) {
+      // The role is keyed per ACCOUNT, and the teardown released every one this
+      // tab held — but a grant landing after it registered the DEPARTING
+      // account's role again, locking other tabs out of an account this one has
+      // left. Hand it back, unless the switch came round to this account again
+      // (its build then serves under the same hold). An abandoned build (below)
+      // keeps the role: it is the tab's, and its replacement writes under it.
+      if (get(identity)?.actorId?.toLowerCase() !== id.actorId.toLowerCase()) {
+        void releaseConversationsEngineRole(id.actorId);
+      }
       // Deliberately does NOT null `managerPromise`: by now it may already hold
       // the INCOMING actor's build, and clearing it here would throw that away.
       throw new Error('conversations manager: actor changed while the manager was building');
     }
+    engineRoleDenied.set(false);
     // The settle deadline's seam beside the identity one: an abandoned build
     // resolving after its replacement must not install itself over it
     // (`singleton-build.ts`).
@@ -369,6 +393,9 @@ export function getConversationsManager(): Promise<WasmConversationsManager> {
       throw new Error('conversations manager: build abandoned by its settle deadline');
     }
     manager = built;
+    // The private overlay's face is this manager's from now: open pages
+    // re-read their names and build their editor over it.
+    noteContactsRevision();
     // This tab's account runtime, over the manager just built — it registers
     // the account-plane seams on it at the store's ready edge
     // (`$lib/account-runtime`). Not awaited: the store opening must never
@@ -527,8 +554,8 @@ export function getConversationsManager(): Promise<WasmConversationsManager> {
     // teeth: this build installs BEFORE its long tail, so it is the one most
     // likely abandoned after installing, and `startReceivePoll` rebuilds only
     // on an empty slot. Left filled, the receive rail would pump the abandoned
-    // engine for the rest of the page's life. `engineRole` stays: it is the
-    // account's, and the replacement build writes under it.
+    // engine for the rest of the page's life. The role stays: it is the tab's
+    // (`fauna_mls::engine_role`), and the replacement build writes under it.
     manager = null;
   });
   managerPromise = guarded;
@@ -552,6 +579,11 @@ export function resetConversationsManager(): void {
   mocksInstalled = false;
   conversationsSnapshot.set(null);
   conversationThreads.set([]);
+  conversationSort.set(null);
+  // The departing account's names: the next read takes the runtime-less face
+  // until the incoming account's manager is built.
+  seenOverlay = null;
+  contactsRevision.update((n) => n + 1);
   // The banner log is this actor's, like the threads above: the rebuilt manager
   // carries a fresh `MessageNotificationTracker`, so the incoming identity's
   // restored threads seed silently rather than raising a banner apiece, and the
@@ -562,9 +594,7 @@ export function resetConversationsManager(): void {
   // PREVIOUS actor's role would both hold a lock nothing in this tab still
   // writes under, and lock a second tab out of an account this one has left.
   // The browser also releases it for free if the tab simply closes.
-  engineRole?.release();
-  engineRole = null;
-  engineRoleActor = null;
+  void releaseConversationsEngineRole();
   engineRoleDenied.set(false);
   // The account runtime is the departing account's too: its store and its
   // Web Lock go with the manager it registered its seams on. The plain stop —
@@ -828,16 +858,16 @@ async function trainSpamModelClientSide(secretHex: string, text: string, isSpam:
 /** Apply a `train-correction-button` click for one merged moderation queue row — the
  *  tier-1 spam-model client-write switch (`mail-spam.md` § Encrypted-mode interaction).
  *  A **server** row (`source: "Server"`, carries an enforcement `action`) submits a ham
- *  training correction: a sealed pre-check, then fetch the post body (`fauna.posts.get`
- *  + the shared `postBodyText` wasm decode) and write via `trainSpamModelClient`;
- *  `sealed == false` (older nest / mail not enabled) or an empty/fetch-miss body falls
- *  back to the existing server-side `fauna.moderation.train`. A **local** row
+ *  training correction through the ONE shared flow
+ *  (`WasmMailSettingsMachine.trainModerationCorrection`, `moderation.md` § State &
+ *  data shape → *Training correction*): the sealed model write when possible, then
+ *  `fauna.moderation.train` always, so every correction reports. A **local** row
  *  (`source: "Local"`, a client-only post-decrypt detection) has no nest obligation to
  *  train against — the content is client-only (MLS-sealed at rest) — so the correction
  *  removes the false-positive flag from the session store, and when the sealed write
  *  path is available it *additionally* feeds the ham correction to the tier-1 model
  *  with the SAME retained decrypted text the classifier saw. Mirrors linux
- *  `FaunaClient::{correct_moderation_row,train_moderation_flow}`. */
+ *  `FaunaClient::correct_moderation_row`. */
 export async function trainModerationCorrection(
   secretHex: string,
   contentId: string,
@@ -850,15 +880,7 @@ export async function trainModerationCorrection(
     return;
   }
   if (!settingsMachine) settingsMachine = await mailSettingsMachine(secretHex);
-  if (await settingsMachine.sealedSpamWriteAvailable()) {
-    const bytes = await postsGet(secretHex, contentId);
-    const text = postBodyText(bytes);
-    if (text) {
-      const outcome = (await settingsMachine.trainSpamModelClient(text, false)) as { sealed: boolean };
-      if (outcome.sealed) return;
-    }
-  }
-  await moderationTrain(secretHex, contentId, 'ham');
+  await settingsMachine.trainModerationCorrection(contentId, false); // "ham" — a false positive
 }
 
 export function refreshConversations(): void {
@@ -877,6 +899,8 @@ export function refreshConversations(): void {
     // wasm twin (mirrors `mlsFoldedCommits`'s exact shape).
     const rows = manager.conversationThreadsJson() as ConversationThreadRow[];
     conversationThreads.set(rows);
+    // The active sort order, off the same shared-Rust rule (a bare JSON string).
+    conversationSort.set(manager.conversationSortJson() as string);
     // The member-side succession report, off the same shared-Rust-renders-it
     // rule as the rows above. Refreshed here rather than on its own timer
     // because this function is already the post-receive chokepoint, and the
@@ -884,6 +908,9 @@ export function refreshConversations(): void {
     // state provider is the ack path, so it may never round-trip).
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     successionWitness.set(manager.successionWitnessStateJson() as any);
+    // The private overlay's names, compared on the same chokepoint: a Save,
+    // a sibling device's edit the pump brought in, or a fold.
+    noteContactsRevision();
     // A thread read owes the nest `\Seen` writes: run the mail pass now, which
     // ends in sending them, so another device hears of the read promptly — the
     // web twin of the native session's mail-read poke. This is the chokepoint
@@ -968,6 +995,11 @@ async function ensureRecipientSecret(secretHex: string): Promise<boolean> {
   const keypairs = (await settingsMachine.recipientStandingKeypairs()) as Uint8Array;
   if (keypairs.length > 0) {
     manager.setRecipientKeypairs(keypairs);
+    // The prior generations' retirement instants (aligned with the grace
+    // generations above) so the openers select by seal time, not the whole ring.
+    manager.setRecipientRetirements(
+      (await settingsMachine.recipientGenerationRetirements()) as Float64Array,
+    );
     // Content-sealing epochs: thread the client's mail-epoch roots (current +
     // grace generations, derived from the MSEK in wasm) so the epoch opener can
     // read mail sealed under a mail epoch key once the write flip is thrown.
@@ -1312,6 +1344,10 @@ async function pollFaunaMlsOnce(): Promise<void> {
     // existing channels; refresh after.
     await manager.drainInbox();
     await manager.pollConversations();
+    // Re-read the contact roster the recipient suggestions draw on — the web
+    // twin of the native receive loop's backstop-tick `full_sweep!` arm
+    // (`conversations.md` § Where logic lives → *Recipient suggestions*). Never rejects.
+    await manager.refreshContactRoster();
     // Folder channels are commit-only and bind no thread, so they sit outside
     // `pollConversations`'s bound-channel sweep and need their own drive — this is
     // how a member applies the owner's rotate-on-removal commit and advances to the
@@ -1551,6 +1587,15 @@ export async function startReceivePoll(): Promise<void> {
   await ensureWasm();
   subscribeReceivePushes();
   subscribeReconnectSweep();
+  // The account runtime starts once the manager exists (`$lib/account-runtime`),
+  // and the ticker below builds it only on a tick — up to a full interval
+  // after the sign-in, 30 s in production, since a tick that saw no identity
+  // has already armed its sleep. Every account-plane read in that window
+  // (an unsubscribe's ledger read, a custody check) waits out the store's
+  // bound and is refused not-ready. So a signed-in actor's arrival starts the
+  // build at once, without waiting for the tick; withheld until the actor has
+  // a home nest, because the build dials it.
+  onSignedInActorChange(() => ensureAccountRuntime());
   for (;;) {
     const id = get(identity);
     if (id?.secretHex) {
@@ -1565,8 +1610,16 @@ export async function startReceivePoll(): Promise<void> {
           await getConversationsManager();
           refreshConversations();
         }
-      } catch {
-        // Transient (disconnect / not-yet-connected) — retry next tick.
+      } catch (e) {
+        // Transient (disconnect / not-yet-connected) — retry next tick. Logged
+        // on the TRANSITION (a new reason), not per tick: a build that keeps
+        // failing is the reason no account runtime starts in this tab, and a
+        // silent catch left that undiagnosable.
+        const reason = String(e);
+        if (reason !== lastPollBuildFailure) {
+          lastPollBuildFailure = reason;
+          logMessage('warn', 'fauna_web::conversations', `receive poll: manager build failed: ${reason}`);
+        }
       }
       // Both rails, through the one pump — so a ticker sweep can never overlap a
       // push wake on the single MLS engine. FaunaMls is ungated; the SMTP rail
@@ -1670,6 +1723,35 @@ interface FeedTestSeams {
 export interface MemberReview {
   person: string;
   reasons: string[];
+}
+
+/** One open refused scheduling change as the Events page paints it — the
+ *  shared `refused_change_view` row (`ui/events.md` § Refused scheduling
+ *  changes). The texts are `LocalizedText`s for `resolveLocalized`; `attempts`
+ *  is present only past one attempt and rides the reason line; `lastRefusedAt`
+ *  is epoch seconds (the page formats the date). */
+export interface RefusedChange {
+  key: string;
+  headline: LocalizedText;
+  author: LocalizedText;
+  reason: LocalizedText;
+  attempts: LocalizedText | null;
+  lastRefusedAt: number;
+}
+
+/** The open refused changes, most recent attempt first — empty (the list stays
+ *  absent) when none are open or the account store is not up yet. The sender
+ *  handle is re-derived in Rust at every read. */
+export async function refusedChanges(): Promise<RefusedChange[]> {
+  const m = await getConversationsManager();
+  return (await m.refusedChanges()) as RefusedChange[];
+}
+
+/** Dismiss one refused change (a local store write). Resolves to whether it
+ *  was open — a sibling device may have dismissed it first. */
+export async function dismissRefusedChange(key: string): Promise<boolean> {
+  const m = await getConversationsManager();
+  return m.dismissRefusedChange(key);
 }
 
 /** The shared row-text parts for one review item — mirrors
@@ -2003,6 +2085,9 @@ async function handleConversationsCommand(action: string, p: any): Promise<unkno
               'that resolved to no chip)',
           );
         }
+        // The page's own chip-commit door does the same: the compose's list-send
+        // texts (`dm-compose-list-*`) are re-derived once a chip commits.
+        await m.refreshListSend();
         refreshConversations();
         return null;
       }
@@ -2047,8 +2132,8 @@ async function handleConversationsCommand(action: string, p: any): Promise<unkno
       }
       case 'conversations_real_resolve_send_new': {
         // Resolve the typed recipient through the REAL backend probe (no actor_id
-        // injection): the recipient picker's `resolveRecipient` probes
-        // `fauna.conversations.keypackage.count` to promote a 64-hex actor id to a
+        // injection): the recipient picker's `resolveRecipient` asks the boolean
+        // `fauna.conversations.keypackage.addressable` to promote a 64-hex actor id to a
         // `Fauna` chip, then `sendNewThread` bootstraps the group (fetch key
         // package → create MLS group → deliver Welcome → post Application envelope).
         const m = await getConversationsManager();

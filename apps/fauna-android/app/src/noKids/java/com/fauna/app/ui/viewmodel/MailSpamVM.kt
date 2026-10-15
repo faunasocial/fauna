@@ -57,6 +57,14 @@ class MailSpamVM @Inject constructor(
         hydrate()
         hydrateReportShare()
         hydrateThresholdOverride()
+        // The history open here follows an undo or a reset on another device
+        // (`StaleSurfaces::mail_spam`, mail-spam.md § Undo step 4, § Reset
+        // step 6), and a reconnect re-reads it too — a push sent while the
+        // socket was down is never replayed. Only the machine's own hydrate:
+        // the reset confirm's armed state lives in the screen, which a
+        // snapshot never touches, so a push never disarms it.
+        viewModelScope.launch { api.mailSpamChangedTick.collect { hydrate() } }
+        viewModelScope.launch { api.reconnectTick.collect { hydrate() } }
     }
 
     /** Load training history + the contribution flag; retry while the socket

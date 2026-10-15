@@ -754,7 +754,7 @@ func TestPublishLabelerRoundTrip(t *testing.T) {
   (func (export "label") (param i32 i32) (result i32)
     (i32.store (i32.const 100) (i32.const 0)) (i32.const 100)))`)
 
-	blob, err := publishLabeler(seed, wasm, 1, true, false, false, false, 16*1024*1024, 100_000, 1_700_000_000)
+	blob, err := publishLabeler(seed, wasm, 1, true, false, false, false, 1, 16*1024*1024, 100_000, 1_700_000_000)
 	if err != nil {
 		t.Fatalf("publishLabeler: %v", err)
 	}

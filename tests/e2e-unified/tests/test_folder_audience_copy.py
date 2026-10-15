@@ -32,8 +32,9 @@ share walked through the recipient picker. The wizard and the headless
 recipient are fixture setup (the documented carve-out); VERIFICATION of what
 moved reads the nest's own row.
 
-tui leads; the other six columns follow as one lift, and
-this marker list is the parity ledger.
+tui leads; web and linux joined with the lift's first
+legs, and windows, macos and ios follow on their own
+machines. This marker list is the parity ledger.
 """
 
 from __future__ import annotations
@@ -46,7 +47,12 @@ from helpers.waiting import wait_until
 from i18n.strings import S
 from helpers.set_names import find_set
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui]
+pytestmark = [
+    pytest.mark.tier_3,
+    pytest.mark.tui,
+    pytest.mark.web,
+    pytest.mark.linux,
+]
 
 # Generous ceilings, not expectations (convention 14): every wait below is a
 # deadline poll on STATE, never a settle-sleep.
@@ -90,6 +96,15 @@ def _await_row(nest_url: str, actor, name: str, **want) -> dict:
     )
 
 
+def _offers_private(options: list[str] | None) -> bool:
+    """Whether a picker's option set offers ``private``. The drivers read a
+    picker two ways — tui reports the model's wire values, web and linux the
+    rendered labels — so match either spelling."""
+    return any(
+        o in ("private", S.devices.folder_audience_private) for o in (options or [])
+    )
+
+
 def _open_row(b, name: str) -> None:
     """Expand ``name``'s row unless its body already shows.
     ``find_and_expand_folder`` TOGGLES, so an unconditional call on an open row
@@ -115,7 +130,7 @@ def _await_website_hint(app, name: str, want: str, why: str) -> None:
     )
 
 
-@pytest.mark.parametrize("folder_share_owner_app", ["tui"], indirect=True)
+@pytest.mark.parametrize("folder_share_owner_app", ["tui", "web", "linux"], indirect=True)
 @pytest.mark.real_conversations
 @pytest.mark.feature("public-folders-and-websites")
 def test_a_website_folder_says_whether_anyone_can_reach_it(folder_share_owner_app):
@@ -167,7 +182,7 @@ def test_a_website_folder_says_whether_anyone_can_reach_it(folder_share_owner_ap
     )
 
 
-@pytest.mark.parametrize("folder_share_owner_app", ["tui"], indirect=True)
+@pytest.mark.parametrize("folder_share_owner_app", ["tui", "web", "linux"], indirect=True)
 @pytest.mark.real_conversations
 @pytest.mark.feature("public-folders-and-websites")
 def test_the_go_public_confirmation_states_both_consequences(folder_share_owner_app):
@@ -221,7 +236,7 @@ def test_the_go_public_confirmation_states_both_consequences(folder_share_owner_
     )
 
 
-@pytest.mark.parametrize("folder_share_owner_app", ["tui"], indirect=True)
+@pytest.mark.parametrize("folder_share_owner_app", ["tui", "web", "linux"], indirect=True)
 @pytest.mark.real_conversations
 @pytest.mark.feature("public-folders-and-websites")
 def test_a_shared_folder_offers_no_private_and_says_why(folder_share_owner_app):
@@ -257,7 +272,7 @@ def test_a_shared_folder_offers_no_private_and_says_why(folder_share_owner_app):
 
     # The unbound baseline, so the absence below is a change and not a picker
     # that never offered `private` at all.
-    assert "private" in (b.audience_options() or []), (
+    assert _offers_private(b.audience_options()), (
         f"an unbound folder offers private; got {b.audience_options()!r}"
     )
 
@@ -289,7 +304,7 @@ def test_a_shared_folder_offers_no_private_and_says_why(folder_share_owner_app):
         ),
     )
     options = b.audience_options()
-    assert options is not None and "private" not in options, (
+    assert options is not None and not _offers_private(options), (
         "a shared folder must offer no way to make it private while it is "
         f"shared — the nest refuses it. Options offered: {options!r}"
     )

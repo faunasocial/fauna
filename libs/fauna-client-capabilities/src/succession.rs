@@ -59,7 +59,9 @@
 //! store, which the post-auth pass cannot reach. The payloads a re-mint wraps
 //! derive from that store's rows too — the MSEK from the mail custody
 //! (`fauna.state.mail`), a post tier's key from the period-key custody
-//! (`fauna.state.subscriptions`), both handed in — so the leg waits on no
+//! (`fauna.state.subscriptions`), both handed in, and a delegable-kind grant's
+//! pairs (an `ext.*` consent grant, the personalization twin) from the
+//! successor's own delegable branch — so the leg waits on no
 //! re-key of a predecessor-sealed blob: a successor's device re-mints all the
 //! same.
 //!
@@ -87,13 +89,14 @@
 use ed25519_dalek::SigningKey;
 use fauna_client_bridges::{HolderInfo, MailAdminClient, discover_holders};
 use fauna_client_config::{StoreError, SuccessionLedgerStore};
+use fauna_core::crypto::{BackupKey, DelegableSchedule};
 use fauna_core::data::{GrantUnattestedMark, MailConfig, Timestamp, UnattestedVerdict};
 use fauna_core::grant_event::{GrantEvent, GrantEventKind, GrantEventScope, latest_live_events};
 use fauna_core::identity::{ActorId, ActorKeypair};
 use fauna_core::localized::LocalizedText;
 use fauna_core::progress::ProgressOutcome;
 use fauna_core::succession_ledger::SuccessionLedger;
-use fauna_mls::wrapped_blob::{GrantWindow, ScopeTuple};
+use fauna_mls::wrapped_blob::{GrantWindow, ScopeTuple, build_grant_blob_with_epochs};
 use fauna_protocol::{RpcErrorClass, RpcRequester};
 
 use crate::grant_log::{self, is_bounded_mail_grant};
@@ -398,6 +401,9 @@ where
         .map_err(GrantRemintError::Roster)?;
 
     let signing_key: &SigningKey = keypair.signing_key();
+    // The successor's delegable branch, from its own seed exactly as the
+    // consent seams derive it — a delegable-kind grant re-wraps these pairs.
+    let delegable = DelegableSchedule::derive(&BackupKey::derive(&owner_secret));
     let capabilities = CapabilitiesClient::new(nest);
     let mut owed = 0usize;
 
@@ -432,6 +438,27 @@ where
             ) {
                 Ok(b) => b,
                 Err(_) => {
+                    owed += 1;
+                    continue;
+                }
+            }
+        } else if let Some(scopes) =
+            crate::delegable_kinds_scope_wraps(&delegable, &event_scope_to_tuples(&c.scope))
+        {
+            // A delegable-kind grant — the consent-time `ext.*` grant and the
+            // personalization twin riding it (`third-party-kinds.md`
+            // § Principal write authority) — also builds BEFORE the roster
+            // gate: its holder is the principal's own key, never a bridge on
+            // the roster, and the consent mint wraps classical to that key
+            // alone, so carrying the log's holder downgrades nothing. Every
+            // read re-wraps the SUCCESSOR's pair for its kind and every write
+            // tuple keeps its writer, so the event scope re-records verbatim.
+            match build_grant_blob_with_epochs(&owner.0, &new_id, &c.holder, None, window, &scopes)
+                .map_err(|_| ())
+                .and_then(|b| b.to_canonical_bytes().map_err(|_| ()))
+            {
+                Ok(b) => b,
+                Err(()) => {
                     owed += 1;
                     continue;
                 }

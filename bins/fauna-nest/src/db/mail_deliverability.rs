@@ -91,6 +91,19 @@ impl CacheDb {
         Ok(rows)
     }
 
+    /// `ran_at` of the newest diagnostics run the nest made itself (an all-zero
+    /// `ran_by_actor_id` — the daily pass), if any: the cover the daily pass's
+    /// schedule is seeded from at boot (`mail-deliverability.md` § The check).
+    pub async fn newest_nest_diagnostic_run_at(&self) -> Result<Option<i64>> {
+        let conn = self.conn.lock().await;
+        let newest = conn.query_row(
+            "SELECT MAX(ran_at) FROM mail_outbound_diagnostic_runs WHERE ran_by_actor_id = ?1",
+            rusqlite::params![[0u8; 32].as_slice()],
+            |r| r.get::<_, Option<i64>>(0),
+        )?;
+        Ok(newest)
+    }
+
     /// Prune blocklist-check + diagnostic-run rows older than `before`
     /// (epoch-seconds). Called from the 24h timer.
     pub async fn prune_deliverability_history(&self, before: i64) -> Result<()> {
@@ -145,6 +158,25 @@ mod tests {
             .unwrap();
         assert_eq!(blocklist_rows, 1);
         assert_eq!(diag_rows, 0);
+    }
+
+    #[tokio::test]
+    async fn the_newest_nest_run_ignores_admin_runs() {
+        let db = CacheDb::open_in_memory().unwrap();
+        assert_eq!(db.newest_nest_diagnostic_run_at().await.unwrap(), None);
+        db.record_diagnostic_run(1_000, "[]", &[0u8; 32])
+            .await
+            .unwrap();
+        db.record_diagnostic_run(2_000, "[]", &[0u8; 32])
+            .await
+            .unwrap();
+        db.record_diagnostic_run(3_000, "[]", &[5u8; 32])
+            .await
+            .unwrap();
+        assert_eq!(
+            db.newest_nest_diagnostic_run_at().await.unwrap(),
+            Some(2_000)
+        );
     }
 
     #[tokio::test]

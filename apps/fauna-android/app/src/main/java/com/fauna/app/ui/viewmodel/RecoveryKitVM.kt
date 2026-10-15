@@ -7,12 +7,16 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.R
 import com.fauna.app.core.ApiClient
+import com.fauna.app.core.AftermathProgress
+import com.fauna.app.core.AftermathProgressStore
+import com.fauna.app.core.InheritedFilterMarks
 import com.fauna.app.core.ShellLog
 import com.fauna.app.core.StolenCeremonyHold
 import com.fauna.app.core.SuccessionHandoff
 import com.fauna.app.ui.util.getStringFmt
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.ffi.FfiConnectionState
+import com.fauna.ffi.FfiDeadGenerations
 import com.fauna.ffi.FfiMintedKit
 import com.fauna.ffi.FfiRecoveryKitStatus
 import com.fauna.ffi.FfiStolenOutcome
@@ -25,6 +29,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import uniffi.fauna_core.LocalizedText
 import javax.inject.Inject
 
 /**
@@ -57,6 +62,12 @@ import javax.inject.Inject
  *   handed to the shared `sweepCopy` at paint time, never matched on `kind`.
  * @property busy a ceremony is in flight — every button reads it, so a second
  *   tap cannot start a second irreversible ceremony.
+ * @property deadGenerations the account runtime's dead read, taken at hydrate
+ *   and REPLACED by each let-go's refreshed read — `null` until it resolves.
+ * @property letGoConfirmWord shared Rust's let-go confirm word, read with the
+ *   dead read — `null` until then, which arms nothing.
+ * @property letGoConfirmInput the type-to-confirm buffer behind
+ *   `recovery-kit-let-go-confirm-field`.
  */
 data class RecoveryKitUiState(
     val status: FfiRecoveryKitStatus? = null,
@@ -68,7 +79,24 @@ data class RecoveryKitUiState(
     val mintedLandsAt: Long? = null,
     val sweepView: FfiSweepView? = null,
     val busy: Boolean = false,
+    val deadGenerations: FfiDeadGenerations? = null,
+    val letGoConfirmWord: String? = null,
+    val letGoConfirmInput: String = "",
 ) {
+    /**
+     * `recovery-kit-unreadable-status`, and the render gate of the whole let-go
+     * trio (`settings.md` § Recovery kit, the fifth act): the line, its confirm
+     * field and its button render only while the shared projection answers one
+     * — never re-derived here from the id list (apple's `letGoStatus`).
+     */
+    val letGoStatus: LocalizedText?
+        get() = deadGenerations?.unreadableStatus
+
+    /** Whether `recovery-kit-let-go-button` is armed — on the shared confirm
+     *  word alone (apple's `letGoArmed`). An unread word arms nothing. */
+    val letGoArmed: Boolean
+        get() = letGoConfirmWord != null && letGoConfirmInput == letGoConfirmWord && !busy
+
     /** The phrase field renders while a ceremony that consumes one is
      *  reachable — replace, stolen, veto or the no-escrow re-seal (tui's
      *  gate). Also with the status UNREAD: an unread status must not take the
@@ -104,7 +132,8 @@ data class RecoveryKitUiState(
         "RecoveryKitUiState(status=${status?.kind}, phrase=${phraseInput.length} chars, " +
             "confirm=${stolenConfirmInput.length} chars, " +
             "minted=${mintedSecretHex?.length ?: 0} hex, escrowStored=$mintedEscrowStored, " +
-            "landsAt=$mintedLandsAt, sweep=${sweepView?.kind}, busy=$busy)"
+            "landsAt=$mintedLandsAt, sweep=${sweepView?.kind}, busy=$busy, " +
+            "dead=${deadGenerations?.generationIds?.size}, letGoConfirm=${letGoConfirmInput.length} chars)"
 }
 
 /**
@@ -130,7 +159,25 @@ class RecoveryKitVM @Inject constructor(
     /** Where the stolen ceremony reports that it owns the Account page, so a
      *  supersession it causes is held back rather than tearing the page down. */
     val ceremonyHold: StolenCeremonyHold,
+    /** The open inherited-rule marks — `recovery-kit-inherited-filters-status`
+     *  counts the same cache the Privacy filter list marks from. */
+    private val inheritedFilterMarks: InheritedFilterMarks,
+    /** Where the aftermath sink parks each leg's resolved line. */
+    aftermathProgressStore: AftermathProgressStore,
 ) : ViewModel() {
+
+    /** The six aftermath leg lines (`recovery-kit-*-status`), painted verbatim. */
+    val aftermathProgress: StateFlow<AftermathProgress> = aftermathProgressStore.progress
+
+    /** The marks behind `recovery-kit-inherited-filters-status`; the line
+     *  renders only while this is non-empty (`ui.yaml` — no done line). */
+    val inheritedFilterMarkIds: StateFlow<List<Long>> = inheritedFilterMarks.marks
+
+    /** Re-read the marks — on every Account entry (apple re-reads on every
+     *  visit), so a verdict given on Privacy or another device shows here. */
+    fun reloadInheritedFilterMarks() {
+        viewModelScope.launch { inheritedFilterMarks.reload() }
+    }
 
     private val _state = MutableStateFlow(RecoveryKitUiState())
     val state: StateFlow<RecoveryKitUiState> = _state.asStateFlow()
@@ -204,6 +251,7 @@ class RecoveryKitVM @Inject constructor(
         _state.update { it.copy(sweepView = SuccessionHandoff.sweep) }
         viewModelScope.launch {
             loadStatus()
+            loadDeadGenerations()
             if (onScreen) {
                 dischargeOwedSweep(sessionActorIdHex)
                 dischargeOwedSuccessionKit(sessionActorIdHex)
@@ -232,8 +280,62 @@ class RecoveryKitVM @Inject constructor(
         _state.update { it.copy(stolenConfirmInput = value) }
     }
 
+    fun onLetGoConfirmChange(value: String) {
+        _state.update { it.copy(letGoConfirmInput = value) }
+    }
+
     fun consumeError() {
         errorMessage.value = null
+    }
+
+    /**
+     * Read the dead generations — and the shared confirm word beside them —
+     * from the account runtime, at hydrate (apple's `loadDeadGenerations`).
+     * The read never throws (`recovery_dead_generations` folds a missing
+     * runtime or a failed read into the empty answer): a let-go that cannot be
+     * shown is not offered.
+     */
+    suspend fun loadDeadGenerations() {
+        val dead: FfiDeadGenerations? = api.recoveryDeadGenerations()
+        val word: String? = api.recoveryLetGoConfirmWord()
+        _state.update { it.copy(deadGenerations = dead, letGoConfirmWord = word) }
+    }
+
+    /**
+     * `recovery-kit-let-go-button` — the user's confirmed act
+     * (`fleet-scope-reclamation.md`
+     * § *Fleet-scope reclamation*, clause (3)(j)).
+     *
+     * The confirm word is re-checked HERE, not only in the render, for the
+     * stolen gate's reason: a test agent driving the id reaches this handler,
+     * and the data cannot be brought back. The refreshed dead read REPLACES the
+     * list, so the trio leaves the screen once nothing is dead; what the act did
+     * is said on `error-message`, and a generation that became readable again
+     * since the render is named as kept, never silently skipped.
+     */
+    fun letGo() {
+        val s = _state.value
+        if (s.busy) return
+        if (!s.letGoArmed) {
+            setError(context.getString(R.string.settings_recovery_kit_let_go_confirm_placeholder))
+            return
+        }
+        val ids = s.deadGenerations?.generationIds ?: return
+        _state.update { it.copy(busy = true) }
+        viewModelScope.launch {
+            try {
+                val outcome = api.recoveryLetGo(ids)
+                _state.update { it.copy(letGoConfirmInput = "", deadGenerations = outcome.dead) }
+                var message = context.getStringFmt(R.string.settings_recovery_kit_let_go_done, outcome.retired)
+                if (outcome.kept) message += " " + context.getString(R.string.settings_recovery_kit_let_go_kept)
+                setError(message)
+            } catch (e: Exception) {
+                _state.update { it.copy(letGoConfirmInput = "") }
+                setError(failed(R.string.settings_recovery_kit_let_go_failed, e))
+            } finally {
+                _state.update { it.copy(busy = false) }
+            }
+        }
     }
 
     /**
@@ -514,16 +616,16 @@ class RecoveryKitVM @Inject constructor(
      *  the status those were read against (the load-bearing half). */
     private fun resetForIdentityChange() {
         clearHeldSecrets()
-        _state.update { it.copy(status = null) }
+        _state.update { it.copy(status = null, deadGenerations = null) }
         setError(null)
     }
 
     /**
      * Drop everything the screen was holding — called when the section leaves
      * composition. The minted secret must not survive the view that displayed
-     * it, and the two typed buffers are a recovery phrase and a confirm token
-     * (an armed gate must not survive a page leave). Leaving is also the parked
-     * message's acknowledgment edge, so it is discharged here first.
+     * it, and the three typed buffers are a recovery phrase and two confirm
+     * tokens (an armed gate must not survive a page leave). Leaving is also the
+     * parked message's acknowledgment edge, so it is discharged here first.
      */
     fun clearHeldSecrets() {
         acknowledgeStolenFailedMessage()
@@ -531,6 +633,7 @@ class RecoveryKitVM @Inject constructor(
             it.copy(
                 phraseInput = "",
                 stolenConfirmInput = "",
+                letGoConfirmInput = "",
                 mintedSecretHex = null,
                 mintedKitUri = null,
                 mintedEscrowStored = true,

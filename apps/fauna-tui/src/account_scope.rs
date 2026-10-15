@@ -181,12 +181,16 @@ pub(crate) fn erase_all_known_accounts(app: &App) -> Vec<PathBuf> {
         .into_iter()
         .map(|entry| entry.actor_id)
         .collect();
-    erase_all_known_accounts_under(
-        &flat,
-        fauna_sync_engine::root::StoreRoot::platform().base(),
-        &actors,
-    )
-    .survivors
+    let store_root = match fauna_sync_engine::root::StoreRoot::platform() {
+        Ok(root) => root,
+        // No absolute home: nothing under the store root was reached, so the
+        // sweep says so — a survivor, never a quiet clean.
+        Err(refusal) => {
+            tracing::error!("[reset] the account-store root was not erased: {refusal:#}");
+            return vec![PathBuf::from(format!("<account-store root: {refusal:#}>"))];
+        }
+    };
+    erase_all_known_accounts_under(&flat, store_root.base(), &actors).survivors
 }
 
 /// The pure half of [`erase_all_known_accounts`], both bases and the actor list
@@ -402,10 +406,12 @@ fn log_residue(survivors: &[PathBuf], credentials: &fauna_client_accounts::Crede
 /// and the erase that *asks* can never disagree about where.
 fn with_serving_bases<T>(f: impl FnOnce(fauna_client_accounts::ServingBases<'_>) -> T) -> T {
     let base = crate::session::config_dir();
-    let store_root = fauna_sync_engine::root::StoreRoot::platform();
+    let store_root = fauna_sync_engine::root::StoreRoot::platform()
+        .inspect_err(|e| tracing::error!("[account-scope] no account-store root: {e:#}"))
+        .ok();
     f(fauna_client_accounts::ServingBases {
         state_base: base.as_deref(),
-        store_root: Some(store_root.base()),
+        store_root: store_root.as_ref().map(|root| root.base()),
     })
 }
 
@@ -462,7 +468,9 @@ fn all_accounts_erase_blocked(
 ) -> Option<fauna_client_accounts::EraseBlocked> {
     let registry = crate::session::registry(app);
     let flat = crate::session::config_dir();
-    let store_root = fauna_sync_engine::root::StoreRoot::platform();
+    // No root to sweep → nothing here can be served from it; the erase itself
+    // then reports the unreached root as a survivor.
+    let store_root = fauna_sync_engine::root::StoreRoot::platform().ok()?;
     let blocked = with_serving_bases(|bases| {
         all_accounts_erase_blocked_under(&registry, bases, flat.as_deref(), store_root.base())
     })?;
@@ -488,18 +496,48 @@ fn all_accounts_erase_blocked_under(
     fauna_client_accounts::sign_out_blocked(registry, bases, &swept)
 }
 
+/// What a remove-account still owes once its registry step has landed: the
+/// nest half over the snapshot the removal took ([`Self::removed`]), then the
+/// erase of the account's scopes ([`Self::erase`]) — in that order, since the
+/// nest half assembles over the account's still-present store
+/// (`account-scoping.md` § Erasure follows scope → *Removing an account
+/// retires this machine from it, as a sign-out does*, decision 1).
+pub(crate) struct RemovalOwed {
+    /// The removed account's slots, in memory — what the nest half signs in
+    /// and assembles with. Zeroized when the last holder drops it.
+    pub(crate) removed: std::sync::Arc<fauna_client_accounts::RemovedAccountCredentials>,
+    /// The flat base and the store root the erase sweeps; `None` when the
+    /// process has no config dir, as [`erase_all_known_accounts`]'s no-op.
+    erase_bases: Option<(PathBuf, PathBuf)>,
+}
+
+impl RemovalOwed {
+    /// Erase the removed account's scopes — the gesture's last step, run once
+    /// its nest half has finished (or found nothing to do).
+    pub(crate) fn erase(self) {
+        if let Some((flat, store_root)) = &self.erase_bases {
+            erase_under(flat, store_root, self.removed.actor_id());
+        }
+    }
+}
+
 /// Remove one account from this install — the local half of the
 /// `account-remove-button` gesture, in the only order that is safe to refuse
-/// part-way through: **ask, then drop the registry entry, then erase.**
+/// part-way through: **ask, then drop the registry entry, then retire, then
+/// erase** (`account-scoping.md` § Erasure follows scope → *Removing an
+/// account retires this machine from it, as a sign-out does*). This returns
+/// after the first two; the caller owes the rest ([`RemovalOwed`],
+/// `session::remove_account`).
 ///
-/// The question comes first because both later steps destroy something a
+/// The question comes first because every later step destroys something a
 /// refusal cannot give back: the registry removal drops the account's secret
-/// slots (delete-only, per `AccountRegistry::remove`),
-/// and the erase unlinks the scope a
-/// live sibling is running out of (`account-scoping.md` § Concurrent instances
-/// → *An erase refuses while a sibling serves the account*). The scope is
-/// erased only after the registry removal succeeds (§ Serialized switching,
-/// "Erasure follows scope").
+/// slots (delete-only, per `AccountRegistry::remove`), the retirement ends
+/// this machine's grant on the account's nest, and the erase unlinks the scope
+/// a live sibling is running out of (`account-scoping.md` § Concurrent
+/// instances → *An erase refuses while a sibling serves the account*). The
+/// registry removal is the one decision point and lands before anything
+/// awaits; the slots the retirement needs are taken into memory in the same
+/// mutation (`AccountRegistry::remove_with_snapshot`).
 ///
 /// `Err` is the line for the Settings `error-message`: the shared refusal
 /// ([`fauna_client_accounts::remove_account_blocked_copy`]) or the registry's
@@ -507,9 +545,12 @@ fn all_accounts_erase_blocked_under(
 pub(crate) fn remove_account(
     registry: &fauna_client_accounts::AccountRegistry,
     actor_id_hex: &str,
-) -> Result<(), String> {
+) -> Result<RemovalOwed, String> {
     let flat = crate::session::config_dir();
-    let store_root = fauna_sync_engine::root::StoreRoot::platform();
+    let store_root = fauna_sync_engine::root::StoreRoot::platform().map_err(|e| {
+        tracing::error!("[settings/account] remove-account: no account-store root: {e:#}");
+        format!("{e:#}")
+    })?;
     let serving_here = fauna_client_accounts::process_session_account();
     with_serving_bases(|bases| {
         remove_account_under(
@@ -534,21 +575,21 @@ fn remove_account_under(
     flat: Option<&Path>,
     store_root: &Path,
     actor_id_hex: &str,
-) -> Result<(), String> {
+) -> Result<RemovalOwed, String> {
     if let Some(blocked) =
         fauna_client_accounts::remove_account_blocked_as(serving_here, bases, actor_id_hex)
     {
         tracing::warn!("[settings/account] remove-account REFUSED ({blocked:?}) — {actor_id_hex}");
         return Err(blocked.copy().resolve(fauna_i18n::strings::lookup));
     }
-    registry.remove(actor_id_hex).map_err(|e| {
+    let removed = registry.remove_with_snapshot(actor_id_hex).map_err(|e| {
         tracing::error!("[session] remove account failed: {e:#}");
         fauna_i18n::strings::onboarding::session_error::remove_account(&e.to_string())
     })?;
-    if let Some(flat) = flat {
-        erase_under(flat, store_root, actor_id_hex);
-    }
-    Ok(())
+    Ok(RemovalOwed {
+        removed: std::sync::Arc::new(removed),
+        erase_bases: flat.map(|flat| (flat.to_path_buf(), store_root.to_path_buf())),
+    })
 }
 
 #[cfg(test)]
@@ -1085,7 +1126,8 @@ mod tests {
             Some(&seats.flat),
             &seats.store_root,
             &actor,
-        );
+        )
+        .map(RemovalOwed::erase);
         assert_eq!(
             refused,
             Err(fauna_i18n::strings::settings::REMOVE_ACCOUNT_BLOCKED_OTHER_WINDOW.to_string()),
@@ -1115,7 +1157,8 @@ mod tests {
                 Some(&seats.flat),
                 &seats.store_root,
                 &actor,
-            ),
+            )
+            .map(RemovalOwed::erase),
             Ok(()),
             "with the sibling gone, the remove goes through"
         );
@@ -1123,6 +1166,97 @@ mod tests {
         for scope in &scopes {
             assert!(!scope.exists(), "{scope:?} survived an unrefused remove");
         }
+    }
+
+    /// A removal of an account this machine is enrolled on runs its nest half
+    /// between the registry removal and the erase (`account-scoping.md`
+    /// § Erasure follows scope → *Removing an account retires this machine
+    /// from it, as a sign-out does*): the entry is gone the moment the gesture
+    /// returns, the scope stays while the nest half runs (its runtime has the
+    /// store open), and a nest that answers nothing defers the retirement
+    /// inside the budget — the erase then runs all the same, and the removed
+    /// account's slots stay gone from the registry the nest half never wrote.
+    #[tokio::test]
+    async fn a_silent_nest_defers_the_retirement_and_the_removal_still_erases() {
+        use crate::app::{App, DataMessage, UiMessage};
+        use fauna_client_accounts::SecretStore;
+        let seats = Seats::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::with_credentials(&tx, crate::app::tests::test_credentials());
+        let registry = crate::session::registry(&app);
+        registry.add_account(&"01".repeat(32), None, None).unwrap();
+        let actor = registry.add_account(&"02".repeat(32), None, None).unwrap();
+        // A nest that takes the connection and never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let held = tokio::spawn(async move {
+            let mut open = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                open.push(socket);
+            }
+        });
+        registry.set_nest_url(&actor, &url);
+        // This machine's enrollment on it.
+        app.credentials
+            .set(&format!("{actor}/device-auth"), "an authorization");
+        let scopes = seats.scopes_for(&actor);
+
+        let owed = remove_account_under(
+            &registry,
+            None,
+            seats.tui(),
+            Some(&seats.flat),
+            &seats.store_root,
+            &actor,
+        )
+        .expect("nothing refuses it");
+        let started = std::time::Instant::now();
+        crate::session::finish_removal(&mut app, owed);
+
+        assert!(
+            !registry.list().iter().any(|a| a.actor_id == actor),
+            "the entry goes with the gesture"
+        );
+        assert!(app.teardown_pending(), "the nest half runs as a stop");
+        for scope in &scopes {
+            assert!(
+                scope.join("data").exists(),
+                "{scope:?} erased under the nest half"
+            );
+        }
+        tokio::time::timeout(
+            fauna_client_account_runtime::REMOVED_ACCOUNT_RETIRE_BUDGET
+                + std::time::Duration::from_secs(5),
+            async {
+                while let Some(msg) = rx.recv().await {
+                    let done = matches!(msg, UiMessage::Data(DataMessage::AccountRuntimeStopped));
+                    app.handle_message(msg);
+                    if done {
+                        break;
+                    }
+                }
+            },
+        )
+        .await
+        .expect("the nest half reports back through the UI queue");
+        held.abort();
+
+        assert!(
+            started.elapsed()
+                <= fauna_client_account_runtime::REMOVED_ACCOUNT_RETIRE_BUDGET
+                    + std::time::Duration::from_secs(1),
+            "the nest half held the gesture past its budget"
+        );
+        assert!(!app.teardown_pending());
+        for scope in &scopes {
+            assert!(!scope.exists(), "{scope:?} survived the removal");
+        }
+        assert_eq!(
+            app.credentials.get(&format!("{actor}/device-auth")),
+            None,
+            "the nest half wrote the removed account's slot back"
+        );
+        assert_eq!(app.credentials.get(&format!("fauna/{actor}/secret")), None);
     }
 
     /// A sibling on some OTHER account is none of remove-account's business.
@@ -1141,7 +1275,8 @@ mod tests {
                 Some(&seats.flat),
                 &seats.store_root,
                 &actor,
-            ),
+            )
+            .map(RemovalOwed::erase),
             Ok(())
         );
     }
@@ -1172,7 +1307,8 @@ mod tests {
                 Some(&seats.flat),
                 &seats.store_root,
                 &served_here,
-            ),
+            )
+            .map(RemovalOwed::erase),
             Err(fauna_i18n::strings::settings::REMOVE_ACCOUNT_BLOCKED_THIS_WINDOW.to_string()),
             "the served-here refusal, on the surface's error line"
         );

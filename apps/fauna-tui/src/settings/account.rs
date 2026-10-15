@@ -350,6 +350,9 @@ pub(super) fn account_elements(
         ));
     }
     // ── Delete account (type-to-confirm gate, mirroring web/windows) ──
+    // The confirmation's own text (settings.md item 14): chrome only until the
+    // shared element ID for it is approved (rule A) — no id, so e2e can't read it yet.
+    els.push(Element::chrome(t::account_page::DELETE_CONFIRM_TEXT));
     els.push(
         Element::input(
             ids::SETTINGS_DELETE_CONFIRM_FIELD,

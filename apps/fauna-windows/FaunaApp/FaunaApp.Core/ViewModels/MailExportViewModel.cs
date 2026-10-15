@@ -263,20 +263,42 @@ public partial class MailExportViewModel : ObservableObject
             Mailboxes.Add(new MailExportMailboxRow { Name = m.name, Selected = m.selected });
         }
 
-        var selectedCount = snap.mailboxes.Count(m => m.selected);
-        ConfirmSummary = Strings.Format("mail_export/confirm_summary_fmt", FormatLabel(snap.format), selectedCount);
-        ProgressSummary = Strings.Format(
-            "mail_export/progress_summary_fmt",
-            snap.exportedCount, snap.totalCount, snap.skippedCount, snap.erroredCount);
+        // Step 3's total is the selected mailboxes' counts summed; the size and wall-clock
+        // estimates have no source, so the confirm row's note says so (confirm_estimate_unavailable).
+        var selected = snap.mailboxes.Where(m => m.selected).ToList();
+        ulong selectedMessages = 0;
+        foreach (var m in selected) selectedMessages += m.messageCount;
+        ConfirmSummary = Strings.Format(
+            "mail_export/confirm_summary_count_fmt", FormatLabel(snap.format), selected.Count, selectedMessages);
+        var timing = TransferTimingText.Of(
+            snap.startedAt, snap.lastProgressAt,
+            snap.sessionState == ExportSessionState.Running,
+            (ulong)snap.exportedCount + snap.skippedCount + snap.erroredCount, snap.totalCount);
+        ProgressSummary = TransferTimingText.WithTiming(
+            "mail_export",
+            Strings.Format(
+                "mail_export/progress_summary_fmt",
+                snap.exportedCount, snap.totalCount, snap.skippedCount, snap.erroredCount),
+            timing);
         ProgressFraction = FaunaFfiMethods.QuotaFraction(snap.exportedCount, snap.totalCount);
         ErrorLog = string.Join("\n", snap.errorLog);
         // Once the archive is on disk the summary says WHERE — the visible answer to the
         // Download press (linux's done_text, tui's done_step_elements).
-        DoneSummary = snap.blobBytes is ulong b
-            ? string.IsNullOrEmpty(snap.savedArchivePath)
-                ? Strings.Format("mail_export/done_summary_fmt", FormatLabel(snap.format), b)
-                : Strings.Format("mail_export/saved_summary_fmt", FormatLabel(snap.format), b, snap.savedArchivePath)
-            : FormatLabel(snap.format);
+        // A snapshot with no clock yet keeps the untimed form.
+        var saved = !string.IsNullOrEmpty(snap.savedArchivePath);
+        DoneSummary = (snap.blobBytes, timing.elapsedSecs) switch
+        {
+            (ulong b, ulong took) when saved => Strings.Format(
+                "mail_export/saved_summary_timed_fmt",
+                snap.exportedCount, FormatLabel(snap.format), b, ValueFormat.DurationSecs(took), snap.savedArchivePath),
+            (ulong b, ulong took) => Strings.Format(
+                "mail_export/done_summary_timed_fmt",
+                snap.exportedCount, FormatLabel(snap.format), b, ValueFormat.DurationSecs(took)),
+            (ulong b, null) when saved => Strings.Format(
+                "mail_export/saved_summary_fmt", FormatLabel(snap.format), b, snap.savedArchivePath),
+            (ulong b, null) => Strings.Format("mail_export/done_summary_fmt", FormatLabel(snap.format), b),
+            _ => FormatLabel(snap.format),
+        };
         DownloadUrl = snap.downloadUrl;
         CanPause = snap.sessionState == ExportSessionState.Running;
         CanResume = snap.sessionState == ExportSessionState.Paused;

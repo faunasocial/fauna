@@ -57,10 +57,17 @@ its bearer from the machine.
 ### Key storage
 
 **The store (built 2026-10-03).** The app's one credential store is Windows
-Credential Manager, reached through the shared Rust arm rather than a second
-implementation of it: `CredManSecretBackend` (`FaunaApp.Core`) calls
-`fauna-ffi`'s windows-only `native_keyring_get` / `_set` / `_delete`, which are
-`fauna_credential_store`'s `keyring_*` wrappers over its `win_credman` module.
+Credential Manager, reached through the shared Rust store rather than a second
+implementation of it: `SharedSecretBackend` (`FaunaApp.Core`) calls
+`fauna-ffi`'s windows-only `credential_store_get` / `_set` / `_delete`, which
+hand each read and write to `fauna_credential_store::CredentialStore` — the
+same store linux, tui and the sync agent use, whose keyring arm is its
+`win_credman` module. The crate also picks the arm, so the app has no backend
+switch of its own: a test-capable build pointed at a harness credential dir
+(`cred_file_dir`, compiled out of a release build) gets the crate's file arm,
+whose writes are serialized across processes and replace the file atomically.
+The app's own copy of that file arm did neither until 2026-10-10, and two
+instances sharing one credential dir lost registry writes to it.
 One registry row is one generic credential: `TargetName` =
 `fauna-windows/<logical key>`, the value as a UTF-8 blob,
 `CRED_PERSIST_LOCAL_MACHINE` — per-user despite the name, and never roamed to
@@ -68,7 +75,7 @@ the person's other PCs. The terminal app and the sync agent write the same arm
 under their own namespaces, so the grammar has one writer. A live test reads a
 row back through Win32 `CredReadW`, an observer sharing no code with the
 writer, and pins the name, the type, the persistence and the bytes
-(`CredManSecretBackendTests`). What the cross-app rule asks of a store, and
+(`SharedSecretBackendTests`). What the cross-app rule asks of a store, and
 this one's cell: [`common.md`](common.md) § Credential storage.
 
 **The bound the store brings.** One row holds at most 2560 bytes, and a write
@@ -143,6 +150,23 @@ pattern to copy; pinned by
 `tests/e2e-unified/tests/test_windows_login_cycle_poller_leak.py`, which asserts
 the live-poller count (`diagnostics.live_sync_agent_pollers`) directly so a
 regression fails as itself rather than as a downstream timing flake.
+
+And the teardown corollary: **a page's own teardown runs AFTER the actor change,
+so it must tolerate a session object that is already destroyed.** The actor
+change (`DisposeNestClients` → `DropActorScopedState`, which retires the
+conversations host's manager) runs on the command's thread, and the root frame
+navigates on a later UI turn — so `Unloaded`, and any observer tick queued in
+between, reaches a page whose session objects are gone. A page that writes back on
+its way out (`ConversationsPage` flushes the open composer into its manager) must
+treat a destroyed target as "the session ended", never let the exception reach the
+UI thread, where it is an unhandled crash. The conversations page renders off the
+host's own manager wrapper whenever no `ConvSession` was handed over (a swallowed
+session-build failure; the e2e login's bounded session await expiring under load),
+and that wrapper is exactly what the actor change disposes: on that path every
+sign-out with a conversation (or a new message) open on the page killed the app
+(`[fauna] FATAL (UI thread) — Cannot access a disposed object`). Fixed 2026-10-09 by `ConversationsPage.UnlessManagerRetired`;
+pinned by `tests/e2e-unified/tests/test_windows_conversation_open_across_reset.py`,
+which forces the host-wrapper path deterministically.
 
 ---
 
@@ -355,7 +379,12 @@ consumed by `fauna-sync-agent` (see *cfapi crate* below), **not** by this DLL.
      "eligible": its set's running engine holds the public-audience write arm
      (`SyncEngine::is_public_audience`, reported through the progress drain as
      `ProgressEvent::PublicAudience` — the owner-attested verdict the engine already seals by,
-     so the leaf and the nest's serve gate agree on one fact; no report yet reads ineligible).
+     so the leaf and the nest's serve gate agree on one fact; no report yet reads ineligible). The leaf deliberately does
+     NOT widen to an owner-only (sealed) folder's file: whether that fragment-keyed link can be made
+     is the shared Media machine's fact (`share_facts`: the folder unbound — no bridge binding —
+     and the owner root held), neither of which the agent tracks, and re-deriving them agent-side
+     would be a second copy of one decision. An owner-only file's link is made from the app's own
+     file detail (`share-link-button`), which has the machine.
      A cross-nest set is never a target: the routes name a set by this nest's `folders.id`. The
      leaf's `GetState` asks this on Explorer's background pass (`E_PENDING` on the UI-thread
      pass, as the root does).
@@ -721,12 +750,16 @@ unpackaged registration key decides (measured 2026-10-08: a packaged identity
 reads enabled from its registration on, and an unpackaged process posts under
 it). Pinned against the real notification platform by `push_arm.rs`'s
 `toast_tests` (a per-run registered identity; popup suppressed, the toast read
-back from the identity's history and removed).
+back from the identity's history and removed). Witnessed end to end on Windows
+(2026-10-09) by `tests/e2e-unified/tests/platform/windows/test_agent_push_arm_end_to_end.py`:
+the real agent process, provisioned and never enrolled, announces over its
+capability connection; a live nest's frame for a knock reaches it, is withheld
+while an app holds the attachment lease, and once the app has closed lands as
+one toast in the named identity's notification history.
 
 **Not yet witnessed:** a tap on an agent toast launching the app (the
 `common.md` status line's cross-platform "tapped banner" gap — the activator is
-the app's own registration's, untested here), and an end-to-end frame from a
-live nest reaching a toast through the agent process. System tray icon via Win32 `Shell_NotifyIconW`;
+the app's own registration's, untested here). System tray icon via Win32 `Shell_NotifyIconW`;
 window-close behavior follows the user's **Close to tray** setting (§ App
 Lifecycle). The notifications page reads `fauna.notifications.*`
 (`behavior/notifications.md`).
@@ -761,7 +794,7 @@ The Windows app follows the same lifecycle model as the Linux app (`linux.md` §
 
 **Window close = the "Close to tray" setting (default ON — flipped 2026-07-16 with the shape-A ratification; was opt-in).** A persisted `AppSettingsStore.CloseToTray` (`%LocalAppData%\Fauna\app-settings.json`) gates the `TrayIconService` close handler — on (the default) ⇒ hide to tray and stay resident, keeping sync/badges/toasts alive; off ⇒ persist drafts then quit. Rationale: with the app as the agent's bearer-minting service (§ Per-user agent), closing a *window* must not silently stop file sync — a deliberate stop is the tray **Quit** (the cross-app never-a-silent-stop promise is owned by [`common.md`](common.md) § Desktop Residency since 2026-08-30; this paragraph keeps windows' mechanism). An explicitly persisted `false` from before the flip is an explicit choice and is honoured. Toggle on Settings → General (`close-to-tray-toggle`, the shared linux+windows `platform_element`). The linux default flip shipped alongside the autostart leg (linux additionally gates close-to-tray on a live tray host — `linux.md` § System Tray — which the flip preserves).
 
-**No close path leaves unsaved state — windows' leg of the cross-app leave-flush promise, and its worked example ([`../../behavior/reserved-folders.md`](../../behavior/reserved-folders.md) § The leave-flush promise owns the promise since 2026-08-30; this paragraph keeps only windows' mechanism).** Every termination path — tray Quit, a Restart-Manager/OS shutdown request, or the single-instance hand-off — first persists in-progress compose input (`TrayIconService.QuitApplication()`: `ConvDrafts.SaveNowAsync()` + `FeedDrafts.FlushIfPendingAsync()`; the `RestartManagerService` end-session twin). **Both rails are nest-backed, cross-device now (draft-persistence v2, 2026-08-26).** DM-thread drafts ride the shared `fauna_client_drafts::DraftsSync` gate via `ConversationDraftsService`; feed-post drafts ride the same gate via `FeedDraftsService` (rail `"posts"`) — each manager's draft set is restored into it at login (feed: at every Feed-page load, since `FfiFeedManager` rebuilds per visit, unlike the session-scoped conversations manager) and saved (debounced, plus a flush on navigating away from the page and at quit), matching web/linux/android/apple. Neither rail touches the local `drafts.json` file any more — the `FaunaApp.Core` `DraftStore` + `DraftPersistenceService` classes that captured/restored it are deleted; `AccountStateDir.DraftsPath`, kept only to adopt and erase a pre-existing flat file, went with the flat-layout adoption in the compat-remnant sweep (2026-09-24, [`../version-compatibility.md`](../version-compatibility.md) § Dimension 2, the fourth ratified exception). No local-file compose-draft mechanism remains. Drafts Sync mechanics: [`../../behavior/reserved-folders.md`](../../behavior/reserved-folders.md) § Drafts Sync.
+**No close path leaves unsaved state — windows' leg of the cross-app leave-flush promise, and its worked example ([`../../behavior/reserved-folders.md`](../../behavior/reserved-folders.md) § The leave-flush promise owns the promise since 2026-08-30; this paragraph keeps only windows' mechanism).** Every termination path — tray Quit, a Restart-Manager/OS shutdown request, or the single-instance hand-off — first persists in-progress compose input, and so does every session teardown — sign-out, the account switch — before its transport goes: one body, `App.FlushDraftRailsAsync()`, over all three rails (`TrayIconService.QuitApplication()` and the `RestartManagerService` end-session twin wait for it bounded; `SignOutHandler` and `DisposeNestClients` start it first and hold the session's client until it lands). **Both rails are nest-backed, cross-device now (draft-persistence v2, 2026-08-26).** DM-thread drafts ride the shared `fauna_client_drafts::DraftsSync` gate via `ConversationDraftsService`; feed-post drafts ride the same gate via `FeedDraftsService` (rail `"posts"`) — each manager's draft set is restored into it at login (feed: at every Feed-page load, since `FfiFeedManager` rebuilds per visit, unlike the session-scoped conversations manager) and saved (debounced, plus a flush on navigating away from the page and at quit), matching web/linux/android/apple. Neither rail touches the local `drafts.json` file any more — the `FaunaApp.Core` `DraftStore` + `DraftPersistenceService` classes that captured/restored it are deleted; `AccountStateDir.DraftsPath`, kept only to adopt and erase a pre-existing flat file, went with the flat-layout adoption in the compat-remnant sweep (2026-09-24, [`../version-compatibility.md`](../version-compatibility.md) § Dimension 2, the fourth ratified exception). No local-file compose-draft mechanism remains. Drafts Sync mechanics: [`../../behavior/reserved-folders.md`](../../behavior/reserved-folders.md) § Drafts Sync.
 
 **Cooperative shutdown for installers.** `RestartManagerService` registers `RegisterApplicationRestart` and runs a persistent hidden top-level window that receives `WM_QUERYENDSESSION`/`WM_ENDSESSION`, persists drafts, and quits gracefully — so an MSI install/upgrade closes (and relaunches) the app without force-killing; the installer's `taskkill` is a last-resort net. Policy is the unit-tested `RestartManagerGate`; the Win32 mechanism is gated off under `FAUNA_E2E_BRIDGE` and manual-verified.
 
@@ -804,7 +837,7 @@ post-decrypt **local detections** (`IModerationLocalDetections`, from
   list via the FlaUI bridge's `/session/windows`). The second witness is not
   belt-and-braces — a red-verify with an activation injected *after* the gate found
   the self-report still honest and only the OS view red. Open: the live "session
-  survives a real relaunch on example.com" re-verify, and the linux advisory legs
+  survives a real relaunch on a live nest" re-verify, and the linux advisory legs
   (autostart default + close-to-tray default) — both tracked in the respective
   NEXT files.
 - **Shell extension:** COM surfaces + status producer + engine-driven end-to-end

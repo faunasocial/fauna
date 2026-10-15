@@ -15,8 +15,41 @@ export class TransientAuthError extends Error {}
  *  wizard drop — retrying the same outdated nest is futile). The web sibling of
  *  the FFI's `FfiError::NestOutdated` and the launch machine's
  *  `Offline { transient: false }` (version-compatibility.md Dim 4). `.message` is
- *  the already-localized actionable text (the `"outdated:"` wire prefix stripped). */
-export class NestOutdatedError extends Error {}
+ *  the already-localized actionable text (the `"outdated:"` wire prefix stripped).
+ *
+ *  `code` is the wire code and is load-bearing, as `SignInRefusedError`'s is:
+ *  a signed-in tab whose nest restarted degraded meets this on its WS client's
+ *  re-mint, and the wasm token provider reads the code off the rejection to
+ *  stop the reconnect loop with the needs-update verdict instead of backing
+ *  off forever (`fauna_rpc_wasm`'s `typed_refusal`; `version-compatibility.md`
+ *  § Dimension 4, the *Mid-session* bullet). */
+export class NestOutdatedError extends Error {
+  readonly code = 'fauna.nest.outdated';
+  constructor(message: string) {
+    super(message);
+    this.name = 'NestOutdatedError';
+  }
+}
+
+/** The nest no longer serves this app's subprotocol — it closed the dial 4426
+ *  (`transport-connection.md` § Connection lifecycle, the 4426 paragraph): the
+ *  APP is the one too old. The other direction of `NestOutdatedError`, kept
+ *  apart from it at every seam because the remedy differs (update the app, not
+ *  the nest; `version-compatibility.md` § Dimension 4, *The other direction*).
+ *  `.message` is the already-localized `errors.subprotocol_mismatch` text.
+ *
+ *  `arm` is load-bearing the way `NestOutdatedError`'s `code` is: a 4426 has no
+ *  wire code, so the wasm token provider reads the `WsRpcError` tag
+ *  (`subprotocol_mismatch`) off the rejection to stop the reconnect loop with
+ *  the app-outdated verdict instead of backing off forever
+ *  (`fauna_rpc_wasm`'s `typed_refusal`). */
+export class AppOutdatedError extends Error {
+  readonly arm = 'subprotocol_mismatch';
+  constructor(message: string) {
+    super(message);
+    this.name = 'AppOutdatedError';
+  }
+}
 
 /** The nest's pinned deployment identity changed — or it can no longer prove the
  *  identity we previously pinned (`docs/goal/architecture/security.md`
@@ -95,7 +128,8 @@ export class SignInRefusedError extends Error {
 /** Classify a `challengeVerify` rejection into the typed launch-routing error.
  *  Mirrors the shared `RpcError::action()` classifier (`libs/fauna-protocol`): the
  *  wasm `map_silent_err` prefixes a transient transport fault with `"transient:"`
- *  and a degraded-nest `fauna.nest.outdated` with `"outdated:"`; everything else is
+ *  a degraded-nest `fauna.nest.outdated` with `"outdated:"` and a 4426 close (the
+ *  app too old) with `"app-outdated:"`; everything else is
  *  an opaque `Error` the launch screen treats as `unreachable`. The `"outdated:"`
  *  prefix is stripped so the resulting `.message` is the bare localized text the UI
  *  renders directly; `"transient:"` keeps its full string (the launch screen shows a
@@ -105,6 +139,10 @@ export function classifyChallengeError(raw: unknown): Error {
   if (msg.startsWith('transient:')) return new TransientAuthError(msg);
   if (msg.startsWith('outdated:')) {
     return new NestOutdatedError(msg.slice('outdated:'.length).trimStart());
+  }
+  // `app-outdated:` from the wasm `map_silent_err` 4426 arm — the app is too old.
+  if (msg.startsWith('app-outdated:')) {
+    return new AppOutdatedError(msg.slice('app-outdated:'.length).trimStart());
   }
   // `nest-identity-changed:<json>` from the wasm possession-pin check — the nest's
   // pinned identity changed or its proof was withdrawn. The JSON

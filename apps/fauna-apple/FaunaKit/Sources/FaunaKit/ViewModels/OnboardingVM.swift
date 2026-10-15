@@ -231,6 +231,22 @@ public final class OnboardingVM {
         return machine.awaitingDnsCopyEnabled()
     }
 
+    /// Whether the "Use a different nest" exit is live — off only while a claim is
+    /// in flight, ON during a bare probe (a box that never answers lives in
+    /// `Checking`), so it is NOT `isAwaitingDnsBusy`. The machine decides.
+    public var awaitingDnsFallthroughEnabled: Bool {
+        _ = _observerTick
+        return machine.awaitingDnsFallthroughEnabled()
+    }
+
+    /// The "Almost ready" exit (`onboarding-provisioning.md` § "Almost ready"
+    /// surface → *Exit*): the machine clears the slot through the store it was
+    /// built with and re-lands at `handle_entry` holding the identity; the observer
+    /// tick then repaints, and the surface (keyed on the outcome) disappears.
+    public func abandonAwaitingManualDns() {
+        machine.abandonAwaitingManualDns()
+    }
+
     /// True while `wizard_outcome() == AwaitingManualDns` — the single predicate the
     /// "Almost ready" surface renders and polls off (it is NOT an `OnboardingStep`,
     /// so both the same-session exit and the relaunch hydration reach it identically).

@@ -30,7 +30,7 @@
 //!
 //! The *trigger* is deliberately **not** invented here: every app already has a
 //! universal post-auth hook hosting best-effort session-start convergences of
-//! exactly this shape (tui `session::establish` — `spawn_refresh_mail_epoch_schedule`,
+//! exactly this shape (tui `session::establish` — the mail connect-time refresh,
 //! the deployment-seed custody leg; linux's own equivalents). The sweep is one more call
 //! there, which is what makes it uniform rather than seven bespoke designs.
 //!
@@ -56,6 +56,8 @@ pub mod domain_expiry;
 pub use domain_expiry::{
     DOMAIN_EXPIRY_ALERT_KEY, domain_expiry_alert_lines, sync_domain_expiry_alert,
 };
+pub mod eviction;
+pub use eviction::{eviction_alert_key, eviction_alert_lines, sync_eviction_alert};
 
 use fauna_client_alerts::CriticalAlerts;
 use fauna_client_atproto::identity_store::AtprotoIdentityStore;
@@ -77,6 +79,9 @@ pub mod feeders {
     /// The deployment's primary-domain registration
     /// (`domains-and-tls-bootstrap.md` § Domain loss → *Detection*).
     pub const DOMAIN_EXPIRY: &str = "domain-expiry";
+    /// The member's own account under eviction
+    /// (`admin.md` § Cutting a user off → *The member is told*).
+    pub const EVICTION_WARNING: &str = "eviction-warning";
 }
 
 /// One feeder that could not be checked this sweep.
@@ -369,10 +374,24 @@ where
         stage = "domain-expiry-begin",
         "session-start sweep: domain-expiry feeder begins"
     );
-    domain_expiry::run_domain_expiry_feeder(rpc, alerts, &mut report, now).await;
+    domain_expiry::run_domain_expiry_feeder(rpc.clone(), alerts, &mut report, now).await;
     tracing::debug!(
         stage = "domain-expiry-end",
         "session-start sweep: domain-expiry feeder returned"
+    );
+
+    // ── Feeder: this account under eviction ──────────────────────────────────
+    // The member's own `fauna.account.get`. No faster trigger than this sweep
+    // (`critical-alerts.md` § Implementation status today): a called-off
+    // eviction may stand on the banner until the next pass, the safe side.
+    tracing::debug!(
+        stage = "eviction-begin",
+        "session-start sweep: eviction feeder begins"
+    );
+    eviction::run_eviction_feeder(rpc, alerts, actor_id, &mut report, now).await;
+    tracing::debug!(
+        stage = "eviction-end",
+        "session-start sweep: eviction feeder returned"
     );
 
     // Every feeder above has posted or cleared, so the registry now reflects
@@ -1360,6 +1379,9 @@ mod tests {
         /// nest whose watch has not completed an attempt yet, which is the
         /// honest state of a freshly-booted fake and makes no network claim.
         domain: Mutex<fauna_protocol::domain_expiry::DomainExpiryReply>,
+        /// What `account.get` answers. The default carries no eviction — an
+        /// ordinary member, whom the eviction feeder checks and clears.
+        account: Mutex<fauna_protocol::account::AccountGetReply>,
         /// `(kind, error code)` to reject with, leaving every other kind alone.
         reject_kind: Mutex<Option<(&'static str, &'static str)>>,
         calls: Mutex<Vec<&'static str>>,
@@ -1388,6 +1410,40 @@ mod tests {
         }
     }
 
+    /// A member's `fauna.account.get` reply, under `eviction` if any.
+    fn account_reply(
+        eviction: Option<fauna_protocol::account::AccountEviction>,
+    ) -> fauna_protocol::account::AccountGetReply {
+        use fauna_protocol::account::*;
+        let usage = || UsageBytes {
+            used_bytes: 0,
+            max_bytes: 0,
+            extra: Default::default(),
+        };
+        AccountGetReply {
+            actor_id: "00".repeat(32),
+            handle: None,
+            tier: "member".into(),
+            created_at: 0,
+            eviction,
+            quota: AccountGetQuota {
+                inbox: usage(),
+                storage: usage(),
+                devices: AccountDeviceLimit {
+                    max: 0,
+                    extra: Default::default(),
+                },
+                extra: Default::default(),
+            },
+            node_policy: AccountNodePolicy {
+                eviction_warning_days: 14,
+                eviction_suspension_days: 14,
+                extra: Default::default(),
+            },
+            extra: Default::default(),
+        }
+    }
+
     impl FakeRpc {
         fn answering(pending: Option<wire::ReplacementPendingInfo>) -> Self {
             Self {
@@ -1395,6 +1451,7 @@ mod tests {
                     pending: Mutex::new(Some(pending)),
                     atproto: Mutex::new(Default::default()),
                     domain: Mutex::new(Default::default()),
+                    account: Mutex::new(account_reply(None)),
                     reject_kind: Mutex::new(None),
                     calls: Mutex::new(Vec::new()),
                 }),
@@ -1407,6 +1464,7 @@ mod tests {
                     pending: Mutex::new(None),
                     atproto: Mutex::new(Default::default()),
                     domain: Mutex::new(Default::default()),
+                    account: Mutex::new(account_reply(None)),
                     reject_kind: Mutex::new(None),
                     calls: Mutex::new(Vec::new()),
                 }),
@@ -1454,6 +1512,12 @@ mod tests {
             self
         }
 
+        /// Answer `account.get` with this account under `eviction` (or none).
+        fn with_eviction(self, eviction: Option<fauna_protocol::account::AccountEviction>) -> Self {
+            *self.inner.account.lock().unwrap() = account_reply(eviction);
+            self
+        }
+
         fn calls(&self) -> Vec<&'static str> {
             self.inner.calls.lock().unwrap().clone()
         }
@@ -1493,6 +1557,9 @@ mod tests {
                     .expect("encode reply")
             } else if kind == "fauna.domain.expiry.get" {
                 fauna_core::encoding::canonical_encode(&*self.inner.domain.lock().unwrap())
+                    .expect("encode reply")
+            } else if kind == "fauna.account.get" {
+                fauna_core::encoding::canonical_encode(&*self.inner.account.lock().unwrap())
                     .expect("encode reply")
             } else {
                 fauna_core::encoding::canonical_encode(&wire::ReplacementStatusReply {
@@ -1863,7 +1930,10 @@ mod tests {
         ));
 
         assert!(report.failures.is_empty(), "{report:?}");
-        assert_eq!(report.checked, vec![feeders::PENDING_REPLACEMENT]);
+        assert_eq!(
+            report.checked,
+            vec![feeders::PENDING_REPLACEMENT, feeders::EVICTION_WARNING]
+        );
         // Not `is_complete()`: this fake reports no ATProto identity, so both
         // directory feeders honestly had nothing to check — and since 2026-08-02
         // that is *recorded* rather than passed over in silence.
@@ -1983,7 +2053,8 @@ mod tests {
                 feeders::PENDING_REPLACEMENT,
                 feeders::GENESIS_CUSTODY,
                 feeders::HANDLE_BINDING,
-                feeders::DOMAIN_EXPIRY
+                feeders::DOMAIN_EXPIRY,
+                feeders::EVICTION_WARNING,
             ],
         );
         assert_eq!(
@@ -1992,6 +2063,7 @@ mod tests {
                 fauna_client_recovery::nest::kinds::REPLACEMENT_STATUS,
                 "fauna.bridges.atproto.get_integration_status",
                 "fauna.domain.expiry.get",
+                "fauna.account.get",
             ],
             "the sweep drives each feeder's standing read, not a ceremony"
         );
@@ -3632,6 +3704,137 @@ mod tests {
                 .iter()
                 .any(|s| s.feeder == feeders::DOMAIN_EXPIRY),
             "unreachable is a failure, never a skip — only a failure retries"
+        );
+    }
+
+    // ── Feeder #5: the eviction warning ──────────────────────────────────────
+
+    fn warning_eviction() -> fauna_protocol::account::AccountEviction {
+        fauna_protocol::account::AccountEviction {
+            status: "warning".into(),
+            reason: "inactive".into(),
+            category: "other".into(),
+            warned_at: Some(NOW),
+            suspend_at: Some(NOW + 14 * DAY),
+            delete_at: Some(NOW + 28 * DAY),
+            export_token: Some("tok".into()),
+            extra: Default::default(),
+        }
+    }
+
+    fn sweep_as(rpc: FakeRpc, alerts: &CriticalAlerts, id: &ActorId) -> SweepReport {
+        block_on(run_session_start_sweep_at(
+            rpc,
+            &store(&[]),
+            alerts,
+            id,
+            NOW,
+        ))
+    }
+
+    /// The gap this feeder closes: an evicted member is told on a sweep, with
+    /// the two dates, under their own actor-scoped key.
+    #[test]
+    fn a_sweep_posts_an_eviction_in_warning() {
+        let alerts = CriticalAlerts::new();
+        let id = actor(5);
+        let report = sweep_as(
+            FakeRpc::answering(None).with_eviction(Some(warning_eviction())),
+            &alerts,
+            &id,
+        );
+
+        assert!(
+            report.checked.contains(&feeders::EVICTION_WARNING),
+            "{report:?}"
+        );
+        let active = alerts.active();
+        let alert = active
+            .iter()
+            .find(|a| a.key == eviction_alert_key(&id))
+            .expect("the eviction alert is posted");
+        assert_eq!(alert.lines[0].key, "critical_alerts.eviction_warning");
+        assert_eq!(alert.lines[0].args["days"], "14");
+        assert_eq!(alert.lines[1].args["reason"], "inactive");
+    }
+
+    /// A called-off eviction takes its banner with it on the next sweep, and an
+    /// account with no eviction is *checked*, never skipped.
+    #[test]
+    fn a_sweep_with_no_eviction_clears_a_standing_alert() {
+        let alerts = CriticalAlerts::new();
+        let id = actor(5);
+        sweep_as(
+            FakeRpc::answering(None).with_eviction(Some(warning_eviction())),
+            &alerts,
+            &id,
+        );
+        let report = sweep_as(FakeRpc::answering(None), &alerts, &id);
+
+        assert!(
+            report.checked.contains(&feeders::EVICTION_WARNING),
+            "{report:?}"
+        );
+        assert!(
+            !report
+                .skipped
+                .iter()
+                .any(|s| s.feeder == feeders::EVICTION_WARNING)
+        );
+        assert!(
+            alerts
+                .active()
+                .iter()
+                .all(|a| a.key != eviction_alert_key(&id)),
+            "a called-off eviction clears"
+        );
+    }
+
+    /// A suspended account has no member left to warn: its phase clears too.
+    #[test]
+    fn a_suspended_eviction_clears_rather_than_posts() {
+        let alerts = CriticalAlerts::new();
+        let id = actor(5);
+        sweep_as(
+            FakeRpc::answering(None).with_eviction(Some(warning_eviction())),
+            &alerts,
+            &id,
+        );
+        let mut suspended = warning_eviction();
+        suspended.status = "suspended".into();
+        sweep_as(
+            FakeRpc::answering(None).with_eviction(Some(suspended)),
+            &alerts,
+            &id,
+        );
+        assert!(alerts.active().is_empty());
+    }
+
+    /// A failed account read never clears: the warning stands, the next sweep
+    /// retries — and an unknown-kind refusal is a failure, not a skip.
+    #[test]
+    fn a_failed_account_read_leaves_a_standing_eviction_alert_alone() {
+        let alerts = CriticalAlerts::new();
+        let id = actor(5);
+        sweep_as(
+            FakeRpc::answering(None).with_eviction(Some(warning_eviction())),
+            &alerts,
+            &id,
+        );
+        let report = sweep_as(
+            FakeRpc::answering(None).rejecting_kind("fauna.account.get", "rpc.unknown_kind"),
+            &alerts,
+            &id,
+        );
+
+        let failed: Vec<_> = report.failures.iter().map(|f| f.feeder).collect();
+        assert_eq!(failed, vec![feeders::EVICTION_WARNING], "{report:?}");
+        assert!(
+            alerts
+                .active()
+                .iter()
+                .any(|a| a.key == eviction_alert_key(&id)),
+            "unreachable is not resolved"
         );
     }
 }

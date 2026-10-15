@@ -139,6 +139,15 @@ pub trait PrincipalCustody: RetainedKeyCustody {
     /// (the latch is content-addressed against the grant's encoding).
     fn grant_registration_row(&self) -> Option<String>;
 
+    /// Adopt the generation keys the slot carries that this custody's view
+    /// lacks — keys another process of the machine recorded since it loaded
+    /// — and answer how many. Run once at the start of every full pass, so an
+    /// engine holder opens what a co-located seed pass recovered. A custody
+    /// whose view is the slot itself, or that shares no slot, adopts nothing.
+    fn adopt_slot_generation_keys(&self) -> usize {
+        0
+    }
+
     /// Latch the grant the slot carries as registered on `device_id_hex`.
     fn record_grant_registered_on(&self, device_id_hex: &str);
 

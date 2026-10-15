@@ -215,7 +215,7 @@ class CustodianPushKick @Inject constructor(
         // No device id yet (pre-onboarding) → no registry row can name this
         // device, so there is nothing to match on. Wait out this actor rather
         // than spinning: the next identity change starts the next turn.
-        val deviceId = secureStorage.deviceId ?: return retired.await()
+        val deviceId = secureStorage.resolveDeviceId() ?: return retired.await()
 
         val built = try {
             api.buildCustodianHost(deviceId, accountStores.custodianStoreBaseDir())

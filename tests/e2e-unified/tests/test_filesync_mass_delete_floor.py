@@ -336,7 +336,7 @@ def test_an_unreadable_subtree_is_surfaced_and_nothing_is_deleted(logged_in_app,
       the line goes away on its own.
     """
     app = logged_in_app
-    if app_name(app.driver) not in ("tui", "macos", "windows"):
+    if app_name(app.driver) not in ("tui", "macos", "windows", "linux"):
         skip_unbuilt(
             app.driver,
             surface="folder-location-unreadable",

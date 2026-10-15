@@ -405,9 +405,22 @@ impl FakeDeploymentSeedStore {
 /// lands one right after one of this device's writes — the window the rotation
 /// finalize's re-drive exists for (`mail-credentials.md` § Cross-device
 /// finalize race).
+///
+/// It also models the publish to the bound nest: [`Self::published`] is what
+/// the nest's state plane holds — the rows as of the last
+/// [`MailStore::publish`] (or [`Self::seed`]) — and [`Self::fresh_replica`] is
+/// a device that hydrates from it (a sibling, or this device relaunched over a
+/// fresh store). [`Self::refuse_next_publishes`] plays an offline nest.
+/// [`Self::stale_replica`] is a sibling that listed the nest's rows once and
+/// has not walked since: it keeps reading what it listed until its
+/// [`MailStore::walk`] joins what the nest holds by then
+/// ([`Self::refuse_next_walks`] plays a walk this runtime cannot take).
 #[derive(Clone, Default)]
 pub struct FakeMailStore {
     inner: Arc<Mutex<FakeMailInner>>,
+    /// The store whose published rows this replica's walk joins — `None` for
+    /// a store that is its own source (its walk joins nothing).
+    upstream: Option<Arc<Mutex<FakeMailInner>>>,
 }
 
 /// A write hook: runs after each accepted write until it answers `true`.
@@ -422,6 +435,14 @@ struct FakeMailInner {
     refuse: usize,
     writes: usize,
     on_write: Option<InjectedRowsWrite>,
+    /// The rows the bound nest's state plane holds.
+    published: MailRows,
+    refuse_publish: usize,
+    publishes: usize,
+    refuse_walk: usize,
+    walks: usize,
+    /// Every read answers `Load(reason)` while set.
+    refuse_reads: Option<String>,
 }
 
 impl FakeMailInner {
@@ -496,7 +517,14 @@ impl FakeMailStore {
         {
             rows.join_generation(g);
         }
+        inner.published = rows.clone();
         inner.rows = rows;
+    }
+
+    /// Refuse every read from now on with `reason` (e.g. [`crate::LEDGER_NOT_READY`]),
+    /// as the first-listing gate does a device that has not listed yet.
+    pub fn refuse_reads_with(&self, reason: &str) {
+        self.inner.lock().unwrap().refuse_reads = Some(reason.to_owned());
     }
 
     /// The READ fold of what is stored.
@@ -545,6 +573,56 @@ impl FakeMailStore {
     /// How many writes moved a row.
     pub fn writes(&self) -> usize {
         self.inner.lock().unwrap().writes
+    }
+
+    /// The rows the bound nest's state plane holds — what a replica that
+    /// hydrates from the nest reads.
+    pub fn published(&self) -> MailRows {
+        self.inner.lock().unwrap().published.clone()
+    }
+
+    /// A store over what the nest holds, sharing nothing with this one — a
+    /// sibling device, or this device relaunched over a fresh store.
+    pub fn fresh_replica(&self) -> Self {
+        let published = self.published();
+        let store = Self::default();
+        {
+            let mut inner = store.inner.lock().unwrap();
+            inner.rows = published.clone();
+            inner.published = published;
+        }
+        store
+    }
+
+    /// A sibling whose replica listed what the nest holds NOW and walks only
+    /// when asked: its [`MailStore::walk`] joins this store's
+    /// [`Self::published`] rows as they stand at the walk — the rows this
+    /// device publishes meanwhile stay unseen until then.
+    pub fn stale_replica(&self) -> Self {
+        let mut replica = self.fresh_replica();
+        replica.upstream = Some(Arc::clone(&self.inner));
+        replica
+    }
+
+    /// Refuse the next `n` walks the way a runtime that cannot walk now does
+    /// (offline, or another process holds the engine role).
+    pub fn refuse_next_walks(&self, n: usize) {
+        self.inner.lock().unwrap().refuse_walk = n;
+    }
+
+    /// How many walks this store took.
+    pub fn walks(&self) -> usize {
+        self.inner.lock().unwrap().walks
+    }
+
+    /// Refuse the next `n` publishes the way an offline nest does.
+    pub fn refuse_next_publishes(&self, n: usize) {
+        self.inner.lock().unwrap().refuse_publish = n;
+    }
+
+    /// How many publishes the nest acknowledged.
+    pub fn publishes(&self) -> usize {
+        self.inner.lock().unwrap().publishes
     }
 }
 
@@ -780,10 +858,16 @@ impl FollowsStore for FakeFollowsStore {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl MailStore for FakeMailStore {
     async fn load(&self) -> Result<MailConfig, StoreError> {
+        if let Some(r) = self.inner.lock().unwrap().refuse_reads.clone() {
+            return Err(StoreError::Load(r));
+        }
         Ok(self.current())
     }
 
     async fn load_rows(&self) -> Result<MailRows, StoreError> {
+        if let Some(r) = self.inner.lock().unwrap().refuse_reads.clone() {
+            return Err(StoreError::Load(r));
+        }
         Ok(self.rows())
     }
 
@@ -905,6 +989,48 @@ impl MailStore for FakeMailStore {
             inner.landed();
         }
         Ok(moved)
+    }
+
+    async fn publish(&self) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.refuse_publish > 0 {
+            inner.refuse_publish -= 1;
+            return Err(StoreError::Save(
+                "fake nest: offline, the mail rows stay unsent".into(),
+            ));
+        }
+        inner.published = inner.rows.clone();
+        inner.publishes += 1;
+        Ok(())
+    }
+
+    async fn walk(&self) -> Result<(), StoreError> {
+        let nest = self
+            .upstream
+            .as_ref()
+            .map(|upstream| upstream.lock().unwrap().published.clone());
+        let mut inner = self.inner.lock().unwrap();
+        if inner.refuse_walk > 0 {
+            inner.refuse_walk -= 1;
+            return Err(StoreError::Load(
+                "fake runtime: no walk can be taken now".into(),
+            ));
+        }
+        inner.walks += 1;
+        let Some(nest) = nest else {
+            return Ok(());
+        };
+        if let Some(state) = &nest.state {
+            FakeMailStore::join_state_into(&mut inner.rows, state);
+        }
+        for credential in nest.credentials.values() {
+            inner.join_credential(credential.clone());
+        }
+        for generation in nest.generations.values() {
+            inner.rows.join_generation(generation.clone());
+        }
+        inner.published = nest;
+        Ok(())
     }
 }
 

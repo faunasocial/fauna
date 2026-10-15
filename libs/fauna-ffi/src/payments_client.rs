@@ -158,6 +158,15 @@ pub fn payments_webhook_url(base_url: String, author_id_hex: String, kind: Strin
     fauna_client_payments::webhook_url(&base_url, &author_id_hex, &kind)
 }
 
+/// The post-checkout redirect URL a creator pastes into `kind`'s checkout
+/// settings so a paying visitor lands on their site's return door and sees
+/// their claim code. `site_url` is the creator's web site origin (the door
+/// resolves the owner from the `Host`), not the nest URL.
+#[uniffi::export]
+pub fn payments_return_url(site_url: String, kind: String) -> String {
+    fauna_client_payments::return_url(&site_url, &kind)
+}
+
 // ── FfiPaymentsClient ──────────────────────────────────────────────────
 
 /// UniFFI handle for the `fauna.payments.*` kinds. Construct via
@@ -253,6 +262,19 @@ impl FfiPaymentsClient {
             .claims_list()
             .await
             .map(|rows| rows.into_iter().map(FfiClaimItem::from).collect())
+            .map_err(stringify)
+    }
+
+    /// `fauna.payments.claims.void` — the author withdraws one of their own
+    /// claim codes: unredeemed → it stops redeeming (app and web); redeemed →
+    /// the redeemer's entitlement to its tier ends too, as a refund ends it.
+    /// Idempotent. Typed error: `fauna.payments.claim_not_found`. Returns the
+    /// void's stamp (micros) — the same value `claims_list` then carries.
+    pub async fn claims_void(&self, code: String) -> Result<u64, FfiError> {
+        self.client()
+            .claims_void(code)
+            .await
+            .map(|t| t.0)
             .map_err(stringify)
     }
 }

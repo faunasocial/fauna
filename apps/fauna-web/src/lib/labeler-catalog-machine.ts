@@ -81,6 +81,13 @@ export interface LabelerInspectView {
    *  beside the four v1 flags — the fifth transparency line
    *  (content-moderation-and-ranking.md § Tier-3 → *The attachment facet*). */
   needs_attachment_bytes: boolean;
+  /** The `label()` output revision the module declares (uniffi default 1),
+   *  painted beside the five input flags (content-moderation-and-ranking.md
+   *  § Tier-3 → *The output half of the `label()` ABI*, position (ii)). */
+  label_abi: number;
+  /** Whether {@link label_abi} is past this app's own `LABEL_ABI_CURRENT` — the
+   *  panel says so and subscribe is already refused by the machine. */
+  newer_than_this_app: boolean;
   /** Whether the client-side re-verify (`verify_labeler_metadata`) accepted
    *  the hash/size/signature binding — `false` renders a tampering warning. */
   verified: boolean;

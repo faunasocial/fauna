@@ -12,7 +12,7 @@
   // pay-per-view is the deliberate opt-in.
   import AskingPriceInput from '$lib/components/payments/AskingPriceInput.svelte';
   import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import { PAYMENTS_IDS } from '$lib/components/payments/generatedIds';
 
   interface Props {
     sellPrice: string;
@@ -34,7 +34,7 @@
 <div class="compose-meta">
   <input
     class="text-input small"
-    data-testid={IDS.COMPOSE_SELL_PRICE}
+    data-testid={PAYMENTS_IDS.COMPOSE_SELL_PRICE}
     type="text"
     placeholder={t.feed.post.sell_price_placeholder}
     value={sellPrice}
@@ -49,7 +49,7 @@
   <label class="sell-subscribers-free-label">
     <input
       type="checkbox"
-      data-testid={IDS.COMPOSE_SELL_SUBSCRIBERS_FREE}
+      data-testid={PAYMENTS_IDS.COMPOSE_SELL_SUBSCRIBERS_FREE}
       checked={sellSubscribersFree}
       data-checked={sellSubscribersFree ? 'true' : 'false'}
       onchange={(e) => onsellsubscribersfreechange?.(e.currentTarget.checked)}

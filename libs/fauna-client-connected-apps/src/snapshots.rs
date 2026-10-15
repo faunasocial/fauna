@@ -1,6 +1,7 @@
 //! The renderable connected-apps page (`docs/goal/ui/connected-apps.md`
 //! § State & data shape): `ConnectedAppsSnapshot { loaded, requests,
-//! principals }` plus the blocked-clients read and the page error.
+//! principals }` plus the blocked-clients read, the open oracle record and
+//! the page error.
 
 use fauna_core::localized::LocalizedText;
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,13 @@ pub struct ConnectedAppRow {
     /// What the row may reach, in words, through the one describe path the
     /// consent card uses.
     pub scope_descriptions: Vec<LocalizedText>,
+    /// The permission sets the row's permissions came from — the provenance
+    /// the consent card showed at approval, composed by the card's own
+    /// function (`atproto-oauth-provider.md` § Implementation status today).
+    /// Each set once, over the client's live OAuth grants; empty for a row
+    /// whose grants named none and for every non-principal row.
+    #[cfg_attr(feature = "uniffi", uniffi(default = []))]
+    pub sets: Vec<ConsentSetRow>,
     /// Epoch milliseconds.
     pub created_at_millis: i64,
     /// Epoch milliseconds; `None` when never used (or not known).
@@ -68,9 +76,80 @@ pub struct ConnectedAppRow {
     /// family, a suspended grant or a pending signer is listed and revocable
     /// but not connected.
     pub connected: bool,
+    /// The account's external-apps switch is OFF and this row is on the
+    /// external-app plane it suspends — a principal or an ATProto
+    /// app-password session (`atproto-pds-full.md` § F1 detail, the
+    /// kill-switch bullet). A paused row is not [`Self::connected`], stays
+    /// listed and revocable, and works again with nothing redone once the
+    /// switch is back ON; apps word it as paused, not as merely not
+    /// connected.
+    pub paused: bool,
     /// `Some` on a mail app-password row, and only there: the login, kind and
     /// burned state the row shows beside the columns every row has.
     pub mail: Option<MailAppPassword>,
+    /// A NIP-46 signer row the identity-succession burn killed and kept
+    /// (`ui/nostr.md` § Key succession and rotation): listed so the successor
+    /// sees which apps held standing authority, not connected, and Revoke
+    /// removes it — the mail row's `revoked`, for the signer class.
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub signer_burned: bool,
+    /// `Some` on a principal row the oracle's custodians have served, or an
+    /// ATProto app-password session that has written through the
+    /// `atproto.commit` door, and only there: what they did for it
+    /// (`connected-apps.md` § Layout & flow, region 3). A principal row's
+    /// per-operation record behind it is read on demand
+    /// ([`crate::ConnectedAppsMachine::open_record`]).
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub oracle: Option<OracleSummaryRow>,
+}
+
+/// The oracle summary a served principal's row carries
+/// (`third-party.md` § The roster model, the oracle record's columns), summed
+/// across the custodians that served it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct OracleSummaryRow {
+    /// Key operations admitted in the rate ceiling's current window.
+    pub ops_in_window: u32,
+    /// Every request a custodian served for the principal, key-less ones
+    /// (connect, ping, the public-key read) included.
+    pub requests_served: u64,
+    /// The newest operation; `None` before the first.
+    pub last_op: Option<OracleOpRow>,
+}
+
+/// One key operation a custodian performed for a principal — a row of the
+/// per-operation record, and the summary's newest operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct OracleOpRow {
+    /// Epoch milliseconds.
+    pub at_millis: i64,
+    /// The `identity.op` class verbatim (`nostr.sign_event`, …) — a value a
+    /// reader can match on; the words below are what a user reads.
+    pub class: String,
+    /// The class in words, through the one describe path the consent card
+    /// uses for its `fauna:identity:op:<class>` scope — never a second
+    /// wording. A class this build does not know reads as its name.
+    pub words: LocalizedText,
+    /// The class's own detail (the event kind, the method, `<method> <host>`),
+    /// verbatim and control-stripped.
+    pub detail: LocalizedText,
+}
+
+/// One principal's per-operation record, open on the page
+/// ([`crate::ConnectedAppsMachine::open_record`]). At most one is open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct OracleRecord {
+    /// The row key it belongs to.
+    pub key: String,
+    /// Whether the read has returned — the three-state list rule
+    /// (`docs/goal/ui/README.md` § List pages): before it, the record paints
+    /// neither operations nor its empty state.
+    pub loaded: bool,
+    /// Newest first, at most `fauna_protocol::principals::PRINCIPAL_OPS_PAGE`.
+    pub ops: Vec<OracleOpRow>,
 }
 
 /// What a mail app-password row carries beyond the common columns
@@ -120,6 +199,9 @@ pub struct ConnectedAppsSnapshot {
     pub principals: Vec<ConnectedAppRow>,
     /// The per-client blocks, oldest first.
     pub blocked: Vec<BlockedAppRow>,
+    /// The open per-operation record, if any.
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub record: Option<OracleRecord>,
     /// The page error (`error-message`), if the last gesture or read failed.
     pub error: Option<LocalizedText>,
 }

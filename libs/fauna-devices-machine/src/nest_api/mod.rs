@@ -125,13 +125,14 @@ pub trait DevicesNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
         vec![false; rows.len()]
     }
 
-    /// `fauna.web.get_subdomain_enabled` — whether this actor's per-handle web
+    /// The web plane's subdomain read — whether this actor's per-handle web
     /// address is switched on, for the website toggle's tri-state hint
     /// (`fauna_folders_machine::website_serve_hint`; `ui/folders.md`
     /// § Audience and website serving).
     ///
     /// **Best-effort by signature**: `None` means unknown — an adapter that
-    /// has not wired it (this default), or a
+    /// has not wired it (this default — and the WS-RPC adapter of a build
+    /// without the `web` feature, which excises web publishing), or a
     /// transport fault — and the hint then degrades to the combined wording
     /// that hedges both halves. Deliberately NOT a `Result`: no answer here
     /// may ever fail the page, and the only consumer treats every failure
@@ -280,6 +281,16 @@ pub trait DevicesNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
         &self,
         name: &str,
         residency: &str,
+    ) -> Result<(), DevicesApiError>;
+
+    /// `fauna.folders.update` with only `exclusive_editing` set — the write
+    /// behind `folder-exclusive-editing-toggle` (`ui/folders.md` § Exclusive
+    /// editing; `file-sync.md` § Exclusive editing). Its own field, so no
+    /// other folder property rides it. Keyless, owner-only.
+    async fn set_folder_exclusive_editing(
+        &self,
+        name: &str,
+        on: bool,
     ) -> Result<(), DevicesApiError>;
 
     /// `fauna.folders.places.set` — the write behind the expanded owner row's

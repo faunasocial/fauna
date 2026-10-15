@@ -106,8 +106,8 @@ What exists, and the gap each ratified shape declares:
   sender match untouched); and `MessageSnapshot::can_delete` is the affordance
   (own, or `RoomSnapshot::viewer_deletes_any` — owner or admin of a governed
   end-to-end room), which `ConversationsManager::delete_message` re-checks
-  before any send. tui paints the delete button off that flag; **the other six
-  apps still gate on `is_own`**, so an owner or admin there is offered nothing
+  before any send. tui, linux, web, android and windows paint the delete button off that flag; **the other two
+  apps (macos, ios) still gate on `is_own`**, so an owner or admin there is offered nothing
   new until the trickle-down lifts them (they already honour and paint the
   tombstone — that half is shared Rust). Pinned by
   `an_owners_delete_of_a_members_message_tombstones_it_and_a_members_does_not`
@@ -2044,7 +2044,7 @@ room, and the post seal it uses is the `Posts` row's own.
       the role check removed, the community floor's refusal pinned on the nest,
       and a tui journey (the end-to-end class: 2026-09-19, shared-Rust test
       red-verified, three-seat tui journey green; the community class and the
-      other six apps' affordance unbuilt — § Implementation status today).
+      macos and ios affordance unbuilt — § Implementation status today).
 - [ ] History policy `full` delivers a history slice to a newcomer on both
       classes; `none` delivers nothing (the end-to-end class: 2026-09-08,
       `libs/fauna-conversations/tests/fauna_mls_backend_tests.rs`; the

@@ -6,7 +6,7 @@
 //!
 //! Phase-1 capability doctrine: only the derived `BackupKey` is handed to
 //! the sync service; the seed stays in the client.
-//! See `docs/goal/behavior/file-sync.md` § On-Demand Files and
+//! See `docs/goal/behavior/on-demand-files.md` § On-Demand Files and
 //! `docs/goal/architecture/key-material-hierarchy.md` rule #7.
 
 use crate::FfiError;

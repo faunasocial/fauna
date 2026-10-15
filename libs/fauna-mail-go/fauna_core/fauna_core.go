@@ -1348,6 +1348,188 @@ func (_ FfiDestroyerConversationTimestampDisplay) Destroy(value ConversationTime
 	value.Destroy()
 }
 
+// One DKIM signature's raw (unaligned) result — the `auth_results/dkim` row
+// of an RFC 7489 §A.1 record.
+type DkimAuthResult struct {
+	// The signature's `d=` domain, lowercased.
+	Domain string
+	// The signature's `s=` selector.
+	Selector string
+	// An RFC 7489 §A.1 `DKIMResultType` token (`none`, `pass`, `fail`,
+	// `policy`, `neutral`, `temperror`, `permerror`).
+	Result string
+}
+
+func (r *DkimAuthResult) Destroy() {
+	FfiDestroyerString{}.Destroy(r.Domain)
+	FfiDestroyerString{}.Destroy(r.Selector)
+	FfiDestroyerString{}.Destroy(r.Result)
+}
+
+type FfiConverterDkimAuthResult struct{}
+
+var FfiConverterDkimAuthResultINSTANCE = FfiConverterDkimAuthResult{}
+
+func (c FfiConverterDkimAuthResult) Lift(rb RustBufferI) DkimAuthResult {
+	return LiftFromRustBuffer[DkimAuthResult](c, rb)
+}
+
+func (c FfiConverterDkimAuthResult) Read(reader io.Reader) DkimAuthResult {
+	return DkimAuthResult{
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterDkimAuthResult) Lower(value DkimAuthResult) C.RustBuffer {
+	return LowerIntoRustBuffer[DkimAuthResult](c, value)
+}
+
+func (c FfiConverterDkimAuthResult) LowerExternal(value DkimAuthResult) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[DkimAuthResult](c, value))
+}
+
+func (c FfiConverterDkimAuthResult) Write(writer io.Writer, value DkimAuthResult) {
+	FfiConverterStringINSTANCE.Write(writer, value.Domain)
+	FfiConverterStringINSTANCE.Write(writer, value.Selector)
+	FfiConverterStringINSTANCE.Write(writer, value.Result)
+}
+
+type FfiDestroyerDkimAuthResult struct{}
+
+func (_ FfiDestroyerDkimAuthResult) Destroy(value DkimAuthResult) {
+	value.Destroy()
+}
+
+// What one inbound message contributes to an outbound DMARC aggregate report
+// (RFC 7489 §7.2, `docs/goal/behavior/dmarc-reporting.md` § Outbound
+// aggregate-report sender): the identifiers and the *aligned* results the
+// four verdicts above flatten away.
+//
+// Produced beside [`AuthVerdicts`] by `fauna_mail::auth::verify_inbound_observed`
+// at the SMTP perimeter — before any enforcement gate, so mail the perimeter
+// refuses is counted too — and carried to the nest on
+// `fauna.bridges.report_dmarc_observation`. Every field is a plain string,
+// bool or list, so the Go wire mirror needs no hand-written enum translation;
+// the result tokens are RFC 7489 §A.1's own vocabulary.
+type DmarcObservation struct {
+	// The RFC 5322.From domain, lowercased — the report's `header_from`, and
+	// the domain whose DMARC policy addresses the report. Empty when the
+	// message carries no From address.
+	HeaderFromDomain string
+	// The RFC 5321.MailFrom domain (the HELO name for a null sender),
+	// lowercased — the report's `envelope_from` and the SPF `auth_results`
+	// domain.
+	EnvelopeFromDomain string
+	// DKIM produced an aligned pass (the `policy_evaluated/dkim` result).
+	DkimAligned bool
+	// SPF produced an aligned pass (the `policy_evaluated/spf` result).
+	SpfAligned bool
+	// One entry per DKIM signature verified, in verification order.
+	DkimResults []DkimAuthResult
+	// The SPF result for `envelope_from_domain`, as an RFC 7489 §A.1
+	// `SPFResultType` token (`none`, `neutral`, `pass`, `fail`, `softfail`,
+	// `temperror`, `permerror`).
+	SpfResult string
+}
+
+func (r *DmarcObservation) Destroy() {
+	FfiDestroyerString{}.Destroy(r.HeaderFromDomain)
+	FfiDestroyerString{}.Destroy(r.EnvelopeFromDomain)
+	FfiDestroyerBool{}.Destroy(r.DkimAligned)
+	FfiDestroyerBool{}.Destroy(r.SpfAligned)
+	FfiDestroyerSequenceDkimAuthResult{}.Destroy(r.DkimResults)
+	FfiDestroyerString{}.Destroy(r.SpfResult)
+}
+
+type FfiConverterDmarcObservation struct{}
+
+var FfiConverterDmarcObservationINSTANCE = FfiConverterDmarcObservation{}
+
+func (c FfiConverterDmarcObservation) Lift(rb RustBufferI) DmarcObservation {
+	return LiftFromRustBuffer[DmarcObservation](c, rb)
+}
+
+func (c FfiConverterDmarcObservation) Read(reader io.Reader) DmarcObservation {
+	return DmarcObservation{
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterSequenceDkimAuthResultINSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterDmarcObservation) Lower(value DmarcObservation) C.RustBuffer {
+	return LowerIntoRustBuffer[DmarcObservation](c, value)
+}
+
+func (c FfiConverterDmarcObservation) LowerExternal(value DmarcObservation) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[DmarcObservation](c, value))
+}
+
+func (c FfiConverterDmarcObservation) Write(writer io.Writer, value DmarcObservation) {
+	FfiConverterStringINSTANCE.Write(writer, value.HeaderFromDomain)
+	FfiConverterStringINSTANCE.Write(writer, value.EnvelopeFromDomain)
+	FfiConverterBoolINSTANCE.Write(writer, value.DkimAligned)
+	FfiConverterBoolINSTANCE.Write(writer, value.SpfAligned)
+	FfiConverterSequenceDkimAuthResultINSTANCE.Write(writer, value.DkimResults)
+	FfiConverterStringINSTANCE.Write(writer, value.SpfResult)
+}
+
+type FfiDestroyerDmarcObservation struct{}
+
+func (_ FfiDestroyerDmarcObservation) Destroy(value DmarcObservation) {
+	value.Destroy()
+}
+
+// The verdict set and the DMARC observation one verification produces.
+type InboundAuthOutcome struct {
+	Verdicts    AuthVerdicts
+	Observation DmarcObservation
+}
+
+func (r *InboundAuthOutcome) Destroy() {
+	FfiDestroyerAuthVerdicts{}.Destroy(r.Verdicts)
+	FfiDestroyerDmarcObservation{}.Destroy(r.Observation)
+}
+
+type FfiConverterInboundAuthOutcome struct{}
+
+var FfiConverterInboundAuthOutcomeINSTANCE = FfiConverterInboundAuthOutcome{}
+
+func (c FfiConverterInboundAuthOutcome) Lift(rb RustBufferI) InboundAuthOutcome {
+	return LiftFromRustBuffer[InboundAuthOutcome](c, rb)
+}
+
+func (c FfiConverterInboundAuthOutcome) Read(reader io.Reader) InboundAuthOutcome {
+	return InboundAuthOutcome{
+		FfiConverterAuthVerdictsINSTANCE.Read(reader),
+		FfiConverterDmarcObservationINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterInboundAuthOutcome) Lower(value InboundAuthOutcome) C.RustBuffer {
+	return LowerIntoRustBuffer[InboundAuthOutcome](c, value)
+}
+
+func (c FfiConverterInboundAuthOutcome) LowerExternal(value InboundAuthOutcome) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[InboundAuthOutcome](c, value))
+}
+
+func (c FfiConverterInboundAuthOutcome) Write(writer io.Writer, value InboundAuthOutcome) {
+	FfiConverterAuthVerdictsINSTANCE.Write(writer, value.Verdicts)
+	FfiConverterDmarcObservationINSTANCE.Write(writer, value.Observation)
+}
+
+type FfiDestroyerInboundAuthOutcome struct{}
+
+func (_ FfiDestroyerInboundAuthOutcome) Destroy(value InboundAuthOutcome) {
+	value.Destroy()
+}
+
 // Owned `(url, state name)` pair from [`RenderDocument::link_previews`], for the
 // FFI/wasm face every non-Rust app's e2e state dump publishes as
 // `data.feed.posts[].link_previews` (`{url, state}`, `state` being
@@ -2833,6 +3015,11 @@ func (_ FfiDestroyerBackupAuditAlertReason) Destroy(value BackupAuditAlertReason
 }
 
 // ClamAV malware-scan verdict for one message.
+//
+// Decoded by hand (below): a kind a newer build adds — unit or carrying
+// `data` — reads as [`Self::Unknown`]. The derive's `#[serde(other)]` cannot
+// do that on an adjacently tagged enum: it refuses an unknown kind that
+// carries a payload.
 type ClamavVerdict interface {
 	Destroy()
 }
@@ -2894,6 +3081,20 @@ type ClamavVerdictNotScanned struct {
 func (e ClamavVerdictNotScanned) Destroy() {
 }
 
+// A verdict kind a newer build added that this one does not know — the
+// app decodes this enum off `fauna.bridges.get_message_scan_result`'s
+// reply, so an app older than its nest meets kinds it was not built
+// with (`transport.md` § Schema and forward-compat discipline, rule 3:
+// collapse — every reader only displays or scores the value, none
+// re-emits it). Any payload is dropped. Never written: the bridge never
+// produces it, the nest refuses it at ingest and never stores it, and
+// it scores no row.
+type ClamavVerdictUnknown struct {
+}
+
+func (e ClamavVerdictUnknown) Destroy() {
+}
+
 type FfiConverterClamavVerdict struct{}
 
 var FfiConverterClamavVerdictINSTANCE = FfiConverterClamavVerdict{}
@@ -2926,6 +3127,8 @@ func (FfiConverterClamavVerdict) Read(reader io.Reader) ClamavVerdict {
 		return ClamavVerdictBypassedOversize{}
 	case 5:
 		return ClamavVerdictNotScanned{}
+	case 6:
+		return ClamavVerdictUnknown{}
 	default:
 		panic(fmt.Sprintf("invalid enum value %v in FfiConverterClamavVerdict.Read()", id))
 	}
@@ -2945,6 +3148,8 @@ func (FfiConverterClamavVerdict) Write(writer io.Writer, value ClamavVerdict) {
 		writeInt32(writer, 4)
 	case ClamavVerdictNotScanned:
 		writeInt32(writer, 5)
+	case ClamavVerdictUnknown:
+		writeInt32(writer, 6)
 	default:
 		_ = variant_value
 		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterClamavVerdict.Write", value))
@@ -4953,6 +5158,53 @@ type FfiDestroyerSequenceString struct{}
 func (FfiDestroyerSequenceString) Destroy(sequence []string) {
 	for _, value := range sequence {
 		FfiDestroyerString{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceDkimAuthResult struct{}
+
+var FfiConverterSequenceDkimAuthResultINSTANCE = FfiConverterSequenceDkimAuthResult{}
+
+func (c FfiConverterSequenceDkimAuthResult) Lift(rb RustBufferI) []DkimAuthResult {
+	return LiftFromRustBuffer[[]DkimAuthResult](c, rb)
+}
+
+func (c FfiConverterSequenceDkimAuthResult) Read(reader io.Reader) []DkimAuthResult {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]DkimAuthResult, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterDkimAuthResultINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceDkimAuthResult) Lower(value []DkimAuthResult) C.RustBuffer {
+	return LowerIntoRustBuffer[[]DkimAuthResult](c, value)
+}
+
+func (c FfiConverterSequenceDkimAuthResult) LowerExternal(value []DkimAuthResult) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]DkimAuthResult](c, value))
+}
+
+func (c FfiConverterSequenceDkimAuthResult) Write(writer io.Writer, value []DkimAuthResult) {
+	if len(value) > math.MaxInt32 {
+		panic("[]DkimAuthResult is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterDkimAuthResultINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceDkimAuthResult struct{}
+
+func (FfiDestroyerSequenceDkimAuthResult) Destroy(sequence []DkimAuthResult) {
+	for _, value := range sequence {
+		FfiDestroyerDkimAuthResult{}.Destroy(value)
 	}
 }
 

@@ -1,7 +1,7 @@
 // The onboarding `LoggedIn` terminal's tail, as one sequence the page hands its
 // steps to (`routes/onboarding/+page.svelte::handleWizardExit`).
 
-export type LoggedInTerminalStep = 'register' | 'restored predecessors' | 'activate';
+export type LoggedInTerminalStep = 'register' | 'restored predecessors' | 'begin session' | 'activate';
 
 export interface LoggedInTerminalSteps {
   /** The terminal's registry write — `persist_logged_in`, or append mode's
@@ -11,6 +11,14 @@ export interface LoggedInTerminalSteps {
   /** The predecessor seeds a phrase-only restore recovered, linked to the
    *  restored identity by name; resolves at once when there are none. */
   persistRestoredPredecessors: () => Promise<void>;
+  /** Start the signed-in session over the account that now exists: retire
+   *  the WS-RPC client built before it (a pre-account dial can have stopped it
+   *  for good on `not_registered`, and the claim changes neither half of its
+   *  key) and deliver the signed-in actor-change handlers the missing home nest
+   *  held back. After the registry write, which records that nest; before the
+   *  switch, whose own actor change must not find its fresh client retired
+   *  under it; before the hand-offs, which must dial through a live client. */
+  beginSession: () => void;
   /** Append mode's switch to the added identity; absent on a first sign-in,
    *  whose identity is already active. Skipped when `register` failed — there
    *  is no added identity to switch to. */
@@ -48,6 +56,13 @@ export async function runLoggedInTerminal(steps: LoggedInTerminalSteps): Promise
     await steps.persistRestoredPredecessors();
   } catch (e) {
     steps.onFailure('restored predecessors', e);
+  }
+  // Unconditional, a failed `register` included: the claim already created
+  // the account, so a client stopped before it is stale either way.
+  try {
+    steps.beginSession();
+  } catch (e) {
+    steps.onFailure('begin session', e);
   }
   if (registered && steps.activate) {
     try {

@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.settings
 
+import com.fauna.app.ui.navigation.exitAdminToPrimary
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -72,7 +73,7 @@ fun AdminLogsScreen(
         copyText = rendered.copyText,
         filterIndex = filterIndex,
         onFilterChange = { filterIndex = it },
-        onBack = { navController.popBackStack() },
+        onBack = { navController.exitAdminToPrimary() },
     )
 }
 

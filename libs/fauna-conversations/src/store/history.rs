@@ -345,6 +345,17 @@ pub enum HistoryRestoreError {
     Decode(String),
 }
 
+/// [`merge_history_slices`] was handed slices of two different channels.
+/// The sealed `__mls` blobs bind no path, so the home nest can serve
+/// one channel's slice at another's path; merging them would union two
+/// conversations and could re-home one. Never adopt the foreign slice.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("history slices of different channels cannot merge: {left} vs {right}")]
+pub struct ChannelMismatch {
+    pub left: String,
+    pub right: String,
+}
+
 impl ChannelHistorySlice {
     /// Canonical CBOR bytes (byte-stable for equal logical state — message
     /// order is part of the state).
@@ -430,10 +441,19 @@ impl ThreadStore {
 /// scalars from the higher-watermark side, watermark = max. On equal
 /// watermarks the tie-break is the canonical-encoding byte order (arbitrary
 /// but symmetric, so `merge(a, b) == merge(b, a)` always holds).
+///
+/// Refuses (`Err(ChannelMismatch)`) two slices whose `channel_id_hex` differ
+///: the merge takes identity, participants and home from one side.
 pub fn merge_history_slices(
     a: &ChannelHistorySlice,
     b: &ChannelHistorySlice,
-) -> ChannelHistorySlice {
+) -> Result<ChannelHistorySlice, ChannelMismatch> {
+    if a.channel_id_hex != b.channel_id_hex {
+        return Err(ChannelMismatch {
+            left: a.channel_id_hex.clone(),
+            right: b.channel_id_hex.clone(),
+        });
+    }
     let hi = if a.watermark > b.watermark {
         a
     } else if b.watermark > a.watermark {
@@ -485,7 +505,7 @@ pub fn merge_history_slices(
             ))
     });
 
-    ChannelHistorySlice {
+    Ok(ChannelHistorySlice {
         channel_id_hex: hi.channel_id_hex.clone(),
         label: hi.label.clone(),
         flavor: hi.flavor.clone(),
@@ -540,7 +560,7 @@ pub fn merge_history_slices(
             union_parked_floor_deletes(&mut parked, hi.parked_floor_deletes.iter().cloned());
             parked
         },
-    }
+    })
 }
 
 /// Where one stamped event sorts in a unioned reaction log — the canonical
@@ -721,6 +741,18 @@ mod tests {
         assert_eq!(store_b.get(&restored_id).unwrap().messages.len(), 2);
     }
 
+    /// Two slices of different channels never merge, in either
+    /// order — the merge would otherwise take identity and home from one side.
+    #[test]
+    fn merge_refuses_slices_of_different_channels() {
+        let a = slice(vec![], 1, "a");
+        let mut b = slice(vec![], 9, "b");
+        b.channel_id_hex = "bb22".to_string();
+        b.home_nest_url = Some("https://elsewhere.example".to_string());
+        assert!(merge_history_slices(&a, &b).is_err());
+        assert!(merge_history_slices(&b, &a).is_err());
+    }
+
     #[test]
     fn merge_unions_messages_and_is_commutative() {
         let shared = msg(&format!("conv:{CH}:1"), "shared", false, 10);
@@ -738,8 +770,8 @@ mod tests {
             "renamed",
         );
 
-        let ab = merge_history_slices(&a, &b);
-        let ba = merge_history_slices(&b, &a);
+        let ab = merge_history_slices(&a, &b).unwrap();
+        let ba = merge_history_slices(&b, &a).unwrap();
         assert_eq!(ab, ba, "merge must be commutative");
         assert_eq!(ab.watermark, 3);
         assert_eq!(ab.label, "renamed", "higher-watermark side's scalars win");
@@ -770,15 +802,15 @@ mod tests {
         let low = slice(vec![plain], 1, "peer");
         let high = slice(vec![deleted], 5, "peer");
 
-        let merged = merge_history_slices(&low, &high);
+        let merged = merge_history_slices(&low, &high).unwrap();
         assert!(merged.messages[0].deleted, "higher-watermark fold wins");
-        assert_eq!(merge_history_slices(&high, &low), merged);
+        assert_eq!(merge_history_slices(&high, &low).unwrap(), merged);
     }
 
     #[test]
     fn merge_idempotent() {
         let a = slice(vec![msg(&format!("conv:{CH}:1"), "x", true, 1)], 1, "peer");
-        assert_eq!(merge_history_slices(&a, &a), a);
+        assert_eq!(merge_history_slices(&a, &a).unwrap(), a);
     }
 
     /// **A tombstone is monotone, so the merge unions it instead of letting the
@@ -804,8 +836,8 @@ mod tests {
         let high = slice(vec![msg(&id.0, "hello", true, 10)], 5, "peer");
 
         for merged in [
-            merge_history_slices(&low, &high),
-            merge_history_slices(&high, &low),
+            merge_history_slices(&low, &high).unwrap(),
+            merge_history_slices(&high, &low).unwrap(),
         ] {
             assert!(
                 merged.messages[0].deleted,
@@ -817,8 +849,8 @@ mod tests {
             );
         }
         assert_eq!(
-            merge_history_slices(&low, &high),
-            merge_history_slices(&high, &low),
+            merge_history_slices(&low, &high).unwrap(),
+            merge_history_slices(&high, &low).unwrap(),
             "still commutative"
         );
     }
@@ -884,8 +916,8 @@ mod tests {
         high.parked_floor_deletes = vec![parked(2, 9), parked(3, 11)];
 
         for merged in [
-            merge_history_slices(&low, &high),
-            merge_history_slices(&high, &low),
+            merge_history_slices(&low, &high).unwrap(),
+            merge_history_slices(&high, &low).unwrap(),
         ] {
             assert_eq!(
                 merged.parked_floor_deletes,
@@ -894,8 +926,8 @@ mod tests {
             );
         }
         assert_eq!(
-            merge_history_slices(&low, &high),
-            merge_history_slices(&high, &low),
+            merge_history_slices(&low, &high).unwrap(),
+            merge_history_slices(&high, &low).unwrap(),
             "still commutative"
         );
 
@@ -962,8 +994,8 @@ mod tests {
         log_on(&mut high, &shared, vec![before.clone(), hi_own.clone()]);
 
         for merged in [
-            merge_history_slices(&low, &high),
-            merge_history_slices(&high, &low),
+            merge_history_slices(&low, &high).unwrap(),
+            merge_history_slices(&high, &low).unwrap(),
         ] {
             assert_eq!(
                 merged.reaction_log[&shared],
@@ -987,8 +1019,8 @@ mod tests {
         }
 
         assert_eq!(
-            canonical_encode(&merge_history_slices(&low, &high)).unwrap(),
-            canonical_encode(&merge_history_slices(&high, &low)).unwrap(),
+            canonical_encode(&merge_history_slices(&low, &high).unwrap()).unwrap(),
+            canonical_encode(&merge_history_slices(&high, &low).unwrap()).unwrap(),
             "commutative down to the canonical BYTES — the equal-watermark \
              tie-break reads them, so a merge that only agreed up to ordering \
              would make that tie-break direction-dependent"
@@ -1015,7 +1047,7 @@ mod tests {
         let mut high = slice(vec![msg(&shared.0, "a", false, 1)], 5, "peer");
         log_on(&mut high, &shared, vec![add.clone()]);
 
-        let merged = merge_history_slices(&low, &high);
+        let merged = merge_history_slices(&low, &high).unwrap();
         assert_eq!(
             merged.reaction_log[&shared],
             vec![add, remove],
@@ -1045,11 +1077,15 @@ mod tests {
         let unknown = slice(msgs(), 1, "peer"); // home_same_nest: false (no marker recorded)
 
         assert!(
-            merge_history_slices(&known, &unknown).home_same_nest,
+            merge_history_slices(&known, &unknown)
+                .unwrap()
+                .home_same_nest,
             "a known SameNest marker was lost merging with a marker-less slice"
         );
         assert!(
-            merge_history_slices(&unknown, &known).home_same_nest,
+            merge_history_slices(&unknown, &known)
+                .unwrap()
+                .home_same_nest,
             "merge must preserve the marker regardless of argument order"
         );
     }
@@ -1065,7 +1101,7 @@ mod tests {
         let mut same_nest = slice(msgs(), 1, "peer");
         same_nest.home_same_nest = true;
 
-        let merged = merge_history_slices(&foreign, &same_nest);
+        let merged = merge_history_slices(&foreign, &same_nest).unwrap();
         assert_eq!(
             merged.home_nest_url.as_deref(),
             Some("https://home.example")
@@ -1241,8 +1277,8 @@ mod tests {
         hi.anchor_grade_handles = vec![];
 
         for merged in [
-            merge_history_slices(&lo, &hi),
-            merge_history_slices(&hi, &lo),
+            merge_history_slices(&lo, &hi).unwrap(),
+            merge_history_slices(&hi, &lo).unwrap(),
         ] {
             assert_eq!(merged.participants, hi.participants);
             assert_eq!(
@@ -1270,8 +1306,8 @@ mod tests {
         high.attachment_coordinates
             .insert("both".into(), blob("04", 2));
 
-        let merged = merge_history_slices(&low, &high);
-        assert_eq!(merged, merge_history_slices(&high, &low));
+        let merged = merge_history_slices(&low, &high).unwrap();
+        assert_eq!(merged, merge_history_slices(&high, &low).unwrap());
         assert_eq!(
             merged
                 .attachment_coordinates

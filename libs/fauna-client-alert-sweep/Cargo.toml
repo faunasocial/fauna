@@ -33,6 +33,10 @@ fauna-client-atproto = { path = "../fauna-client-atproto" }
 # The one nest read that feeder needs — `fauna.bridges.atproto.get_integration_status`,
 # for the DID to audit and the handle domain to audit it against.
 fauna-client-bridges = { path = "../fauna-client-bridges" }
+# Feeder #5: the member's own `fauna.account.get`, whose `eviction` record
+# raises the eviction warning (`admin.md` § Cutting a user off → *The member is
+# told*). Wasm-clean, like every typed `fauna-client-*` call surface.
+fauna-client-account = { path = "../fauna-client-account" }
 # `ActorId` (the identity every alert key is scoped to) and `Timestamp::now_secs`
 # for the clock-reading convenience wrapper. `default-features = false` drops the
 # `network` default (redb/tokio/hickory) so the crate stays wasm-clean; `js` is

@@ -1571,6 +1571,149 @@ async fn feed_posts_project_gated_tier() {
     assert_eq!(public.gated_room, None, "nor a room");
 }
 
+/// Flow (`behavior/restricted-posts.md` § Encryption at rest, ruling 3 — a
+/// repost renders "as the target's own gated card, teaser and badge"): a room
+/// post and a tier post are each reposted (empty-body `Reference::Repost`) →
+/// `put_post` mints the `content_links 'repost'` row → `fauna.feed.local.posts`
+/// projects, on each REPOST row, the target's `content_meta` gate as
+/// `reposted_gated_tier` / `reposted_gated_room` → the apps' repost card paints
+/// `gated-post-badge` off it. The row's own `gated_tier` / `gated_room` stay
+/// `None`: the repost post itself is public, and every reader of those fields
+/// treats them as "this row is sealed".
+#[tokio::test]
+async fn feed_posts_project_a_repost_targets_gate() {
+    let (router, state) = router_with_db_only().await;
+
+    async fn ingest(
+        db: &CacheDb,
+        body: &str,
+        created_at: u64,
+        gated: Option<fauna_core::subscription::types::GatedInfo>,
+        references: Vec<fauna_core::data::Reference>,
+    ) -> ([u8; 32], fauna_core::data::PostId) {
+        let kp = fauna_core::identity::ActorKeypair::generate();
+        let post = fauna_core::data::Post {
+            author: kp.actor_id(),
+            created_at: fauna_core::data::Timestamp(created_at),
+            body: fauna_core::data::PostBody::Text {
+                content: body.into(),
+                facets: vec![],
+            },
+            references,
+            expires_at: None,
+            gated,
+            content_warning: None,
+            origin: None,
+        };
+        let cid = fauna_core::encoding::compute_post_id(&post).unwrap();
+        let digest: [u8; 32] = cid.as_bytes()[4..].try_into().unwrap();
+        let bytes = fauna_core::encoding::sign_and_pack(&kp, &post).unwrap();
+        db.put_post(&digest, &bytes, None).await.unwrap();
+        (digest, cid)
+    }
+    let repost_of =
+        |cid: fauna_core::data::PostId| vec![fauna_core::data::Reference::Repost { post_id: cid }];
+
+    use fauna_core::data::ContentHash;
+    use fauna_core::subscription::types::{GatedInfo, KeyAccess};
+    let room = [0xC8u8; 32];
+    let (_, room_cid) = ingest(
+        &state.db,
+        "a teaser for the room",
+        1_700_021,
+        Some(GatedInfo {
+            encrypted_ref: ContentHash::from_digest_raw([6u8; 32]),
+            key_access: KeyAccess::Room {
+                group_id: fauna_core::subscription::types::MlsGroupId(room.to_vec()),
+                epoch: 1,
+                generation: None,
+            },
+            tier: fauna_core::subscription::ROOM_POST_TIER.into(),
+            tier_rank: 0,
+            seal_id: ContentHash::from_digest_raw([5u8; 32]),
+            attachment_refs: vec![],
+        }),
+        vec![],
+    )
+    .await;
+    let (_, gold_cid) = ingest(
+        &state.db,
+        "a teaser for gold",
+        1_700_022,
+        Some(GatedInfo {
+            encrypted_ref: ContentHash::from_digest_raw([9u8; 32]),
+            key_access: KeyAccess::Broadcast {
+                key_blob_ref: ContentHash::from_digest_raw([8u8; 32]),
+            },
+            tier: "gold".into(),
+            tier_rank: 2,
+            seal_id: ContentHash::from_digest_raw([7u8; 32]),
+            attachment_refs: vec![],
+        }),
+        vec![],
+    )
+    .await;
+    let (_, public_cid) = ingest(&state.db, "plain public", 1_700_023, None, vec![]).await;
+    let (room_repost, _) = ingest(&state.db, "", 1_700_031, None, repost_of(room_cid)).await;
+    let (gold_repost, _) = ingest(&state.db, "", 1_700_032, None, repost_of(gold_cid)).await;
+    let (public_repost, _) = ingest(&state.db, "", 1_700_033, None, repost_of(public_cid)).await;
+
+    let reply: FeedLocalPostsReply = decode(
+        &dispatch(
+            &router,
+            state,
+            [45u8; 32],
+            "fauna.feed.local.posts",
+            encode(&FeedLocalPostsRequest {
+                cursor: None,
+                limit: Some(50),
+                search: None,
+                extra: std::collections::BTreeMap::new(),
+            }),
+        )
+        .await
+        .expect("local.posts ok"),
+    )
+    .unwrap();
+    let row = |digest: [u8; 32]| {
+        reply
+            .posts
+            .iter()
+            .find(|p| p.post_id == hex::encode(digest))
+            .expect("the repost row appears in the local feed")
+            .clone()
+    };
+
+    let r = row(room_repost);
+    assert_eq!(
+        r.reposted_gated_tier.as_deref(),
+        Some(fauna_core::subscription::ROOM_POST_TIER),
+        "a room post's repost row carries the target's reserved tier"
+    );
+    assert_eq!(
+        r.reposted_gated_room.as_deref(),
+        Some(hex::encode(room).as_str()),
+        "and names the room the target addresses, so a member's card can label it"
+    );
+    assert_eq!(
+        (r.gated_tier, r.gated_room),
+        (None, None),
+        "the repost post itself stays public — never read as a sealed row"
+    );
+
+    let g = row(gold_repost);
+    assert_eq!(g.reposted_gated_tier.as_deref(), Some("gold"));
+    assert_eq!(g.reposted_gated_room, None, "a tier post addresses no room");
+    assert_eq!(g.gated_tier, None);
+
+    let p = row(public_repost);
+    assert_eq!(
+        (p.reposted_gated_tier, p.reposted_gated_room),
+        (None, None),
+        "a public target's repost carries no gate"
+    );
+}
+
 // ── allowlist ──────────────────────────────────────────────────
 
 const FEED_KINDS: [&str; 10] = [

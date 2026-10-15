@@ -24,6 +24,7 @@ import com.fauna.app.ui.screen.bridges.BridgesScreen
 import com.fauna.app.ui.screen.feed.FeedComposeScreen
 import com.fauna.app.ui.screen.feed.FeedScreen
 import com.fauna.app.ui.screen.feed.PostDetailScreen
+import com.fauna.app.ui.screen.feed.ThreadScreen
 import com.fauna.app.ui.screen.personalization.LabelerCatalogScreen
 import com.fauna.app.ui.screen.personalization.PersonalizationScreen
 import com.fauna.app.ui.screen.search.SearchResultsScreen
@@ -174,56 +175,49 @@ fun NavGraphBuilder.kidsExcisedDestinations(navController: NavHostController) {
         val source = entry.arguments?.getString("source") ?: ""
         PostDetailScreen(navController, postId, source)
     }
+    // The Bluesky thread page (ui.yaml `feed.sub_pages.thread`), pushed over
+    // the post detail it was opened from, so back returns there.
+    composable(
+        "feed/post/{postId}/thread",
+        arguments = listOf(navArgument("postId") { type = NavType.StringType })
+    ) { entry ->
+        val postId = java.net.URLDecoder.decode(
+            entry.arguments?.getString("postId") ?: "", "UTF-8"
+        )
+        ThreadScreen(navController, postId)
+    }
 }
 
 /**
  * The bridge legs of the universal post-auth hook, run once on the authed app
  * surface's mount beside `PostAuthGlueVM`'s legs.
  *
- * First-authenticated-setup glue (onboarding.md § Enable-email at claim ·
- * mail-credentials.md § Auto-enable for new users · caldav-server.md
- * § Independent enablement): run once now that the authed session exists.
- * Mail is am_i_admin-discriminated (admin honors the enable-email checkbox;
- * a new non-admin user auto-mints per the deployment policy); CalDAV/CardDAV
- * fire their own Admin-class set_*_enabled toggle AND — on a calendar-only
- * / contacts-only first setup — mint the admin's shared MSEK, gated on
- * whether an earlier sibling already did (exactly one MSEK-minting path per
- * first setup). Each gates independently, but SEQUENTIALLY in one effect,
- * not four independent LaunchedEffects: the mint gates need the ORIGINAL
- * mail/CalDAV request booleans, snapshotted below BEFORE either glue call
- * consumes its own latch, so the gate can never depend on which coroutine
- * happens to run first (MailEnableGlueVM.applyPendingCaldavEnable's doc).
- * The three cheap DAV flips run AHEAD of the mail mint (whose duration is
- * unbounded under load) — safe because every mint gate below decides off
- * the PEEKED request booleans, never off whether mail's own mint actually
- * finished, so reordering changes latency, not correctness. Mirrors the
- * "mail awaited first blocks the cheap DAV flips behind it" coupling
- * windows was fixed for (onboarding.md § the four-enable coupling).
- * No-op on every ordinary authed launch (the first-setup latches are
- * null/false).
+ * Post-claim serving-enablement glue (onboarding.md § 3b *Mechanism*): run
+ * once now that the authed session exists. The four onboarding intents (mail,
+ * CalDAV, CardDAV, WebDAV) are taken together and handed to the ONE shared step,
+ * which resolves `am_i_admin` and fires the first-setup mail provision, the
+ * three Admin-class DAV toggles and the one-MSEK-mint-path companion mints
+ * itself (`MailEnableGlueVM.applyPostClaimServingEnablement`). No-op on every
+ * ordinary authed launch (the latch is null).
  */
 @Composable
 fun KidsExcisedPostAuthEffects() {
     val mailGlue: com.fauna.app.ui.viewmodel.MailEnableGlueVM = hiltViewModel()
-    LaunchedEffect(Unit) {
-        val mailWasRequested = mailGlue.peekMailWasRequested()
-        val caldavWasRequested = mailGlue.peekCaldavWasRequested()
-        mailGlue.applyPendingCaldavEnable(mailWasRequested)
-        mailGlue.applyPendingCarddavEnable(mailWasRequested, caldavWasRequested)
-        mailGlue.applyPendingWebdavEnable()
-        mailGlue.provisionMailAtFirstSetup()
-    }
-    // encryption-at-rest.md § Capability tiering → Content-sealing epochs:
-    // slide the published mail epoch-seal-key horizon forward at the same
-    // universal post-auth hook. Best-effort, logged only.
-    LaunchedEffect(Unit) { mailGlue.refreshMailEpochSchedule() }
+    LaunchedEffect(Unit) { mailGlue.applyPostClaimServingEnablement() }
+    // post-quantum.md § surface B: publish the subscriber encapsulation-key
+    // registry entry at the same hook. Idempotent, best-effort, logged only.
+    LaunchedEffect(Unit) { mailGlue.publishSubscriberEncapsKey() }
     // critical-alerts.md § Mechanism → Who runs the detector: run the
     // feeders that have no page of their own, at the same universal
     // post-auth hook — immediately, then every RE_SWEEP_INTERVAL_SECS for
     // as long as the identity lives. Not a suspend call: the loop is launched on
     // CriticalAlertsHost's own process-wide scope, so this effect returns
     // right away instead of blocking on a coroutine that never completes.
-    LaunchedEffect(Unit) { mailGlue.runCriticalAlertSweepLoop() }
+    // A `Unit` key re-runs only when this node re-enters composition, never on
+    // a same-actor session re-establish (the e2e `session` patch recomposes
+    // nothing), so TestAgent calls the same entry point itself; the host's
+    // loop/one-pass split makes the double call safe.
+    LaunchedEffect(Unit) { mailGlue.startCriticalAlertSweep() }
 }
 
 /**

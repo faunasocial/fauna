@@ -90,7 +90,7 @@ def test_conv_rail_push_wakes_web(
     # rides the manager, NOT the receive ticker — which is why muting the ticker
     # below cannot starve it. bob keeps the private half, so he can DECRYPT.
     wait_until(
-        lambda: conv_api.keypackage_count(port, alice, bob_actor_id) >= 1,
+        lambda: conv_api.keypackage_count(port, test_user, bob_actor_id) >= 1,
         KEYPACKAGE_BUDGET_S,
         diagnose=lambda: (
             "bob's web client never published a key package "
@@ -98,7 +98,7 @@ def test_conv_rail_push_wakes_web(
             "alice cannot bootstrap a group at him at all"
         ),
     )
-    before = conv_api.keypackage_count(port, alice, bob_actor_id)
+    before = conv_api.keypackage_count(port, test_user, bob_actor_id)
 
     # bob must ACCEPT alice or the nest refuses her Welcome outright: the DM
     # plane consults the recipient's inbox mode, and bob's stored default is
@@ -143,7 +143,7 @@ def test_conv_rail_push_wakes_web(
 
         # A nest-side witness that the bootstrap really fired, so a missing thread
         # below is read as "bob never woke", never as "alice never sent".
-        assert conv_api.keypackage_count(port, alice, bob_actor_id) < before, \
+        assert conv_api.keypackage_count(port, test_user, bob_actor_id) < before, \
             "the 1:1 bootstrap should consume one of bob's key packages"
 
         # ── bob's WEB GUI wakes on the push, drains, joins, decrypts ──────────

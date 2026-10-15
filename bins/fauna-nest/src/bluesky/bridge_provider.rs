@@ -170,8 +170,11 @@ impl BridgeProvider for BlueskyProvider {
         // Clamp the client-supplied return_url to a same-origin relative path
         // (open-redirect guard, defense-in-depth — the load-bearing check is
         // at the callback use-site, since `state` is attacker-controllable there).
-        let return_url =
-            super::auth_routes::sanitize_return_url(p.return_url.as_deref().unwrap_or("/bridges"));
+        let return_url = super::auth_routes::sanitize_return_url(
+            p.return_url
+                .as_deref()
+                .unwrap_or(super::auth_routes::DEFAULT_RETURN_URL),
+        );
 
         let oauth_state = format!("{}|{}", actor_id, return_url);
         let options = AuthorizeOptions {

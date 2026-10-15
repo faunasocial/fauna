@@ -472,6 +472,14 @@ criteria = "safe-to-deploy"
 version = "1.6.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.bollard]]
+version = "0.21.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.bollard-stubs]]
+version = "1.53.1-rc.29.3.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.bon]]
 version = "3.10.1"
 criteria = "safe-to-deploy"
@@ -1496,12 +1504,20 @@ criteria = "safe-to-deploy"
 version = "1.8.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.hyper-named-pipe]]
+version = "0.1.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.hyper-rustls]]
 version = "0.27.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.hyper-util]]
 version = "0.1.20"
+criteria = "safe-to-deploy"
+
+[[exemptions.hyperlocal]]
+version = "0.9.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.iana-time-zone]]
@@ -2569,7 +2585,7 @@ version = "0.11.9"
 criteria = "safe-to-deploy"
 
 [[exemptions.quinn-proto]]
-version = "0.11.15"
+version = "0.11.18"
 criteria = "safe-to-deploy"
 
 [[exemptions.quinn-udp]]
@@ -2809,7 +2825,7 @@ version = "1.1.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls]]
-version = "0.23.37"
+version = "0.23.46"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls-cert-file-reader]]

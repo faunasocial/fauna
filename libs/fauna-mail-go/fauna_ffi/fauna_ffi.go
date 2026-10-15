@@ -426,7 +426,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_atproto_extract_blob_refs()
 		})
-		if checksum != 12099 {
+		if checksum != 55490 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_atproto_extract_blob_refs: UniFFI API checksum mismatch")
 		}
@@ -912,7 +912,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_ios_age_attestation_app_id()
 		})
-		if checksum != 6505 {
+		if checksum != 55111 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_ios_age_attestation_app_id: UniFFI API checksum mismatch")
 		}
@@ -951,24 +951,6 @@ func uniffiCheckChecksums() {
 		if checksum != 26950 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_ward_feed_request_state: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_func_encode_filter_rule()
-		})
-		if checksum != 39174 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_encode_filter_rule: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_func_normalize_filter_rules()
-		})
-		if checksum != 15114 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_normalize_filter_rules: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1092,7 +1074,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_build_signed_labeler_metadata()
 		})
-		if checksum != 45031 {
+		if checksum != 8461 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_build_signed_labeler_metadata: UniFFI API checksum mismatch")
 		}
@@ -1747,6 +1729,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_func_find_user()
+		})
+		if checksum != 29059 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_find_user: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_resolve_calendar_selection()
 		})
 		if checksum != 63457 {
@@ -1801,15 +1792,6 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_func_classify_text()
-		})
-		if checksum != 52599 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_classify_text: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_forget_nest_identity_pin()
 		})
 		if checksum != 47207 {
@@ -1848,7 +1830,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_install_scoped_trust_home()
 		})
-		if checksum != 11484 {
+		if checksum != 17145 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_install_scoped_trust_home: UniFFI API checksum mismatch")
 		}
@@ -1884,7 +1866,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_look_at_sign_in()
 		})
-		if checksum != 57483 {
+		if checksum != 21277 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_look_at_sign_in: UniFFI API checksum mismatch")
 		}
@@ -2089,6 +2071,33 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_ffiadminclient_pending_action_approve()
+		})
+		if checksum != 19311 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffiadminclient_pending_action_approve: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_ffiadminclient_pending_action_cancel()
+		})
+		if checksum != 40823 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffiadminclient_pending_action_cancel: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_ffiadminclient_pending_actions_list()
+		})
+		if checksum != 20172 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffiadminclient_pending_actions_list: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_method_ffiadminclient_request_host_restart()
 		})
 		if checksum != 41242 {
@@ -2199,7 +2208,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_method_ffiadminclient_users_create()
 		})
-		if checksum != 6938 {
+		if checksum != 4496 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffiadminclient_users_create: UniFFI API checksum mismatch")
 		}
@@ -2247,24 +2256,6 @@ func uniffiCheckChecksums() {
 		if checksum != 31560 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffiadminclient_users_update: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_method_ffiblueskyclient_thread_by_at_uri()
-		})
-		if checksum != 20649 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffiblueskyclient_thread_by_at_uri: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_method_ffiblueskyclient_thread_by_post_id()
-		})
-		if checksum != 30909 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffiblueskyclient_thread_by_post_id: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -2854,96 +2845,6 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_contributors_grant()
-		})
-		if checksum != 27430 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_contributors_grant: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_contributors_list()
-		})
-		if checksum != 59829 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_contributors_list: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_contributors_revoke()
-		})
-		if checksum != 50031 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_contributors_revoke: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_create()
-		})
-		if checksum != 23421 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_create: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_delete()
-		})
-		if checksum != 15345 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_delete: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_get()
-		})
-		if checksum != 28531 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_get: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_list()
-		})
-		if checksum != 31387 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_list: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_local_posts()
-		})
-		if checksum != 54591 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_local_posts: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_posts()
-		})
-		if checksum != 3705 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_posts: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_update()
-		})
-		if checksum != 13891 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffifeedclient_feed_update: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_method_ffifoldersclient_backfill_sealed_fields()
 		})
 		if checksum != 39086 {
@@ -2973,7 +2874,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_method_ffifoldersclient_device_accepts()
 		})
-		if checksum != 12837 {
+		if checksum != 50984 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffifoldersclient_device_accepts: UniFFI API checksum mismatch")
 		}
@@ -3277,15 +3178,6 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_method_ffinestclient_bluesky()
-		})
-		if checksum != 60794 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffinestclient_bluesky: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_method_ffinestclient_bridges()
 		})
 		if checksum != 19476 {
@@ -3367,15 +3259,6 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_method_ffinestclient_feed()
-		})
-		if checksum != 594 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffinestclient_feed: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_method_ffinestclient_folders()
 		})
 		if checksum != 45009 {
@@ -3390,6 +3273,15 @@ func uniffiCheckChecksums() {
 		if checksum != 56979 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffinestclient_inbox: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_ffinestclient_look_for_newer_release_at_sign_in()
+		})
+		if checksum != 44613 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffinestclient_look_for_newer_release_at_sign_in: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -3444,15 +3336,6 @@ func uniffiCheckChecksums() {
 		if checksum != 31975 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffinestclient_push_registration: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_method_ffinestclient_search()
-		})
-		if checksum != 44597 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffinestclient_search: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -3777,15 +3660,6 @@ func uniffiCheckChecksums() {
 		if checksum != 57444 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffipushregistration_rearm: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_method_ffisearchclient_query()
-		})
-		if checksum != 61031 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffisearchclient_query: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -4932,6 +4806,18 @@ type FfiAdminClientInterface interface {
 	// `fauna.admin.not_found`; a quota tier that does not exist is
 	// `fauna.admin.invalid_params`.
 	MembershipTiersSet(tierName string, adminTier string, lapseTier string) error
+	// `fauna.pending_actions.approve` — add this admin's approval to a
+	// quorum-gated action (`admin-pending-action-approve-button`). The nest
+	// refuses self-approval and a row no longer pending.
+	PendingActionApprove(id int64) error
+	// `fauna.pending_actions.cancel` from the admin console
+	// (`admin-pending-action-cancel-button`) — one click, no confirm.
+	PendingActionCancel(id int64) error
+	// `fauna.admin.pending_actions.list` — every account's pending actions
+	// (ALL statuses; the console narrows to `is_pending`), the read behind the
+	// Users hub's `admin-users-pending-section` (`admin.md` § Pending admin
+	// actions). Replay-safe pure read.
+	PendingActionsList() ([]FfiAdminPendingAction, error)
 	// `fauna.admin.request_host_restart` — the admin's "restart now" affordance
 	// for the host Ubuntu box of an onboarded VPS (`installers/vps.md` § Host OS
 	// Maintenance § 4). Writes a flag the host reboot-coordinator picks up and
@@ -5013,7 +4899,13 @@ type FfiAdminClientInterface interface {
 	// tui/linux/web — there is no free-text label on direct admission, only
 	// a tier. A duplicate actor or taken handle is `fauna.admin.conflict`, a
 	// malformed/reserved handle `fauna.admin.invalid_params`.
-	UsersCreate(actorId []byte, tier string, handle *string) error
+	// `guardian_actor` links the admitted account to a guardian (the
+	// `admin-users-admit-guardian-select` pick; `family-safety.md` § The
+	// guardianship link); `None` admits an ordinary account. `age_band` is
+	// the guardian's band option value (a wire token from
+	// `age_band_options`, or `None`/the not-set value); anything the
+	// vocabulary cannot name is refused **here**, never sent.
+	UsersCreate(actorId []byte, tier string, handle *string, guardianActor *[]byte, ageBand *string) error
 	// `fauna.admin.users.evict` — schedule an eviction (warn → suspend → delete
 	// timeline) for a user with a `reason` + `category`; the row's `eviction`
 	// then renders the in-flight timeline (the `admin-users-evict-button`
@@ -5548,6 +5440,112 @@ func (_self *FfiAdminClient) MembershipTiersSet(tierName string, adminTier strin
 	return err
 }
 
+// `fauna.pending_actions.approve` — add this admin's approval to a
+// quorum-gated action (`admin-pending-action-approve-button`). The nest
+// refuses self-approval and a row no longer pending.
+func (_self *FfiAdminClient) PendingActionApprove(id int64) error {
+	_pointer := _self.ffiObject.incrementPointer("*FfiAdminClient")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*FfiError](
+		FfiConverterFfiErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_fauna_ffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_fauna_ffi_fn_method_ffiadminclient_pending_action_approve(
+			_pointer, FfiConverterInt64INSTANCE.Lower(id)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
+// `fauna.pending_actions.cancel` from the admin console
+// (`admin-pending-action-cancel-button`) — one click, no confirm.
+func (_self *FfiAdminClient) PendingActionCancel(id int64) error {
+	_pointer := _self.ffiObject.incrementPointer("*FfiAdminClient")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*FfiError](
+		FfiConverterFfiErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_fauna_ffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_fauna_ffi_fn_method_ffiadminclient_pending_action_cancel(
+			_pointer, FfiConverterInt64INSTANCE.Lower(id)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
+// `fauna.admin.pending_actions.list` — every account's pending actions
+// (ALL statuses; the console narrows to `is_pending`), the read behind the
+// Users hub's `admin-users-pending-section` (`admin.md` § Pending admin
+// actions). Replay-safe pure read.
+func (_self *FfiAdminClient) PendingActionsList() ([]FfiAdminPendingAction, error) {
+	_pointer := _self.ffiObject.incrementPointer("*FfiAdminClient")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*FfiError](
+		FfiConverterFfiErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_fauna_ffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) []FfiAdminPendingAction {
+			return FfiConverterSequenceFfiAdminPendingActionINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_ffi_fn_method_ffiadminclient_pending_actions_list(
+			_pointer),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
 // `fauna.admin.request_host_restart` — the admin's "restart now" affordance
 // for the host Ubuntu box of an onboarded VPS (`installers/vps.md` § Host OS
 // Maintenance § 4). Writes a flag the host reboot-coordinator picks up and
@@ -6005,7 +6003,13 @@ func (_self *FfiAdminClient) UsersCancelEviction(actorId []byte) error {
 // tui/linux/web — there is no free-text label on direct admission, only
 // a tier. A duplicate actor or taken handle is `fauna.admin.conflict`, a
 // malformed/reserved handle `fauna.admin.invalid_params`.
-func (_self *FfiAdminClient) UsersCreate(actorId []byte, tier string, handle *string) error {
+// `guardian_actor` links the admitted account to a guardian (the
+// `admin-users-admit-guardian-select` pick; `family-safety.md` § The
+// guardianship link); `None` admits an ordinary account. `age_band` is
+// the guardian's band option value (a wire token from
+// `age_band_options`, or `None`/the not-set value); anything the
+// vocabulary cannot name is refused **here**, never sent.
+func (_self *FfiAdminClient) UsersCreate(actorId []byte, tier string, handle *string, guardianActor *[]byte, ageBand *string) error {
 	_pointer := _self.ffiObject.incrementPointer("*FfiAdminClient")
 	defer _self.ffiObject.decrementPointer()
 	_, err := uniffiRustCallAsync[*FfiError](
@@ -6018,7 +6022,7 @@ func (_self *FfiAdminClient) UsersCreate(actorId []byte, tier string, handle *st
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_fauna_ffi_fn_method_ffiadminclient_users_create(
-			_pointer, FfiConverterBytesINSTANCE.Lower(actorId), FfiConverterStringINSTANCE.Lower(tier), FfiConverterOptionalStringINSTANCE.Lower(handle)),
+			_pointer, FfiConverterBytesINSTANCE.Lower(actorId), FfiConverterStringINSTANCE.Lower(tier), FfiConverterOptionalStringINSTANCE.Lower(handle), FfiConverterOptionalBytesINSTANCE.Lower(guardianActor), FfiConverterOptionalStringINSTANCE.Lower(ageBand)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_fauna_ffi_rust_future_poll_void(handle, continuation, data)
@@ -6273,174 +6277,6 @@ func LowerToExternalFfiAdminClient(value *FfiAdminClient) uint64 {
 type FfiDestroyerFfiAdminClient struct{}
 
 func (_ FfiDestroyerFfiAdminClient) Destroy(value *FfiAdminClient) {
-	value.Destroy()
-}
-
-// UniFFI handle for the `bluesky.feed.thread` kind. Construct via
-// [`crate::nest_client::FfiNestClient::bluesky`]; methods are exposed to Swift
-// as `async throws` and Kotlin as `suspend fun`. Caller-scoped by
-// construction (the connection knows its caller; the handler restores that
-// actor's Bluesky OAuth agent).
-type FfiBlueskyClientInterface interface {
-	// `bluesky.feed.thread` via the `AtUri` request variant — fetch the thread
-	// for a post addressed by its Bluesky AT-URI directly (`at://did/.../rkey`).
-	// Provided for surfaces that hold the AT-URI rather than a crossposted
-	// Fauna post id.
-	ThreadByAtUri(uri string) (FfiBlueskyThreadReply, error)
-	// `bluesky.feed.thread` via the `PostId` request variant — fetch the
-	// thread for a **crossposted Fauna post** addressed by its hex `[u8; 32]`
-	// id (what the unified feed surfaces as `FfiFeedPostItem.post_id`). The
-	// handler hex-decodes server-side and resolves the AT-URI through the
-	// `bluesky_posts` crosspost mapping (a missing mapping is a
-	// `bluesky.feed.not_found` error). This is the variant the android +
-	// linux post-detail surfaces use (they hold the Fauna post id, not the
-	// AT-URI).
-	ThreadByPostId(postIdHex string) (FfiBlueskyThreadReply, error)
-}
-
-// UniFFI handle for the `bluesky.feed.thread` kind. Construct via
-// [`crate::nest_client::FfiNestClient::bluesky`]; methods are exposed to Swift
-// as `async throws` and Kotlin as `suspend fun`. Caller-scoped by
-// construction (the connection knows its caller; the handler restores that
-// actor's Bluesky OAuth agent).
-type FfiBlueskyClient struct {
-	ffiObject FfiObject
-}
-
-// `bluesky.feed.thread` via the `AtUri` request variant — fetch the thread
-// for a post addressed by its Bluesky AT-URI directly (`at://did/.../rkey`).
-// Provided for surfaces that hold the AT-URI rather than a crossposted
-// Fauna post id.
-func (_self *FfiBlueskyClient) ThreadByAtUri(uri string) (FfiBlueskyThreadReply, error) {
-	_pointer := _self.ffiObject.incrementPointer("*FfiBlueskyClient")
-	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*FfiError](
-		FfiConverterFfiErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
-			res := C.ffi_fauna_ffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
-		},
-		// liftFn
-		func(ffi RustBufferI) FfiBlueskyThreadReply {
-			return FfiConverterFfiBlueskyThreadReplyINSTANCE.Lift(ffi)
-		},
-		C.uniffi_fauna_ffi_fn_method_ffiblueskyclient_thread_by_at_uri(
-			_pointer, FfiConverterStringINSTANCE.Lower(uri)),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_free_rust_buffer(handle)
-		},
-	)
-
-	if err == nil {
-		return res, nil
-	}
-
-	return res, err
-}
-
-// `bluesky.feed.thread` via the `PostId` request variant — fetch the
-// thread for a **crossposted Fauna post** addressed by its hex `[u8; 32]`
-// id (what the unified feed surfaces as `FfiFeedPostItem.post_id`). The
-// handler hex-decodes server-side and resolves the AT-URI through the
-// `bluesky_posts` crosspost mapping (a missing mapping is a
-// `bluesky.feed.not_found` error). This is the variant the android +
-// linux post-detail surfaces use (they hold the Fauna post id, not the
-// AT-URI).
-func (_self *FfiBlueskyClient) ThreadByPostId(postIdHex string) (FfiBlueskyThreadReply, error) {
-	_pointer := _self.ffiObject.incrementPointer("*FfiBlueskyClient")
-	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*FfiError](
-		FfiConverterFfiErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
-			res := C.ffi_fauna_ffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
-		},
-		// liftFn
-		func(ffi RustBufferI) FfiBlueskyThreadReply {
-			return FfiConverterFfiBlueskyThreadReplyINSTANCE.Lift(ffi)
-		},
-		C.uniffi_fauna_ffi_fn_method_ffiblueskyclient_thread_by_post_id(
-			_pointer, FfiConverterStringINSTANCE.Lower(postIdHex)),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_free_rust_buffer(handle)
-		},
-	)
-
-	if err == nil {
-		return res, nil
-	}
-
-	return res, err
-}
-func (object *FfiBlueskyClient) Destroy() {
-	runtime.SetFinalizer(object, nil)
-	object.ffiObject.destroy()
-}
-
-type FfiConverterFfiBlueskyClient struct{}
-
-var FfiConverterFfiBlueskyClientINSTANCE = FfiConverterFfiBlueskyClient{}
-
-func (c FfiConverterFfiBlueskyClient) Lift(handle C.uint64_t) *FfiBlueskyClient {
-	result := &FfiBlueskyClient{
-		newFfiObject(
-			handle,
-			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
-				return C.uniffi_fauna_ffi_fn_clone_ffiblueskyclient(handle, status)
-			},
-			func(handle C.uint64_t, status *C.RustCallStatus) {
-				C.uniffi_fauna_ffi_fn_free_ffiblueskyclient(handle, status)
-			},
-		),
-	}
-	runtime.SetFinalizer(result, (*FfiBlueskyClient).Destroy)
-	return result
-}
-
-func (c FfiConverterFfiBlueskyClient) Read(reader io.Reader) *FfiBlueskyClient {
-	return c.Lift(C.uint64_t(readUint64(reader)))
-}
-
-func (c FfiConverterFfiBlueskyClient) Lower(value *FfiBlueskyClient) C.uint64_t {
-	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
-	// because the handle will be decremented immediately after this function returns,
-	// and someone will be left holding onto a non-locked handle.
-	handle := value.ffiObject.incrementPointer("*FfiBlueskyClient")
-	defer value.ffiObject.decrementPointer()
-	return handle
-}
-
-func (c FfiConverterFfiBlueskyClient) Write(writer io.Writer, value *FfiBlueskyClient) {
-	writeUint64(writer, uint64(c.Lower(value)))
-}
-
-func LiftFromExternalFfiBlueskyClient(handle uint64) *FfiBlueskyClient {
-	return FfiConverterFfiBlueskyClientINSTANCE.Lift(C.uint64_t(handle))
-}
-
-func LowerToExternalFfiBlueskyClient(value *FfiBlueskyClient) uint64 {
-	return uint64(FfiConverterFfiBlueskyClientINSTANCE.Lower(value))
-}
-
-type FfiDestroyerFfiBlueskyClient struct{}
-
-func (_ FfiDestroyerFfiBlueskyClient) Destroy(value *FfiBlueskyClient) {
 	value.Destroy()
 }
 
@@ -9676,468 +9512,6 @@ func (_ FfiDestroyerFfiFamilyClient) Destroy(value *FfiFamilyClient) {
 	value.Destroy()
 }
 
-// UniFFI handle for the `fauna.feed.*` kinds. Construct via
-// [`crate::nest_client::FfiNestClient::feed`]; methods are exposed to Swift as
-// `async throws` and Kotlin as `suspend fun`.
-type FfiFeedClientInterface interface {
-	// `fauna.feed.contributors.grant` — add a contributor to a discovery feed.
-	// `added=false` with a `reason` means it already existed.
-	FeedContributorsGrant(feedId string, nestUrl string, authorId *string) (FfiFeedContributorGrantReply, error)
-	// `fauna.feed.contributors.list` — list a discovery feed's contributors
-	// (owner-only).
-	FeedContributorsList(feedId string) ([]FfiFeedContributor, error)
-	// `fauna.feed.contributors.revoke` — remove a contributor from a discovery
-	// feed. A missing contributor surfaces as a `fauna.feed.not_found` error.
-	FeedContributorsRevoke(feedId string, nestUrl string, authorId *string) error
-	// `fauna.feed.create` — create a feed. `rules` are the form's triples,
-	// encoded by the shared codec (an unknown `rule_type` is an `Err` before
-	// any nest call). `scope` is `local` (default) or
-	// `discovery`; `contributor_seeds` apply only to discovery feeds. Returns
-	// the generated `feed_id`.
-	FeedCreate(name string, rules []FfiFilterRule, combination string, scope *string, contributorSeeds *[]string) (string, error)
-	// `fauna.feed.delete` — delete an owned feed.
-	FeedDelete(feedId string) error
-	// `fauna.feed.get` — fetch a single feed including its rules.
-	FeedGet(feedId string) (FfiFeedGetReply, error)
-	// `fauna.feed.list` — list all feeds (summary view, no rules).
-	FeedList() ([]FfiFeedSummary, error)
-	// `fauna.feed.local.posts` — query this nest's local feed (always
-	// chronological).
-	FeedLocalPosts(cursor *int64, limit *int64, search *string) (FfiFeedLocalPostsReply, error)
-	// `fauna.feed.posts` — query a feed's posts. `order = Some("score")`
-	// orders by score and paginates on the keyset pair `(score_cursor,
-	// score_cursor_created_at)` — both echoed back from the previous reply,
-	// both or neither; otherwise chronological (paginate via `cursor`, epoch
-	// micros). `search` appends a comma-separated body-contains filter.
-	FeedPosts(feedId string, cursor *int64, limit *int64, order *string, scoreCursor *int64, scoreCursorCreatedAt *int64, search *string) (FfiFeedPostsReply, error)
-	// `fauna.feed.update` — overwrite a feed's `name` / `rules` /
-	// `combination` (scope + seeds are immutable on update).
-	FeedUpdate(feedId string, name string, rules []FfiFilterRule, combination string) error
-}
-
-// UniFFI handle for the `fauna.feed.*` kinds. Construct via
-// [`crate::nest_client::FfiNestClient::feed`]; methods are exposed to Swift as
-// `async throws` and Kotlin as `suspend fun`.
-type FfiFeedClient struct {
-	ffiObject FfiObject
-}
-
-// `fauna.feed.contributors.grant` — add a contributor to a discovery feed.
-// `added=false` with a `reason` means it already existed.
-func (_self *FfiFeedClient) FeedContributorsGrant(feedId string, nestUrl string, authorId *string) (FfiFeedContributorGrantReply, error) {
-	_pointer := _self.ffiObject.incrementPointer("*FfiFeedClient")
-	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*FfiError](
-		FfiConverterFfiErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
-			res := C.ffi_fauna_ffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
-		},
-		// liftFn
-		func(ffi RustBufferI) FfiFeedContributorGrantReply {
-			return FfiConverterFfiFeedContributorGrantReplyINSTANCE.Lift(ffi)
-		},
-		C.uniffi_fauna_ffi_fn_method_ffifeedclient_feed_contributors_grant(
-			_pointer, FfiConverterStringINSTANCE.Lower(feedId), FfiConverterStringINSTANCE.Lower(nestUrl), FfiConverterOptionalStringINSTANCE.Lower(authorId)),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_free_rust_buffer(handle)
-		},
-	)
-
-	if err == nil {
-		return res, nil
-	}
-
-	return res, err
-}
-
-// `fauna.feed.contributors.list` — list a discovery feed's contributors
-// (owner-only).
-func (_self *FfiFeedClient) FeedContributorsList(feedId string) ([]FfiFeedContributor, error) {
-	_pointer := _self.ffiObject.incrementPointer("*FfiFeedClient")
-	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*FfiError](
-		FfiConverterFfiErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
-			res := C.ffi_fauna_ffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
-		},
-		// liftFn
-		func(ffi RustBufferI) []FfiFeedContributor {
-			return FfiConverterSequenceFfiFeedContributorINSTANCE.Lift(ffi)
-		},
-		C.uniffi_fauna_ffi_fn_method_ffifeedclient_feed_contributors_list(
-			_pointer, FfiConverterStringINSTANCE.Lower(feedId)),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_free_rust_buffer(handle)
-		},
-	)
-
-	if err == nil {
-		return res, nil
-	}
-
-	return res, err
-}
-
-// `fauna.feed.contributors.revoke` — remove a contributor from a discovery
-// feed. A missing contributor surfaces as a `fauna.feed.not_found` error.
-func (_self *FfiFeedClient) FeedContributorsRevoke(feedId string, nestUrl string, authorId *string) error {
-	_pointer := _self.ffiObject.incrementPointer("*FfiFeedClient")
-	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*FfiError](
-		FfiConverterFfiErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
-			C.ffi_fauna_ffi_rust_future_complete_void(handle, status)
-			return struct{}{}
-		},
-		// liftFn
-		func(_ struct{}) struct{} { return struct{}{} },
-		C.uniffi_fauna_ffi_fn_method_ffifeedclient_feed_contributors_revoke(
-			_pointer, FfiConverterStringINSTANCE.Lower(feedId), FfiConverterStringINSTANCE.Lower(nestUrl), FfiConverterOptionalStringINSTANCE.Lower(authorId)),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_poll_void(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_free_void(handle)
-		},
-	)
-
-	if err == nil {
-		return nil
-	}
-
-	return err
-}
-
-// `fauna.feed.create` — create a feed. `rules` are the form's triples,
-// encoded by the shared codec (an unknown `rule_type` is an `Err` before
-// any nest call). `scope` is `local` (default) or
-// `discovery`; `contributor_seeds` apply only to discovery feeds. Returns
-// the generated `feed_id`.
-func (_self *FfiFeedClient) FeedCreate(name string, rules []FfiFilterRule, combination string, scope *string, contributorSeeds *[]string) (string, error) {
-	_pointer := _self.ffiObject.incrementPointer("*FfiFeedClient")
-	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*FfiError](
-		FfiConverterFfiErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
-			res := C.ffi_fauna_ffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
-		},
-		// liftFn
-		func(ffi RustBufferI) string {
-			return FfiConverterStringINSTANCE.Lift(ffi)
-		},
-		C.uniffi_fauna_ffi_fn_method_ffifeedclient_feed_create(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterSequenceFfiFilterRuleINSTANCE.Lower(rules), FfiConverterStringINSTANCE.Lower(combination), FfiConverterOptionalStringINSTANCE.Lower(scope), FfiConverterOptionalSequenceStringINSTANCE.Lower(contributorSeeds)),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_free_rust_buffer(handle)
-		},
-	)
-
-	if err == nil {
-		return res, nil
-	}
-
-	return res, err
-}
-
-// `fauna.feed.delete` — delete an owned feed.
-func (_self *FfiFeedClient) FeedDelete(feedId string) error {
-	_pointer := _self.ffiObject.incrementPointer("*FfiFeedClient")
-	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*FfiError](
-		FfiConverterFfiErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
-			C.ffi_fauna_ffi_rust_future_complete_void(handle, status)
-			return struct{}{}
-		},
-		// liftFn
-		func(_ struct{}) struct{} { return struct{}{} },
-		C.uniffi_fauna_ffi_fn_method_ffifeedclient_feed_delete(
-			_pointer, FfiConverterStringINSTANCE.Lower(feedId)),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_poll_void(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_free_void(handle)
-		},
-	)
-
-	if err == nil {
-		return nil
-	}
-
-	return err
-}
-
-// `fauna.feed.get` — fetch a single feed including its rules.
-func (_self *FfiFeedClient) FeedGet(feedId string) (FfiFeedGetReply, error) {
-	_pointer := _self.ffiObject.incrementPointer("*FfiFeedClient")
-	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*FfiError](
-		FfiConverterFfiErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
-			res := C.ffi_fauna_ffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
-		},
-		// liftFn
-		func(ffi RustBufferI) FfiFeedGetReply {
-			return FfiConverterFfiFeedGetReplyINSTANCE.Lift(ffi)
-		},
-		C.uniffi_fauna_ffi_fn_method_ffifeedclient_feed_get(
-			_pointer, FfiConverterStringINSTANCE.Lower(feedId)),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_free_rust_buffer(handle)
-		},
-	)
-
-	if err == nil {
-		return res, nil
-	}
-
-	return res, err
-}
-
-// `fauna.feed.list` — list all feeds (summary view, no rules).
-func (_self *FfiFeedClient) FeedList() ([]FfiFeedSummary, error) {
-	_pointer := _self.ffiObject.incrementPointer("*FfiFeedClient")
-	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*FfiError](
-		FfiConverterFfiErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
-			res := C.ffi_fauna_ffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
-		},
-		// liftFn
-		func(ffi RustBufferI) []FfiFeedSummary {
-			return FfiConverterSequenceFfiFeedSummaryINSTANCE.Lift(ffi)
-		},
-		C.uniffi_fauna_ffi_fn_method_ffifeedclient_feed_list(
-			_pointer),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_free_rust_buffer(handle)
-		},
-	)
-
-	if err == nil {
-		return res, nil
-	}
-
-	return res, err
-}
-
-// `fauna.feed.local.posts` — query this nest's local feed (always
-// chronological).
-func (_self *FfiFeedClient) FeedLocalPosts(cursor *int64, limit *int64, search *string) (FfiFeedLocalPostsReply, error) {
-	_pointer := _self.ffiObject.incrementPointer("*FfiFeedClient")
-	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*FfiError](
-		FfiConverterFfiErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
-			res := C.ffi_fauna_ffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
-		},
-		// liftFn
-		func(ffi RustBufferI) FfiFeedLocalPostsReply {
-			return FfiConverterFfiFeedLocalPostsReplyINSTANCE.Lift(ffi)
-		},
-		C.uniffi_fauna_ffi_fn_method_ffifeedclient_feed_local_posts(
-			_pointer, FfiConverterOptionalInt64INSTANCE.Lower(cursor), FfiConverterOptionalInt64INSTANCE.Lower(limit), FfiConverterOptionalStringINSTANCE.Lower(search)),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_free_rust_buffer(handle)
-		},
-	)
-
-	if err == nil {
-		return res, nil
-	}
-
-	return res, err
-}
-
-// `fauna.feed.posts` — query a feed's posts. `order = Some("score")`
-// orders by score and paginates on the keyset pair `(score_cursor,
-// score_cursor_created_at)` — both echoed back from the previous reply,
-// both or neither; otherwise chronological (paginate via `cursor`, epoch
-// micros). `search` appends a comma-separated body-contains filter.
-func (_self *FfiFeedClient) FeedPosts(feedId string, cursor *int64, limit *int64, order *string, scoreCursor *int64, scoreCursorCreatedAt *int64, search *string) (FfiFeedPostsReply, error) {
-	_pointer := _self.ffiObject.incrementPointer("*FfiFeedClient")
-	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*FfiError](
-		FfiConverterFfiErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
-			res := C.ffi_fauna_ffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
-		},
-		// liftFn
-		func(ffi RustBufferI) FfiFeedPostsReply {
-			return FfiConverterFfiFeedPostsReplyINSTANCE.Lift(ffi)
-		},
-		C.uniffi_fauna_ffi_fn_method_ffifeedclient_feed_posts(
-			_pointer, FfiConverterStringINSTANCE.Lower(feedId), FfiConverterOptionalInt64INSTANCE.Lower(cursor), FfiConverterOptionalInt64INSTANCE.Lower(limit), FfiConverterOptionalStringINSTANCE.Lower(order), FfiConverterOptionalInt64INSTANCE.Lower(scoreCursor), FfiConverterOptionalInt64INSTANCE.Lower(scoreCursorCreatedAt), FfiConverterOptionalStringINSTANCE.Lower(search)),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_free_rust_buffer(handle)
-		},
-	)
-
-	if err == nil {
-		return res, nil
-	}
-
-	return res, err
-}
-
-// `fauna.feed.update` — overwrite a feed's `name` / `rules` /
-// `combination` (scope + seeds are immutable on update).
-func (_self *FfiFeedClient) FeedUpdate(feedId string, name string, rules []FfiFilterRule, combination string) error {
-	_pointer := _self.ffiObject.incrementPointer("*FfiFeedClient")
-	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*FfiError](
-		FfiConverterFfiErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
-			C.ffi_fauna_ffi_rust_future_complete_void(handle, status)
-			return struct{}{}
-		},
-		// liftFn
-		func(_ struct{}) struct{} { return struct{}{} },
-		C.uniffi_fauna_ffi_fn_method_ffifeedclient_feed_update(
-			_pointer, FfiConverterStringINSTANCE.Lower(feedId), FfiConverterStringINSTANCE.Lower(name), FfiConverterSequenceFfiFilterRuleINSTANCE.Lower(rules), FfiConverterStringINSTANCE.Lower(combination)),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_poll_void(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_free_void(handle)
-		},
-	)
-
-	if err == nil {
-		return nil
-	}
-
-	return err
-}
-func (object *FfiFeedClient) Destroy() {
-	runtime.SetFinalizer(object, nil)
-	object.ffiObject.destroy()
-}
-
-type FfiConverterFfiFeedClient struct{}
-
-var FfiConverterFfiFeedClientINSTANCE = FfiConverterFfiFeedClient{}
-
-func (c FfiConverterFfiFeedClient) Lift(handle C.uint64_t) *FfiFeedClient {
-	result := &FfiFeedClient{
-		newFfiObject(
-			handle,
-			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
-				return C.uniffi_fauna_ffi_fn_clone_ffifeedclient(handle, status)
-			},
-			func(handle C.uint64_t, status *C.RustCallStatus) {
-				C.uniffi_fauna_ffi_fn_free_ffifeedclient(handle, status)
-			},
-		),
-	}
-	runtime.SetFinalizer(result, (*FfiFeedClient).Destroy)
-	return result
-}
-
-func (c FfiConverterFfiFeedClient) Read(reader io.Reader) *FfiFeedClient {
-	return c.Lift(C.uint64_t(readUint64(reader)))
-}
-
-func (c FfiConverterFfiFeedClient) Lower(value *FfiFeedClient) C.uint64_t {
-	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
-	// because the handle will be decremented immediately after this function returns,
-	// and someone will be left holding onto a non-locked handle.
-	handle := value.ffiObject.incrementPointer("*FfiFeedClient")
-	defer value.ffiObject.decrementPointer()
-	return handle
-}
-
-func (c FfiConverterFfiFeedClient) Write(writer io.Writer, value *FfiFeedClient) {
-	writeUint64(writer, uint64(c.Lower(value)))
-}
-
-func LiftFromExternalFfiFeedClient(handle uint64) *FfiFeedClient {
-	return FfiConverterFfiFeedClientINSTANCE.Lift(C.uint64_t(handle))
-}
-
-func LowerToExternalFfiFeedClient(value *FfiFeedClient) uint64 {
-	return uint64(FfiConverterFfiFeedClientINSTANCE.Lower(value))
-}
-
-type FfiDestroyerFfiFeedClient struct{}
-
-func (_ FfiDestroyerFfiFeedClient) Destroy(value *FfiFeedClient) {
-	value.Destroy()
-}
-
 // UniFFI handle for the `fauna.folders.*` kinds. Construct via
 // [`crate::nest_client::FfiNestClient::folders`]; methods are exposed to
 // Swift as `async throws` and Kotlin as `suspend fun`.
@@ -10167,7 +9541,7 @@ type FfiFoldersClientInterface interface {
 	Delete(name string) error
 	// Whether `device_id`'s place on `name` makes it a delivery seat for an
 	// on-demand presence — the `this_device_accepts` input of the shared
-	// presence plan (`on-demand-files.md` § Apple File Provider binding:
+	// presence plan (`on-demand-files-apple.md` § Apple File Provider binding:
 	// desired = own folders where this device's place has `accepts: true`).
 	// One `members.list` read through the one sanctioned seat rule
 	// (`SeatRead::delivers_presence`): no place, an unreadable place, or a
@@ -10407,7 +9781,7 @@ func (_self *FfiFoldersClient) Delete(name string) error {
 
 // Whether `device_id`'s place on `name` makes it a delivery seat for an
 // on-demand presence — the `this_device_accepts` input of the shared
-// presence plan (`on-demand-files.md` § Apple File Provider binding:
+// presence plan (`on-demand-files-apple.md` § Apple File Provider binding:
 // desired = own folders where this device's place has `accepts: true`).
 // One `members.list` read through the one sanctioned seat rule
 // (`SeatRead::delivers_presence`): no place, an unreadable place, or a
@@ -12051,13 +11425,6 @@ type FfiNestClientInterface interface {
 	// a thin wrapper over the shared `NestClient`; all kinds are Admin-gated
 	// nest-side.
 	Admin() *FfiAdminClient
-	// Typed-call client for the `bluesky.feed.thread` kind (the one
-	// protocol-unique consume-side Bluesky surface — the crossposted-post
-	// thread view the post-detail surface shows) over this connection,
-	// replacing the deleted `GET /api/v1/bluesky/{feed/thread,thread}` HTTP
-	// twins. Caller-scoped (the handler restores the caller's Bluesky OAuth
-	// agent). `User`-gated nest-side.
-	Bluesky() *FfiBlueskyClient
 	// Typed-call client for the `fauna.bridges.*` kinds over this
 	// connection. Cheap — a thin wrapper over the shared `NestClient`.
 	Bridges() *FfiBridgesClient
@@ -12096,9 +11463,6 @@ type FfiNestClientInterface interface {
 	// Typed-call client for the `fauna.family.*` kinds over this connection
 	// (the Family surface + supervised indicator — family-safety.md).
 	Family() *FfiFamilyClient
-	// Typed-call client for the `fauna.feed.*` kinds (feed CRUD, feed/local
-	// post queries, discovery contributors) over this connection.
-	Feed() *FfiFeedClient
 	// Typed-call client for the `fauna.folders.*` kinds (the Devices /
 	// Backups page folder control plane: list / create / update / delete /
 	// devices / members / schedule) over this connection — the shared seam
@@ -12109,6 +11473,14 @@ type FfiNestClientInterface interface {
 	// `fauna.inbox.{fetch,ack}` (the store-and-forward drain) over this
 	// connection. Caller-scoped — no `actor_id` param.
 	Inbox() *FfiInboxClient
+	// The once-per-sign-in look over this connection
+	// ([`fauna_client::update_look::look_at_sign_in`]): the newer release this
+	// nest reports, or `None` — nothing newer, the nest says nothing, or a
+	// failed read (silent by rule). One read of `fauna.nest.info`; no request
+	// reaches the release host (`installers/README.md` § Knowing a newer
+	// version is out → *The nest's newest-release field*). Each app calls it
+	// from its post-sign-in hook, on the client it just signed in with.
+	LookForNewerReleaseAtSignIn() *NewerRelease
 	// Typed-call client for the client-facing `fauna.moderation.*` kinds
 	// (queue read, training correction, report-/signal-sharing opt-ins) over
 	// this connection. Gated `User | Admin` nest-side.
@@ -12135,11 +11507,6 @@ type FfiNestClientInterface interface {
 	// that actor (`FfiAccountRegistry::device_id_for_actor`) — the id the rows
 	// are keyed under and the connection announces.
 	PushRegistration(intentPath string, actorId string, deviceId string) *FfiPushRegistration
-	// Typed-call client for the `fauna.search.query` kind (the search bar's
-	// full-text query) over this connection — the native-client seam onto the
-	// WS-RPC kind the Rust-native Linux app calls directly, replacing the
-	// `GET /api/v1/search` HTTP twin.
-	Search() *FfiSearchClient
 	// Why this client's supervisor stopped for good, when the reason is a
 	// session-ending verdict — read on a `Disconnected` from
 	// [`Self::subscribe_connection_state`] (the stop is recorded before that
@@ -12250,21 +11617,6 @@ func (_self *FfiNestClient) Admin() *FfiAdminClient {
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterFfiAdminClientINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_fauna_ffi_fn_method_ffinestclient_admin(
-			_pointer, _uniffiStatus)
-	}))
-}
-
-// Typed-call client for the `bluesky.feed.thread` kind (the one
-// protocol-unique consume-side Bluesky surface — the crossposted-post
-// thread view the post-detail surface shows) over this connection,
-// replacing the deleted `GET /api/v1/bluesky/{feed/thread,thread}` HTTP
-// twins. Caller-scoped (the handler restores the caller's Bluesky OAuth
-// agent). `User`-gated nest-side.
-func (_self *FfiNestClient) Bluesky() *FfiBlueskyClient {
-	_pointer := _self.ffiObject.incrementPointer("*FfiNestClient")
-	defer _self.ffiObject.decrementPointer()
-	return FfiConverterFfiBlueskyClientINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_fauna_ffi_fn_method_ffinestclient_bluesky(
 			_pointer, _uniffiStatus)
 	}))
 }
@@ -12418,17 +11770,6 @@ func (_self *FfiNestClient) Family() *FfiFamilyClient {
 	}))
 }
 
-// Typed-call client for the `fauna.feed.*` kinds (feed CRUD, feed/local
-// post queries, discovery contributors) over this connection.
-func (_self *FfiNestClient) Feed() *FfiFeedClient {
-	_pointer := _self.ffiObject.incrementPointer("*FfiNestClient")
-	defer _self.ffiObject.decrementPointer()
-	return FfiConverterFfiFeedClientINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_fauna_ffi_fn_method_ffinestclient_feed(
-			_pointer, _uniffiStatus)
-	}))
-}
-
 // Typed-call client for the `fauna.folders.*` kinds (the Devices /
 // Backups page folder control plane: list / create / update / delete /
 // devices / members / schedule) over this connection — the shared seam
@@ -12453,6 +11794,44 @@ func (_self *FfiNestClient) Inbox() *FfiInboxClient {
 		return C.uniffi_fauna_ffi_fn_method_ffinestclient_inbox(
 			_pointer, _uniffiStatus)
 	}))
+}
+
+// The once-per-sign-in look over this connection
+// ([`fauna_client::update_look::look_at_sign_in`]): the newer release this
+// nest reports, or `None` — nothing newer, the nest says nothing, or a
+// failed read (silent by rule). One read of `fauna.nest.info`; no request
+// reaches the release host (`installers/README.md` § Knowing a newer
+// version is out → *The nest's newest-release field*). Each app calls it
+// from its post-sign-in hook, on the client it just signed in with.
+func (_self *FfiNestClient) LookForNewerReleaseAtSignIn() *NewerRelease {
+	_pointer := _self.ffiObject.incrementPointer("*FfiNestClient")
+	defer _self.ffiObject.decrementPointer()
+	res, _ := uniffiRustCallAsync[error](
+		nil,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_fauna_ffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) *NewerRelease {
+			return FfiConverterOptionalNewerReleaseINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_ffi_fn_method_ffinestclient_look_for_newer_release_at_sign_in(
+			_pointer),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	return res
 }
 
 // Typed-call client for the client-facing `fauna.moderation.*` kinds
@@ -12526,19 +11905,6 @@ func (_self *FfiNestClient) PushRegistration(intentPath string, actorId string, 
 	return FfiConverterFfiPushRegistrationINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_fauna_ffi_fn_method_ffinestclient_push_registration(
 			_pointer, FfiConverterStringINSTANCE.Lower(intentPath), FfiConverterStringINSTANCE.Lower(actorId), FfiConverterStringINSTANCE.Lower(deviceId), _uniffiStatus)
-	}))
-}
-
-// Typed-call client for the `fauna.search.query` kind (the search bar's
-// full-text query) over this connection — the native-client seam onto the
-// WS-RPC kind the Rust-native Linux app calls directly, replacing the
-// `GET /api/v1/search` HTTP twin.
-func (_self *FfiNestClient) Search() *FfiSearchClient {
-	_pointer := _self.ffiObject.incrementPointer("*FfiNestClient")
-	defer _self.ffiObject.decrementPointer()
-	return FfiConverterFfiSearchClientINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_fauna_ffi_fn_method_ffinestclient_search(
-			_pointer, _uniffiStatus)
 	}))
 }
 
@@ -14170,122 +13536,6 @@ func LowerToExternalFfiReconnectSubscription(value *FfiReconnectSubscription) ui
 type FfiDestroyerFfiReconnectSubscription struct{}
 
 func (_ FfiDestroyerFfiReconnectSubscription) Destroy(value *FfiReconnectSubscription) {
-	value.Destroy()
-}
-
-// UniFFI handle for the `fauna.search.query` kind. Construct via
-// [`crate::nest_client::FfiNestClient::search`]; the method is exposed to Swift
-// as `async throws` and Kotlin as `suspend fun`. Thin wrapper over the shared
-// `fauna_client_search::SearchClient`.
-type FfiSearchClientInterface interface {
-	// `fauna.search.query` — full-text search scoped to the calling actor (the
-	// connection knows its caller). Each `None` rides the handler default
-	// (`content_type` = all, `limit` = 20 clamped to `[1, 100]`, `offset` = 0;
-	// `before`/`after` are epoch-micros cursors). Returns the result hits (the
-	// reply's forward-compat `extra` overflow is dropped).
-	Query(query string, contentType *string, before *int64, after *int64, limit *int64, offset *int64) ([]FfiSearchResult, error)
-}
-
-// UniFFI handle for the `fauna.search.query` kind. Construct via
-// [`crate::nest_client::FfiNestClient::search`]; the method is exposed to Swift
-// as `async throws` and Kotlin as `suspend fun`. Thin wrapper over the shared
-// `fauna_client_search::SearchClient`.
-type FfiSearchClient struct {
-	ffiObject FfiObject
-}
-
-// `fauna.search.query` — full-text search scoped to the calling actor (the
-// connection knows its caller). Each `None` rides the handler default
-// (`content_type` = all, `limit` = 20 clamped to `[1, 100]`, `offset` = 0;
-// `before`/`after` are epoch-micros cursors). Returns the result hits (the
-// reply's forward-compat `extra` overflow is dropped).
-func (_self *FfiSearchClient) Query(query string, contentType *string, before *int64, after *int64, limit *int64, offset *int64) ([]FfiSearchResult, error) {
-	_pointer := _self.ffiObject.incrementPointer("*FfiSearchClient")
-	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*FfiError](
-		FfiConverterFfiErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
-			res := C.ffi_fauna_ffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
-		},
-		// liftFn
-		func(ffi RustBufferI) []FfiSearchResult {
-			return FfiConverterSequenceFfiSearchResultINSTANCE.Lift(ffi)
-		},
-		C.uniffi_fauna_ffi_fn_method_ffisearchclient_query(
-			_pointer, FfiConverterStringINSTANCE.Lower(query), FfiConverterOptionalStringINSTANCE.Lower(contentType), FfiConverterOptionalInt64INSTANCE.Lower(before), FfiConverterOptionalInt64INSTANCE.Lower(after), FfiConverterOptionalInt64INSTANCE.Lower(limit), FfiConverterOptionalInt64INSTANCE.Lower(offset)),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_free_rust_buffer(handle)
-		},
-	)
-
-	if err == nil {
-		return res, nil
-	}
-
-	return res, err
-}
-func (object *FfiSearchClient) Destroy() {
-	runtime.SetFinalizer(object, nil)
-	object.ffiObject.destroy()
-}
-
-type FfiConverterFfiSearchClient struct{}
-
-var FfiConverterFfiSearchClientINSTANCE = FfiConverterFfiSearchClient{}
-
-func (c FfiConverterFfiSearchClient) Lift(handle C.uint64_t) *FfiSearchClient {
-	result := &FfiSearchClient{
-		newFfiObject(
-			handle,
-			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
-				return C.uniffi_fauna_ffi_fn_clone_ffisearchclient(handle, status)
-			},
-			func(handle C.uint64_t, status *C.RustCallStatus) {
-				C.uniffi_fauna_ffi_fn_free_ffisearchclient(handle, status)
-			},
-		),
-	}
-	runtime.SetFinalizer(result, (*FfiSearchClient).Destroy)
-	return result
-}
-
-func (c FfiConverterFfiSearchClient) Read(reader io.Reader) *FfiSearchClient {
-	return c.Lift(C.uint64_t(readUint64(reader)))
-}
-
-func (c FfiConverterFfiSearchClient) Lower(value *FfiSearchClient) C.uint64_t {
-	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
-	// because the handle will be decremented immediately after this function returns,
-	// and someone will be left holding onto a non-locked handle.
-	handle := value.ffiObject.incrementPointer("*FfiSearchClient")
-	defer value.ffiObject.decrementPointer()
-	return handle
-}
-
-func (c FfiConverterFfiSearchClient) Write(writer io.Writer, value *FfiSearchClient) {
-	writeUint64(writer, uint64(c.Lower(value)))
-}
-
-func LiftFromExternalFfiSearchClient(handle uint64) *FfiSearchClient {
-	return FfiConverterFfiSearchClientINSTANCE.Lift(C.uint64_t(handle))
-}
-
-func LowerToExternalFfiSearchClient(value *FfiSearchClient) uint64 {
-	return uint64(FfiConverterFfiSearchClientINSTANCE.Lower(value))
-}
-
-type FfiDestroyerFfiSearchClient struct{}
-
-func (_ FfiDestroyerFfiSearchClient) Destroy(value *FfiSearchClient) {
 	value.Destroy()
 }
 
@@ -18230,6 +17480,97 @@ func (_ FfiDestroyerFfiAdminMembershipTier) Destroy(value FfiAdminMembershipTier
 	value.Destroy()
 }
 
+// FFI mirror of [`fauna_protocol::admin::AdminPendingActionSummary`] — one
+// row of the admin Users hub's standing pending-admin-actions section
+// (`admin.md` § Pending admin actions). `description` (the shared
+// `describe_pending_action` sentence) and `actor_short` (the scheduling
+// admin's canonical short id) are derived in shared Rust so no app re-derives
+// either; `is_pending` gates the row (the console shows only still-`pending`
+// actions). `ip_address` is dropped — the console never renders it.
+type FfiAdminPendingAction struct {
+	Id             int64
+	ActorId        []byte
+	ActorShort     string
+	ActionType     string
+	Target         *string
+	Description    string
+	Status         string
+	IsPending      bool
+	CreatedAt      int64
+	ExecuteAfter   int64
+	RequiresQuorum int64
+	Approvals      []string
+}
+
+func (r *FfiAdminPendingAction) Destroy() {
+	FfiDestroyerInt64{}.Destroy(r.Id)
+	FfiDestroyerBytes{}.Destroy(r.ActorId)
+	FfiDestroyerString{}.Destroy(r.ActorShort)
+	FfiDestroyerString{}.Destroy(r.ActionType)
+	FfiDestroyerOptionalString{}.Destroy(r.Target)
+	FfiDestroyerString{}.Destroy(r.Description)
+	FfiDestroyerString{}.Destroy(r.Status)
+	FfiDestroyerBool{}.Destroy(r.IsPending)
+	FfiDestroyerInt64{}.Destroy(r.CreatedAt)
+	FfiDestroyerInt64{}.Destroy(r.ExecuteAfter)
+	FfiDestroyerInt64{}.Destroy(r.RequiresQuorum)
+	FfiDestroyerSequenceString{}.Destroy(r.Approvals)
+}
+
+type FfiConverterFfiAdminPendingAction struct{}
+
+var FfiConverterFfiAdminPendingActionINSTANCE = FfiConverterFfiAdminPendingAction{}
+
+func (c FfiConverterFfiAdminPendingAction) Lift(rb RustBufferI) FfiAdminPendingAction {
+	return LiftFromRustBuffer[FfiAdminPendingAction](c, rb)
+}
+
+func (c FfiConverterFfiAdminPendingAction) Read(reader io.Reader) FfiAdminPendingAction {
+	return FfiAdminPendingAction{
+		FfiConverterInt64INSTANCE.Read(reader),
+		FfiConverterBytesINSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterInt64INSTANCE.Read(reader),
+		FfiConverterInt64INSTANCE.Read(reader),
+		FfiConverterInt64INSTANCE.Read(reader),
+		FfiConverterSequenceStringINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterFfiAdminPendingAction) Lower(value FfiAdminPendingAction) C.RustBuffer {
+	return LowerIntoRustBuffer[FfiAdminPendingAction](c, value)
+}
+
+func (c FfiConverterFfiAdminPendingAction) LowerExternal(value FfiAdminPendingAction) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[FfiAdminPendingAction](c, value))
+}
+
+func (c FfiConverterFfiAdminPendingAction) Write(writer io.Writer, value FfiAdminPendingAction) {
+	FfiConverterInt64INSTANCE.Write(writer, value.Id)
+	FfiConverterBytesINSTANCE.Write(writer, value.ActorId)
+	FfiConverterStringINSTANCE.Write(writer, value.ActorShort)
+	FfiConverterStringINSTANCE.Write(writer, value.ActionType)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.Target)
+	FfiConverterStringINSTANCE.Write(writer, value.Description)
+	FfiConverterStringINSTANCE.Write(writer, value.Status)
+	FfiConverterBoolINSTANCE.Write(writer, value.IsPending)
+	FfiConverterInt64INSTANCE.Write(writer, value.CreatedAt)
+	FfiConverterInt64INSTANCE.Write(writer, value.ExecuteAfter)
+	FfiConverterInt64INSTANCE.Write(writer, value.RequiresQuorum)
+	FfiConverterSequenceStringINSTANCE.Write(writer, value.Approvals)
+}
+
+type FfiDestroyerFfiAdminPendingAction struct{}
+
+func (_ FfiDestroyerFfiAdminPendingAction) Destroy(value FfiAdminPendingAction) {
+	value.Destroy()
+}
+
 // FFI mirror of [`fauna_protocol::admin::AdminServiceFlags`] — the sidecar-
 // service enable flags backing the `admin-services` toggles. `bridge` /
 // `pairing` are the two nest service flags
@@ -18860,58 +18201,6 @@ func (_ FfiDestroyerFfiApproveReply) Destroy(value FfiApproveReply) {
 	value.Destroy()
 }
 
-// FFI mirror of [`fauna_protocol::feed::AuthorDisplay`] — a bridged author's
-// face (`bridges.md` § Unified feed ingestion → *Bridged authors*), minus the
-// wire `extra` map. Additive Record; consume-safe.
-type FfiAuthorDisplay struct {
-	Handle      *string
-	DisplayName *string
-	// Nest-relative, already proxied.
-	AvatarUrl *string
-}
-
-func (r *FfiAuthorDisplay) Destroy() {
-	FfiDestroyerOptionalString{}.Destroy(r.Handle)
-	FfiDestroyerOptionalString{}.Destroy(r.DisplayName)
-	FfiDestroyerOptionalString{}.Destroy(r.AvatarUrl)
-}
-
-type FfiConverterFfiAuthorDisplay struct{}
-
-var FfiConverterFfiAuthorDisplayINSTANCE = FfiConverterFfiAuthorDisplay{}
-
-func (c FfiConverterFfiAuthorDisplay) Lift(rb RustBufferI) FfiAuthorDisplay {
-	return LiftFromRustBuffer[FfiAuthorDisplay](c, rb)
-}
-
-func (c FfiConverterFfiAuthorDisplay) Read(reader io.Reader) FfiAuthorDisplay {
-	return FfiAuthorDisplay{
-		FfiConverterOptionalStringINSTANCE.Read(reader),
-		FfiConverterOptionalStringINSTANCE.Read(reader),
-		FfiConverterOptionalStringINSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterFfiAuthorDisplay) Lower(value FfiAuthorDisplay) C.RustBuffer {
-	return LowerIntoRustBuffer[FfiAuthorDisplay](c, value)
-}
-
-func (c FfiConverterFfiAuthorDisplay) LowerExternal(value FfiAuthorDisplay) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[FfiAuthorDisplay](c, value))
-}
-
-func (c FfiConverterFfiAuthorDisplay) Write(writer io.Writer, value FfiAuthorDisplay) {
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.Handle)
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.DisplayName)
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.AvatarUrl)
-}
-
-type FfiDestroyerFfiAuthorDisplay struct{}
-
-func (_ FfiDestroyerFfiAuthorDisplay) Destroy(value FfiAuthorDisplay) {
-	value.Destroy()
-}
-
 // One Backups-page status row. Returned by
 // [`crate::backup_destinations::backup_destination_status`] for native apps to
 // render `backup-destination-last-upload-time` /
@@ -18959,6 +18248,11 @@ type FfiBackupDestinationStatus struct {
 	// is never handed `now`), so a shell rendering the stamp alone would show
 	// a freshly-rotted custodian as just-verified.
 	LastAuditPassedAt *uint64
+	// Nest rows only: `WRITER_STATE_OK` / `WRITER_STATE_REFUSED`, passed
+	// straight to the shared `backup_backlog_label` — a destination that turns
+	// this box away reads as refused, never as an ordinary lag. `None` on a
+	// client-device row.
+	WriterState *string
 }
 
 func (r *FfiBackupDestinationStatus) Destroy() {
@@ -18969,6 +18263,7 @@ func (r *FfiBackupDestinationStatus) Destroy() {
 	FfiDestroyerOptionalString{}.Destroy(r.CapState)
 	FfiDestroyerOptionalString{}.Destroy(r.AuditState)
 	FfiDestroyerOptionalUint64{}.Destroy(r.LastAuditPassedAt)
+	FfiDestroyerOptionalString{}.Destroy(r.WriterState)
 }
 
 type FfiConverterFfiBackupDestinationStatus struct{}
@@ -18988,6 +18283,7 @@ func (c FfiConverterFfiBackupDestinationStatus) Read(reader io.Reader) FfiBackup
 		FfiConverterOptionalStringINSTANCE.Read(reader),
 		FfiConverterOptionalStringINSTANCE.Read(reader),
 		FfiConverterOptionalUint64INSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
 	}
 }
 
@@ -19007,6 +18303,7 @@ func (c FfiConverterFfiBackupDestinationStatus) Write(writer io.Writer, value Ff
 	FfiConverterOptionalStringINSTANCE.Write(writer, value.CapState)
 	FfiConverterOptionalStringINSTANCE.Write(writer, value.AuditState)
 	FfiConverterOptionalUint64INSTANCE.Write(writer, value.LastAuditPassedAt)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.WriterState)
 }
 
 type FfiDestroyerFfiBackupDestinationStatus struct{}
@@ -19162,181 +18459,6 @@ func (c FfiConverterFfiBlobTypeCounts) Write(writer io.Writer, value FfiBlobType
 type FfiDestroyerFfiBlobTypeCounts struct{}
 
 func (_ FfiDestroyerFfiBlobTypeCounts) Destroy(value FfiBlobTypeCounts) {
-	value.Destroy()
-}
-
-// Flat FFI display projection of [`fauna_protocol::bluesky::BlueskyPost`]. The
-// rich nested sub-objects (`facets` / `images` / `video` / `external` /
-// `quote`) are collapsed to `has_media` (any image or video present) and the
-// `viewer_*` booleans (the presence of the viewer's like / repost records) —
-// no UniFFI app renders the nested content today, and `quote` is recursive
-// (`Option<Box<BlueskyPost>>`), which the flat record sidesteps. `created_at`
-// crosses as the raw ISO-8601 string (the consumer parses to its own time
-// type). Mirrors the `feed_client::FfiFeedPostItem` flattening convention.
-type FfiBlueskyPost struct {
-	// Opaque post identifier (the bridge-side id; used by the UI for keys).
-	Id string
-	// AT-URI of the post record (`at://did/.../rkey`).
-	AtUri             string
-	Cid               string
-	AuthorDid         string
-	AuthorHandle      string
-	AuthorDisplayName *string
-	AuthorAvatar      *string
-	Text              string
-	// Any image attachment or a video is present.
-	HasMedia bool
-	// AT-URI of the parent post if this is a reply.
-	ReplyParent *string
-	// AT-URI of the thread root if this is a reply.
-	ReplyRoot   *string
-	LikeCount   uint64
-	RepostCount uint64
-	ReplyCount  uint64
-	// The viewer has liked this post (a `viewer_like` record exists).
-	ViewerLiked bool
-	// The viewer has reposted this post (a `viewer_repost` record exists).
-	ViewerReposted bool
-	// ISO-8601 creation timestamp (raw; the consumer parses it).
-	CreatedAt string
-	// Source tag, e.g. "bluesky".
-	Source string
-}
-
-func (r *FfiBlueskyPost) Destroy() {
-	FfiDestroyerString{}.Destroy(r.Id)
-	FfiDestroyerString{}.Destroy(r.AtUri)
-	FfiDestroyerString{}.Destroy(r.Cid)
-	FfiDestroyerString{}.Destroy(r.AuthorDid)
-	FfiDestroyerString{}.Destroy(r.AuthorHandle)
-	FfiDestroyerOptionalString{}.Destroy(r.AuthorDisplayName)
-	FfiDestroyerOptionalString{}.Destroy(r.AuthorAvatar)
-	FfiDestroyerString{}.Destroy(r.Text)
-	FfiDestroyerBool{}.Destroy(r.HasMedia)
-	FfiDestroyerOptionalString{}.Destroy(r.ReplyParent)
-	FfiDestroyerOptionalString{}.Destroy(r.ReplyRoot)
-	FfiDestroyerUint64{}.Destroy(r.LikeCount)
-	FfiDestroyerUint64{}.Destroy(r.RepostCount)
-	FfiDestroyerUint64{}.Destroy(r.ReplyCount)
-	FfiDestroyerBool{}.Destroy(r.ViewerLiked)
-	FfiDestroyerBool{}.Destroy(r.ViewerReposted)
-	FfiDestroyerString{}.Destroy(r.CreatedAt)
-	FfiDestroyerString{}.Destroy(r.Source)
-}
-
-type FfiConverterFfiBlueskyPost struct{}
-
-var FfiConverterFfiBlueskyPostINSTANCE = FfiConverterFfiBlueskyPost{}
-
-func (c FfiConverterFfiBlueskyPost) Lift(rb RustBufferI) FfiBlueskyPost {
-	return LiftFromRustBuffer[FfiBlueskyPost](c, rb)
-}
-
-func (c FfiConverterFfiBlueskyPost) Read(reader io.Reader) FfiBlueskyPost {
-	return FfiBlueskyPost{
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterOptionalStringINSTANCE.Read(reader),
-		FfiConverterOptionalStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-		FfiConverterOptionalStringINSTANCE.Read(reader),
-		FfiConverterOptionalStringINSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterFfiBlueskyPost) Lower(value FfiBlueskyPost) C.RustBuffer {
-	return LowerIntoRustBuffer[FfiBlueskyPost](c, value)
-}
-
-func (c FfiConverterFfiBlueskyPost) LowerExternal(value FfiBlueskyPost) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[FfiBlueskyPost](c, value))
-}
-
-func (c FfiConverterFfiBlueskyPost) Write(writer io.Writer, value FfiBlueskyPost) {
-	FfiConverterStringINSTANCE.Write(writer, value.Id)
-	FfiConverterStringINSTANCE.Write(writer, value.AtUri)
-	FfiConverterStringINSTANCE.Write(writer, value.Cid)
-	FfiConverterStringINSTANCE.Write(writer, value.AuthorDid)
-	FfiConverterStringINSTANCE.Write(writer, value.AuthorHandle)
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.AuthorDisplayName)
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.AuthorAvatar)
-	FfiConverterStringINSTANCE.Write(writer, value.Text)
-	FfiConverterBoolINSTANCE.Write(writer, value.HasMedia)
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.ReplyParent)
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.ReplyRoot)
-	FfiConverterUint64INSTANCE.Write(writer, value.LikeCount)
-	FfiConverterUint64INSTANCE.Write(writer, value.RepostCount)
-	FfiConverterUint64INSTANCE.Write(writer, value.ReplyCount)
-	FfiConverterBoolINSTANCE.Write(writer, value.ViewerLiked)
-	FfiConverterBoolINSTANCE.Write(writer, value.ViewerReposted)
-	FfiConverterStringINSTANCE.Write(writer, value.CreatedAt)
-	FfiConverterStringINSTANCE.Write(writer, value.Source)
-}
-
-type FfiDestroyerFfiBlueskyPost struct{}
-
-func (_ FfiDestroyerFfiBlueskyPost) Destroy(value FfiBlueskyPost) {
-	value.Destroy()
-}
-
-// FFI mirror of [`fauna_protocol::bluesky::BlueskyThreadReply`] — the
-// translated thread as a flat list of posts (ancestors oldest-first, the
-// focal post, then its direct replies), plus the nest-named `focal_index`.
-type FfiBlueskyThreadReply struct {
-	Posts []FfiBlueskyPost
-	// Index into `posts` of the focal post, as named by the nest on the wire.
-	// Lets every UniFFI consumer split into parent/focal/replies without
-	// guessing (priority #2). The consumer guards an empty list.
-	FocalIndex uint32
-}
-
-func (r *FfiBlueskyThreadReply) Destroy() {
-	FfiDestroyerSequenceFfiBlueskyPost{}.Destroy(r.Posts)
-	FfiDestroyerUint32{}.Destroy(r.FocalIndex)
-}
-
-type FfiConverterFfiBlueskyThreadReply struct{}
-
-var FfiConverterFfiBlueskyThreadReplyINSTANCE = FfiConverterFfiBlueskyThreadReply{}
-
-func (c FfiConverterFfiBlueskyThreadReply) Lift(rb RustBufferI) FfiBlueskyThreadReply {
-	return LiftFromRustBuffer[FfiBlueskyThreadReply](c, rb)
-}
-
-func (c FfiConverterFfiBlueskyThreadReply) Read(reader io.Reader) FfiBlueskyThreadReply {
-	return FfiBlueskyThreadReply{
-		FfiConverterSequenceFfiBlueskyPostINSTANCE.Read(reader),
-		FfiConverterUint32INSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterFfiBlueskyThreadReply) Lower(value FfiBlueskyThreadReply) C.RustBuffer {
-	return LowerIntoRustBuffer[FfiBlueskyThreadReply](c, value)
-}
-
-func (c FfiConverterFfiBlueskyThreadReply) LowerExternal(value FfiBlueskyThreadReply) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[FfiBlueskyThreadReply](c, value))
-}
-
-func (c FfiConverterFfiBlueskyThreadReply) Write(writer io.Writer, value FfiBlueskyThreadReply) {
-	FfiConverterSequenceFfiBlueskyPostINSTANCE.Write(writer, value.Posts)
-	FfiConverterUint32INSTANCE.Write(writer, value.FocalIndex)
-}
-
-type FfiDestroyerFfiBlueskyThreadReply struct{}
-
-func (_ FfiDestroyerFfiBlueskyThreadReply) Destroy(value FfiBlueskyThreadReply) {
 	value.Destroy()
 }
 
@@ -20299,52 +19421,6 @@ func (c FfiConverterFfiChunkResult) Write(writer io.Writer, value FfiChunkResult
 type FfiDestroyerFfiChunkResult struct{}
 
 func (_ FfiDestroyerFfiChunkResult) Destroy(value FfiChunkResult) {
-	value.Destroy()
-}
-
-// One text-classification label: a `category` (`"spam"` | `"phishing"`) and a
-// `confidence` in `0.0..=1.0`. Mirror of [`fauna_client_core::scan::ClassificationResult`].
-type FfiClassifyLabel struct {
-	Category   string
-	Confidence float64
-}
-
-func (r *FfiClassifyLabel) Destroy() {
-	FfiDestroyerString{}.Destroy(r.Category)
-	FfiDestroyerFloat64{}.Destroy(r.Confidence)
-}
-
-type FfiConverterFfiClassifyLabel struct{}
-
-var FfiConverterFfiClassifyLabelINSTANCE = FfiConverterFfiClassifyLabel{}
-
-func (c FfiConverterFfiClassifyLabel) Lift(rb RustBufferI) FfiClassifyLabel {
-	return LiftFromRustBuffer[FfiClassifyLabel](c, rb)
-}
-
-func (c FfiConverterFfiClassifyLabel) Read(reader io.Reader) FfiClassifyLabel {
-	return FfiClassifyLabel{
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterFloat64INSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterFfiClassifyLabel) Lower(value FfiClassifyLabel) C.RustBuffer {
-	return LowerIntoRustBuffer[FfiClassifyLabel](c, value)
-}
-
-func (c FfiConverterFfiClassifyLabel) LowerExternal(value FfiClassifyLabel) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[FfiClassifyLabel](c, value))
-}
-
-func (c FfiConverterFfiClassifyLabel) Write(writer io.Writer, value FfiClassifyLabel) {
-	FfiConverterStringINSTANCE.Write(writer, value.Category)
-	FfiConverterFloat64INSTANCE.Write(writer, value.Confidence)
-}
-
-type FfiDestroyerFfiClassifyLabel struct{}
-
-func (_ FfiDestroyerFfiClassifyLabel) Destroy(value FfiClassifyLabel) {
 	value.Destroy()
 }
 
@@ -21943,418 +21019,6 @@ func (_ FfiDestroyerFfiFamilyWardInfo) Destroy(value FfiFamilyWardInfo) {
 	value.Destroy()
 }
 
-// FFI mirror of [`fauna_protocol::feed::FeedContributor`].
-type FfiFeedContributor struct {
-	NestUrl string
-	// Hex-encoded author id `[u8; 32]`, when scoped to a specific author.
-	AuthorId      *string
-	HitCount      int64
-	LastSeen      int64
-	PollPriority  string
-	DiscoveredVia string
-}
-
-func (r *FfiFeedContributor) Destroy() {
-	FfiDestroyerString{}.Destroy(r.NestUrl)
-	FfiDestroyerOptionalString{}.Destroy(r.AuthorId)
-	FfiDestroyerInt64{}.Destroy(r.HitCount)
-	FfiDestroyerInt64{}.Destroy(r.LastSeen)
-	FfiDestroyerString{}.Destroy(r.PollPriority)
-	FfiDestroyerString{}.Destroy(r.DiscoveredVia)
-}
-
-type FfiConverterFfiFeedContributor struct{}
-
-var FfiConverterFfiFeedContributorINSTANCE = FfiConverterFfiFeedContributor{}
-
-func (c FfiConverterFfiFeedContributor) Lift(rb RustBufferI) FfiFeedContributor {
-	return LiftFromRustBuffer[FfiFeedContributor](c, rb)
-}
-
-func (c FfiConverterFfiFeedContributor) Read(reader io.Reader) FfiFeedContributor {
-	return FfiFeedContributor{
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterOptionalStringINSTANCE.Read(reader),
-		FfiConverterInt64INSTANCE.Read(reader),
-		FfiConverterInt64INSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterFfiFeedContributor) Lower(value FfiFeedContributor) C.RustBuffer {
-	return LowerIntoRustBuffer[FfiFeedContributor](c, value)
-}
-
-func (c FfiConverterFfiFeedContributor) LowerExternal(value FfiFeedContributor) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[FfiFeedContributor](c, value))
-}
-
-func (c FfiConverterFfiFeedContributor) Write(writer io.Writer, value FfiFeedContributor) {
-	FfiConverterStringINSTANCE.Write(writer, value.NestUrl)
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.AuthorId)
-	FfiConverterInt64INSTANCE.Write(writer, value.HitCount)
-	FfiConverterInt64INSTANCE.Write(writer, value.LastSeen)
-	FfiConverterStringINSTANCE.Write(writer, value.PollPriority)
-	FfiConverterStringINSTANCE.Write(writer, value.DiscoveredVia)
-}
-
-type FfiDestroyerFfiFeedContributor struct{}
-
-func (_ FfiDestroyerFfiFeedContributor) Destroy(value FfiFeedContributor) {
-	value.Destroy()
-}
-
-// FFI mirror of [`fauna_protocol::feed::FeedContributorGrantReply`].
-// `added=false` with a `reason` means the contributor already existed.
-type FfiFeedContributorGrantReply struct {
-	Added  bool
-	Reason *string
-}
-
-func (r *FfiFeedContributorGrantReply) Destroy() {
-	FfiDestroyerBool{}.Destroy(r.Added)
-	FfiDestroyerOptionalString{}.Destroy(r.Reason)
-}
-
-type FfiConverterFfiFeedContributorGrantReply struct{}
-
-var FfiConverterFfiFeedContributorGrantReplyINSTANCE = FfiConverterFfiFeedContributorGrantReply{}
-
-func (c FfiConverterFfiFeedContributorGrantReply) Lift(rb RustBufferI) FfiFeedContributorGrantReply {
-	return LiftFromRustBuffer[FfiFeedContributorGrantReply](c, rb)
-}
-
-func (c FfiConverterFfiFeedContributorGrantReply) Read(reader io.Reader) FfiFeedContributorGrantReply {
-	return FfiFeedContributorGrantReply{
-		FfiConverterBoolINSTANCE.Read(reader),
-		FfiConverterOptionalStringINSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterFfiFeedContributorGrantReply) Lower(value FfiFeedContributorGrantReply) C.RustBuffer {
-	return LowerIntoRustBuffer[FfiFeedContributorGrantReply](c, value)
-}
-
-func (c FfiConverterFfiFeedContributorGrantReply) LowerExternal(value FfiFeedContributorGrantReply) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[FfiFeedContributorGrantReply](c, value))
-}
-
-func (c FfiConverterFfiFeedContributorGrantReply) Write(writer io.Writer, value FfiFeedContributorGrantReply) {
-	FfiConverterBoolINSTANCE.Write(writer, value.Added)
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.Reason)
-}
-
-type FfiDestroyerFfiFeedContributorGrantReply struct{}
-
-func (_ FfiDestroyerFfiFeedContributorGrantReply) Destroy(value FfiFeedContributorGrantReply) {
-	value.Destroy()
-}
-
-// FFI mirror of [`fauna_protocol::feed::FeedGetReply`] — a single feed
-// including its rules, decoded to the form's triples.
-type FfiFeedGetReply struct {
-	FeedId string
-	// Hex-encoded owner `[u8; 32]`.
-	Owner string
-	Name  string
-	// The feed's typed rules, decoded by the shared codec
-	// (`fauna_client_feed::decode_filter_rules`).
-	Rules            []FfiFilterRule
-	Combination      string
-	CreatedAt        int64
-	Scope            string
-	ContributorSeeds []string
-}
-
-func (r *FfiFeedGetReply) Destroy() {
-	FfiDestroyerString{}.Destroy(r.FeedId)
-	FfiDestroyerString{}.Destroy(r.Owner)
-	FfiDestroyerString{}.Destroy(r.Name)
-	FfiDestroyerSequenceFfiFilterRule{}.Destroy(r.Rules)
-	FfiDestroyerString{}.Destroy(r.Combination)
-	FfiDestroyerInt64{}.Destroy(r.CreatedAt)
-	FfiDestroyerString{}.Destroy(r.Scope)
-	FfiDestroyerSequenceString{}.Destroy(r.ContributorSeeds)
-}
-
-type FfiConverterFfiFeedGetReply struct{}
-
-var FfiConverterFfiFeedGetReplyINSTANCE = FfiConverterFfiFeedGetReply{}
-
-func (c FfiConverterFfiFeedGetReply) Lift(rb RustBufferI) FfiFeedGetReply {
-	return LiftFromRustBuffer[FfiFeedGetReply](c, rb)
-}
-
-func (c FfiConverterFfiFeedGetReply) Read(reader io.Reader) FfiFeedGetReply {
-	return FfiFeedGetReply{
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterSequenceFfiFilterRuleINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterInt64INSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterSequenceStringINSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterFfiFeedGetReply) Lower(value FfiFeedGetReply) C.RustBuffer {
-	return LowerIntoRustBuffer[FfiFeedGetReply](c, value)
-}
-
-func (c FfiConverterFfiFeedGetReply) LowerExternal(value FfiFeedGetReply) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[FfiFeedGetReply](c, value))
-}
-
-func (c FfiConverterFfiFeedGetReply) Write(writer io.Writer, value FfiFeedGetReply) {
-	FfiConverterStringINSTANCE.Write(writer, value.FeedId)
-	FfiConverterStringINSTANCE.Write(writer, value.Owner)
-	FfiConverterStringINSTANCE.Write(writer, value.Name)
-	FfiConverterSequenceFfiFilterRuleINSTANCE.Write(writer, value.Rules)
-	FfiConverterStringINSTANCE.Write(writer, value.Combination)
-	FfiConverterInt64INSTANCE.Write(writer, value.CreatedAt)
-	FfiConverterStringINSTANCE.Write(writer, value.Scope)
-	FfiConverterSequenceStringINSTANCE.Write(writer, value.ContributorSeeds)
-}
-
-type FfiDestroyerFfiFeedGetReply struct{}
-
-func (_ FfiDestroyerFfiFeedGetReply) Destroy(value FfiFeedGetReply) {
-	value.Destroy()
-}
-
-// FFI mirror of [`fauna_protocol::feed::FeedLocalPostsReply`] — the local feed
-// (always chronological, so no `score_cursor`).
-type FfiFeedLocalPostsReply struct {
-	Posts  []FfiFeedPostItem
-	Cursor *int64
-}
-
-func (r *FfiFeedLocalPostsReply) Destroy() {
-	FfiDestroyerSequenceFfiFeedPostItem{}.Destroy(r.Posts)
-	FfiDestroyerOptionalInt64{}.Destroy(r.Cursor)
-}
-
-type FfiConverterFfiFeedLocalPostsReply struct{}
-
-var FfiConverterFfiFeedLocalPostsReplyINSTANCE = FfiConverterFfiFeedLocalPostsReply{}
-
-func (c FfiConverterFfiFeedLocalPostsReply) Lift(rb RustBufferI) FfiFeedLocalPostsReply {
-	return LiftFromRustBuffer[FfiFeedLocalPostsReply](c, rb)
-}
-
-func (c FfiConverterFfiFeedLocalPostsReply) Read(reader io.Reader) FfiFeedLocalPostsReply {
-	return FfiFeedLocalPostsReply{
-		FfiConverterSequenceFfiFeedPostItemINSTANCE.Read(reader),
-		FfiConverterOptionalInt64INSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterFfiFeedLocalPostsReply) Lower(value FfiFeedLocalPostsReply) C.RustBuffer {
-	return LowerIntoRustBuffer[FfiFeedLocalPostsReply](c, value)
-}
-
-func (c FfiConverterFfiFeedLocalPostsReply) LowerExternal(value FfiFeedLocalPostsReply) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[FfiFeedLocalPostsReply](c, value))
-}
-
-func (c FfiConverterFfiFeedLocalPostsReply) Write(writer io.Writer, value FfiFeedLocalPostsReply) {
-	FfiConverterSequenceFfiFeedPostItemINSTANCE.Write(writer, value.Posts)
-	FfiConverterOptionalInt64INSTANCE.Write(writer, value.Cursor)
-}
-
-type FfiDestroyerFfiFeedLocalPostsReply struct{}
-
-func (_ FfiDestroyerFfiFeedLocalPostsReply) Destroy(value FfiFeedLocalPostsReply) {
-	value.Destroy()
-}
-
-// FFI mirror of [`fauna_protocol::feed::FeedPostItem`].
-type FfiFeedPostItem struct {
-	// Hex-encoded post id `[u8; 32]`.
-	PostId string
-	// Hex-encoded author `[u8; 32]`.
-	Author    string
-	Body      string
-	CreatedAt int64
-	Tags      []string
-	HasMedia  bool
-	IsReply   bool
-	Source    string
-	// Interaction-bar counters (ratified 2026-06-27) — drive the native
-	// apps' icon+count bar (count hidden at 0). Additive Record fields:
-	// consume-safe (clients receive `FfiFeedPostItem`, never construct it).
-	LikeCount   int64
-	ReplyCount  int64
-	RepostCount int64
-	QuoteCount  int64
-	// Composite score in fixed-point micro-units (×1e6); `None` outside the
-	// `order=score` branch (the dag-cbor wire forbids floats).
-	Score *int64
-	// Hex-encoded `[u8; 32]` post id this post *quotes* (`Reference::Quote`
-	// target) — drives the embedded quoted-post card. `None` when the post
-	// quotes nothing, or when talking to a nest that doesn't yet project it.
-	QuotedPostId *string
-	// Hex-encoded `[u8; 32]` post id this post *reposts* — `Some` marks a
-	// repost row (attribution + embedded original; `feed.md` § Interaction
-	// bar → Repost, ratified 2026-08-10). Additive Record field,
-	// consume-safe.
-	RepostedPostId *string
-	// The connection actor's own live repost of this row's post —
-	// `unrepost`'s argument; presence = "reposted by me". `None` on bridged
-	// rows and on rows the actor has not reposted.
-	ViewerRepostId *string
-	// The connection actor's like-toggle state on this post.
-	ViewerLiked bool
-	// A bridged author's face; `None` for a native author. Additive Record field, consume-safe.
-	AuthorDisplay *FfiAuthorDisplay
-}
-
-func (r *FfiFeedPostItem) Destroy() {
-	FfiDestroyerString{}.Destroy(r.PostId)
-	FfiDestroyerString{}.Destroy(r.Author)
-	FfiDestroyerString{}.Destroy(r.Body)
-	FfiDestroyerInt64{}.Destroy(r.CreatedAt)
-	FfiDestroyerSequenceString{}.Destroy(r.Tags)
-	FfiDestroyerBool{}.Destroy(r.HasMedia)
-	FfiDestroyerBool{}.Destroy(r.IsReply)
-	FfiDestroyerString{}.Destroy(r.Source)
-	FfiDestroyerInt64{}.Destroy(r.LikeCount)
-	FfiDestroyerInt64{}.Destroy(r.ReplyCount)
-	FfiDestroyerInt64{}.Destroy(r.RepostCount)
-	FfiDestroyerInt64{}.Destroy(r.QuoteCount)
-	FfiDestroyerOptionalInt64{}.Destroy(r.Score)
-	FfiDestroyerOptionalString{}.Destroy(r.QuotedPostId)
-	FfiDestroyerOptionalString{}.Destroy(r.RepostedPostId)
-	FfiDestroyerOptionalString{}.Destroy(r.ViewerRepostId)
-	FfiDestroyerBool{}.Destroy(r.ViewerLiked)
-	FfiDestroyerOptionalFfiAuthorDisplay{}.Destroy(r.AuthorDisplay)
-}
-
-type FfiConverterFfiFeedPostItem struct{}
-
-var FfiConverterFfiFeedPostItemINSTANCE = FfiConverterFfiFeedPostItem{}
-
-func (c FfiConverterFfiFeedPostItem) Lift(rb RustBufferI) FfiFeedPostItem {
-	return LiftFromRustBuffer[FfiFeedPostItem](c, rb)
-}
-
-func (c FfiConverterFfiFeedPostItem) Read(reader io.Reader) FfiFeedPostItem {
-	return FfiFeedPostItem{
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterInt64INSTANCE.Read(reader),
-		FfiConverterSequenceStringINSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterInt64INSTANCE.Read(reader),
-		FfiConverterInt64INSTANCE.Read(reader),
-		FfiConverterInt64INSTANCE.Read(reader),
-		FfiConverterInt64INSTANCE.Read(reader),
-		FfiConverterOptionalInt64INSTANCE.Read(reader),
-		FfiConverterOptionalStringINSTANCE.Read(reader),
-		FfiConverterOptionalStringINSTANCE.Read(reader),
-		FfiConverterOptionalStringINSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-		FfiConverterOptionalFfiAuthorDisplayINSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterFfiFeedPostItem) Lower(value FfiFeedPostItem) C.RustBuffer {
-	return LowerIntoRustBuffer[FfiFeedPostItem](c, value)
-}
-
-func (c FfiConverterFfiFeedPostItem) LowerExternal(value FfiFeedPostItem) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[FfiFeedPostItem](c, value))
-}
-
-func (c FfiConverterFfiFeedPostItem) Write(writer io.Writer, value FfiFeedPostItem) {
-	FfiConverterStringINSTANCE.Write(writer, value.PostId)
-	FfiConverterStringINSTANCE.Write(writer, value.Author)
-	FfiConverterStringINSTANCE.Write(writer, value.Body)
-	FfiConverterInt64INSTANCE.Write(writer, value.CreatedAt)
-	FfiConverterSequenceStringINSTANCE.Write(writer, value.Tags)
-	FfiConverterBoolINSTANCE.Write(writer, value.HasMedia)
-	FfiConverterBoolINSTANCE.Write(writer, value.IsReply)
-	FfiConverterStringINSTANCE.Write(writer, value.Source)
-	FfiConverterInt64INSTANCE.Write(writer, value.LikeCount)
-	FfiConverterInt64INSTANCE.Write(writer, value.ReplyCount)
-	FfiConverterInt64INSTANCE.Write(writer, value.RepostCount)
-	FfiConverterInt64INSTANCE.Write(writer, value.QuoteCount)
-	FfiConverterOptionalInt64INSTANCE.Write(writer, value.Score)
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.QuotedPostId)
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.RepostedPostId)
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.ViewerRepostId)
-	FfiConverterBoolINSTANCE.Write(writer, value.ViewerLiked)
-	FfiConverterOptionalFfiAuthorDisplayINSTANCE.Write(writer, value.AuthorDisplay)
-}
-
-type FfiDestroyerFfiFeedPostItem struct{}
-
-func (_ FfiDestroyerFfiFeedPostItem) Destroy(value FfiFeedPostItem) {
-	value.Destroy()
-}
-
-// FFI mirror of [`fauna_protocol::feed::FeedPostsReply`] — a feed's posts plus
-// the pagination cursors (chronological `cursor` in the default branch, score
-// `score_cursor` in the `order=score` branch).
-type FfiFeedPostsReply struct {
-	Posts       []FfiFeedPostItem
-	Cursor      *int64
-	ScoreCursor *int64
-	// The tiebreak half of the score-order keyset cursor — echo it back beside
-	// `score_cursor` on the next page (`fauna_protocol::feed::FeedPostsReply`).
-	ScoreCursorCreatedAt *int64
-}
-
-func (r *FfiFeedPostsReply) Destroy() {
-	FfiDestroyerSequenceFfiFeedPostItem{}.Destroy(r.Posts)
-	FfiDestroyerOptionalInt64{}.Destroy(r.Cursor)
-	FfiDestroyerOptionalInt64{}.Destroy(r.ScoreCursor)
-	FfiDestroyerOptionalInt64{}.Destroy(r.ScoreCursorCreatedAt)
-}
-
-type FfiConverterFfiFeedPostsReply struct{}
-
-var FfiConverterFfiFeedPostsReplyINSTANCE = FfiConverterFfiFeedPostsReply{}
-
-func (c FfiConverterFfiFeedPostsReply) Lift(rb RustBufferI) FfiFeedPostsReply {
-	return LiftFromRustBuffer[FfiFeedPostsReply](c, rb)
-}
-
-func (c FfiConverterFfiFeedPostsReply) Read(reader io.Reader) FfiFeedPostsReply {
-	return FfiFeedPostsReply{
-		FfiConverterSequenceFfiFeedPostItemINSTANCE.Read(reader),
-		FfiConverterOptionalInt64INSTANCE.Read(reader),
-		FfiConverterOptionalInt64INSTANCE.Read(reader),
-		FfiConverterOptionalInt64INSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterFfiFeedPostsReply) Lower(value FfiFeedPostsReply) C.RustBuffer {
-	return LowerIntoRustBuffer[FfiFeedPostsReply](c, value)
-}
-
-func (c FfiConverterFfiFeedPostsReply) LowerExternal(value FfiFeedPostsReply) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[FfiFeedPostsReply](c, value))
-}
-
-func (c FfiConverterFfiFeedPostsReply) Write(writer io.Writer, value FfiFeedPostsReply) {
-	FfiConverterSequenceFfiFeedPostItemINSTANCE.Write(writer, value.Posts)
-	FfiConverterOptionalInt64INSTANCE.Write(writer, value.Cursor)
-	FfiConverterOptionalInt64INSTANCE.Write(writer, value.ScoreCursor)
-	FfiConverterOptionalInt64INSTANCE.Write(writer, value.ScoreCursorCreatedAt)
-}
-
-type FfiDestroyerFfiFeedPostsReply struct{}
-
-func (_ FfiDestroyerFfiFeedPostsReply) Destroy(value FfiFeedPostsReply) {
-	value.Destroy()
-}
-
 // FFI mirror of [`fauna_protocol::bridges_ui::FeedSubscription`].
 type FfiFeedSubscription struct {
 	Id        int64
@@ -22412,74 +21076,6 @@ func (_ FfiDestroyerFfiFeedSubscription) Destroy(value FfiFeedSubscription) {
 	value.Destroy()
 }
 
-// FFI mirror of [`fauna_protocol::feed::FeedSummary`] — the list-view feed
-// (omits `rules`, which ride only on `feed_get`).
-type FfiFeedSummary struct {
-	FeedId string
-	// Hex-encoded owner `[u8; 32]`.
-	Owner       string
-	Name        string
-	Combination string
-	CreatedAt   int64
-	// `local` or `discovery`.
-	Scope            string
-	ContributorSeeds []string
-}
-
-func (r *FfiFeedSummary) Destroy() {
-	FfiDestroyerString{}.Destroy(r.FeedId)
-	FfiDestroyerString{}.Destroy(r.Owner)
-	FfiDestroyerString{}.Destroy(r.Name)
-	FfiDestroyerString{}.Destroy(r.Combination)
-	FfiDestroyerInt64{}.Destroy(r.CreatedAt)
-	FfiDestroyerString{}.Destroy(r.Scope)
-	FfiDestroyerSequenceString{}.Destroy(r.ContributorSeeds)
-}
-
-type FfiConverterFfiFeedSummary struct{}
-
-var FfiConverterFfiFeedSummaryINSTANCE = FfiConverterFfiFeedSummary{}
-
-func (c FfiConverterFfiFeedSummary) Lift(rb RustBufferI) FfiFeedSummary {
-	return LiftFromRustBuffer[FfiFeedSummary](c, rb)
-}
-
-func (c FfiConverterFfiFeedSummary) Read(reader io.Reader) FfiFeedSummary {
-	return FfiFeedSummary{
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterInt64INSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterSequenceStringINSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterFfiFeedSummary) Lower(value FfiFeedSummary) C.RustBuffer {
-	return LowerIntoRustBuffer[FfiFeedSummary](c, value)
-}
-
-func (c FfiConverterFfiFeedSummary) LowerExternal(value FfiFeedSummary) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[FfiFeedSummary](c, value))
-}
-
-func (c FfiConverterFfiFeedSummary) Write(writer io.Writer, value FfiFeedSummary) {
-	FfiConverterStringINSTANCE.Write(writer, value.FeedId)
-	FfiConverterStringINSTANCE.Write(writer, value.Owner)
-	FfiConverterStringINSTANCE.Write(writer, value.Name)
-	FfiConverterStringINSTANCE.Write(writer, value.Combination)
-	FfiConverterInt64INSTANCE.Write(writer, value.CreatedAt)
-	FfiConverterStringINSTANCE.Write(writer, value.Scope)
-	FfiConverterSequenceStringINSTANCE.Write(writer, value.ContributorSeeds)
-}
-
-type FfiDestroyerFfiFeedSummary struct{}
-
-func (_ FfiDestroyerFfiFeedSummary) Destroy(value FfiFeedSummary) {
-	value.Destroy()
-}
-
 // FFI mirror of [`fauna_protocol::email::FilterActionInputs`] — every input
 // the shared filter form collects for its action.
 type FfiFilterActionInputs struct {
@@ -22533,57 +21129,6 @@ func (c FfiConverterFfiFilterActionInputs) Write(writer io.Writer, value FfiFilt
 type FfiDestroyerFfiFilterActionInputs struct{}
 
 func (_ FfiDestroyerFfiFilterActionInputs) Destroy(value FfiFilterActionInputs) {
-	value.Destroy()
-}
-
-// FFI mirror of [`fauna_client_feed::DecodedFilterRule`] — one decoded feed-rule
-// `(rule_type, value, required)` triple a feed-edit form binds to. The inverse of
-// [`encode_filter_rule`]'s input.
-type FfiFilterRule struct {
-	RuleType string
-	Value    string
-	Required bool
-}
-
-func (r *FfiFilterRule) Destroy() {
-	FfiDestroyerString{}.Destroy(r.RuleType)
-	FfiDestroyerString{}.Destroy(r.Value)
-	FfiDestroyerBool{}.Destroy(r.Required)
-}
-
-type FfiConverterFfiFilterRule struct{}
-
-var FfiConverterFfiFilterRuleINSTANCE = FfiConverterFfiFilterRule{}
-
-func (c FfiConverterFfiFilterRule) Lift(rb RustBufferI) FfiFilterRule {
-	return LiftFromRustBuffer[FfiFilterRule](c, rb)
-}
-
-func (c FfiConverterFfiFilterRule) Read(reader io.Reader) FfiFilterRule {
-	return FfiFilterRule{
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterFfiFilterRule) Lower(value FfiFilterRule) C.RustBuffer {
-	return LowerIntoRustBuffer[FfiFilterRule](c, value)
-}
-
-func (c FfiConverterFfiFilterRule) LowerExternal(value FfiFilterRule) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[FfiFilterRule](c, value))
-}
-
-func (c FfiConverterFfiFilterRule) Write(writer io.Writer, value FfiFilterRule) {
-	FfiConverterStringINSTANCE.Write(writer, value.RuleType)
-	FfiConverterStringINSTANCE.Write(writer, value.Value)
-	FfiConverterBoolINSTANCE.Write(writer, value.Required)
-}
-
-type FfiDestroyerFfiFilterRule struct{}
-
-func (_ FfiDestroyerFfiFilterRule) Destroy(value FfiFilterRule) {
 	value.Destroy()
 }
 
@@ -24281,7 +22826,7 @@ type FfiPendingActionSummary struct {
 	// `handle.change` / `account.delete` / `snapshot.delete` / …
 	ActionType string
 	Target     *string
-	// `pending` / `executed` / `cancelled` / `expired`.
+	// `pending` / `executing` / `executed` / `cancelled` / `expired`.
 	Status         string
 	CreatedAt      int64
 	ExecuteAfter   int64
@@ -26045,67 +24590,6 @@ func (c FfiConverterFfiSealedUpload) Write(writer io.Writer, value FfiSealedUplo
 type FfiDestroyerFfiSealedUpload struct{}
 
 func (_ FfiDestroyerFfiSealedUpload) Destroy(value FfiSealedUpload) {
-	value.Destroy()
-}
-
-// FFI mirror of [`fauna_protocol::search::SearchResult`] — one search hit. The
-// protocol type's forward-compat `extra` overflow has no counterpart here
-// (clients only consume the named fields). `rank` is fixed-point micro-units
-// (higher = more relevant; the dag-cbor wire forbids floats), `created_at` is
-// epoch micros.
-type FfiSearchResult struct {
-	ContentType string
-	ContentId   string
-	CreatedAt   int64
-	Rank        int64
-	Snippet     string
-}
-
-func (r *FfiSearchResult) Destroy() {
-	FfiDestroyerString{}.Destroy(r.ContentType)
-	FfiDestroyerString{}.Destroy(r.ContentId)
-	FfiDestroyerInt64{}.Destroy(r.CreatedAt)
-	FfiDestroyerInt64{}.Destroy(r.Rank)
-	FfiDestroyerString{}.Destroy(r.Snippet)
-}
-
-type FfiConverterFfiSearchResult struct{}
-
-var FfiConverterFfiSearchResultINSTANCE = FfiConverterFfiSearchResult{}
-
-func (c FfiConverterFfiSearchResult) Lift(rb RustBufferI) FfiSearchResult {
-	return LiftFromRustBuffer[FfiSearchResult](c, rb)
-}
-
-func (c FfiConverterFfiSearchResult) Read(reader io.Reader) FfiSearchResult {
-	return FfiSearchResult{
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterInt64INSTANCE.Read(reader),
-		FfiConverterInt64INSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterFfiSearchResult) Lower(value FfiSearchResult) C.RustBuffer {
-	return LowerIntoRustBuffer[FfiSearchResult](c, value)
-}
-
-func (c FfiConverterFfiSearchResult) LowerExternal(value FfiSearchResult) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[FfiSearchResult](c, value))
-}
-
-func (c FfiConverterFfiSearchResult) Write(writer io.Writer, value FfiSearchResult) {
-	FfiConverterStringINSTANCE.Write(writer, value.ContentType)
-	FfiConverterStringINSTANCE.Write(writer, value.ContentId)
-	FfiConverterInt64INSTANCE.Write(writer, value.CreatedAt)
-	FfiConverterInt64INSTANCE.Write(writer, value.Rank)
-	FfiConverterStringINSTANCE.Write(writer, value.Snippet)
-}
-
-type FfiDestroyerFfiSearchResult struct{}
-
-func (_ FfiDestroyerFfiSearchResult) Destroy(value FfiSearchResult) {
 	value.Destroy()
 }
 
@@ -28445,10 +26929,11 @@ func (_ FfiDestroyerSpamBaselineCopyInput) Destroy(value SpamBaselineCopyInput) 
 
 // Plaintext side of an AEAD-unwrapped `WrappedSubmissionTokenBlob`.
 // Mirrors `fauna_mls::wrapped_blob::SubmissionToken`'s public policy
-// fields; `user_sig` is verified inside the FFI and dropped from the
-// returned shape (the consumer authenticates the user via the FFI's
-// Ok/Err outcome, and uses the policy fields for D.3/D.7's quota +
-// expiry enforcement).
+// fields; `user_sig` is verified inside the FFI and kept only inside
+// `canonical_bytes` (the consumer authenticates the user via the FFI's
+// Ok/Err outcome, uses the policy fields for D.3/D.7's quota + expiry
+// enforcement, and forwards `canonical_bytes` to the nest as its proof
+// of the submitter).
 type SubmissionTokenFfi struct {
 	ActorId           []byte
 	CredentialId      string
@@ -28456,6 +26941,12 @@ type SubmissionTokenFfi struct {
 	ExpiresAt         uint64
 	MaxRecipients     uint32
 	MaxMessagesPerDay uint32
+	// The verified token's canonical DAG-CBOR plaintext, `user_sig` included —
+	// the bytes the MTA hands the nest as `submission_token` on every
+	// `enqueue_outbound_mail`, so the nest proves the submitter itself
+	// (`mail-multidomain.md` § From: header ownership → *Per door,
+	// nest-side*). Signed policy data, no secret.
+	CanonicalBytes []byte
 }
 
 func (r *SubmissionTokenFfi) Destroy() {
@@ -28465,6 +26956,7 @@ func (r *SubmissionTokenFfi) Destroy() {
 	FfiDestroyerUint64{}.Destroy(r.ExpiresAt)
 	FfiDestroyerUint32{}.Destroy(r.MaxRecipients)
 	FfiDestroyerUint32{}.Destroy(r.MaxMessagesPerDay)
+	FfiDestroyerBytes{}.Destroy(r.CanonicalBytes)
 }
 
 type FfiConverterSubmissionTokenFfi struct{}
@@ -28483,6 +26975,7 @@ func (c FfiConverterSubmissionTokenFfi) Read(reader io.Reader) SubmissionTokenFf
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterUint32INSTANCE.Read(reader),
 		FfiConverterUint32INSTANCE.Read(reader),
+		FfiConverterBytesINSTANCE.Read(reader),
 	}
 }
 
@@ -28501,6 +26994,7 @@ func (c FfiConverterSubmissionTokenFfi) Write(writer io.Writer, value Submission
 	FfiConverterUint64INSTANCE.Write(writer, value.ExpiresAt)
 	FfiConverterUint32INSTANCE.Write(writer, value.MaxRecipients)
 	FfiConverterUint32INSTANCE.Write(writer, value.MaxMessagesPerDay)
+	FfiConverterBytesINSTANCE.Write(writer, value.CanonicalBytes)
 }
 
 type FfiDestroyerSubmissionTokenFfi struct{}
@@ -28980,7 +27474,8 @@ type FfiCloudBackupExclusion interface {
 // **android** — excluded declaratively by the app's own manifest, which no
 // runtime call can substitute for. `declaration` names the file + rule so
 // a reviewer can check it exists rather than take the claim; android's is
-// `AndroidManifest.xml android:allowBackup="false"`.
+// `AndroidManifest.xml android:allowBackup="false" +
+// android:dataExtractionRules="@xml/data_extraction_rules"`.
 type FfiCloudBackupExclusionDeclaredInManifest struct {
 	Declaration string
 }
@@ -29471,6 +27966,7 @@ var ErrFfiErrorNestIdentityChanged = fmt.Errorf("FfiErrorNestIdentityChanged")
 var ErrFfiErrorIdentitySuperseded = fmt.Errorf("FfiErrorIdentitySuperseded")
 var ErrFfiErrorGuardianApprovalRequired = fmt.Errorf("FfiErrorGuardianApprovalRequired")
 var ErrFfiErrorAccountLocked = fmt.Errorf("FfiErrorAccountLocked")
+var ErrFfiErrorStateNeedsNewerApp = fmt.Errorf("FfiErrorStateNeedsNewerApp")
 
 // Variant structs
 type FfiErrorGeneral struct {
@@ -29791,6 +28287,56 @@ func (self FfiErrorAccountLocked) Is(target error) bool {
 	return target == ErrFfiErrorAccountLocked
 }
 
+// **A newer build wrote this account's `mls.db` with a breaking change** —
+// `MlsError::SchemaIncompatible` at engine construction (`ui/conversations.md`
+// § Errors & edge cases, the sixth standing truth). The store is intact and
+// untouched; only a newer app can open it.
+//
+// Distinct from [`Self::General`] because the app owes the standing
+// `conversations.errors.state_needs_newer_app` notice on `error-message`
+// (everything non-conversations proceeds), and the display text cannot tell
+// it apart. Raised by the conversations-session factory
+// (`FfiNestClient::build_conversations_session`), the one seam apple,
+// windows and android all route through.
+type FfiErrorStateNeedsNewerApp struct {
+	Msg string
+}
+
+// **A newer build wrote this account's `mls.db` with a breaking change** —
+// `MlsError::SchemaIncompatible` at engine construction (`ui/conversations.md`
+// § Errors & edge cases, the sixth standing truth). The store is intact and
+// untouched; only a newer app can open it.
+//
+// Distinct from [`Self::General`] because the app owes the standing
+// `conversations.errors.state_needs_newer_app` notice on `error-message`
+// (everything non-conversations proceeds), and the display text cannot tell
+// it apart. Raised by the conversations-session factory
+// (`FfiNestClient::build_conversations_session`), the one seam apple,
+// windows and android all route through.
+func NewFfiErrorStateNeedsNewerApp(
+	msg string,
+) *FfiError {
+	return &FfiError{err: &FfiErrorStateNeedsNewerApp{
+		Msg: msg}}
+}
+
+func (e FfiErrorStateNeedsNewerApp) destroy() {
+	FfiDestroyerString{}.Destroy(e.Msg)
+}
+
+func (err FfiErrorStateNeedsNewerApp) Error() string {
+	return fmt.Sprint("StateNeedsNewerApp",
+		": ",
+
+		"Msg=",
+		err.Msg,
+	)
+}
+
+func (self FfiErrorStateNeedsNewerApp) Is(target error) bool {
+	return target == ErrFfiErrorStateNeedsNewerApp
+}
+
 type FfiConverterFfiError struct{}
 
 var FfiConverterFfiErrorINSTANCE = FfiConverterFfiError{}
@@ -29837,6 +28383,10 @@ func (c FfiConverterFfiError) Read(reader io.Reader) *FfiError {
 		return &FfiError{&FfiErrorAccountLocked{
 			LockedUntilSecs: FfiConverterUint64INSTANCE.Read(reader),
 		}}
+	case 7:
+		return &FfiError{&FfiErrorStateNeedsNewerApp{
+			Msg: FfiConverterStringINSTANCE.Read(reader),
+		}}
 	default:
 		panic(fmt.Sprintf("Unknown error code %d in FfiConverterFfiError.Read()", errorID))
 	}
@@ -29864,6 +28414,9 @@ func (c FfiConverterFfiError) Write(writer io.Writer, value *FfiError) {
 	case *FfiErrorAccountLocked:
 		writeInt32(writer, 6)
 		FfiConverterUint64INSTANCE.Write(writer, variantValue.LockedUntilSecs)
+	case *FfiErrorStateNeedsNewerApp:
+		writeInt32(writer, 7)
+		FfiConverterStringINSTANCE.Write(writer, variantValue.Msg)
 	default:
 		_ = variantValue
 		panic(fmt.Sprintf("invalid error value `%v` in FfiConverterFfiError.Write", value))
@@ -29885,6 +28438,8 @@ func (_ FfiDestroyerFfiError) Destroy(value *FfiError) {
 	case FfiErrorGuardianApprovalRequired:
 		variantValue.destroy()
 	case FfiErrorAccountLocked:
+		variantValue.destroy()
+	case FfiErrorStateNeedsNewerApp:
 		variantValue.destroy()
 	default:
 		_ = variantValue
@@ -30651,9 +29206,10 @@ type FfiDestroyerFfiRegistrationMode struct{}
 func (_ FfiDestroyerFfiRegistrationMode) Destroy(value FfiRegistrationMode) {
 }
 
-// UniFFI face of [`fauna_client::SessionEndingVerdict`] — a post-auth verdict
-// a signed-in session cannot survive, each routed by the apps to the launch
-// surface rather than a banner (`security.md` § Post-auth surfacing).
+// UniFFI face of [`fauna_client::SessionEndingVerdict`] — a verdict a
+// signed-in session cannot survive, each routed by the apps to the launch
+// surface rather than a banner (`security.md` § Post-auth surfacing;
+// `version-compatibility.md` § Dimension 4 for [`Self::AppOutdated`]).
 type FfiSessionEndingVerdict uint
 
 const (
@@ -30663,6 +29219,13 @@ const (
 	FfiSessionEndingVerdictSuperseded FfiSessionEndingVerdict = 2
 	// The nest stopped signing this identity in — suspended or removed.
 	FfiSessionEndingVerdictSignInRefused FfiSessionEndingVerdict = 3
+	// The nest refused this app's subprotocol — the app is too old for it.
+	// The re-run launch lands the needs-update surface.
+	FfiSessionEndingVerdictAppOutdated FfiSessionEndingVerdict = 4
+	// The nest needs updating — restarted into its degraded needs-update mode
+	// while signed in (`fauna.nest.outdated`). The app re-enters launch, whose
+	// re-run challenge lands its non-retry update surface.
+	FfiSessionEndingVerdictNestOutdated FfiSessionEndingVerdict = 5
 )
 
 type FfiConverterFfiSessionEndingVerdict struct{}
@@ -31775,47 +30338,6 @@ type FfiDestroyerOptionalFfiAdminUpdateAvailable struct{}
 func (_ FfiDestroyerOptionalFfiAdminUpdateAvailable) Destroy(value *FfiAdminUpdateAvailable) {
 	if value != nil {
 		FfiDestroyerFfiAdminUpdateAvailable{}.Destroy(*value)
-	}
-}
-
-type FfiConverterOptionalFfiAuthorDisplay struct{}
-
-var FfiConverterOptionalFfiAuthorDisplayINSTANCE = FfiConverterOptionalFfiAuthorDisplay{}
-
-func (c FfiConverterOptionalFfiAuthorDisplay) Lift(rb RustBufferI) *FfiAuthorDisplay {
-	return LiftFromRustBuffer[*FfiAuthorDisplay](c, rb)
-}
-
-func (_ FfiConverterOptionalFfiAuthorDisplay) Read(reader io.Reader) *FfiAuthorDisplay {
-	if readInt8(reader) == 0 {
-		return nil
-	}
-	temp := FfiConverterFfiAuthorDisplayINSTANCE.Read(reader)
-	return &temp
-}
-
-func (c FfiConverterOptionalFfiAuthorDisplay) Lower(value *FfiAuthorDisplay) C.RustBuffer {
-	return LowerIntoRustBuffer[*FfiAuthorDisplay](c, value)
-}
-
-func (c FfiConverterOptionalFfiAuthorDisplay) LowerExternal(value *FfiAuthorDisplay) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[*FfiAuthorDisplay](c, value))
-}
-
-func (_ FfiConverterOptionalFfiAuthorDisplay) Write(writer io.Writer, value *FfiAuthorDisplay) {
-	if value == nil {
-		writeInt8(writer, 0)
-	} else {
-		writeInt8(writer, 1)
-		FfiConverterFfiAuthorDisplayINSTANCE.Write(writer, *value)
-	}
-}
-
-type FfiDestroyerOptionalFfiAuthorDisplay struct{}
-
-func (_ FfiDestroyerOptionalFfiAuthorDisplay) Destroy(value *FfiAuthorDisplay) {
-	if value != nil {
-		FfiDestroyerFfiAuthorDisplay{}.Destroy(*value)
 	}
 }
 
@@ -33930,6 +32452,53 @@ func (FfiDestroyerSequenceFfiAdminMembershipTier) Destroy(sequence []FfiAdminMem
 	}
 }
 
+type FfiConverterSequenceFfiAdminPendingAction struct{}
+
+var FfiConverterSequenceFfiAdminPendingActionINSTANCE = FfiConverterSequenceFfiAdminPendingAction{}
+
+func (c FfiConverterSequenceFfiAdminPendingAction) Lift(rb RustBufferI) []FfiAdminPendingAction {
+	return LiftFromRustBuffer[[]FfiAdminPendingAction](c, rb)
+}
+
+func (c FfiConverterSequenceFfiAdminPendingAction) Read(reader io.Reader) []FfiAdminPendingAction {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]FfiAdminPendingAction, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterFfiAdminPendingActionINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceFfiAdminPendingAction) Lower(value []FfiAdminPendingAction) C.RustBuffer {
+	return LowerIntoRustBuffer[[]FfiAdminPendingAction](c, value)
+}
+
+func (c FfiConverterSequenceFfiAdminPendingAction) LowerExternal(value []FfiAdminPendingAction) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]FfiAdminPendingAction](c, value))
+}
+
+func (c FfiConverterSequenceFfiAdminPendingAction) Write(writer io.Writer, value []FfiAdminPendingAction) {
+	if len(value) > math.MaxInt32 {
+		panic("[]FfiAdminPendingAction is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterFfiAdminPendingActionINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceFfiAdminPendingAction struct{}
+
+func (FfiDestroyerSequenceFfiAdminPendingAction) Destroy(sequence []FfiAdminPendingAction) {
+	for _, value := range sequence {
+		FfiDestroyerFfiAdminPendingAction{}.Destroy(value)
+	}
+}
+
 type FfiConverterSequenceFfiAdminTier struct{}
 
 var FfiConverterSequenceFfiAdminTierINSTANCE = FfiConverterSequenceFfiAdminTier{}
@@ -34115,53 +32684,6 @@ type FfiDestroyerSequenceFfiBackupStatusEntry struct{}
 func (FfiDestroyerSequenceFfiBackupStatusEntry) Destroy(sequence []FfiBackupStatusEntry) {
 	for _, value := range sequence {
 		FfiDestroyerFfiBackupStatusEntry{}.Destroy(value)
-	}
-}
-
-type FfiConverterSequenceFfiBlueskyPost struct{}
-
-var FfiConverterSequenceFfiBlueskyPostINSTANCE = FfiConverterSequenceFfiBlueskyPost{}
-
-func (c FfiConverterSequenceFfiBlueskyPost) Lift(rb RustBufferI) []FfiBlueskyPost {
-	return LiftFromRustBuffer[[]FfiBlueskyPost](c, rb)
-}
-
-func (c FfiConverterSequenceFfiBlueskyPost) Read(reader io.Reader) []FfiBlueskyPost {
-	length := readInt32(reader)
-	if length == 0 {
-		return nil
-	}
-	result := make([]FfiBlueskyPost, 0, length)
-	for i := int32(0); i < length; i++ {
-		result = append(result, FfiConverterFfiBlueskyPostINSTANCE.Read(reader))
-	}
-	return result
-}
-
-func (c FfiConverterSequenceFfiBlueskyPost) Lower(value []FfiBlueskyPost) C.RustBuffer {
-	return LowerIntoRustBuffer[[]FfiBlueskyPost](c, value)
-}
-
-func (c FfiConverterSequenceFfiBlueskyPost) LowerExternal(value []FfiBlueskyPost) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[[]FfiBlueskyPost](c, value))
-}
-
-func (c FfiConverterSequenceFfiBlueskyPost) Write(writer io.Writer, value []FfiBlueskyPost) {
-	if len(value) > math.MaxInt32 {
-		panic("[]FfiBlueskyPost is too large to fit into Int32")
-	}
-
-	writeInt32(writer, int32(len(value)))
-	for _, item := range value {
-		FfiConverterFfiBlueskyPostINSTANCE.Write(writer, item)
-	}
-}
-
-type FfiDestroyerSequenceFfiBlueskyPost struct{}
-
-func (FfiDestroyerSequenceFfiBlueskyPost) Destroy(sequence []FfiBlueskyPost) {
-	for _, value := range sequence {
-		FfiDestroyerFfiBlueskyPost{}.Destroy(value)
 	}
 }
 
@@ -34773,53 +33295,6 @@ type FfiDestroyerSequenceFfiChunkItem struct{}
 func (FfiDestroyerSequenceFfiChunkItem) Destroy(sequence []FfiChunkItem) {
 	for _, value := range sequence {
 		FfiDestroyerFfiChunkItem{}.Destroy(value)
-	}
-}
-
-type FfiConverterSequenceFfiClassifyLabel struct{}
-
-var FfiConverterSequenceFfiClassifyLabelINSTANCE = FfiConverterSequenceFfiClassifyLabel{}
-
-func (c FfiConverterSequenceFfiClassifyLabel) Lift(rb RustBufferI) []FfiClassifyLabel {
-	return LiftFromRustBuffer[[]FfiClassifyLabel](c, rb)
-}
-
-func (c FfiConverterSequenceFfiClassifyLabel) Read(reader io.Reader) []FfiClassifyLabel {
-	length := readInt32(reader)
-	if length == 0 {
-		return nil
-	}
-	result := make([]FfiClassifyLabel, 0, length)
-	for i := int32(0); i < length; i++ {
-		result = append(result, FfiConverterFfiClassifyLabelINSTANCE.Read(reader))
-	}
-	return result
-}
-
-func (c FfiConverterSequenceFfiClassifyLabel) Lower(value []FfiClassifyLabel) C.RustBuffer {
-	return LowerIntoRustBuffer[[]FfiClassifyLabel](c, value)
-}
-
-func (c FfiConverterSequenceFfiClassifyLabel) LowerExternal(value []FfiClassifyLabel) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[[]FfiClassifyLabel](c, value))
-}
-
-func (c FfiConverterSequenceFfiClassifyLabel) Write(writer io.Writer, value []FfiClassifyLabel) {
-	if len(value) > math.MaxInt32 {
-		panic("[]FfiClassifyLabel is too large to fit into Int32")
-	}
-
-	writeInt32(writer, int32(len(value)))
-	for _, item := range value {
-		FfiConverterFfiClassifyLabelINSTANCE.Write(writer, item)
-	}
-}
-
-type FfiDestroyerSequenceFfiClassifyLabel struct{}
-
-func (FfiDestroyerSequenceFfiClassifyLabel) Destroy(sequence []FfiClassifyLabel) {
-	for _, value := range sequence {
-		FfiDestroyerFfiClassifyLabel{}.Destroy(value)
 	}
 }
 
@@ -35528,100 +34003,6 @@ func (FfiDestroyerSequenceFfiFamilyWardInfo) Destroy(sequence []FfiFamilyWardInf
 	}
 }
 
-type FfiConverterSequenceFfiFeedContributor struct{}
-
-var FfiConverterSequenceFfiFeedContributorINSTANCE = FfiConverterSequenceFfiFeedContributor{}
-
-func (c FfiConverterSequenceFfiFeedContributor) Lift(rb RustBufferI) []FfiFeedContributor {
-	return LiftFromRustBuffer[[]FfiFeedContributor](c, rb)
-}
-
-func (c FfiConverterSequenceFfiFeedContributor) Read(reader io.Reader) []FfiFeedContributor {
-	length := readInt32(reader)
-	if length == 0 {
-		return nil
-	}
-	result := make([]FfiFeedContributor, 0, length)
-	for i := int32(0); i < length; i++ {
-		result = append(result, FfiConverterFfiFeedContributorINSTANCE.Read(reader))
-	}
-	return result
-}
-
-func (c FfiConverterSequenceFfiFeedContributor) Lower(value []FfiFeedContributor) C.RustBuffer {
-	return LowerIntoRustBuffer[[]FfiFeedContributor](c, value)
-}
-
-func (c FfiConverterSequenceFfiFeedContributor) LowerExternal(value []FfiFeedContributor) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[[]FfiFeedContributor](c, value))
-}
-
-func (c FfiConverterSequenceFfiFeedContributor) Write(writer io.Writer, value []FfiFeedContributor) {
-	if len(value) > math.MaxInt32 {
-		panic("[]FfiFeedContributor is too large to fit into Int32")
-	}
-
-	writeInt32(writer, int32(len(value)))
-	for _, item := range value {
-		FfiConverterFfiFeedContributorINSTANCE.Write(writer, item)
-	}
-}
-
-type FfiDestroyerSequenceFfiFeedContributor struct{}
-
-func (FfiDestroyerSequenceFfiFeedContributor) Destroy(sequence []FfiFeedContributor) {
-	for _, value := range sequence {
-		FfiDestroyerFfiFeedContributor{}.Destroy(value)
-	}
-}
-
-type FfiConverterSequenceFfiFeedPostItem struct{}
-
-var FfiConverterSequenceFfiFeedPostItemINSTANCE = FfiConverterSequenceFfiFeedPostItem{}
-
-func (c FfiConverterSequenceFfiFeedPostItem) Lift(rb RustBufferI) []FfiFeedPostItem {
-	return LiftFromRustBuffer[[]FfiFeedPostItem](c, rb)
-}
-
-func (c FfiConverterSequenceFfiFeedPostItem) Read(reader io.Reader) []FfiFeedPostItem {
-	length := readInt32(reader)
-	if length == 0 {
-		return nil
-	}
-	result := make([]FfiFeedPostItem, 0, length)
-	for i := int32(0); i < length; i++ {
-		result = append(result, FfiConverterFfiFeedPostItemINSTANCE.Read(reader))
-	}
-	return result
-}
-
-func (c FfiConverterSequenceFfiFeedPostItem) Lower(value []FfiFeedPostItem) C.RustBuffer {
-	return LowerIntoRustBuffer[[]FfiFeedPostItem](c, value)
-}
-
-func (c FfiConverterSequenceFfiFeedPostItem) LowerExternal(value []FfiFeedPostItem) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[[]FfiFeedPostItem](c, value))
-}
-
-func (c FfiConverterSequenceFfiFeedPostItem) Write(writer io.Writer, value []FfiFeedPostItem) {
-	if len(value) > math.MaxInt32 {
-		panic("[]FfiFeedPostItem is too large to fit into Int32")
-	}
-
-	writeInt32(writer, int32(len(value)))
-	for _, item := range value {
-		FfiConverterFfiFeedPostItemINSTANCE.Write(writer, item)
-	}
-}
-
-type FfiDestroyerSequenceFfiFeedPostItem struct{}
-
-func (FfiDestroyerSequenceFfiFeedPostItem) Destroy(sequence []FfiFeedPostItem) {
-	for _, value := range sequence {
-		FfiDestroyerFfiFeedPostItem{}.Destroy(value)
-	}
-}
-
 type FfiConverterSequenceFfiFeedSubscription struct{}
 
 var FfiConverterSequenceFfiFeedSubscriptionINSTANCE = FfiConverterSequenceFfiFeedSubscription{}
@@ -35666,100 +34047,6 @@ type FfiDestroyerSequenceFfiFeedSubscription struct{}
 func (FfiDestroyerSequenceFfiFeedSubscription) Destroy(sequence []FfiFeedSubscription) {
 	for _, value := range sequence {
 		FfiDestroyerFfiFeedSubscription{}.Destroy(value)
-	}
-}
-
-type FfiConverterSequenceFfiFeedSummary struct{}
-
-var FfiConverterSequenceFfiFeedSummaryINSTANCE = FfiConverterSequenceFfiFeedSummary{}
-
-func (c FfiConverterSequenceFfiFeedSummary) Lift(rb RustBufferI) []FfiFeedSummary {
-	return LiftFromRustBuffer[[]FfiFeedSummary](c, rb)
-}
-
-func (c FfiConverterSequenceFfiFeedSummary) Read(reader io.Reader) []FfiFeedSummary {
-	length := readInt32(reader)
-	if length == 0 {
-		return nil
-	}
-	result := make([]FfiFeedSummary, 0, length)
-	for i := int32(0); i < length; i++ {
-		result = append(result, FfiConverterFfiFeedSummaryINSTANCE.Read(reader))
-	}
-	return result
-}
-
-func (c FfiConverterSequenceFfiFeedSummary) Lower(value []FfiFeedSummary) C.RustBuffer {
-	return LowerIntoRustBuffer[[]FfiFeedSummary](c, value)
-}
-
-func (c FfiConverterSequenceFfiFeedSummary) LowerExternal(value []FfiFeedSummary) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[[]FfiFeedSummary](c, value))
-}
-
-func (c FfiConverterSequenceFfiFeedSummary) Write(writer io.Writer, value []FfiFeedSummary) {
-	if len(value) > math.MaxInt32 {
-		panic("[]FfiFeedSummary is too large to fit into Int32")
-	}
-
-	writeInt32(writer, int32(len(value)))
-	for _, item := range value {
-		FfiConverterFfiFeedSummaryINSTANCE.Write(writer, item)
-	}
-}
-
-type FfiDestroyerSequenceFfiFeedSummary struct{}
-
-func (FfiDestroyerSequenceFfiFeedSummary) Destroy(sequence []FfiFeedSummary) {
-	for _, value := range sequence {
-		FfiDestroyerFfiFeedSummary{}.Destroy(value)
-	}
-}
-
-type FfiConverterSequenceFfiFilterRule struct{}
-
-var FfiConverterSequenceFfiFilterRuleINSTANCE = FfiConverterSequenceFfiFilterRule{}
-
-func (c FfiConverterSequenceFfiFilterRule) Lift(rb RustBufferI) []FfiFilterRule {
-	return LiftFromRustBuffer[[]FfiFilterRule](c, rb)
-}
-
-func (c FfiConverterSequenceFfiFilterRule) Read(reader io.Reader) []FfiFilterRule {
-	length := readInt32(reader)
-	if length == 0 {
-		return nil
-	}
-	result := make([]FfiFilterRule, 0, length)
-	for i := int32(0); i < length; i++ {
-		result = append(result, FfiConverterFfiFilterRuleINSTANCE.Read(reader))
-	}
-	return result
-}
-
-func (c FfiConverterSequenceFfiFilterRule) Lower(value []FfiFilterRule) C.RustBuffer {
-	return LowerIntoRustBuffer[[]FfiFilterRule](c, value)
-}
-
-func (c FfiConverterSequenceFfiFilterRule) LowerExternal(value []FfiFilterRule) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[[]FfiFilterRule](c, value))
-}
-
-func (c FfiConverterSequenceFfiFilterRule) Write(writer io.Writer, value []FfiFilterRule) {
-	if len(value) > math.MaxInt32 {
-		panic("[]FfiFilterRule is too large to fit into Int32")
-	}
-
-	writeInt32(writer, int32(len(value)))
-	for _, item := range value {
-		FfiConverterFfiFilterRuleINSTANCE.Write(writer, item)
-	}
-}
-
-type FfiDestroyerSequenceFfiFilterRule struct{}
-
-func (FfiDestroyerSequenceFfiFilterRule) Destroy(sequence []FfiFilterRule) {
-	for _, value := range sequence {
-		FfiDestroyerFfiFilterRule{}.Destroy(value)
 	}
 }
 
@@ -37032,53 +35319,6 @@ func (FfiDestroyerSequenceFfiSealedChunk) Destroy(sequence []FfiSealedChunk) {
 	}
 }
 
-type FfiConverterSequenceFfiSearchResult struct{}
-
-var FfiConverterSequenceFfiSearchResultINSTANCE = FfiConverterSequenceFfiSearchResult{}
-
-func (c FfiConverterSequenceFfiSearchResult) Lift(rb RustBufferI) []FfiSearchResult {
-	return LiftFromRustBuffer[[]FfiSearchResult](c, rb)
-}
-
-func (c FfiConverterSequenceFfiSearchResult) Read(reader io.Reader) []FfiSearchResult {
-	length := readInt32(reader)
-	if length == 0 {
-		return nil
-	}
-	result := make([]FfiSearchResult, 0, length)
-	for i := int32(0); i < length; i++ {
-		result = append(result, FfiConverterFfiSearchResultINSTANCE.Read(reader))
-	}
-	return result
-}
-
-func (c FfiConverterSequenceFfiSearchResult) Lower(value []FfiSearchResult) C.RustBuffer {
-	return LowerIntoRustBuffer[[]FfiSearchResult](c, value)
-}
-
-func (c FfiConverterSequenceFfiSearchResult) LowerExternal(value []FfiSearchResult) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[[]FfiSearchResult](c, value))
-}
-
-func (c FfiConverterSequenceFfiSearchResult) Write(writer io.Writer, value []FfiSearchResult) {
-	if len(value) > math.MaxInt32 {
-		panic("[]FfiSearchResult is too large to fit into Int32")
-	}
-
-	writeInt32(writer, int32(len(value)))
-	for _, item := range value {
-		FfiConverterFfiSearchResultINSTANCE.Write(writer, item)
-	}
-}
-
-type FfiDestroyerSequenceFfiSearchResult struct{}
-
-func (FfiDestroyerSequenceFfiSearchResult) Destroy(sequence []FfiSearchResult) {
-	for _, value := range sequence {
-		FfiDestroyerFfiSearchResult{}.Destroy(value)
-	}
-}
-
 type FfiConverterSequenceFfiServedSetKeys struct{}
 
 var FfiConverterSequenceFfiServedSetKeysINSTANCE = FfiConverterSequenceFfiServedSetKeys{}
@@ -38211,14 +36451,23 @@ func AtprotoDeterministicTid(createdAtMicros int64, postId []byte) string {
 // The bridge fills the `#commit` frame's `blobs` field from this, and the
 // nest stamps `atproto_blobs.referenced_at` from the same Rust walk — one
 // walker, two consumers, so the frame's announcement and the GC guard cannot
-// disagree about which blobs a record names. Infallible like the refs
-// extraction above: unreadable bytes announce nothing.
-func AtprotoExtractBlobRefs(recordCbor []byte) []string {
-	return FfiConverterSequenceStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+// disagree about which blobs a record names. Unreadable bytes announce
+// nothing, like the refs extraction above; a record naming more than
+// `MAX_RECORD_BLOB_REFS` distinct blobs is an **error**, never a truncated
+// list — the nest refuses such a write before it commits, and a caller that
+// still meets one must not announce or resolve a shortened set.
+func AtprotoExtractBlobRefs(recordCbor []byte) ([]string, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_ffi_fn_func_atproto_extract_blob_refs(FfiConverterBytesINSTANCE.Lower(recordCbor), _uniffiStatus),
 		}
-	}))
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue []string
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterSequenceStringINSTANCE.Lift(_uniffiRV), nil
+	}
 }
 
 // Extract the image attachments of stored Fauna post bytes, so the Go
@@ -39174,9 +37423,11 @@ func FeedSourceOperationWire(operation FfiFeedSourceOperation) string {
 	}))
 }
 
-// `fauna_protocol::age::FAUNA_IOS_APP_ID` — the team-prefixed App ID the iOS
-// store-age arm passes as `age_claim_digest`'s `application_id`, and nothing
-// more: whether an attestation is worth attaching is the addressed nest's
+// This build's team-prefixed iOS App ID — `fauna_protocol::age::FAUNA_IOS_APP_ID`,
+// or `FAUNA_IOS_KIDS_APP_ID` in the kids flavor (`kids-floor`), because App
+// Attest signs under the running bundle's App ID — which the iOS store-age
+// arm passes as `age_claim_digest`'s `application_id`, and nothing more:
+// whether an attestation is worth attaching is the addressed nest's
 // `attestation_platforms` list (`AgeNoncePlain`), never this build's arming
 // (`family-safety.md` § The account age band → *An attestation the nest
 // cannot check*). `None` only means the signed message cannot be formed.
@@ -39233,61 +37484,6 @@ func WardFeedRequestState(asks []FfiFamilyFeedRequest, bridgeId string, operatio
 			inner: C.uniffi_fauna_ffi_fn_func_ward_feed_request_state(FfiConverterSequenceFfiFamilyFeedRequestINSTANCE.Lower(asks), FfiConverterStringINSTANCE.Lower(bridgeId), FfiConverterStringINSTANCE.Lower(operation), FfiConverterStringINSTANCE.Lower(target), _uniffiStatus),
 		}
 	}))
-}
-
-// UniFFI façade for [`fauna_client_feed::encode_filter_rule`] — the shared
-// feed-rule encoder every native app uses. Builds one real
-// [`fauna_core::scoring::FilterRule`] from the create-feed form's
-// `(rule_type, value, required)` triple and renders it as JSON — the same
-// externally-tagged shape each element of the typed `rules` wire list takes
-// (e.g. `{"BodyContains":{"terms":["x"]}}`), exposed for inspection and the
-// apps' cross-language conformance tests (the feed calls themselves take
-// [`FfiFilterRule`] triples). Because it builds the *real* `FilterRule`, it
-// can't drift from what the nest decodes; an unknown `rule_type` is an
-// `Err`, not a `{}`.
-//
-// The encoding logic lives in `fauna-client-feed` so the Rust-native Linux
-// app can call it directly (no FFI hop); this thin wrapper just maps the
-// shared fn's `String` error onto [`FfiError`] for the Apple / Windows /
-// Android binding. Input conventions (`docs/goal/ui/feed.md` § Filter rule
-// types): comma-separated lists; integer `count` for `MinReplies`/`MinReposts`;
-// `CreatedAfter` input is **hours**; the label rules pack `"category:threshold"`
-// with `threshold` on a **0–10** scale (`× 100` → per-mille `u16`); the toggles
-// (`HasMedia`/`IsReply`) read `required`.
-func EncodeFilterRule(ruleType string, value string, required bool) (string, error) {
-	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
-		return GoRustBuffer{
-			inner: C.uniffi_fauna_ffi_fn_func_encode_filter_rule(FfiConverterStringINSTANCE.Lower(ruleType), FfiConverterStringINSTANCE.Lower(value), FfiConverterBoolINSTANCE.Lower(required), _uniffiStatus),
-		}
-	})
-	if _uniffiErr != nil {
-		var _uniffiDefaultValue string
-		return _uniffiDefaultValue, _uniffiErr
-	} else {
-		return FfiConverterStringINSTANCE.Lift(_uniffiRV), nil
-	}
-}
-
-// Normalize the create-feed form's triples by round-tripping them through the
-// real `FilterRule` — [`fauna_client_feed::encode_filter_rules`] then
-// [`fauna_client_feed::decode_filter_rules`], exactly what a create followed
-// by a `fauna.feed.get` hands back (CSV spacing re-joined with `", "`, the
-// label 0–10 scale and `CreatedAfter` hours inverted in Rust). Keeps the
-// Apple / Windows / Android bindings off a hand-rolled per-app normalizer
-// that would drift from the codec (priority #2/#3); an unknown `rule_type` is
-// an `Err`, not a silent drop.
-func NormalizeFilterRules(rules []FfiFilterRule) ([]FfiFilterRule, error) {
-	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
-		return GoRustBuffer{
-			inner: C.uniffi_fauna_ffi_fn_func_normalize_filter_rules(FfiConverterSequenceFfiFilterRuleINSTANCE.Lower(rules), _uniffiStatus),
-		}
-	})
-	if _uniffiErr != nil {
-		var _uniffiDefaultValue []FfiFilterRule
-		return _uniffiDefaultValue, _uniffiErr
-	} else {
-		return FfiConverterSequenceFfiFilterRuleINSTANCE.Lift(_uniffiRV), nil
-	}
 }
 
 // The `role == "member"` subset of a folder actor roster (the owner
@@ -39476,13 +37672,16 @@ func ShortNestId(id string) string {
 // canonical dag-cbor with `signature` zeroed via
 // [`fauna_core::scoring::sign_labeler_metadata`] — so the produced blob passes
 // `validate_labeler_publish` → `verify_labeler_metadata` by construction.
+// `label_abi` is the signed output revision (`LabelerOutput::label_abi`; pass
+// `fauna_core::scoring::LABEL_ABI_CURRENT`, 1 today — a test fixture passes a
+// later one to mint a module newer than this build reads).
 // Returns the canonical-CBOR `metadata_blob` bytes the `PublishLabelerRequest`
 // carries (bytes, not a `fauna_core` type, to avoid the uniffi-bindgen-go
 // value-format import footgun — same as the sibling exports).
-func BuildSignedLabelerMetadata(signingSeed []byte, wasmBytes []byte, version uint64, needsText bool, needsHashtags bool, needsMediaMetadata bool, needsAuthor bool, needsAttachmentBytes bool, maxMemoryBytes uint64, maxCpuMicroseconds uint64, updatedAt uint64) ([]byte, error) {
+func BuildSignedLabelerMetadata(signingSeed []byte, wasmBytes []byte, version uint64, needsText bool, needsHashtags bool, needsMediaMetadata bool, needsAuthor bool, needsAttachmentBytes bool, labelAbi uint16, maxMemoryBytes uint64, maxCpuMicroseconds uint64, updatedAt uint64) ([]byte, error) {
 	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
-			inner: C.uniffi_fauna_ffi_fn_func_build_signed_labeler_metadata(FfiConverterBytesINSTANCE.Lower(signingSeed), FfiConverterBytesINSTANCE.Lower(wasmBytes), FfiConverterUint64INSTANCE.Lower(version), FfiConverterBoolINSTANCE.Lower(needsText), FfiConverterBoolINSTANCE.Lower(needsHashtags), FfiConverterBoolINSTANCE.Lower(needsMediaMetadata), FfiConverterBoolINSTANCE.Lower(needsAuthor), FfiConverterBoolINSTANCE.Lower(needsAttachmentBytes), FfiConverterUint64INSTANCE.Lower(maxMemoryBytes), FfiConverterUint64INSTANCE.Lower(maxCpuMicroseconds), FfiConverterUint64INSTANCE.Lower(updatedAt), _uniffiStatus),
+			inner: C.uniffi_fauna_ffi_fn_func_build_signed_labeler_metadata(FfiConverterBytesINSTANCE.Lower(signingSeed), FfiConverterBytesINSTANCE.Lower(wasmBytes), FfiConverterUint64INSTANCE.Lower(version), FfiConverterBoolINSTANCE.Lower(needsText), FfiConverterBoolINSTANCE.Lower(needsHashtags), FfiConverterBoolINSTANCE.Lower(needsMediaMetadata), FfiConverterBoolINSTANCE.Lower(needsAuthor), FfiConverterBoolINSTANCE.Lower(needsAttachmentBytes), FfiConverterUint16INSTANCE.Lower(labelAbi), FfiConverterUint64INSTANCE.Lower(maxMemoryBytes), FfiConverterUint64INSTANCE.Lower(maxCpuMicroseconds), FfiConverterUint64INSTANCE.Lower(updatedAt), _uniffiStatus),
 		}
 	})
 	if _uniffiErr != nil {
@@ -41261,6 +39460,55 @@ func ClassifyRecipient(input string) []string {
 	}))
 }
 
+// The Contacts Find User lookup with cross-nest peer discovery — the shared
+// [`fauna_client_core::find_user::find_user_across_nests`] behind one export, so
+// no native app re-derives the foreign-domain decision or the peer URL
+// (`contacts.md` § Implementation status today → *Cross-nest knocks*;
+// `federation.md` § Client-side peer discovery for a cross-nest knock). A typed
+// `@domain` the home nest does not serve is dialed **directly** at
+// `fauna_provisioning::probe::peer_nest_url`, never through [`resolve_nest`]'s
+// nest-proxied hop (which refuses loopback / IP / `.local` authorities).
+//
+// `home_url` is the client's own nest; `domain` the typed `@domain` qualifier
+// (`None` for a bare handle). Returns a flat `[actor_id, handle, domain,
+// nest_url]`: slots 1,2 name the TYPED address (see [`resolve_handle`]); slot 3 is
+// the peer nest the actor resolved on — pass it as `fauna.inbox.send`'s
+// `recipient_nest_url` — or empty when the actor lives on the home nest (send
+// `null`). Any failure is an `Err`; the page shows its one find-error.
+//
+// `async_runtime = "tokio"` — same reason as [`resolve_handle`].
+func FindUser(homeUrl string, handle string, domain *string) ([]string, error) {
+	res, err := uniffiRustCallAsync[*FfiError](
+		FfiConverterFfiErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_fauna_ffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) []string {
+			return FfiConverterSequenceStringINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_ffi_fn_func_find_user(FfiConverterStringINSTANCE.Lower(homeUrl), FfiConverterStringINSTANCE.Lower(handle), FfiConverterOptionalStringINSTANCE.Lower(domain)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
 // UniFFI face of [`fauna_client_caldav::resolve_calendar_selection`] (events.md
 // § Where logic lives → *"Which calendars the page is scoped to"*): resolve the
 // Events page's `calendar-item` selection against the calendars that actually
@@ -41434,18 +39682,6 @@ func MintKeyBlob(signerSecret []byte, signerAuth FfiEmbedAsBytes, tier string, r
 	}
 }
 
-// Run the built-in spam/phishing text heuristic on `text`, returning one label per
-// category whose confidence is `> 0.0` (an empty list when the text trips no signal).
-// Pure string computation; the canonical implementation lives in
-// `fauna_core::text_heuristic` and is consumed identically by web (WASM) and nest.
-func ClassifyText(text string) []FfiClassifyLabel {
-	return FfiConverterSequenceFfiClassifyLabelINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
-		return GoRustBuffer{
-			inner: C.uniffi_fauna_ffi_fn_func_classify_text(FfiConverterStringINSTANCE.Lower(text), _uniffiStatus),
-		}
-	}))
-}
-
 // Forget the TOFU nest-identity pin for `nest_url` — the explicit,
 // user-approved recovery behind the `launch_identity_changed` warning's
 // "trust this nest" action (the `ssh-keygen -R host` analogue; web's
@@ -41522,12 +39758,22 @@ func InstallNestIdentityPinStoreWithMirror(dataDir string, replicaDir string) {
 // (the user domain, never the TCC-protected app-group container). Meant for
 // unsandboxed desktop shells; a sandboxed shell (iOS) keeps its own container
 // dir, where this resolver would point outside the sandbox.
-func InstallScopedTrustHome() string {
-	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+//
+// Throws (`FfiError::General`, the shared no-home refusal) when the process
+// has no absolute home — the caller logs it and keeps the in-memory pin store,
+// never a panic.
+func InstallScopedTrustHome() (string, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_ffi_fn_func_install_scoped_trust_home(_uniffiStatus),
 		}
-	}))
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue string
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterStringINSTANCE.Lift(_uniffiRV), nil
+	}
 }
 
 // The asked check — the "Check for Updates" door's one round trip — over
@@ -41592,7 +39838,11 @@ func IsNewer(current string, candidate string) bool {
 	}))
 }
 
-// The once-per-sign-in look, called from each app's post-sign-in hook, over
+// **Interim — the release-host sign-in look macOS and windows still call
+// until each moves to `FfiNestClient::look_for_newer_release_at_sign_in`,
+// which reads the signed-in nest and contacts no third party
+// (`installers/README.md` § Knowing a newer version is out); then this
+// function is deleted.** Over
 // [`fauna_client::update_look::look_at_sign_in_over_http`]: the newer release
 // to paint the same notice for, or `None` — nothing newer, or a failed look
 // (silent by rule). Same arguments as [`check_for_newer_release`].

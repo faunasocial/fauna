@@ -2,13 +2,13 @@
 
 Owns: docker-packaging
 Status: ratified
-Authority: the published nest Docker image + compose bundles — the multi-stage build (cache-mount strategy, --locked, per-stage toolchains), the s6 supervision tree + per-role UID/sandbox wiring, the entrypoint first-run + every-boot reconcile contract, the FAUNA_* env catalog (bucket-classified), the supervisor sidekick socket wire shape (the wire-level detail `mail-bridge-lifecycle.md` § Wire shapes delegates here), scan sidecars + watchtower, ports + /data layout; defers image tags/release channels to architecture/build-system.md § Image tags & channels, UID-isolation/sandbox rationale to architecture/security.md § UID isolation, bridge lifecycle semantics to behavior/mail-bridge-lifecycle.md, SNI routing policy to behavior/caldav-server.md § Network exposure, the home host-networking bundle to installers/home-relay.md, VPS provisioning that consumes the image to installers/vps.md.
+Authority: the published nest Docker image + compose bundles — the multi-stage build (cache-mount strategy, --locked, per-stage toolchains), the s6 supervision tree + per-role UID/sandbox wiring, the entrypoint first-run + every-boot reconcile contract, the FAUNA_* env catalog (bucket-classified), the supervisor sidekick socket wire shape (the wire-level detail `mail-bridge-lifecycle.md` § Wire shapes delegates here), scan sidecars + watchtower, ports + /data layout; defers image tags/release channels to architecture/image-pipeline.md § Image tags & channels, UID-isolation/sandbox rationale to architecture/security.md § UID isolation, bridge lifecycle semantics to behavior/mail-bridge-lifecycle.md, SNI routing policy to behavior/caldav-server.md § Network exposure, the home host-networking bundle to installers/home-relay.md, VPS provisioning that consumes the image to installers/vps.md.
 
 The recommended Docker deployment for the nest server — a single multi-arch container with s6-overlay process supervision, consumed directly by client-side provisioning via `fauna-provisioning`. Last verified: 2026-08-26 (docs-consistency sweep — re-checked the multi-stage build's binary list + `libfauna_ffi.so` feature flags, the s6 UID table, the supervisor allowlist, the retired-env-var claims, the golang exact-patch pin, and the `fauna-atproto-bridge` `contents.d` wiring against `Dockerfile`, `docker/entrypoint.sh`, `cmd/fauna-supervisor/supervisor.go`, `docker/s6/user/contents.d/`, and `bins/fauna-bridges/go.mod`; all held — no code change since the prior verify affected this doc's claims). | Source: `Dockerfile`, `docker/`, `docker-compose.yml`, `.github/workflows/build-nest-image.yml`.
 
 ## Implementation status today
 
-Fully implemented and in production: the image is what the closed-alpha nests run (Watchtower tracks `:latest`; release channels + the internal-CI production gate are owned by `architecture/build-system.md` § Image tags & channels). CI builds each arch **separately on the self-hosted CI runner** (amd64 built `--load` + smoke-tested before push; arm64 native; **no QEMU** — the Go stage must never run emulated, § Multi-Stage Build) — `.github/workflows/build-nest-image.yml`.
+Fully implemented and in production: the image is what the closed-alpha nests run (each box follows its channel's tag — by the Fauna updater on a box installed from the current bundles, by Watchtower on one installed before; Stable is `:latest` — the public pipeline's promote target in the same `ghcr.io/faunasocial/nest` package; the staging box tracks the private pipeline's `:dev`; release channels + the internal-CI production gate are owned by `architecture/image-pipeline.md` § Image tags & channels). CI builds each arch **separately on the self-hosted CI runner** (amd64 built `--load` + smoke-tested before push; arm64 native; **no QEMU** — the Go stage must never run emulated, § Multi-Stage Build) — `.github/workflows/build-nest-image.yml`.
 
 Recorded gaps / migration targets:
 
@@ -28,7 +28,7 @@ Provide the recommended deployment shape for the nest server: a single multi-arc
 
 ## Image
 
-**Registry:** `ghcr.io/faunasocial/nest:latest`
+**Registry:** `ghcr.io/faunasocial/nest:latest` — written by the public pipeline's promote; the private pipeline stages `:sha-<sha>` + `:dev` in the same package (channels: [`../image-pipeline.md`](../image-pipeline.md) § Image tags & channels).
 
 | Property | Value |
 |----------|-------|
@@ -57,7 +57,7 @@ the `labeler` half is ABI-load-bearing — dropping it is a linker failure, reco
 in the Dockerfile). A parallel `rust-wasm` stage builds the WASM modules for the
 web SPA.
 
-**Go** (an exact-patch-pinned `golang:1.26.8-bookworm` — never a floating
+**Go** (an exact-patch-pinned `golang:1.26.9-bookworm` — never a floating
 `golang:1.26-bookworm` tag, so the shipped toolchain is reproducible and
 `govulncheck` scans exactly what ships; kept in sync with
 `bins/fauna-bridges/go.mod`'s `toolchain` directive by a dedicated
@@ -268,10 +268,10 @@ admin's client-persisted state exists, overridden by it after).
 | `FAUNA_DEPLOYMENT_SEED` | Box-recovery identity seed, read by the nest binary (inert once an identity exists). Custody story: [`../nest/box-recovery.md`](../nest/box-recovery.md). Passed through compose (`docker-compose*.yml`) + both install scripts. | Artifact-set IPC (recovery input) |
 | `FAUNA_ACME_DIRECTORY_URL` | ACME directory override → `[acme] directory_url`. Set only by the tier_4 pebble harness; the CA is otherwise the constant Let's Encrypt (same owner). | Artifact-set IPC (test) |
 | `FAUNA_CORS_ORIGINS` | Comma-separated CORS origins boot seed; the live surface is the app-set `fauna.admin.set_cors_origins` state | Seed |
+| `FAUNA_IMAGE_TAG` | The image tag the bundle pulls (`${FAUNA_IMAGE_TAG:-latest}` on the `image:` line; channels owned by [`../image-pipeline.md`](../image-pipeline.md) § Image tags & channels) — and, repeated into the nest's environment in all three bundles, the **update-channel seed**: read only while no admin has chosen a channel from the app; a non-channel tag seeds a *pinned* box. Owner: [`../nest/update-channel.md`](../nest/update-channel.md) § The channel as nest state. | Seed |
 | `FAUNA_CLAMD_ADDR` / `FAUNA_RSPAMD_URL` | Content-scan sidecar addresses → `operator-hatch.toml` (compose defaults `clamd:3310` / `http://rspamd:11333`) | Artifact-set IPC |
 | `FAUNA_MTA_MX_OVERRIDE` | Test-harness MX override → `operator-hatch.toml` | Artifact-set IPC (test) |
 | `FAUNA_LOG_LEVEL` | Bridge log level (s6 run-scripts, default `info`) | Artifact-set IPC |
-| `FAUNA_IMAGE_TAG` | Image tag the compose bundle follows (default `latest`; channels owned by `architecture/build-system.md`) | Artifact-set IPC |
 
 (`FAUNA_NAME`, `FAUNA_PUBLIC_IP` and `FAUNA_IMAP`, formerly listed here, are read by
 nothing and emitted by nothing — removed. `FAUNA_ACME_EMAIL` and the entrypoint's
@@ -392,17 +392,17 @@ Its shape:
   in every shipping copy (since 2026-08-27) — the pin, the vetting evidence, and
   the currency cadence are owned by [`../release-integrity.md`](../release-integrity.md)
   § Third-party container images; this page names the topology only.
-- **`watchtower`** (`nickfedor/watchtower:latest` — maintained fork; the original
-  `containrrr/watchtower` is unmaintained and incompatible with Docker 24+) —
-  label-gated daily poll for image updates on the followed tag, recreating the
-  container on a new digest. Its `127.0.0.1:8080` HTTP API is **opt-in**
-  (`WATCHTOWER_HTTP_API_UPDATE`, default off) — when enabled it is what
-  `just deploy-dev` triggers over SSH for an instant update. Remove the service
-  for manual-only upgrades. Digest-pinned like the scanners (same owner). Because
-  only `fauna-nest` carries the enable label, watchtower updates the nest image
-  **only**: the two scanners and watchtower itself change only with a new bundle
-  copy — § Upgrades' `docker compose pull` re-pulls the same pinned bytes until
-  then — until the Fauna-namespace mirror that owner's part 4 targets lands.
+- **`fauna-updater`** — the nest image's second binary, run as its own
+  container at the nest's tag with `entrypoint: ["/usr/local/bin/fauna-updater"]`
+  and the Docker socket as its only mount; it follows the update channel and
+  re-creates the labelled nest on a newer build, never an older one (owner
+  [`../nest/update-channel.md`](../nest/update-channel.md) § The updater). It
+  takes no requests; `just deploy-dev` restarts it over SSH for an immediate
+  check. Remove the service for manual-only upgrades. Because only `fauna-nest`
+  carries the `social.fauna.update=true` label, it updates the nest **only**: the
+  two scanners change only with a new bundle copy — § Upgrades' `docker compose
+  pull` re-pulls the same pinned bytes until then — until the Fauna-namespace
+  mirror that release-integrity's part 4 targets lands.
 - Compose-level hardening: every service carries the `x-logging` 50 MB × 5
   rotation caps (the log-growth incident backstop) and the nest service a
   `stop_grace_period: 15s` (graceful WS close-1001 drain on recreate).
@@ -456,7 +456,7 @@ docker compose exec fauna-nest cat /data/claim-code
 
 ## Upgrades
 
-**Automatic (Watchtower):** The `watchtower` service in the compose file checks for a new `latest` image daily and restarts the container if one is found. The data volume is preserved automatically.
+**Automatic (the Fauna updater):** The `fauna-updater` service in the compose file follows the box's update channel — the tag the bundle was installed with until an admin chooses one in the app — checks the registry at the channel's interval (a minute on Dev and Test, an hour on Stable), re-creates the nest on a newer build and never downgrades; the data volume is preserved. Owner [`../nest/update-channel.md`](../nest/update-channel.md). A box installed before the updater replaced Watchtower keeps Watchtower until its compose is re-copied.
 
 **Manual:**
 

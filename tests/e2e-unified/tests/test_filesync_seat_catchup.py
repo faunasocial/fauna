@@ -19,9 +19,10 @@ The flow every test here asserts::
     the harness writer records a change through the shared engine (signed)
       -> the nest stores the record
       -> the seat's agent pulls it, on the nudge or on its restart
-      -> its engine applies it, skips it into a ``catchup_failed`` row, or
-         keeps the file on a backup place
-      -> the test reads the seat's disk, its state DB, or its agent log
+      -> its engine applies it, skips it into a ``catchup_failed`` row (and
+         reports that to the nest), or keeps the file on a backup place
+      -> the test reads the seat's disk, the nest's ``conflicts.list``, the
+         seat's own Folders review list, or its agent log
 
 The writer is ``helpers.harness_writer`` — one signed pass per call, so a
 change is on the nest the moment its ``sync()`` returns and the seat's wait
@@ -45,13 +46,17 @@ from common.envelope import CID_RAW_PREFIX, cid_link
 from common.auth import (
     UNBINDING_MAX_DEVICES,
     mint_token_via_handshake,
+    sealed_path,
     set_tier_caps,
     sync_changes_record,
+    sync_conflicts_list,
+    sync_devices_list,
     user_folder_ref,
 )
 from helpers import sync_seats
 from helpers.harness_writer import HarnessWriter
 from helpers.waiting import wait_until
+from i18n.strings import S
 
 pytestmark = [
     pytest.mark.tier_3,
@@ -222,8 +227,12 @@ def _upload_chunk_and_manifest(base: str, token: str, data: bytes, *,
 def test_a_permanently_unappliable_change_is_recorded_and_never_blocks_the_rest(
     nest_instance, request
 ):
-    """A stuck change ahead of a good one in the catch-up sequence: the good one
-    lands, the stuck one never reaches the disk, and it is RECORDED.
+    """Two stuck changes ahead of a good one in the catch-up sequence: the good
+    one lands, the stuck ones never reach the disk, and each is REPORTED — on
+    the nest's ``conflicts.list`` and the seat's own review list as a *Not
+    applied* row naming the device that is behind (name-less for the one whose
+    sealed path never opens) — until a later version of the file cures it
+    (`conflicts.md` § Skipped catch-up changes reach the review list).
 
     Measured live 2026-07-31: one un-appliable change froze a device's anchor
     and it pulled zero of the changes after it (`file-sync.md` § 5).
@@ -256,13 +265,22 @@ def test_a_permanently_unappliable_change_is_recorded_and_never_blocks_the_rest(
                 addresses=blake3.blake3(b"a different file entirely").digest(),
             ),
         )
+        # A change whose sealed path this seat can never open — the name-less
+        # skip, also ahead of the good change.
+        unreadable = sync_changes_record(
+            port, secret_key=secret_key, folder=folder, device_id=device,
+            path="unreadable.bin", size_bytes=len(later_body), base_url=base,
+            path_sealed=_UNOPENABLE_SEAL,
+            manifest_hash=_upload_chunk_and_manifest(base, token, later_body),
+        )
         later = sync_changes_record(
             port, secret_key=secret_key, folder=folder, device_id=device,
             path=later_path, size_bytes=len(later_body), base_url=base,
             manifest_hash=_upload_chunk_and_manifest(base, token, later_body),
         )
-        assert later["seq"] > stuck["seq"], (
-            f"the good change must sit behind the stuck one: {stuck=} {later=}"
+        assert stuck["seq"] < unreadable["seq"] < later["seq"], (
+            f"the good change must sit behind both stuck ones: {stuck=} "
+            f"{unreadable=} {later=}"
         )
 
         seat.restart(STARTUP_WINDOW)
@@ -277,16 +295,118 @@ def test_a_permanently_unappliable_change_is_recorded_and_never_blocks_the_rest(
             "reach the user's disk"
         )
 
-        # Recorded, not silent: the engine's own conflict row for it, read off
-        # the seat's state DB. No app's review list shows this row yet — they
-        # read the nest's `conflicts.list`, which it never reaches (captured as
-        # its own row, `file-sync.md` § 5's "surfaces in the conflict review
-        # list").
-        rows = seat.local_conflicts("catchup_failed")
-        assert [p for p, _ in rows] == [stuck_path], (
-            f"exactly the stuck change is recorded as catchup_failed, never the one "
-            f"that applied: {rows!r}\n{seat.diagnostics()}"
+        # Recorded, not silent — and REPORTED: the seat files each skip on the
+        # nest as an unresolved, candidate-free `catchup_failed` conflict that
+        # names the seat itself (`conflicts.md` § Skipped catch-up changes reach
+        # the review list). Matched by `path_sealed`, the row's only label: the
+        # stuck change's under the real funnel, the sealed-path change's
+        # forwarded verbatim.
+        stuck_seal = sealed_path(secret_key, stuck_path)
+        skips = _await_skip_reports(nest_instance, secret_key, writer,
+                                    {stuck_seal, _UNOPENABLE_SEAL}, seat)
+        seat_device = skips[stuck_seal]["device_id"]
+        assert skips[_UNOPENABLE_SEAL]["device_id"] == seat_device, skips
+
+        # The user sees them: the seat's own Folders page lists both as
+        # informational *Not applied* rows naming the device that is behind —
+        # the readable one by its path, the sealed one name-less, never dropped.
+        label = _device_label(nest_instance, secret_key, seat_device)
+        set_rows = _await_not_applied_rows(seat, folder, 2)
+        assert sorted(info for _, info in set_rows) == sorted([
+            f"{folder}: {stuck_path} ({label})",
+            f"{folder}: {S.devices.conflicts.unreadable_path} ({label})",
+        ]), f"the review list's Not applied rows: {set_rows!r}\n{seat.diagnostics()}"
+
+        # ── The cure: any later version of the file applies normally and the
+        # row clears on its own — off the nest's unresolved list and off the
+        # page — while the sealed-path skip, which nothing cured, stays. ──
+        writer.write(stuck_path, "a version this device can apply")
+        writer.sync(expect=[stuck_path])
+        _await_bytes(seat, stuck_path, b"a version this device can apply", "the cure")
+        wait_until(
+            lambda: set(_unresolved_skips(nest_instance, secret_key, writer))
+            == {_UNOPENABLE_SEAL},
+            WINDOW, interval=1.0,
+            diagnose=lambda: (
+                "the applied later change never resolved the skip on the nest: "
+                f"{_unresolved_skips(nest_instance, secret_key, writer)!r}\n"
+                f"{seat.diagnostics()}"
+            ),
         )
+        set_rows = _await_not_applied_rows(seat, folder, 1)
+        assert [info for _, info in set_rows] == [
+            f"{folder}: {S.devices.conflicts.unreadable_path} ({label})"
+        ], f"a cured skip must leave the review list: {set_rows!r}\n{seat.diagnostics()}"
+
+
+# A `path_sealed` no key opens: not a decodable `SealedLabel` at all, the
+# `Envelope` refusal (`fauna_core::label_custody::ChangePathRefusal`) — a
+# PERMANENT class decided before any key is consulted, so the seat skips it at
+# once instead of deferring it as key material still syncing (`NoRoot`). The
+# nest copies the blob it cannot check.
+_UNOPENABLE_SEAL = b"\xffthis is no sealed label"
+
+
+def _unresolved_skips(nest, secret_key: str, writer) -> dict[bytes, dict]:
+    """The nest's unresolved ``catchup_failed`` rows filed by a device other
+    than the writer, keyed by ``path_sealed``."""
+    rows = sync_conflicts_list(nest["port"], secret_key=secret_key,
+                               base_url=nest["url"])["conflicts"]
+    return {
+        bytes(c.get("path_sealed") or b""): c
+        for c in rows
+        if c["conflict_type"] == "catchup_failed"
+        and c["device_id"] != writer.device_id.hex()
+    }
+
+
+def _await_skip_reports(nest, secret_key: str, writer, seals: set, seat) -> dict:
+    """Wait for one unresolved ``catchup_failed`` report per seal; check its
+    shape (candidate-free, unresolved) and return them keyed by seal."""
+    got: dict = {}
+
+    def reported() -> bool:
+        got.clear()
+        got.update(_unresolved_skips(nest, secret_key, writer))
+        return seals <= set(got)
+
+    wait_until(reported, WINDOW, interval=1.0,
+               diagnose=lambda: f"the seat's skips never reached conflicts.list: "
+                                f"{got!r}\n{seat.diagnostics()}")
+    assert set(got) == seals, f"exactly the two skipped changes are reported: {got!r}"
+    for row in got.values():
+        assert not row.get("candidates") and row.get("resolved_at") is None, row
+    return got
+
+
+def _device_label(nest, secret_key: str, device_hex: str) -> str:
+    """The device's name as every app renders it (the sealed label, opened)."""
+    from fauna_ffi import open_device_label
+
+    row = next(d for d in sync_devices_list(nest["port"], secret_key=secret_key,
+                                            base_url=nest["url"])["devices"]
+               if d["device_id"] == device_hex)
+    return open_device_label(bytes.fromhex(secret_key), bytes.fromhex(device_hex),
+                             row.get("label_sealed"), row.get("label", ""))
+
+
+def _await_not_applied_rows(seat, folder: str, count: int) -> list:
+    """The seat's Folders-page review rows for ``folder`` badged *Not applied*,
+    once exactly ``count`` of them render (the page reloads on every read)."""
+    got: list = []
+
+    def rendered() -> bool:
+        got[:] = [
+            (badge, info) for badge, info in (seat.review_rows() or [])
+            if badge == S.devices.conflicts.type_catchup_failed
+            and info.startswith(f"{folder}: ")
+        ]
+        return len(got) == count
+
+    wait_until(rendered, WINDOW, interval=2.0,
+               diagnose=lambda: f"expected {count} Not applied row(s) for {folder}, "
+                                f"read {got!r}\n{seat.diagnostics()}")
+    return got
 
 
 @pytest.mark.timeout(int(STARTUP_WINDOW + 4 * WINDOW + 120))

@@ -39,7 +39,10 @@ use fauna_mls::wrapped_blob::{
 use fauna_protocol::bridge_routing::{
     EpochSealKey, SpamHistoryOp, SpamLabel as WireSpamLabel, TrainingSource as WireTrainingSource,
 };
-use fauna_protocol::wrapped_blob::{HolderSealTarget, PutSpamModelOutcome, SpamModelHolderCopy};
+use fauna_protocol::wrapped_blob::{
+    HolderSealTarget, PutSpamModelOutcome, SPAM_MODEL_STALE_RETRIES, SpamModelHolderCopy,
+    SpamModelPrecondition,
+};
 
 use crate::credential::{Credential, derive_credential_id};
 use crate::error::{DispatchError, NestError, SignerError};
@@ -172,6 +175,17 @@ pub trait NestClient: MaybeSendSync {
         epoch_keys: Option<Vec<EpochSealKey>>,
     ) -> Result<(), NestError>;
 
+    /// Read back the actor's own standing recipient X25519 pubkey
+    /// (`fauna.bridges.fetch_recipient_mls_pubkey`, the standing key — never
+    /// an epoch key; a `User` caller reads its own only). `None` when the nest
+    /// has none on file. The connect-time refresh compares it with the
+    /// generations its custody holds before it re-seals
+    /// ([`MailSettingsMachine::refresh_epoch_schedule`]).
+    async fn fetch_own_recipient_pubkey(
+        &self,
+        actor_id: [u8; 32],
+    ) -> Result<Option<[u8; 32]>, NestError>;
+
     /// Whether the home nest advertises capability `token` in its
     /// `fauna.nest.info` reply (`fauna_protocol::discovery::capability`).
     /// The degrade contract is the capability module's: a nest that does not
@@ -276,12 +290,18 @@ pub trait NestClient: MaybeSendSync {
     /// `DuplicateSignal` when the one-lesson rule (`mail-spam.md` § 3) rejected
     /// an `Insert` that repeats the actor's newest recorded lesson — then nothing
     /// was written and the stored model is unchanged.
+    ///
+    /// `expected_model` is the compare-and-swap precondition — the stored model
+    /// the write was computed from; when another write landed since, the nest
+    /// refuses the whole write with `StaleModel` and the caller re-fetches
+    /// (`mail-spam.md` § Transactional update). `None` ⇒ last-write-wins.
     async fn put_spam_model(
         &self,
         sealed_model: Vec<u8>,
         sample_count: u32,
         history_op: Option<SpamHistoryOp>,
         holder_copy: Option<SpamModelHolderCopy>,
+        expected_model: Option<SpamModelPrecondition>,
     ) -> Result<PutSpamModelOutcome, NestError>;
 
     /// `fauna.capabilities.mint` — deposit the client-built, HPKE-sealed
@@ -825,6 +845,15 @@ impl MailSettingsMachine {
         Ok(derive_standing_mail_keypairs(&mseks))
     }
 
+    /// The retirement instants (unix seconds) of the prior MSEK generations,
+    /// aligned with `standing_mail_keypairs()[1..]` — what the openers select a
+    /// generation by seal time with (`owner-key-material.md` § Path B-sibling-2 →
+    /// *Pre-rotation mail at rest*). Public timing metadata, not key material.
+    pub async fn recipient_generation_retirements(&self) -> Result<Vec<u64>, DispatchError> {
+        let mail = self.mail.load().await?;
+        Ok(mail.prior_retired_at_unix())
+    }
+
     /// The account's own X-Wing recipient **public** key — what a client seals
     /// its own copy of a bridged message to (`ui/conversations.md` § Where
     /// logic lives → *The `Bridged` adapter*: the Sent row). `None` when mail
@@ -942,7 +971,7 @@ impl MailSettingsMachine {
     /// [`Self::provision_snapshot_for`], which derives epoch roots from it and
     /// drops it — the transient mint-argument boundary the *Carrier shape* rule
     /// declares out of scope, not a carrier.
-    fn snapshot_mseks(mail: &MailConfig) -> Vec<[u8; 32]> {
+    pub(crate) fn snapshot_mseks(mail: &MailConfig) -> Vec<[u8; 32]> {
         let Some(msek) = mail.msek.as_ref() else {
             return Vec::new();
         };
@@ -1070,14 +1099,52 @@ impl MailSettingsMachine {
         // read-time cold-start seed (`stored_sealed == false`), starts from a
         // fresh model — persisting the seed would bake the deployment baseline
         // into the user's own model (`mail-spam.md` § Cold start Path 2).
+        //
+        // The fetch → mutate → put runs under a compare-and-swap precondition
+        // (`mail-spam.md` § Transactional update): the put names the stored
+        // model the mutation was computed from, and when another writer's put
+        // landed in between, the nest refuses it whole (`StaleModel`) and this
+        // loop re-fetches and re-applies `op` to the model now stored — so a
+        // concurrent lesson is never overwritten — at most
+        // `SPAM_MODEL_STALE_RETRIES` times.
+        let mut attempt = 0;
+        loop {
+            match self
+                .apply_spam_model_write_once(&op, history.as_ref(), &material, mlkem_dk)
+                .await?
+            {
+                Some(outcome) => return Ok(outcome),
+                None if attempt < SPAM_MODEL_STALE_RETRIES => attempt += 1,
+                None => {
+                    return Err(DispatchError::Nest(NestError::Rejected(format!(
+                        "put_spam_model: the stored spam model changed under {} retries",
+                        SPAM_MODEL_STALE_RETRIES
+                    ))));
+                }
+            }
+        }
+    }
+
+    /// One fetch → mutate → re-seal → conditional put of
+    /// [`Self::apply_spam_model_write`]. `None` ⇒ the nest refused the put as
+    /// `StaleModel` (another write landed after the fetch; nothing was written)
+    /// and the caller retries.
+    async fn apply_spam_model_write_once(
+        &self,
+        op: &ModelWriteOp,
+        history: Option<&HistoryWrite>,
+        material: &ReSealKeyMaterial,
+        mlkem_dk: &[u8; MLKEM768_DECAPS_KEY_LEN],
+    ) -> Result<Option<SpamModelWriteOutcome>, DispatchError> {
         let fetched = self.nest.fetch_spam_model(self.actor_id).await?;
+        let expected = SpamModelPrecondition::of_stored(stored_model(&fetched));
 
         let resealed = apply_and_reseal_hybrid(
             stored_model(&fetched),
             &material.x25519_secret,
             mlkem_dk,
             &material.xwing_pubkey,
-            &op,
+            op,
         )
         .map_err(|e| DispatchError::Wrap(format!("client spam-model re-seal: {e}")))?;
 
@@ -1104,7 +1171,9 @@ impl MailSettingsMachine {
         };
         let history_op = match history {
             None => None,
-            Some(HistoryWrite::Delete { history_id }) => Some(SpamHistoryOp::Delete { history_id }),
+            Some(HistoryWrite::Delete { history_id }) => Some(SpamHistoryOp::Delete {
+                history_id: history_id.clone(),
+            }),
             Some(HistoryWrite::Insert {
                 message_id,
                 mailbox,
@@ -1113,7 +1182,7 @@ impl MailSettingsMachine {
             }) => {
                 // An Insert is intrinsically a train event — its label is the
                 // `Train`'s. A mismatched op is a caller bug.
-                let label = match &op {
+                let label = match op {
                     ModelWriteOp::Train { label, .. } => match label {
                         SpamLabel::Spam => WireSpamLabel::Spam,
                         SpamLabel::Ham => WireSpamLabel::Ham,
@@ -1125,12 +1194,12 @@ impl MailSettingsMachine {
                     }
                 };
                 Some(SpamHistoryOp::Insert {
-                    message_id,
-                    mailbox,
+                    message_id: message_id.clone(),
+                    mailbox: mailbox.clone(),
                     sealed_subject: seal_blob(subject.as_bytes())?,
                     sealed_delta: seal_blob(&encode_history_delta(&resealed.delta))?,
                     label,
-                    source,
+                    source: *source,
                 })
             }
         };
@@ -1142,21 +1211,25 @@ impl MailSettingsMachine {
                 resealed.sample_count,
                 history_op,
                 holder_copy,
+                Some(expected),
             )
             .await?
         {
-            PutSpamModelOutcome::Written => Ok(SpamModelWriteOutcome::Sealed {
+            PutSpamModelOutcome::Written => Ok(Some(SpamModelWriteOutcome::Sealed {
                 sample_count: resealed.sample_count,
                 delta: resealed.delta,
-            }),
+            })),
+            // Another write landed after the fetch: nothing was written, and
+            // the caller re-fetches and re-applies `op`.
+            PutSpamModelOutcome::StaleModel => Ok(None),
             // The one-lesson rule: the nest kept the stored model as it was, so
             // the mutation we sealed is not the model on record — report the
             // count that is. An outcome a newer nest added reads the same way,
             // as not written: the mutation is discarded, never assumed stored.
             PutSpamModelOutcome::DuplicateSignal | PutSpamModelOutcome::Unknown => {
-                Ok(SpamModelWriteOutcome::Duplicate {
+                Ok(Some(SpamModelWriteOutcome::Duplicate {
                     sample_count: resealed.sample_count_before,
-                })
+                }))
             }
         }
     }
@@ -1223,6 +1296,7 @@ impl MailSettingsMachine {
         let Some(blob) = blob.filter(|b| !b.is_empty()) else {
             return Ok(());
         };
+        let mut blob = blob.to_vec();
         let sealed_supported = self.nest.nest_supports(SPAM_MODEL_SEALED_AT_REST).await?;
         let material = self.recipient_reseal_material().await?;
         match dispatch_for(sealed_supported, material.is_some()) {
@@ -1244,31 +1318,48 @@ impl MailSettingsMachine {
                     "recipient ML-KEM decaps key must be {MLKEM768_DECAPS_KEY_LEN} bytes"
                 ))
             })?;
-        let resealed = apply_and_reseal_hybrid(
-            Some(blob),
-            &material.x25519_secret,
-            dk,
-            &material.xwing_pubkey,
-            &noop,
-        )
-        .map_err(|e| {
-            DispatchError::Wrap(format!("client spam-model re-seal (initial copy): {e}"))
-        })?;
-        // `contribute_baseline = true` by construction here (the toggle set the bit
-        // before this runs), so the copy is always sealed to `holder`.
-        let holder_copy =
-            self.seal_baseline_holder_copy(true, Some(holder), &resealed.model_bytes)?;
-        // `history_op: None` ⇒ the one-lesson rule cannot fire (it gates only an
-        // `Insert`), so the outcome is `Written` by construction.
-        let _written = self
-            .nest
-            .put_spam_model(
-                resealed.sealed_model,
-                resealed.sample_count,
-                None,
-                holder_copy,
+        // The no-op re-seal rewrites the model it read, so it runs under the
+        // compare-and-swap precondition like every write (`mail-spam.md`
+        // § Transactional update): a train that landed after the fetch is never
+        // overwritten — the copy is re-sealed from the model now stored, at most
+        // `SPAM_MODEL_STALE_RETRIES` times, and otherwise left to ride the next
+        // train's write.
+        for _ in 0..=SPAM_MODEL_STALE_RETRIES {
+            let resealed = apply_and_reseal_hybrid(
+                Some(&blob),
+                &material.x25519_secret,
+                dk,
+                &material.xwing_pubkey,
+                &noop,
             )
-            .await?;
+            .map_err(|e| {
+                DispatchError::Wrap(format!("client spam-model re-seal (initial copy): {e}"))
+            })?;
+            // `contribute_baseline = true` by construction here (the toggle set the bit
+            // before this runs), so the copy is always sealed to `holder`.
+            let holder_copy =
+                self.seal_baseline_holder_copy(true, Some(holder), &resealed.model_bytes)?;
+            // `history_op: None` ⇒ the one-lesson rule cannot fire (it gates only an
+            // `Insert`), so the outcome is `Written` or `StaleModel`.
+            let outcome = self
+                .nest
+                .put_spam_model(
+                    resealed.sealed_model,
+                    resealed.sample_count,
+                    None,
+                    holder_copy,
+                    Some(SpamModelPrecondition::of_stored(Some(&blob))),
+                )
+                .await?;
+            if outcome != PutSpamModelOutcome::StaleModel {
+                return Ok(());
+            }
+            let fetched = self.nest.fetch_spam_model(self.actor_id).await?;
+            match stored_model(&fetched) {
+                Some(current) if !current.is_empty() => blob = current.to_vec(),
+                _ => return Ok(()),
+            }
+        }
         Ok(())
     }
 
@@ -1571,6 +1662,18 @@ impl MailSettingsMachine {
             ));
         }
 
+        // A rotation that did not finish — first-enable's own included, though
+        // that one reads enabled above — is resumed, never overtaken: a fresh
+        // mint here would write a new sentinel over a staged MSEK the nest may
+        // already hold (`start_rotation`'s refusal, same reason).
+        if mail.pending_rotation.is_some() {
+            self.set_snapshot_from(&rows);
+            return Err(DispatchError::InvalidState(
+                "a previous mail-key change didn't finish — resume it before turning email on"
+                    .into(),
+            ));
+        }
+
         self.set_status(SettingsStatus::Syncing);
 
         let upgrade = mail
@@ -1595,28 +1698,34 @@ impl MailSettingsMachine {
                 let _ = (display_name, credential);
                 self.provision_submission_token(&credential_id, &existing)
                     .await?;
+                let mail = self.mail.load().await?;
+                self.mail
+                    .write_state(MailStateRow {
+                        mail_enabled: Some(true),
+                        ..MailStateRow::recreatable_of(&mail)
+                    })
+                    .await?;
+                self.refresh_snapshot().await?;
+                self.turn_mail_subsystem_on().await
             }
             // ── Fresh, or a **dormant** MSEK (one a teardown or a succession
             //    burn left with no live credential): make sure the account holds
-            //    an MSEK, then mint the credential under it with the full
-            //    recovery-safe blob set incl. the submission token (snapshot →
-            //    recipient-pubkey → wrapped-MSEK → submission-token;
-            //    `mail-credentials.md` § Partial-state-during-minting). ──
+            //    an MSEK, then run first-enable as the degenerate rotation onto
+            //    it — under the resume sentinel, so a stop anywhere in the blob
+            //    set (snapshot → recipient-pubkey → wrapped-MSEK →
+            //    submission-token) reads pending and resumes
+            //    (`mail-credentials.md` § Partial-state-during-minting). ──
             None => {
                 let (msek, mail) = self.ensure_msek(mail).await?;
-                self.mint_credential_under(&msek, &mail, &rows, display_name, &credential, true)
-                    .await?;
+                crate::rotation::first_enable(self, msek, &mail, display_name, &credential).await
             }
         }
-        let mail = self.mail.load().await?;
-        self.mail
-            .write_state(MailStateRow {
-                mail_enabled: Some(true),
-                ..MailStateRow::recreatable_of(&mail)
-            })
-            .await?;
-        self.refresh_snapshot().await?;
+    }
 
+    /// Flip the deployment-wide mail subsystem on — the last step of every
+    /// email enable (the upgrade arm here, and first-enable's step 4 in
+    /// [`crate::rotation`], fresh or resumed).
+    pub(crate) async fn turn_mail_subsystem_on(&self) -> Result<(), DispatchError> {
         // Flip the deployment-wide mail subsystem on (design A). On a real
         //    deployment (Docker/systemd) the mail-bridge s6 services are gated
         //    on the `/data/imap-enabled` flag that `fauna.bridges.set_mail_enabled`
@@ -1678,7 +1787,6 @@ impl MailSettingsMachine {
         rows: &MailRows,
         display_name: String,
         credential: &Credential,
-        with_submission_token: bool,
     ) -> Result<(), DispatchError> {
         let credential_id = derive_credential_id(&display_name, &rows.spent_credential_ids());
         let mut history = Self::snapshot_mseks(mail);
@@ -1691,15 +1799,8 @@ impl MailSettingsMachine {
             history.insert(0, msek.to_array());
             Vec::new()
         };
-        self.provision_mailbox_blobs(
-            msek,
-            &history,
-            &retired_at_unix,
-            &credential_id,
-            credential,
-            with_submission_token,
-        )
-        .await?;
+        self.provision_mailbox_blobs(msek, &history, &retired_at_unix, &credential_id, credential)
+            .await?;
         self.mail
             .put_credential(MailCredential {
                 credential_id,
@@ -1732,7 +1833,7 @@ impl MailSettingsMachine {
     ///
     /// Two deliberate differences from [`Self::enable_mail`]:
     /// - **No submission token** — CalDAV needs no *outbound* mail capability, so
-    ///   this uses the read-only recipe (`provision_mailbox_blobs(.., false)`, the
+    ///   this uses the read recipe ([`Self::provision_mailbox_blobs`], the
     ///   same one `provision_relay_mailbox` uses). The user provisions the
     ///   outbound submission token only if/when they enable email.
     /// - **No deployment toggle flip** — the Admin-class `set_caldav_enabled`
@@ -1804,7 +1905,7 @@ impl MailSettingsMachine {
             // path, minus the submission token and the `set_mail_enabled`
             // deployment flip.
             let (msek, mail) = self.ensure_msek(mail).await?;
-            self.mint_credential_under(&msek, &mail, &rows, display_name, &credential, false)
+            self.mint_credential_under(&msek, &mail, &rows, display_name, &credential)
                 .await?;
         }
         // Record that this protocol is now on (so a later "Disable mail"
@@ -1833,12 +1934,13 @@ impl MailSettingsMachine {
     /// the grace generations ([`Self::snapshot_mseks`]) — so re-provisioning a
     /// mailbox that has rotated keeps its grace keypairs.
     ///
-    /// `with_submission_token` is `true` for a box the user submits from (the
-    /// primary / public relay box) and `false` for a relay/home box, which runs
-    /// no MTA and so needs only the read credential
+    /// This is the **read recipe**: no submission token. A DAV-only mailbox
+    /// sends nothing, and a relay/home box runs no MTA
     /// (`deployment-home-with-public-relay.md` § Outbound mail — submission +
-    /// DKIM + MX delivery all happen on the public box). Shared by the enables
-    /// and `provision_relay_mailbox` (reused fleet MSEK) so the paths can never
+    /// DKIM + MX delivery all happen on the public box); email's outbound half
+    /// is [`Self::provision_submission_token`], called by the email enables
+    /// and add-credential. Shared by the DAV enables and
+    /// `provision_relay_mailbox` (reused fleet MSEK) so the paths can never
     /// drift on the recipe.
     async fn provision_mailbox_blobs(
         &self,
@@ -1847,7 +1949,6 @@ impl MailSettingsMachine {
         retired_at_unix: &[u64],
         credential_id: &str,
         credential: &Credential,
-        with_submission_token: bool,
     ) -> Result<(), DispatchError> {
         // The read-side snapshot, sealed under `history[0]` (= `msek`).
         self.provision_snapshot_for(history, retired_at_unix)
@@ -1872,21 +1973,16 @@ impl MailSettingsMachine {
         let msek_blob =
             wrap::seal_msek_under_credential(msek, &self.actor_id, credential_id, credential)?;
         self.nest.provision_wrapped_mls_blob(msek_blob).await?;
-
-        if with_submission_token {
-            self.provision_submission_token(credential_id, credential)
-                .await?;
-        }
         Ok(())
     }
 
     /// Mint + seal + provision the per-credential outbound **submission token** —
-    /// the one blob the read-only recipe (`provision_mailbox_blobs(.., false)`)
-    /// skips. Shared by `enable_mail` (fresh + the CalDAV→email upgrade),
-    /// [`Self::add_credential`], and [`Self::provision_mailbox_blobs`] so the
-    /// three paths can never drift on the seal recipe. Idempotent atomic-replace
-    /// on the nest.
-    async fn provision_submission_token(
+    /// the one blob the read recipe ([`Self::provision_mailbox_blobs`]) skips.
+    /// Shared by `enable_mail`'s CalDAV→email upgrade, first-enable's step 4
+    /// (`rotation::first_enable`, fresh or resumed) and
+    /// [`Self::add_credential`], so the paths can never drift on the seal
+    /// recipe. Idempotent atomic-replace on the nest.
+    pub(crate) async fn provision_submission_token(
         &self,
         credential_id: &str,
         credential: &Credential,
@@ -1946,7 +2042,6 @@ impl MailSettingsMachine {
             &mail.prior_retired_at_unix(),
             &credential_id,
             &credential,
-            false,
         )
         .await?;
 
@@ -2397,6 +2492,41 @@ impl MailSettingsMachine {
     /// snapshot. The per-app UI calls this once at page mount
     /// and whenever the account plane's mail rows change. Idempotent.
     pub async fn hydrate(&self) -> Result<(), DispatchError> {
+        self.hydrate_inner(true).await
+    }
+}
+
+impl MailSettingsMachine {
+    /// [`Self::hydrate`] without the generation marker's heal: the same reads
+    /// and the same snapshot (the nest-sourced gate fields included), and no
+    /// write. For a machine whose mail store carries only the listing's doors —
+    /// web's Connected apps chunk, whose account port does not cross the heal's
+    /// writes (`account-client-lifecycle.md` § The client-side lifecycle → *The
+    /// account port*, decision (h)); an owed row is healed by the mail page's
+    /// own hydrate.
+    pub async fn hydrate_without_heal(&self) -> Result<(), DispatchError> {
+        self.hydrate_inner(false).await
+    }
+
+    /// The hydrate body, its failure shown: a failed read leaves the default
+    /// snapshot, which reads "mail is disabled" with the enable gesture offered,
+    /// so the failure is recorded on the snapshot's error — the first-listing
+    /// refusal as the reason it waits for (`common.needs_nest` /
+    /// `common.needs_other_device`; `account-client-lifecycle.md` § The
+    /// client-side lifecycle → *The first listing*, clauses (4) and (5)).
+    async fn hydrate_inner(&self, heal: bool) -> Result<(), DispatchError> {
+        let result = self.hydrate_reads(heal).await;
+        if let Err(e) = &result {
+            let reason = match e {
+                DispatchError::Store(s) => s.not_ready_reason().map(str::to_owned),
+                _ => None,
+            };
+            self.set_error(reason.unwrap_or_else(|| e.to_string()));
+        }
+        result
+    }
+
+    async fn hydrate_reads(&self, heal: bool) -> Result<(), DispatchError> {
         // Both reads first (either may fail → early-return without a partial
         // snapshot update): the synced mail custody and the per-actor
         // serving flag (a caller-scoped nest read; default-on for a never-set
@@ -2415,7 +2545,7 @@ impl MailSettingsMachine {
         let serves_webdav_set = self.nest.serves_any_webdav_set().await.unwrap_or(false);
         // Best-effort: the generation marker's heal and its delete dual — a
         // failure logs and leaves the rows owed for the next hydrate.
-        let rows = match self.heal_generation_markers(&rows).await {
+        let rows = match heal && self.heal_generation_markers(&rows).await {
             true => self.mail.load_rows().await?,
             false => rows,
         };
@@ -2437,7 +2567,10 @@ impl MailSettingsMachine {
         }
         Ok(())
     }
+}
 
+#[cfg_attr(feature = "uniffi", fauna_uniffi_async::export)]
+impl MailSettingsMachine {
     /// Slide the content-sealing-epoch publication horizon forward against
     /// the connected nest — `[e_now, e_now + MAIL_EPOCH_PUBLISH_HORIZON]`,
     /// idempotent upsert (design 2026-07-18 § 3: "refreshes the horizon on
@@ -2446,8 +2579,56 @@ impl MailSettingsMachine {
     /// device is online, rather than going stale past the horizon (§ 3
     /// step 2's honest degradation). A no-op when mail isn't enabled (no
     /// MSEK).
+    ///
+    /// Also a no-op while a rotation is pending (`mail-credentials.md`
+    /// § Hard revoke → *Published before the nest moves*): with the sentinel
+    /// set the custody cannot say whether step (d) already moved the snapshot
+    /// and the pubkey to MSEK′, and re-sealing under `msek` would strand every
+    /// credential step (e) already re-wrapped — the MDA unwraps MSEK′, the
+    /// snapshot fails its AEAD. The resume moves them; the horizon slides at
+    /// the first connect after it.
+    ///
+    /// And it re-seals only under a custody walked at least as far as the
+    /// nest has moved (the stale-sibling rule, same §): a replica that listed
+    /// the fleet scope before another device rotated and has not walked since
+    /// reads the pre-rotation `msek` with no sentinel, and a reconnect runs
+    /// this before the runtime's own walk. So the nest's standing recipient
+    /// pubkey is read first: none on file, the custody's own generation or one
+    /// it retired → the custody is current or ahead, re-seal; a generation it
+    /// has never held → walk ([`MailStore::walk`]) and re-read, moving nothing
+    /// when no walk can be taken now (the next connect retries).
     pub async fn refresh_epoch_schedule(&self) -> Result<(), DispatchError> {
-        let mail = self.mail.load().await?;
+        let mut mail = self.mail.load().await?;
+        if mail.msek.is_none() || mail.pending_rotation.is_some() {
+            return Ok(());
+        }
+        let on_nest = self.nest.fetch_own_recipient_pubkey(self.actor_id).await?;
+        let custody_holds = |mail: &MailConfig, pubkey: &[u8; 32]| {
+            Self::snapshot_mseks(mail)
+                .iter()
+                .any(|m| derive_recipient_hpke_keypair(m).1 == *pubkey)
+        };
+        if let Some(pubkey) = on_nest
+            && !custody_holds(&mail, &pubkey)
+        {
+            if let Err(e) = self.mail.walk().await {
+                // tier_3 `test_mail_stale_sibling_after_key_rotation.py` waits on
+                // this line's "names a generation this replica has not walked".
+                tracing::info!(
+                    "mail refresh: the nest's recipient key names a generation this \
+                     replica has not walked, and no walk can be taken now ({e}); \
+                     moving nothing until the next connect"
+                );
+                return Ok(());
+            }
+            // Still unknown after a walk: the losing side of two concurrent
+            // rotations, whose key the MSEK join displaced — the walked
+            // custody is the account's, and re-sealing under it heals the nest.
+            mail = self.mail.load().await?;
+            if mail.pending_rotation.is_some() {
+                return Ok(());
+            }
+        }
         let Some(msek) = mail.msek.as_ref() else {
             return Ok(());
         };

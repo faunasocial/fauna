@@ -52,10 +52,9 @@ const PROXY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Content types we will serve back with their **declared** type intact.
 /// Everything else is relabelled `application/octet-stream`. The point is that
-/// some media-proxy routes are reachable without a credential and *navigable*
-/// (the bluesky twin still takes no bearer — render-model.md § D6c retires the
-/// `<img src>` premise that excused it, and requiring one is a follow-on), so if
-/// the upstream served `text/html` or `image/svg+xml` and we reflected it, a victim who
+/// a media-proxy URL may be *navigated* to directly (both routes now require a
+/// bearer — render-model.md § D6c retired the `<img src>` premise — but a
+/// logged-in user can still be lured to one), so if the upstream served `text/html` or `image/svg+xml` and we reflected it, a victim who
 /// merely navigated to the proxy URL would get attacker-influenced bytes
 /// executed as script on the SPA origin (a security-review finding, tracked
 /// internally).
@@ -122,8 +121,9 @@ pub(crate) fn safe_content_type(raw: &str) -> &'static str {
 
 /// Shared SSRF-safe + content-type-safe media fetch behind **every** bridge
 /// media-proxy route (the shared `media/proxy`, the bluesky `bluesky/media`
-/// twin). The caller enforces its own policy first — `media/proxy` requires a
-/// bearer; `bluesky/media` applies a CDN host allowlist — then both funnel the
+/// twin). The caller enforces its own policy first — both require a bearer
+/// (`media/proxy` also takes a playback ticket); `bluesky/media` also applies a
+/// CDN host allowlist — then both funnel the
 /// dangerous part (dialing a caller-influenced remote URL and returning its
 /// bytes on our origin) through this one place exactly once: SSRF-guarded
 /// client (https-only, every resolved address global, redirects disabled,
@@ -264,6 +264,16 @@ async fn dial(url_str: &str) -> Result<(reqwest::Client, url::Url), crate::ssrf:
     if let Some(dialed) = tests::loopback_dial(url_str) {
         return Ok(dialed);
     }
+    #[cfg(feature = "test-hooks")]
+    if let Ok(resolve_json) = std::env::var("FAUNA_TEST_MEDIA_PROXY_RESOLVE_JSON") {
+        let extra_ca = match std::env::var_os("FAUNA_TEST_MEDIA_PROXY_EXTRA_CA_PEM") {
+            Some(path) => Some(std::fs::read(path).map_err(|_| crate::ssrf::SsrfError::Resolve)?),
+            None => None,
+        };
+        if let Some(dialed) = test_hook_dial(url_str, &resolve_json, extra_ca.as_deref())? {
+            return Ok(dialed);
+        }
+    }
     crate::ssrf::ssrf_safe_https_streaming_client(
         url_str,
         PROXY_CONNECT_TIMEOUT,
@@ -271,6 +281,33 @@ async fn dial(url_str: &str) -> Result<(reqwest::Client, url::Url), crate::ssrf:
         None,
     )
     .await
+}
+
+/// Under `test-hooks` **only**, and only when
+/// `FAUNA_TEST_MEDIA_PROXY_RESOLVE_JSON` is set: a remote media file on a real
+/// hostname, served by the e2e harness on a loopback port with a test-CA cert —
+/// so a tier_3 journey can play a bridged video through the proxy
+/// (`render-model.md` § D6c → *Inline playback*).
+/// `FAUNA_TEST_MEDIA_PROXY_EXTRA_CA_PEM` names the CA. The resolve map is
+/// loopback-only and mapped-host-only (`crate::ssrf::test_resolve_client`), so
+/// an unmapped host still meets the full guard; production builds no
+/// `test-hooks`. Same client shape as the guarded dial: no redirects, no
+/// `User-Agent`, the proxy's connect and read timeouts.
+#[cfg(feature = "test-hooks")]
+fn test_hook_dial(
+    url_str: &str,
+    resolve_json: &str,
+    extra_ca_pem: Option<&[u8]>,
+) -> Result<Option<(reqwest::Client, url::Url)>, crate::ssrf::SsrfError> {
+    crate::ssrf::test_resolve_client(
+        url_str,
+        resolve_json,
+        extra_ca_pem,
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(PROXY_CONNECT_TIMEOUT)
+            .read_timeout(PROXY_READ_TIMEOUT),
+    )
 }
 
 async fn proxy_media(
@@ -756,6 +793,35 @@ mod tests {
             resp.status(),
             StatusCode::BAD_REQUEST,
             "authed caller must not reach link-local IMDS via the proxy"
+        );
+    }
+
+    /// The e2e seam never widens the guard: a host the resolve map does not name
+    /// falls through to the full SSRF dial, and a map aiming anywhere but
+    /// loopback is refused outright.
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn test_hook_dial_is_mapped_host_and_loopback_only() {
+        const MAP: &str = r#"{"media.test":"127.0.0.1:8443"}"#;
+        assert!(
+            test_hook_dial("https://cdn.example/v.webm", MAP, None)
+                .unwrap()
+                .is_none(),
+            "an unmapped host takes the guarded dial"
+        );
+        let (_, url) = test_hook_dial("https://media.test/v.webm", MAP, None)
+            .unwrap()
+            .expect("the mapped host is overridden");
+        assert_eq!(url.as_str(), "https://media.test/v.webm");
+        assert_eq!(
+            test_hook_dial(
+                "https://media.test/v.webm",
+                r#"{"media.test":"169.254.169.254:443"}"#,
+                None
+            )
+            .map(|_| ()),
+            Err(crate::ssrf::SsrfError::NonGlobal),
+            "a non-loopback target is refused even under the hook"
         );
     }
 }

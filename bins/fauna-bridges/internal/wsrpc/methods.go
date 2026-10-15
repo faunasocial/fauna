@@ -31,6 +31,7 @@ import (
 
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/confinement"
 	"github.com/fxamacker/cbor/v2"
+	"lukechampine.com/blake3"
 )
 
 // ── WS-RPC method names ─────────────────────────────────────────
@@ -66,9 +67,16 @@ const (
 	MethodFetchWrappedSubmissionToken = "fauna.bridges.fetch_wrapped_submission_token"
 	MethodCheckSubmissionQuota        = "fauna.bridges.check_submission_quota"
 
-	MethodIngestInboundMail       = "fauna.bridges.ingest_inbound_mail"
-	MethodSubmitInboundMail       = "fauna.bridges.submit_inbound_mail"
-	MethodReportRejectedScan      = "fauna.bridges.report_rejected_scan"
+	MethodIngestInboundMail  = "fauna.bridges.ingest_inbound_mail"
+	MethodSubmitInboundMail  = "fauna.bridges.submit_inbound_mail"
+	MethodReportRejectedScan = "fauna.bridges.report_rejected_scan"
+	// DMARC report receive (dmarc-reporting.md § Aggregate-report receive,
+	// § Forensic-report receive): the MTA hands a message RCPT'd to
+	// dmarc-report@ to the nest, which classifies it.
+	MethodIngestDmarcReport = "fauna.bridges.ingest_dmarc_report"
+	// TLSRPT inbound receive (smtp-server.md § TLSRPT inbound report
+	// listener): the MTA hands a message RCPT'd to tlsrpt@ to the nest.
+	MethodIngestTlsrptReport      = "fauna.bridges.ingest_tlsrpt_report"
 	MethodFetchRecipientMLSPubkey = "fauna.bridges.fetch_recipient_mls_pubkey"
 	MethodFetchRecipientIndexKey  = "fauna.bridges.fetch_recipient_index_key"
 	MethodFetchWrappedMLSBlob     = "fauna.bridges.fetch_wrapped_mls_blob"
@@ -104,6 +112,9 @@ const (
 	MethodFetchTlsa             = "fauna.bridges.fetch_tlsa"
 	MethodResolveMx             = "fauna.bridges.resolve_mx"
 	MethodReportTlsAttempt      = "fauna.bridges.report_tls_attempt"
+	// MethodReportDmarcObservation reports what one verified inbound message
+	// contributes to the outbound DMARC aggregate report (nest buckets it).
+	MethodReportDmarcObservation = "fauna.bridges.report_dmarc_observation"
 
 	MethodFetchRecipientForwardConfig = "fauna.bridges.fetch_recipient_forward_config"
 	MethodFetchRecipientFilters       = "fauna.bridges.fetch_recipient_filters"
@@ -663,9 +674,10 @@ type ConfigSnapshot struct {
 	// mail-multidomain.md § The primary domain. The bridge's single-
 	// domain TLS provider + EHLO host consume this field.
 	PrimaryDomain string `cbor:"primary_domain"`
-	// DkimSelectors — one entry per active mail_domains row (its name + the
-	// `s=` tag / `<selector>._domainkey.<domain>` DNS label), projected by
-	// nest (defaulting to "default" when the column is NULL). The nest holds
+	// DkimSelectors — two entries per active mail_domains row (its name + the
+	// `s=` tag / `<selector>._domainkey.<domain>` DNS label of each of its
+	// two signatures, `<label>-rsa` and `<label>-ed25519`), projected by
+	// nest (the label is "default" when the column is NULL). The nest holds
 	// every DKIM key and signs at the outbound hand-out; the bridge reads
 	// only whether the list is non-empty — the deployment signs outbound
 	// mail, so the submission door holds the From: header to a local domain
@@ -688,8 +700,8 @@ type ConfigSnapshot struct {
 	MassMailing MassMailingPolicy `cbor:"mass_mailing"`
 }
 
-// DomainDkimSelector mirrors fauna-protocol's DomainDkimSelector — one
-// active local domain's DKIM selector, projected to the MTA bridge in
+// DomainDkimSelector mirrors fauna-protocol's DomainDkimSelector — one of an
+// active local domain's two DKIM selectors, projected to the MTA bridge in
 // ConfigSnapshot.DkimSelectors.
 type DomainDkimSelector struct {
 	Domain   string `cbor:"domain"`
@@ -1180,6 +1192,13 @@ type validateRecipientReply struct {
 	// (smtp-server.md :204) — the caller carries this through to the ingest
 	// request so an over-quota admin mailbox still receives postmaster mail.
 	IsRoleAddress bool `cbor:"is_role_address,omitempty"`
+	// Handle is the resolved actor's canonical handle — absent when the
+	// actor has none. The address the caller asked about may be an exact
+	// alias, owned only on the domain it names, so an AUTH-time caller that
+	// wants the address its actor owns on EVERY local domain reads this,
+	// never the login's local part (mail-multidomain.md § From: header
+	// ownership → Per door).
+	Handle string `cbor:"handle,omitempty"`
 }
 
 // ErrRecipientRejected is the sentinel error returned by
@@ -1202,10 +1221,31 @@ var ErrRecipientRejected = errors.New("validate_recipient: rejected")
 // the delivery bypasses the recipient's per-mailbox quota (smtp-server.md
 // :204). AUTH-time callers discard it.
 func ValidateRecipient(ctx context.Context, c Caller, localPart, domain string) (actorID []byte, isRoleAddress bool, err error) {
+	reply, err := validateRecipient(ctx, c, localPart, domain)
+	if err != nil {
+		return nil, false, err
+	}
+	return reply.ActorID, reply.IsRoleAddress, nil
+}
+
+// ResolveLogin is validate_recipient for an AUTH login: the actor the login
+// address resolves to, plus that actor's canonical handle ("" when it has
+// none). Errors as ValidateRecipient.
+func ResolveLogin(ctx context.Context, c Caller, localPart, domain string) (actorID []byte, handle string, err error) {
+	reply, err := validateRecipient(ctx, c, localPart, domain)
+	if err != nil {
+		return nil, "", err
+	}
+	return reply.ActorID, reply.Handle, nil
+}
+
+// validateRecipient makes the call and returns a Resolved reply, or the
+// ValidateRecipient error contract.
+func validateRecipient(ctx context.Context, c Caller, localPart, domain string) (validateRecipientReply, error) {
 	req := validateRecipientRequest{LocalPart: localPart, Domain: domain}
 	var reply validateRecipientReply
 	if err := c.Call(ctx, MethodValidateRecipient, req, &reply); err != nil {
-		return nil, false, fmt.Errorf("validate_recipient: %w", err)
+		return reply, fmt.Errorf("validate_recipient: %w", err)
 	}
 	switch reply.Outcome {
 	case "resolved":
@@ -1213,13 +1253,13 @@ func ValidateRecipient(ctx context.Context, c Caller, localPart, domain string) 
 		// malformed reply (zero-length or wrong-length) shouldn't be
 		// silently propagated as a valid resolution.
 		if len(reply.ActorID) == 0 {
-			return nil, false, fmt.Errorf("validate_recipient: resolved outcome with empty actor_id")
+			return reply, fmt.Errorf("validate_recipient: resolved outcome with empty actor_id")
 		}
-		return reply.ActorID, reply.IsRoleAddress, nil
+		return reply, nil
 	case "reject":
-		return nil, false, fmt.Errorf("%w: %s", ErrRecipientRejected, reply.Reason)
+		return reply, fmt.Errorf("%w: %s", ErrRecipientRejected, reply.Reason)
 	default:
-		return nil, false, fmt.Errorf("validate_recipient: unknown outcome %q", reply.Outcome)
+		return reply, fmt.Errorf("validate_recipient: unknown outcome %q", reply.Outcome)
 	}
 }
 
@@ -1253,7 +1293,22 @@ const (
 	// with 250 and discards the body (never delivers to a mailbox); no payload
 	// fields. Bare `unsubscribe@` with no token is a ResolveReject{550}, not this.
 	ResolveDiscard ResolveRecipientOutcome = "discard"
+	// ResolveProcessor — a reserved role address a nest processor consumes
+	// instead of any mailbox (dmarc-report@ → ProcessorDmarcReport,
+	// tlsrpt@ → ProcessorTlsrptInbound,
+	// dmarc-reporting.md § Envelope-time routing). The caller accepts the RCPT,
+	// runs the normal DATA policy stack, then hands the message to the
+	// processor's ingest kind — never to a mailbox. Processor names which one.
+	ResolveProcessor ResolveRecipientOutcome = "processor"
 )
+
+// ProcessorDmarcReport is the RecipientProcessor wire value for
+// dmarc-report@ (→ fauna.bridges.ingest_dmarc_report).
+const ProcessorDmarcReport = "dmarc_report"
+
+// ProcessorTlsrptInbound is the RecipientProcessor wire value for tlsrpt@
+// (→ fauna.bridges.ingest_tlsrpt_report).
+const ProcessorTlsrptInbound = "tlsrpt_inbound"
 
 // resolveRecipientRequest mirrors ResolveRecipientRequest. Reuses
 // validate_recipient's {local_part, domain} shape (the bridge already splits
@@ -1269,6 +1324,12 @@ type resolveRecipientRequest struct {
 	// cannot key that decision. Omitted when empty (the SMTP null reverse-path),
 	// which the nest reads as a bounce and never gates.
 	SenderAddress string `cbor:"sender_address,omitempty"`
+	// Probe marks a resolve that asks only who owns the address (MAIL FROM
+	// ownership, the CalDAV routing probe) rather than delivering to it: the
+	// nest then skips the owner's receive switch (`mail-policy-config.md`
+	// § Tier 3, `mail.account.receive_enabled`), so an account that stopped
+	// receiving still sends from its own addresses.
+	Probe bool `cbor:"probe,omitempty"`
 }
 
 // StampedHeader mirrors the Rust `StampedHeader` — one X-Fauna-Address-*
@@ -1306,6 +1367,7 @@ type resolveRecipientReply struct {
 	ForwarderActorID []byte          `cbor:"forwarder_actor_id,omitempty"`
 	SMTPCode         uint16          `cbor:"smtp_code,omitempty"`
 	Reason           string          `cbor:"reason,omitempty"`
+	Processor        string          `cbor:"processor,omitempty"`
 }
 
 // ResolveRecipientResult is the typed return of ResolveRecipient. Only the
@@ -1323,6 +1385,8 @@ type ResolveRecipientResult struct {
 	// Reject:
 	SMTPCode uint16
 	Reason   string
+	// Processor:
+	Processor string
 }
 
 // ResolveRecipient resolves an incoming RCPT TO through the fixed-order alias
@@ -1334,12 +1398,29 @@ type ResolveRecipientResult struct {
 // Reject *outcome* is a normal, non-error result the caller maps to the
 // reply's SMTPCode).
 func ResolveRecipient(ctx context.Context, c Caller, localPart, domain, senderDomain, senderAddress string) (ResolveRecipientResult, error) {
-	req := resolveRecipientRequest{
+	return resolveRecipient(ctx, c, resolveRecipientRequest{
 		LocalPart:     localPart,
 		Domain:        domain,
 		SenderDomain:  senderDomain,
 		SenderAddress: senderAddress,
-	}
+	})
+}
+
+// ResolveRecipientOwner is ResolveRecipient for a caller that asks only who
+// owns the address — the MAIL FROM ownership check and the CalDAV routing
+// probe — never a delivery. It sends no sender address (the guardian mail
+// gate must not weigh in) and sets `probe`, so the owner's receive switch
+// does not answer it either.
+func ResolveRecipientOwner(ctx context.Context, c Caller, localPart, domain, senderDomain string) (ResolveRecipientResult, error) {
+	return resolveRecipient(ctx, c, resolveRecipientRequest{
+		LocalPart:    localPart,
+		Domain:       domain,
+		SenderDomain: senderDomain,
+		Probe:        true,
+	})
+}
+
+func resolveRecipient(ctx context.Context, c Caller, req resolveRecipientRequest) (ResolveRecipientResult, error) {
 	var reply resolveRecipientReply
 	if err := c.Call(ctx, MethodResolveRecipient, req, &reply); err != nil {
 		return ResolveRecipientResult{}, fmt.Errorf("resolve_recipient: %w", err)
@@ -1358,6 +1439,10 @@ func ResolveRecipient(ctx context.Context, c Caller, localPart, domain, senderDo
 	case ResolveDiscard:
 		// Normal result — the caller accepts the RCPT (250) and discards the
 		// body; no payload fields to validate.
+	case ResolveProcessor:
+		if reply.Processor != ProcessorDmarcReport && reply.Processor != ProcessorTlsrptInbound {
+			return ResolveRecipientResult{}, fmt.Errorf("resolve_recipient: unknown processor %q", reply.Processor)
+		}
 	default:
 		return ResolveRecipientResult{}, fmt.Errorf("resolve_recipient: unknown outcome %q", reply.Outcome)
 	}
@@ -1371,6 +1456,7 @@ func ResolveRecipient(ctx context.Context, c Caller, localPart, domain, senderDo
 		ForwarderActorID: reply.ForwarderActorID,
 		SMTPCode:         reply.SMTPCode,
 		Reason:           reply.Reason,
+		Processor:        reply.Processor,
 	}, nil
 }
 
@@ -1987,6 +2073,62 @@ func ReportRejectedScan(
 		return nil, fmt.Errorf("report_rejected_scan: %w", err)
 	}
 	return reply.MessageID, nil
+}
+
+// ── ingest_dmarc_report / ingest_tlsrpt_report ───────────────────
+
+// ReportSourceEnvelope mirrors fauna-protocol::bridge_routing::ReportSourceEnvelope
+// — the SMTP context of the mail that carried a DMARC or TLSRPT report, kept
+// for forensic correlation (dmarc-reporting.md § Storage).
+type ReportSourceEnvelope struct {
+	ClientIP    string       `cbor:"client_ip"`
+	Helo        string       `cbor:"helo"`
+	MailFrom    string       `cbor:"mail_from"`
+	AuthResults AuthVerdicts `cbor:"auth_results"`
+}
+
+// ingestReportRequest mirrors IngestDmarcReportRequest and
+// IngestTlsrptReportRequest, which share one shape.
+type ingestReportRequest struct {
+	RawMessage     []byte               `cbor:"raw_message"`
+	SourceEnvelope ReportSourceEnvelope `cbor:"source_envelope"`
+	ReceivedAt     int64                `cbor:"received_at"`
+}
+
+// IngestReportReply mirrors fauna-protocol's IngestDmarcReportReply and
+// IngestTlsrptReportReply: the nest's outcome word (stored / duplicate /
+// malformed / oversize / wrong_domain) and, for a DMARC report, which kind it
+// was (aggregate / forensic; empty for TLSRPT).
+type IngestReportReply struct {
+	Outcome string `cbor:"outcome"`
+	Kind    string `cbor:"kind"`
+}
+
+func ingestReport(ctx context.Context, c Caller, method string, raw []byte, env ReportSourceEnvelope, receivedAt int64) (IngestReportReply, error) {
+	req := ingestReportRequest{RawMessage: raw, SourceEnvelope: env, ReceivedAt: receivedAt}
+	var reply IngestReportReply
+	if err := c.Call(ctx, method, req, &reply); err != nil {
+		return IngestReportReply{}, fmt.Errorf("%s: %w", method, err)
+	}
+	return reply, nil
+}
+
+// IngestDmarcReport hands a message addressed to dmarc-report@ to the nest's
+// DMARC processor, which tells an aggregate report from a forensic one, then
+// bounds, parses and stores it. The reply is for the log line: every outcome
+// is a 250 on the SMTP wire (accept-on-malformed, dmarc-reporting.md
+// § Architectural rules). A non-nil error is a transport / nest fault the
+// caller tempfails on.
+func IngestDmarcReport(ctx context.Context, c Caller, raw []byte, env ReportSourceEnvelope, receivedAt int64) (IngestReportReply, error) {
+	return ingestReport(ctx, c, MethodIngestDmarcReport, raw, env, receivedAt)
+}
+
+// IngestTlsrptReport hands a message addressed to tlsrpt@ to the nest's TLSRPT
+// processor (smtp-server.md § TLSRPT inbound report listener) — the same
+// contract as IngestDmarcReport: every outcome word is a 250, a non-nil error
+// a fault the caller tempfails on.
+func IngestTlsrptReport(ctx context.Context, c Caller, raw []byte, env ReportSourceEnvelope, receivedAt int64) (IngestReportReply, error) {
+	return ingestReport(ctx, c, MethodIngestTlsrptReport, raw, env, receivedAt)
 }
 
 // ── fetch_recipient_mls_pubkey ───────────────────────────────────
@@ -3395,13 +3537,50 @@ type spamHistoryOp struct {
 // non-empty for a bridge caller; a `User`/`Admin` client leaves it empty
 // and is rejected if it names anyone else). SampleCount is advisory
 // display-only (never trusted). HistoryOp is `Option<SpamHistoryOp>` —
-// nil pointer + omitempty ⇒ absent ⇒ a model-only write.
+// nil pointer + omitempty ⇒ absent ⇒ a model-only write. ExpectedModel is
+// the compare-and-swap precondition (SpamModelPrecondition's wire form):
+// nil ⇒ absent ⇒ last-write-wins; a non-nil pointer is always sent, its
+// EMPTY byte string being the "no stored model" marker.
 type putSpamModelRequest struct {
-	ActorID     []byte               `cbor:"actor_id"`
-	SealedModel []byte               `cbor:"sealed_model"`
-	SampleCount uint32               `cbor:"sample_count"`
-	HistoryOp   *spamHistoryOp       `cbor:"history_op,omitempty"`
-	HolderCopy  *SpamModelHolderCopy `cbor:"holder_copy,omitempty"`
+	ActorID       []byte               `cbor:"actor_id"`
+	SealedModel   []byte               `cbor:"sealed_model"`
+	SampleCount   uint32               `cbor:"sample_count"`
+	HistoryOp     *spamHistoryOp       `cbor:"history_op,omitempty"`
+	HolderCopy    *SpamModelHolderCopy `cbor:"holder_copy,omitempty"`
+	ExpectedModel *[]byte              `cbor:"expected_model,omitempty"`
+}
+
+// SpamModelStaleRetries mirrors
+// libs/fauna-protocol/src/wrapped_blob.rs:SPAM_MODEL_STALE_RETRIES — how
+// many times a writer re-fetches and re-applies its mutation after a
+// "stale_model" put before it gives the event up (mail-spam.md
+// § Transactional update).
+const SpamModelStaleRetries = 3
+
+// SpamModelPrecondition mirrors
+// libs/fauna-protocol/src/wrapped_blob.rs:SpamModelPrecondition — the stored
+// model a put_spam_model write was computed from. Its wire form is the empty
+// byte string when the fetch found no stored model (none, or only the
+// cold-start seed), else the blake3-256 digest of the stored blob exactly as
+// fetch_spam_model returned it.
+type SpamModelPrecondition struct {
+	wire []byte
+}
+
+// SpamModelPreconditionOf is the precondition for a write computed from
+// `storedModel` — the actor's stored sealed model as fetched, nil when the
+// fetch found none (or only the cold-start seed).
+func SpamModelPreconditionOf(storedModel []byte) SpamModelPrecondition {
+	if storedModel == nil {
+		return SpamModelPrecondition{wire: []byte{}}
+	}
+	digest := blake3.Sum256(storedModel)
+	return SpamModelPrecondition{wire: digest[:]}
+}
+
+// Wire is the precondition's wire form (empty, or the 32-byte digest).
+func (p SpamModelPrecondition) Wire() []byte {
+	return p.wire
 }
 
 // SpamModelHolderCopy mirrors
@@ -3418,7 +3597,7 @@ type SpamModelHolderCopy struct {
 }
 
 // putSpamModelReply mirrors PutSpamModelReply: the `outcome` string
-// ("written" / "duplicate_signal"). A nest from before the field omits
+// ("written" / "duplicate_signal" / "stale_model"). A nest from before the field omits
 // it, which decodes as "" and reads as written — the only outcome such a
 // nest could produce.
 type putSpamModelReply struct {
@@ -3439,6 +3618,12 @@ const (
 	// row, not the holder copy. A caller carrying a mutated model forward
 	// must discard this mutation and continue from the last accepted one.
 	PutOutcomeDuplicateSignal PutSpamModelOutcome = "duplicate_signal"
+	// PutOutcomeStaleModel — the write's expected model is no longer the
+	// stored one (another write landed after this writer's fetch): the
+	// nest wrote NOTHING. The writer re-fetches, re-applies its mutation
+	// to the model now stored and retries, at most SpamModelStaleRetries
+	// times (mail-spam.md § Transactional update).
+	PutOutcomeStaleModel PutSpamModelOutcome = "stale_model"
 )
 
 // PutSpamModel writes the served actor's whole RE-SEALED spam model back
@@ -3453,7 +3638,10 @@ const (
 // `SpamModelCopyBlob` sealed to the aggregation holder, stored atomically
 // alongside the model. The nest stores everything verbatim (it holds only
 // the actor's public half — mail-spam.md § Wire shapes `put_spam_model`).
-func PutSpamModel(ctx context.Context, c Caller, actorID, sealedModel []byte, sampleCount uint32, insert *SpamHistoryInsert, holderCopy *SpamModelHolderCopy) (PutSpamModelOutcome, error) {
+// `expected` is the compare-and-swap precondition — the stored model the
+// write was computed from; nil ⇒ last-write-wins. A write another writer's
+// put overtook answers PutOutcomeStaleModel and stores nothing.
+func PutSpamModel(ctx context.Context, c Caller, actorID, sealedModel []byte, sampleCount uint32, insert *SpamHistoryInsert, holderCopy *SpamModelHolderCopy, expected *SpamModelPrecondition) (PutSpamModelOutcome, error) {
 	req := putSpamModelRequest{
 		ActorID:     actorID,
 		SealedModel: sealedModel,
@@ -3462,6 +3650,10 @@ func PutSpamModel(ctx context.Context, c Caller, actorID, sealedModel []byte, sa
 	}
 	if insert != nil {
 		req.HistoryOp = &spamHistoryOp{Insert: insert}
+	}
+	if expected != nil {
+		wire := expected.wire
+		req.ExpectedModel = &wire
 	}
 	var reply putSpamModelReply
 	if err := c.Call(ctx, MethodPutSpamModel, req, &reply); err != nil {
@@ -3472,6 +3664,8 @@ func PutSpamModel(ctx context.Context, c Caller, actorID, sealedModel []byte, sa
 		return PutOutcomeWritten, nil
 	case string(PutOutcomeDuplicateSignal):
 		return PutOutcomeDuplicateSignal, nil
+	case string(PutOutcomeStaleModel):
+		return PutOutcomeStaleModel, nil
 	default:
 		// A newer nest's outcome this bridge cannot interpret: fail the
 		// event (best-effort signal, the model stays at the last accepted
@@ -3876,15 +4070,74 @@ func ReportTlsAttempt(
 	return nil
 }
 
+// DmarcObservation mirrors fauna_core::mail_auth::DmarcObservation (the
+// one definition; re-exported by libs/fauna-protocol/src/bridge_routing.rs):
+// what one inbound message contributes to an outbound DMARC aggregate report.
+// Plain fields only — mailfauna.DmarcObservationToWire is a field copy.
+type DmarcObservation struct {
+	HeaderFromDomain   string           `cbor:"header_from_domain"`
+	EnvelopeFromDomain string           `cbor:"envelope_from_domain"`
+	DkimAligned        bool             `cbor:"dkim_aligned"`
+	SpfAligned         bool             `cbor:"spf_aligned"`
+	DkimResults        []DkimAuthResult `cbor:"dkim_results"`
+	SpfResult          string           `cbor:"spf_result"`
+}
+
+// DkimAuthResult mirrors fauna_core::mail_auth::DkimAuthResult — one DKIM
+// signature's raw result (RFC 7489 §A.1 tokens).
+type DkimAuthResult struct {
+	Domain   string `cbor:"domain"`
+	Selector string `cbor:"selector"`
+	Result   string `cbor:"result"`
+}
+
+// reportDmarcObservationRequest mirrors ReportDmarcObservationRequest
+// (libs/fauna-protocol/src/bridge_routing.rs).
+type reportDmarcObservationRequest struct {
+	ClientIP    string           `cbor:"client_ip"`
+	Dmarc       DmarcVerdict     `cbor:"dmarc"`
+	Observation DmarcObservation `cbor:"observation"`
+}
+
+// reportDmarcObservationReply mirrors ReportDmarcObservationReply.
+type reportDmarcObservationReply struct {
+	Counted bool `cbor:"counted"`
+}
+
+// ReportDmarcObservation reports what one inbound message the perimeter
+// verified contributes to the outbound DMARC aggregate report of the domain it
+// claims (docs/goal/behavior/dmarc-reporting.md § Outbound aggregate-report
+// sender). Sent before any enforcement gate, so refused mail is counted too;
+// nest derives the applied disposition from `dmarc` and its own switches.
+// Returns whether nest counted it. A reporting error must NOT fail the SMTP
+// transaction — the caller logs and proceeds (reporting is cooperative, not
+// load-bearing), as for ReportTlsAttempt.
+func ReportDmarcObservation(
+	ctx context.Context,
+	c Caller,
+	clientIP string,
+	dmarc DmarcVerdict,
+	observation DmarcObservation,
+) (bool, error) {
+	if observation.DkimResults == nil {
+		observation.DkimResults = []DkimAuthResult{}
+	}
+	req := reportDmarcObservationRequest{ClientIP: clientIP, Dmarc: dmarc, Observation: observation}
+	var reply reportDmarcObservationReply
+	if err := c.Call(ctx, MethodReportDmarcObservation, req, &reply); err != nil {
+		return false, fmt.Errorf("report_dmarc_observation: %w", err)
+	}
+	return reply.Counted, nil
+}
+
 // enqueueOutboundMailRequest mirrors EnqueueOutboundMailRequest.
 //
 // OnBehalfOfActor is a pointer-nullable mirror of the Rust
 // `Option<Vec<u8>>` (`omitempty` so a nil pointer is omitted on the wire —
 // the bare-slice `NilContainersAsEmpty` codec footgun would otherwise encode
-// nil as `Some(empty)`). The MTA submission path leaves it nil; the MDA's
-// server-side auto-schedule gateway sets it to the AUTH'd organizer's actor id
-// so nest caller-scopes the enqueue to that organizer (caldav-server.md
-// § Server-side auto-schedule).
+// nil as `Some(empty)`). Both callers set it: the MTA submission path to its
+// AUTH'd submitter, the MDA's server-side auto-schedule gateway to the AUTH'd
+// organizer (see EnqueueOutboundMail).
 type enqueueOutboundMailRequest struct {
 	OriginalMsgID   string   `cbor:"original_msgid"`
 	OriginalSender  string   `cbor:"original_sender"`
@@ -3901,6 +4154,12 @@ type enqueueOutboundMailRequest struct {
 	// skip_serializing_if = "Option::is_none")]`), so the inline MTA bytes are
 	// unchanged.
 	StagedBody *StagedBodyRef `cbor:"staged_body,omitempty"`
+	// SubmissionToken is the MTA's proof of its submitter: the canonical
+	// DAG-CBOR plaintext of the user-signed SubmissionToken SMTP AUTH unwrapped
+	// (mail-multidomain.md § From: header ownership → *Per door, nest-side*).
+	// Required of the MTA, nil for the MDA (omitted on the wire — the Rust
+	// `Option<ByteBuf>` reads an absent key as None).
+	SubmissionToken []byte `cbor:"submission_token,omitempty"`
 }
 
 // enqueueOutboundMailReply mirrors EnqueueOutboundMailReply.
@@ -3914,17 +4173,27 @@ type enqueueOutboundMailReply struct {
 // log correlation when those rows later land on the worker via
 // FetchOutboundDue).
 //
-// onBehalfOfActor is nil for the MTA submission path (sender-unconstrained,
-// nest trusts the AUTH'd submitter). The MDA's server-side auto-schedule
-// gateway passes the AUTH'd organizer's actor id so nest caller-scopes the
-// enqueue: it accepts the call only if originalSender resolves to that actor
-// (caldav-server.md § Server-side auto-schedule).
+// onBehalfOfActor is required: the actor the message is submitted for — the
+// MTA's AUTH'd submitter, or the MDA auto-schedule gateway's AUTH'd organizer.
+// nest holds the message's From: to that actor (mail-multidomain.md § From:
+// header ownership; refused with CodeSenderNotOwned) and, for the MDA, also
+// requires originalSender to resolve to it (caldav-server.md § Server-side
+// auto-schedule). A nil one is refused as malformed.
+//
+// submissionToken is the MTA's proof of onBehalfOfActor: the canonical
+// plaintext of the submission token the session's AUTH unwrapped
+// (SubmissionTokenFfi.CanonicalBytes). nest accepts the submitter only when the
+// token names it, its user signature verifies, it has not expired, its
+// recipient bound holds and its credential is still on file — else
+// CodeSubmitterNotProven; an MTA call without one is malformed. The MDA passes
+// nil (its AUTH blob carries no user signature; nest keeps its caller scope
+// instead).
 //
 // stagedBody is nil for the common inline path (rawMessage carries the body).
 // When the body is over the inline request budget the MTA stages
 // the ciphertext on the bulk-byte plane and passes stagedBody with an empty
 // rawMessage (the staged-envelope rule); nest recovers the identical bytes.
-func EnqueueOutboundMail(ctx context.Context, c Caller, originalMsgID, originalSender string, recipients []string, rawMessage []byte, onBehalfOfActor *[]byte, stagedBody *StagedBodyRef) ([]int64, error) {
+func EnqueueOutboundMail(ctx context.Context, c Caller, originalMsgID, originalSender string, recipients []string, rawMessage []byte, onBehalfOfActor *[]byte, submissionToken []byte, stagedBody *StagedBodyRef) ([]int64, error) {
 	req := enqueueOutboundMailRequest{
 		OriginalMsgID:   originalMsgID,
 		OriginalSender:  originalSender,
@@ -3932,6 +4201,7 @@ func EnqueueOutboundMail(ctx context.Context, c Caller, originalMsgID, originalS
 		RawMessage:      rawMessage,
 		OnBehalfOfActor: onBehalfOfActor,
 		StagedBody:      stagedBody,
+		SubmissionToken: submissionToken,
 	}
 	var reply enqueueOutboundMailReply
 	if err := c.Call(ctx, MethodEnqueueOutboundMail, req, &reply); err != nil {
@@ -4107,12 +4377,15 @@ func KeypackageFetch(ctx context.Context, c Caller, actorID, nestURL string) ([]
 }
 
 // sendAutoReplyRequest mirrors fauna_protocol::bridge_routing::SendAutoReplyRequest.
+// It names the reply and carries no message bytes: the nest composes the reply
+// from the recipient's stored AutoReply rule (mail-multidomain.md § From:
+// header ownership → Per door, nest-side, the auto-reply door).
 type sendAutoReplyRequest struct {
 	RecipientActorID []byte `cbor:"recipient_actor_id"`
 	EnvelopeFrom     string `cbor:"envelope_from"`
-	IntervalHours    uint32 `cbor:"interval_hours"`
-	OriginalMsgID    string `cbor:"original_msgid"`
-	RawMessage       []byte `cbor:"raw_message"`
+	FromAddress      string `cbor:"from_address"`
+	InReplyTo        string `cbor:"in_reply_to"`
+	RuleID           int64  `cbor:"rule_id"`
 }
 
 // sendAutoReplyReply mirrors SendAutoReplyReply.
@@ -4120,19 +4393,23 @@ type sendAutoReplyReply struct {
 	Sent bool `cbor:"sent"`
 }
 
-// SendAutoReply hands nest the composed vacation reply (unsigned — the nest
-// signs it at the outbound hand-out). nest
-// atomically claims the (recipient, envelope-sender) rate-limit slot — keyed on
-// a hash of the lowercased envelope-from — and, if free, enqueues the reply
-// null-sender. A `true` return means the reply is now queued; `false` means a
-// reply was already sent within `intervalHours` (suppressed).
-func SendAutoReply(ctx context.Context, c Caller, recipientActorID []byte, envelopeFrom string, intervalHours uint32, originalMsgID string, rawMessage []byte) (bool, error) {
+// SendAutoReply asks nest to send recipientActorID's vacation reply under the
+// matched AutoReply rule ruleID, from fromAddress (the address the triggering
+// message was delivered to) back to envelopeFrom, threaded on inReplyTo (the
+// triggering Message-ID; empty if it had none). nest composes the reply from
+// the stored rule, holds fromAddress to the recipient, atomically claims the
+// (recipient, envelope-sender) rate-limit slot — keyed on a hash of the
+// lowercased envelope-from — and, if free, enqueues the reply null-sender; it
+// signs it at the outbound hand-out. A `true` return means the reply is now
+// queued; `false` means a reply was already sent within the rule's interval
+// (suppressed).
+func SendAutoReply(ctx context.Context, c Caller, recipientActorID []byte, envelopeFrom, fromAddress, inReplyTo string, ruleID int64) (bool, error) {
 	req := sendAutoReplyRequest{
 		RecipientActorID: recipientActorID,
 		EnvelopeFrom:     envelopeFrom,
-		IntervalHours:    intervalHours,
-		OriginalMsgID:    originalMsgID,
-		RawMessage:       rawMessage,
+		FromAddress:      fromAddress,
+		InReplyTo:        inReplyTo,
+		RuleID:           ruleID,
 	}
 	var reply sendAutoReplyReply
 	if err := c.Call(ctx, MethodSendAutoReply, req, &reply); err != nil {

@@ -15,6 +15,9 @@ import com.fauna.app.ui.screen.events.localeFirstDayOfWeek
 import com.fauna.app.ui.screen.events.pannedBy
 import com.fauna.app.ui.screen.events.snapToWeekStart
 import com.fauna.ffi.FfiCalendarViewMode
+import com.fauna.ffi.FfiIcsImportResult
+import com.fauna.ffi.FfiRefusedChange
+import com.fauna.ffi.refusedChangeDismiss
 import uniffi.fauna_core.RsvpResponse
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -29,6 +32,37 @@ class EventsVM @Inject constructor(
     // surface) the live draft's owner.
     private val draftsHost: com.fauna.app.core.events.EventDraftsHost,
 ) : ViewModel() {
+
+    /** The open refused scheduling changes (`ui/events.md` § Refused scheduling
+     *  changes) — the shared `refused_change_view` rows, empty when nothing was
+     *  refused (the list is then absent). Re-read on every [load] and on the
+     *  store-change notice. */
+    val refusedChanges = MutableStateFlow<List<FfiRefusedChange>>(emptyList())
+
+    /** Re-read the refused-change list. A store that is not up yet reads empty.
+     *  Level, not event: the state flow publishes only a list that differs. */
+    fun loadRefusedChanges() {
+        viewModelScope.launch {
+            try {
+                refusedChanges.value = api.refusedChangesOpen()
+            } catch (e: Exception) {
+                // The list is informational; a failed read leaves it as it was.
+            }
+        }
+    }
+
+    /** `refused-change-dismiss` — the row's only control, a local store write
+     *  (no nest needed). */
+    fun dismissRefusedChange(key: String) {
+        viewModelScope.launch {
+            try {
+                refusedChangeDismiss(key)
+            } catch (e: Exception) {
+                errorMessage.value = e.message
+            }
+            loadRefusedChanges()
+        }
+    }
 
     /** The live events-rail draft, or `null` for "nothing to resume" —
      *  reactive so the New Event sheet picks up a restore that lands after
@@ -130,6 +164,14 @@ class EventsVM @Inject constructor(
         viewModelScope.launch {
             api.reconnectTick.collect { refreshFromPush() }
         }
+        // The store-change notice (account-runtime.md § Multi-instance
+        // concurrency → *A runtime's own pump is a source of the notice too*):
+        // a refusal is a background write of this runtime, so an open page
+        // re-reads the refused-change list — the list ONLY; the calendars and
+        // events beside it are the nest's, not the store's.
+        viewModelScope.launch {
+            api.storeChangedTick.collect { loadRefusedChanges() }
+        }
     }
 
     private fun refreshFromPush() {
@@ -153,6 +195,7 @@ class EventsVM @Inject constructor(
      *  render the current scope (selected calendar or the no-selection union).
      *  Calendars must be listed before the union can fan out over them. */
     fun load() {
+        loadRefusedChanges()
         viewModelScope.launch {
             try {
                 val previous = calendars.value
@@ -356,17 +399,20 @@ class EventsVM @Inject constructor(
         }
     }
 
-    fun importCalendar(calendarId: String, icsText: String) {
-        viewModelScope.launch {
-            try {
-                api.importCalendar(calendarId, icsText)
-                // Refresh the current scope (selected calendar or the union) so
-                // the imported events appear.
-                refreshEvents()
-                loadEventsForCurrentView()
-            } catch (e: Exception) {
-                errorMessage.value = e.message
-            }
+    /**
+     * Import [icsText] into [calendarId] and refresh the current scope so the
+     * imported events appear. Returns the shared imported / skipped counts, or
+     * null (with [errorMessage] set) on failure — the caller words the result.
+     */
+    suspend fun importCalendar(calendarId: String, icsText: String): FfiIcsImportResult? {
+        return try {
+            val outcome = api.importCalendar(calendarId, icsText)
+            refreshEvents()
+            loadEventsForCurrentView()
+            outcome
+        } catch (e: Exception) {
+            errorMessage.value = e.message
+            null
         }
     }
 

@@ -212,6 +212,9 @@ pub struct CalendarViewHandles {
     /// `event_detail::refresh_event_detail_panel` on `EventSelected` /
     /// `EventAttendeesLoaded`.
     pub detail_panel: gtk::Box,
+    /// The refused-change list's container (`refused_changes`); hidden while
+    /// the list is empty, repainted by `RefusedChangesLoaded`.
+    pub refused_panel: gtk::Box,
     /// The page callbacks `month_grid::refresh_month_grid` requires — its day
     /// cells wire them to the month→day drill-in and the double-click compose.
     pub month_hooks: MonthGridHooks,
@@ -336,6 +339,10 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
     crate::testid::set_test_id(&heading_marker, ids::PAGE_HEADING);
     main_area.append(&heading_marker);
 
+    // The refused-change list: absent unless a change was refused.
+    let refused_panel = super::refused_changes::build_refused_changes_panel();
+    main_area.append(&refused_panel);
+
     // --- Header bar ---
     let header_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     header_box.set_margin_top(8);
@@ -448,13 +455,18 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
             // Author into the calendar the page is currently targeting — the
             // live selection, else the first visible / first listed one
             // (events.md § Layout & flow).
+            //
+            // No date prefill: this opener names no day, so a fresh form opens
+            // blank on every field, as on tui and web — only the day-cell and
+            // empty-slot gestures prefill, with the day they name (`events.md`
+            // § Layout & flow). A private "today 09:00–10:00" here left the
+            // form after a created event non-blank (`drafts-survive` outcome 12).
             let cal_id = st.borrow().authoring_target().unwrap_or_default();
-            let today = time_utils::today();
             let data = super::event_form::PrefilledEventData {
                 calendar_id: cal_id,
                 summary: String::new(),
-                start_time: format!("{:04}-{:02}-{:02} 09:00", today.0, today.1, today.2),
-                end_time: format!("{:04}-{:02}-{:02} 10:00", today.0, today.1, today.2),
+                start_time: String::new(),
+                end_time: String::new(),
                 description: String::new(),
                 location: String::new(),
             };
@@ -774,6 +786,7 @@ pub fn build_calendar_view(client: &Rc<FaunaClient>) -> (gtk::Box, CalendarViewH
         day_grid_container,
         agenda_container,
         detail_panel,
+        refused_panel,
         month_hooks,
     };
 

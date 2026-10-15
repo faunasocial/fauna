@@ -78,6 +78,14 @@ MAIL_AGENT_WRITEBACK_S = 90.0
 """The mail bridge's agent-side sealed model/history write-back lands after a
 STORE command's tagged OK (asynchronous relative to the STORE response)."""
 
+MAIL_IMPORT_RETRY_LADDER_S = 300.0
+"""A mail import whose source connection dropped and stays down spends the
+production retry ladder before pausing itself (`mailbox-migration.md`
+§ Failure handling, `RETRY_DELAYS_MS`: 5 s + 30 s + 2 min = 155 s of mandated
+sleep, plus a refused reconnect after each). The sleep is the product's own,
+not latency, so the budget sits that far above it: a green run returns the
+instant the pause lands, and only a ladder that never ends spends it."""
+
 MAIL_OUTBOUND_CYCLE_S = 90.0
 """One outbound drain cycle completes after a `run_now` poke: the MTA bridge
 wakes on the `fauna.bridges.outbound_ready` nudge, fetches the due batch, runs
@@ -85,6 +93,24 @@ an MX attempt (its own `AttemptTimeout` alone is 60s) and reports the outcome
 back to nest, which advances the row. Sized above that attempt ceiling — the
 poll interval it replaces was itself 30s, so a cycle that has to fall back to
 the poll still fits."""
+
+MAIL_BRIDGE_RECONNECT_S = 90.0
+"""A mail bridge whose nest came back reconnects and answers verdict-needing
+RPCs again: its reconnect backoff tops out at 30 s between attempts
+(`mail-bridge-lifecycle.md` § Reconnecting), and an attempt is a handshake, a
+bearer re-mint, `whoami` and `fetch_config`. Sized at three backoff caps so a
+loaded box that misses one attempt still fits."""
+
+MAIL_CONFIG_HOT_APPLY_S = 60.0
+"""An admin's local-domain change reaches the MTA's RCPT gate: the nest fans
+`config_changed`, the bridge re-fetches its snapshot off the reader goroutine,
+and the NEXT inbound connection binds it. Asynchronous, sub-second on a quiet
+box; sized for a loaded one."""
+
+MAIL_BRIDGE_RECONNECT_S = 90.0
+"""A running mail bridge is serving again after its nest came back: it re-dials
+on its backoff curve (at most 30s between tries), re-runs whoami + fetch_config,
+and its listeners answer verdict calls again. Sized for a loaded box."""
 
 ALERT_SWEEP_PASS_S = 90.0
 """One critical-alert sweep pass completes after the session establishment that
@@ -94,6 +120,15 @@ fetch of the public PLC audit log — and it is deliberately best-effort, so it
 also has to absorb an unreachable feeder's own transport timeout before the pass
 counts itself finished. Generous by design: a green run returns the instant the
 pass lands, and only a genuine "the sweep never looked" spends this."""
+
+RESTORE_RETRY_PASS_S = 60.0
+"""The web restore retry's first pass lands after a fail-closed clear wakes it
+(`tests/api/test_web_restore_retry_log.py`). The first attempt after a wake is
+immediate — no failure on record, so `next_attempt_delay` answers zero — and a
+pass is one owed-row listing plus one render attempt per dark site. Generous by
+design: a green run returns the instant the pass's warning is in the log; only
+"the retry never ran" spends this. The pass after it is 900 s out and is never
+waited on."""
 
 RESCORE_WORKLIST_SERVE_S = 90.0
 """The nest serves the re-score drain a worklist after a `config_changed` poke
@@ -112,6 +147,16 @@ scheduling + folder feeds — several nest round trips, each of which may itself
 be paging. Sized alongside `MLS_HANDSHAKE_S` because the same handshake work
 happens inside it; generous by design: a green run returns the instant the
 counter passes its baseline, and only "the loop never ran" spends this."""
+
+NOSTR_INBOUND_TICK_S = 180.0
+"""A nest's Nostr sync worker picks up what a followed author's relay serves:
+its inbound subscriptions are refreshed on the worker's one-minute tick
+(`nostr/sync_worker.rs`), and what a relay sends — the backlog after a new
+`REQ`, or a live event after `EOSE` — is drained at the end of a worker pass, so
+a follow added just after a tick can need two ticks before its notes reach the
+feed. There is no poke for it. Generous by design: a green run returns the
+instant the feed changes, and only "the worker never subscribed or never
+drained" spends this."""
 
 MLS_COMMIT_FOLD_S = 90.0
 """One device folds in another device's epoch-advancing commit and its count of

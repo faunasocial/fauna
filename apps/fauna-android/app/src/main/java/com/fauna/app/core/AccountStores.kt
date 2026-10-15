@@ -316,7 +316,7 @@ class AccountStores @Inject constructor(
      * `build_custodian_host` takes a shell's flat per-user base and derives the
      * actor-scoped location itself, through the shared
      * `custodian_store_root(base, actor_hex)` → `<base>/<actor-hex>/
-     * custodian-store/` (`libs/fauna-sync-engine/src/custodian_store.rs`), so
+     * backup-custodian/` (`libs/fauna-sync-engine/src/custodian_store.rs`), so
      * the layout and the account scoping cannot drift per platform. Handing it
      * [filesScope] instead would scope the path **twice**, and the second hex
      * would come from a different source than the first: `filesScope` reads the
@@ -528,42 +528,45 @@ class AccountStores @Inject constructor(
         )
 
     /**
-     * Erase ONE account's scoped stores — the account-switcher's "remove this
-     * account from this install" affordance (`account-scoping.md` § Erasure
-     * follows scope: *removing one account erases that actor's stores*). Touches
-     * nothing outside that actor's scoped dirs, under either root.
+     * Remove ONE account from this install — the account-switcher's "remove
+     * this account" gesture, WHOLE, through the shared FFI door
+     * (`com.fauna.ffi.removeAccountGesture`): refused while this window or a
+     * sibling serves it; else its registry entry and slots go, this phone is
+     * retired from the account's nest as a sign-out retires it, and its scoped
+     * stores are erased under both roots (`account-scoping.md` § Erasure follows
+     * scope → *Removing an account retires this machine from it, as a sign-out
+     * does*). Returns the refusal to paint, `null` once removed; throws when the
+     * registry refuses the removal (nothing else ran then).
      *
-     * ⚠ Only [closeOpenStores] when the erased actor IS the active one. Every
-     * caller targets a non-active row ([AccountSettingsVM.removeAccount],
-     * offered only for a non-active account) — "removeAccount targets a
-     * non-active actor" and "erases no live engine"
-     * (`account-scoping.md:248-251`) — so the active session's handles are
-     * never the ones being erased. [closeOpenStores] runs EVERY registered
-     * identity closer, not just this actor's: `ContentPolicyStore`,
-     * `ScreenTimeStore` and `SupervisedIndicatorVM` each blank their state
-     * unconditionally and only re-seed it when the active actor actually
-     * changed (family-client-enforcement.md:98-99). Since erasing a
-     * non-active account never moves the active pointer, running the closers
-     * anyway blanked the ACTIVE ward's guardian floor, bedtime lock and
-     * indicator on every non-active removal — the same shape as the debug
-     * `TestAgent` reset/logout same-actor drop, but reachable from ordinary
-     * UI.
+     * The nest half is best-effort under the shared budget, so this may take up
+     * to that long on a nest that does not answer — call it off the main thread.
+     *
+     * ⚠ No [closeOpenStores]. Every caller targets a non-active row
+     * ([AccountSettingsVM.removeAccount], offered only for a non-active
+     * account), and the door refuses the active one (`servingHere`), so the
+     * active session's handles are never the ones being erased.
+     * [closeOpenStores] runs EVERY registered identity closer, not just this
+     * actor's: `ContentPolicyStore`, `ScreenTimeStore` and
+     * `SupervisedIndicatorVM` each blank their state unconditionally and only
+     * re-seed it when the active actor actually changed
+     * (family-client-enforcement.md:98-99), so running them for a non-active
+     * removal blanked the ACTIVE ward's guardian floor, bedtime lock and
+     * indicator.
      */
-    @Synchronized
-    fun eraseAccount(actorIdHex: String) {
-        if (actorIdHex == activeActorHex()) closeOpenStores()
-        for (root in listOf(filesRoot, dbRoot)) {
-            runCatching {
-                com.fauna.ffi.accountStateEraseScope(
-                    root.absolutePath,
-                    actorIdHex,
-                    accountStoreContainerDir(),
-                )
-            }.onFailure {
-                ShellLog.w("AccountStores", "erase of one account under ${root.name} failed: ${it.message}")
-            }
-        }
-    }
+    suspend fun removeAccount(actorIdHex: String): com.fauna.ffi.FfiEraseRemoveBlocked? =
+        com.fauna.ffi.removeAccountGesture(
+            registry,
+            actorIdHex,
+            listOf(filesRoot.absolutePath, dbRoot.absolutePath),
+            // The same container, paired with the same exclusion, that
+            // `ApiClient.startAccountRuntime` hands the live runtime.
+            com.fauna.ffi.FfiStoreContainer(
+                dir = accountStoreContainerDir(),
+                exclusion = CloudBackupPosture.exclusion(),
+            ),
+            null,
+            activeActorHex(),
+        )
 
     /**
      * One root's share of the sign-out sweep. Hands back what would not go —

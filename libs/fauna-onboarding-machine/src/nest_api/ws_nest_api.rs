@@ -232,6 +232,20 @@ enum CoreError {
     /// Transport-level connect failure — the seams' retryable bucket, exactly
     /// the mapping every seam applied before the classification existed.
     Transient { reason: String },
+    /// The nest refused this app's subprotocol before the upgrade (HTTP 426):
+    /// the app is too old for it (`version-compatibility.md` § Dimension 4).
+    /// Terminal on the two first-contact seams that have a typed non-retry
+    /// outcome — the probe (`ProbeError::AppOutdated`) and the challenge
+    /// (`SilentChallengeOutcome::NeedsUpdate` naming `OutdatedSide::App`); the
+    /// later wizard endpoints only run after one of those has answered, so they
+    /// carry it in their transient bucket with its localized `reason`.
+    /// The native connect builds it from the 426 or 4426 it reads itself. The
+    /// wasm connect is synchronous, so a browser meets the nest's 4426 at the
+    /// first request: with a held root that request is the possession proof,
+    /// whose `FirstContactError::AppOutdated` the wasm `core()` maps here;
+    /// without one it is the seam's own request, which the request-level
+    /// classifiers read through `is_subprotocol_mismatch`.
+    AppOutdated { reason: String },
 }
 
 /// Classify a native connect/graduation failure per `security.md` § Pre-claim
@@ -262,6 +276,13 @@ fn classify_core_failure(
         | AnonClientError::RpcDisconnected { .. }
         | AnonClientError::RpcTimeout => {
             return CoreError::Transient {
+                reason: err.to_string(),
+            };
+        }
+        // A nest too new for this app refused its subprotocol: the typed
+        // non-retry outcome, with the localized "your app is out of date" text.
+        AnonClientError::SubprotocolMismatch => {
+            return CoreError::AppOutdated {
                 reason: err.to_string(),
             };
         }
@@ -315,8 +336,15 @@ impl WsNestApi {
         let addr = self.resolve_override_addr(&resolved);
         let client = fauna_anon_client::AnonymousNestClient::connect_resolving(&resolved, addr)
             .await
-            .map_err(|e| CoreError::Transient {
-                reason: e.to_string(),
+            .map_err(|e| match e {
+                // The nest refused this app's subprotocol before the upgrade —
+                // the one connect failure that is a verdict, not a blip.
+                fauna_anon_client::AnonClientError::SubprotocolMismatch => CoreError::AppOutdated {
+                    reason: e.to_string(),
+                },
+                e => CoreError::Transient {
+                    reason: e.to_string(),
+                },
             })?;
         // First-contact trust: authenticate the nest's identity on this fresh
         // pre-identity connection before the real request rides it. On the
@@ -381,6 +409,10 @@ impl WsNestApi {
                 FirstContactError::Transport => CoreError::Transient {
                     reason: e.to_string(),
                 },
+                // The nest's 4426 close ended the proof — the browser's first
+                // request: the app is too old for it, a verdict no retry
+                // clears (version-compatibility.md § Dimension 4).
+                FirstContactError::AppOutdated { reason } => CoreError::AppOutdated { reason },
                 // A verdict: wrong identity, absent binding, or a refusal of
                 // the handshake kind — each hard-fails with a held root
                 // (security.md § Pre-claim surfacing).
@@ -419,6 +451,7 @@ impl NestApi for WsNestApi {
                     ProbeError::IdentityMismatch { reason }
                 }
                 CoreError::Transient { reason } => ProbeError::Transient { reason },
+                CoreError::AppOutdated { reason } => ProbeError::AppOutdated { reason },
             })?
             .probe_setup_status()
             .await
@@ -452,6 +485,13 @@ impl NestApi for WsNestApi {
             Err(CoreError::Transient { reason }) => {
                 SilentChallengeOutcome::Transient { error: reason }
             }
+            // The app is too old for this nest: the needs-update outcome, the
+            // same one the launch machine lands for the same 426 — terminal in
+            // every wizard consumer, never the retry a blip earns.
+            Err(CoreError::AppOutdated { reason }) => SilentChallengeOutcome::NeedsUpdate {
+                message: reason,
+                outdated: crate::nest_api::OutdatedSide::App,
+            },
         }
     }
 
@@ -469,7 +509,9 @@ impl NestApi for WsNestApi {
                 CoreError::IdentityMismatch { reason, .. } => {
                     ClaimAdminError::IdentityMismatch { reason }
                 }
-                CoreError::Transient { reason } => ClaimAdminError::Transient { cause: reason },
+                CoreError::Transient { reason } | CoreError::AppOutdated { reason } => {
+                    ClaimAdminError::Transient { cause: reason }
+                }
             })?
             .claim_admin(code, secret_hex, handle, mail_domain)
             .await
@@ -486,7 +528,9 @@ impl NestApi for WsNestApi {
                 CoreError::IdentityMismatch { reason, .. } => {
                     InviteRequestError::IdentityMismatch { reason }
                 }
-                CoreError::Transient { reason } => InviteRequestError::Transient { cause: reason },
+                CoreError::Transient { reason } | CoreError::AppOutdated { reason } => {
+                    InviteRequestError::Transient { cause: reason }
+                }
             })?
             .submit_invite_request(body)
             .await
@@ -503,7 +547,9 @@ impl NestApi for WsNestApi {
                 CoreError::IdentityMismatch { reason, .. } => {
                     InviteRequestError::IdentityMismatch { reason }
                 }
-                CoreError::Transient { reason } => InviteRequestError::Transient { cause: reason },
+                CoreError::Transient { reason } | CoreError::AppOutdated { reason } => {
+                    InviteRequestError::Transient { cause: reason }
+                }
             })?
             .cancel_invite_request(secret_hex)
             .await
@@ -520,7 +566,9 @@ impl NestApi for WsNestApi {
                 CoreError::IdentityMismatch { reason, .. } => {
                     InviteRequestError::IdentityMismatch { reason }
                 }
-                CoreError::Transient { reason } => InviteRequestError::Transient { cause: reason },
+                CoreError::Transient { reason } | CoreError::AppOutdated { reason } => {
+                    InviteRequestError::Transient { cause: reason }
+                }
             })?
             .recheck_invite_request(actor_id_hex)
             .await
@@ -537,7 +585,9 @@ impl NestApi for WsNestApi {
                 CoreError::IdentityMismatch { reason, .. } => {
                     InviteCodeError::IdentityMismatch { reason }
                 }
-                CoreError::Transient { reason } => InviteCodeError::Transient { cause: reason },
+                CoreError::Transient { reason } | CoreError::AppOutdated { reason } => {
+                    InviteCodeError::Transient { cause: reason }
+                }
             })?
             .verify_invite_code(code)
             .await
@@ -550,7 +600,9 @@ impl NestApi for WsNestApi {
                 CoreError::IdentityMismatch { reason, .. } => {
                     AgeNonceError::IdentityMismatch { reason }
                 }
-                CoreError::Transient { reason } => AgeNonceError::Transient { cause: reason },
+                CoreError::Transient { reason } | CoreError::AppOutdated { reason } => {
+                    AgeNonceError::Transient { cause: reason }
+                }
             })?
             .age_nonce()
             .await
@@ -567,7 +619,9 @@ impl NestApi for WsNestApi {
                 CoreError::IdentityMismatch { reason, .. } => {
                     RegisterError::IdentityMismatch { reason }
                 }
-                CoreError::Transient { reason } => RegisterError::Failed { cause: reason },
+                CoreError::Transient { reason } | CoreError::AppOutdated { reason } => {
+                    RegisterError::Failed { cause: reason }
+                }
             })?
             .register(body)
             .await
@@ -585,7 +639,9 @@ impl NestApi for WsNestApi {
                 CoreError::IdentityMismatch { reason, .. } => {
                     NatModeError::IdentityMismatch { reason }
                 }
-                CoreError::Transient { reason } => NatModeError::Transient { cause: reason },
+                CoreError::Transient { reason } | CoreError::AppOutdated { reason } => {
+                    NatModeError::Transient { cause: reason }
+                }
             })?
             .submit_nat_mode(secret_hex, mode)
             .await
@@ -608,9 +664,32 @@ impl NestApi for WsNestApi {
                 CoreError::IdentityMismatch { reason, .. } => {
                     RestoreSeedError::IdentityMismatch { reason }
                 }
-                CoreError::Transient { reason } => RestoreSeedError::Transient { reason },
+                CoreError::Transient { reason } | CoreError::AppOutdated { reason } => {
+                    RestoreSeedError::Transient { reason }
+                }
             })?
             .restore_escrowed_seed(recovery_secret_hex, actor_id_hex, handle)
+            .await
+    }
+
+    async fn lock_account_with_seed(
+        &self,
+        base_url: &str,
+        secret_hex: &str,
+    ) -> Result<i64, LockAccountError> {
+        // Same connect-failure split as the restore: a transport fault is the
+        // retryable bucket, the identity verdict is terminal.
+        self.core(base_url)
+            .await
+            .map_err(|e| match e {
+                CoreError::IdentityMismatch { reason, .. } => {
+                    LockAccountError::IdentityMismatch { reason }
+                }
+                CoreError::Transient { reason } | CoreError::AppOutdated { reason } => {
+                    LockAccountError::Transient { reason }
+                }
+            })?
+            .lock_account_with_seed(secret_hex)
             .await
     }
 }
@@ -822,6 +901,33 @@ mod tests {
         );
     }
 
+    /// The wasm `core()` lands a 4426-ended possession proof on the terminal
+    /// `CoreError::AppOutdated` — the probe's `ProbeError::AppOutdated` and the
+    /// challenge's `NeedsUpdate` naming the app — never the retryable
+    /// `Transient` (`version-compatibility.md` § Dimension 4, *The other
+    /// direction*). The helper's own classification is pinned behaviourally in
+    /// `fauna-client-core` (`possession_proof_reports_a_4426_close_as_the_app_outdated`);
+    /// this pins the wasm arm's mapping, which no native test can execute (the
+    /// same source-level reasoning as the test above).
+    #[test]
+    fn wasm_core_maps_a_4426_ended_possession_proof_to_app_outdated() {
+        let src = include_str!("ws_nest_api.rs");
+        let (_, wasm) = src
+            .split_once("#[cfg(target_arch = \"wasm32\")]\nimpl WsNestApi {")
+            .expect("the wasm `impl WsNestApi` block is where the wasm core() lives");
+        let wasm = wasm
+            .split_once("#[cfg(test)]")
+            .map(|(before, _)| before)
+            .unwrap_or(wasm);
+        assert!(
+            wasm.contains(
+                "FirstContactError::AppOutdated { reason } => CoreError::AppOutdated { reason }"
+            ),
+            "the wasm core() must land the possession proof's AppOutdated on \
+             CoreError::AppOutdated, not a retryable Transient"
+        );
+    }
+
     // ── `classify_core_failure` — the § Pre-claim surfacing table ─────────────
 
     use fauna_anon_client::{AnonClientError, IdentityError, TrustError};
@@ -854,7 +960,7 @@ mod tests {
                     assert_eq!(seen_hex, None);
                     assert!(!fork);
                 }
-                CoreError::Transient { reason } => {
+                CoreError::Transient { reason } | CoreError::AppOutdated { reason } => {
                     panic!("held-root trust failure classified retryable: {reason}")
                 }
             }
@@ -886,7 +992,7 @@ mod tests {
                 assert_eq!(seen_hex, Some(hex::encode(seen)));
                 assert!(!fork);
             }
-            CoreError::Transient { reason } => {
+            CoreError::Transient { reason } | CoreError::AppOutdated { reason } => {
                 panic!("pin change classified retryable: {reason}")
             }
         }
@@ -947,5 +1053,49 @@ mod tests {
             ),
             CoreError::IdentityMismatch { .. }
         ));
+        assert!(matches!(
+            classify_core_failure(AnonClientError::SubprotocolMismatch, HOST, None),
+            CoreError::AppOutdated { .. }
+        ));
+    }
+
+    /// A nest too new for this app — it answers the upgrade with HTTP 426 — is
+    /// the typed too-old-app outcome on both first-contact seams, never the
+    /// retryable transient a blip earns: the probe's terminal `AppOutdated` and
+    /// the challenge's needs-update naming the app as the side to update, each
+    /// with the localized "your app is out of date" text
+    /// (`version-compatibility.md` § Dimension 4). Against a real upgrade
+    /// rejection — a raw listener answering 426 — not a synthesized variant.
+    #[tokio::test]
+    async fn a_426_at_first_contact_is_the_too_old_app_outcome_on_both_seams() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral listener");
+        let addr = listener.local_addr().expect("listener local_addr");
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 426 Upgrade Required\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+        let nest = api(None, None, None);
+        let url = format!("http://{addr}");
+        let text = fauna_i18n::strings::errors::SUBPROTOCOL_MISMATCH;
+
+        match nest.probe_setup_status(&url).await {
+            Err(ProbeError::AppOutdated { reason }) => assert_eq!(reason, text),
+            other => panic!("expected the probe's AppOutdated, got {other:?}"),
+        }
+        match nest.silent_challenge(&url, &"07".repeat(32)).await {
+            SilentChallengeOutcome::NeedsUpdate { message, outdated } => {
+                assert_eq!(message, text);
+                assert_eq!(outdated, crate::nest_api::OutdatedSide::App);
+            }
+            other => panic!("expected NeedsUpdate naming the app, got {other:?}"),
+        }
     }
 }

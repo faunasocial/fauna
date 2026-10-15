@@ -13,7 +13,8 @@
 //! 2. **Connect an app** — the typed-code start: a code field and a submit.
 //! 3. **The roster** — one row per connected app, Revoke with an inline confirm.
 //!    A mail app-password row additionally carries its login, kind and secret
-//!    controls.
+//!    controls; a principal the oracle served, what the nest did with the
+//!    user's keys for it.
 //! 4. **Blocked apps** — one row per blocked client with Unblock. Painted only
 //!    while something is blocked.
 //!
@@ -35,7 +36,8 @@ use std::sync::Arc;
 
 use fauna_client_connected_apps::{
     ConnectedAppRow, ConnectedAppsMachine, ConnectedAppsObserver, ConnectedAppsSnapshot,
-    ConsentCardRow, class,
+    ConsentCardRow,
+    compose::{request_card_lines, roster_row_text},
 };
 use fauna_client_mail_settings::{MailSettingsMachine, resolve_mua_username};
 use fauna_core::secret::SecretString;
@@ -247,21 +249,6 @@ pub(super) fn connected_apps_elements(state: &SettingsState) -> Vec<Element> {
     els
 }
 
-/// The class badge's words — the one per-app half of the grouping key, which
-/// the machine derives. An unknown class paints no badge rather than a guess.
-fn class_label(class: &str) -> Option<&'static str> {
-    Some(match class {
-        class::REMOTE => t::CLASS_REMOTE,
-        class::DEVICE => t::CLASS_DEVICE,
-        class::WASM => t::CLASS_WASM,
-        class::CONTAINER => t::CLASS_CONTAINER,
-        class::APP_PASSWORD => t::CLASS_APP_PASSWORD,
-        class::SIGNER => t::CLASS_SIGNER,
-        class::OAUTH => t::CLASS_OAUTH,
-        _ => return None,
-    })
-}
-
 fn when(ms: i64) -> String {
     fauna_core::format::format_unix_local_ms(ms)
 }
@@ -279,44 +266,35 @@ fn row_elements(
 ) {
     const ITEM: &str = ids::CONNECTED_APPS_ITEM;
     let name = crate::wizard::localized(&row.name);
-    let mut head = name.clone();
-    if let Some(badge) = class_label(&row.class) {
-        head = format!("{head} · {badge}");
-    }
-    let mut lines = vec![head];
-    let burned = row.mail.as_ref().is_some_and(|m| m.revoked);
-    // The burned state sits directly under the name and above everything a
-    // user might copy into a mail app: the login below it authenticates
-    // nothing any more (`mail-credentials.md` § Rotation and recovery →
-    // *Succession*).
-    if burned {
-        lines.push(mail_t::CREDENTIAL_REVOKED.to_string());
-    }
-    if let (Some(client_id), Some(domain)) = (&row.client_id, &row.publisher) {
-        lines.push(format!("{} — {client_id}", t::publisher(domain)));
-    }
-    for scope in &row.scope_descriptions {
-        lines.push(format!("  • {}", crate::wizard::localized(scope)));
-    }
-    let mut facts = Vec::new();
-    if !row.connected {
-        facts.push(t::NOT_CONNECTED.to_string());
-    }
-    facts.push(t::created(&when(row.created_at_millis)));
-    facts.push(match row.last_used_at_millis {
-        Some(ms) => t::last_used(&when(ms)),
-        None => t::NEVER_USED.to_string(),
-    });
-    facts.push(match row.lasts_until_millis {
-        Some(ms) => t::lasts_until(&when(ms)),
-        None => t::OPEN_ENDED.to_string(),
-    });
-    lines.push(facts.join(" · "));
+    let mail_burned = row.mail.as_ref().is_some_and(|m| m.revoked);
+    let burned = mail_burned || row.signer_burned;
+    // The lines — head, burned state, publisher, scopes, permission sets, oracle
+    // summary, facts — are the shared composition's
+    // (`fauna_client_connected_apps::compose`); this file only resolves them.
+    let lines = roster_row_text(row).resolve_lines(fauna_i18n::strings::lookup);
     let mut item = Element::label(ITEM, lines.join("\n")).attr("key", &row.key);
     if burned {
         // The burned state as a value a reader can count, beside the words.
         item = item.attr("revoked", "true");
     }
+    if let Some(oracle) = &row.oracle {
+        // The window's count as a value, beside the words — present exactly
+        // on a row the oracle served.
+        item = item.attr("oracle_ops", oracle.ops_in_window.to_string());
+    }
+    // Every row reports whether it can act — `paused` (the account's
+    // external-apps switch is OFF), `connected`, or `not_connected` — as a
+    // value a reader can count, beside the words.
+    item = item.attr(
+        "status",
+        if row.paused {
+            "paused"
+        } else if row.connected {
+            "connected"
+        } else {
+            "not_connected"
+        },
+    );
     els.push(item);
 
     if let Some(mail) = &row.mail {
@@ -464,55 +442,14 @@ fn row_elements(
 /// ruling structural rather than remembered.
 fn consent_card_elements(consent: &ConsentCardRow, i: usize, els: &mut Vec<Element>) {
     const CARD: &str = ids::CONNECTED_APPS_REQUEST_CARD;
-    let who = match &consent.client_name {
-        Some(name) => card_t::consent_client(name, &consent.client_id),
-        None => card_t::consent_client_unnamed(&consent.client_id),
-    };
-    let asks = consent
-        .scope_descriptions
+    // Heading, who is asking, the scopes in words, the permission sets and what
+    // the approve ends — the shared composition's lines, resolved here.
+    let card_text = request_card_lines(consent)
         .iter()
-        .map(|line| format!("  • {line}"))
+        .map(|line| line.resolve(fauna_i18n::strings::lookup))
         .collect::<Vec<_>>()
         .join("\n");
-    // Permission-set provenance, after the effective list rather than instead
-    // of it: who decided the bundle (the NSID, verbatim) and what its publisher
-    // says it is for. Every member is already in `asks`.
-    let sets = consent
-        .sets
-        .iter()
-        .map(|set| {
-            let heading = match set.title.as_deref() {
-                Some(title) => card_t::consent_set_heading(title, &set.nsid),
-                None => card_t::consent_set_heading_unnamed(&set.nsid),
-            };
-            let details = set
-                .details
-                .as_deref()
-                .map(|d| format!("\n  {d}"))
-                .unwrap_or_default();
-            let members = set
-                .member_descriptions
-                .iter()
-                .map(|line| format!("\n  • {line}"))
-                .collect::<String>();
-            format!("\n{heading}{details}{members}")
-        })
-        .collect::<String>();
-    // What the approve ends besides granting — a key replacement's line,
-    // inside the scopes-in-words block (`connected-apps.md` § User actions).
-    let ends = consent
-        .ends
-        .as_ref()
-        .map(|e| format!("\n{}", crate::wizard::localized(e)))
-        .unwrap_or_default();
-    els.push(Element::label(
-        CARD,
-        format!(
-            "{}\n{who}\n{}\n{asks}{sets}{ends}",
-            card_t::CONSENT_HEADING,
-            card_t::CONSENT_SCOPES_HEADING
-        ),
-    ));
+    els.push(Element::label(CARD, card_text));
     els.push(
         Element::label(
             ids::CONNECTED_APPS_REQUEST_CODE,

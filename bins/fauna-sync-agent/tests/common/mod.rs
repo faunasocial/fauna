@@ -81,6 +81,7 @@ impl AgentWorld {
             // Identifier domain, item 5).
             fauna_sync_engine::account_runtime::StoreRoot::at(
                 fauna_core::platform_ids::apple_user_domain_home(Some(self.root.clone()))
+                    .expect("the test root is absolute")
                     .join("Fauna")
                     .join("sync"),
             )
@@ -364,8 +365,17 @@ pub async fn start_nest() -> (String, Arc<fauna_nest::routes::AppState>) {
     let signing_key = SigningKey::from_bytes(&secret);
     let verifying_key = signing_key.verifying_key();
 
+    // The store-miss relay over the same store, as `build_app_state` wires it —
+    // what a metadata-only folder's reads are served through (`file-sync.md`
+    // § Relay serving).
+    let chunk_resolver = Arc::new(fauna_nest::chunk_relay::ChunkResolver::new(
+        Some(backup_svc.local_blob_store()),
+        None,
+        false,
+    ));
     let state = Arc::new(AppState {
         backup_service: Some(backup_svc),
+        sync: fauna_nest::state::SyncState { chunk_resolver },
         nest_identity: Arc::new(NestIdentity {
             signing_key,
             verifying_key,

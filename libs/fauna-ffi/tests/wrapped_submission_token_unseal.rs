@@ -73,6 +73,18 @@ fn unseal_plain_succeeds_with_correct_password() {
     assert_eq!(out.expires_at, 1_700_000_000 + 86_400);
     assert_eq!(out.max_recipients, 100);
     assert_eq!(out.max_messages_per_day, 1000);
+    // The signed plaintext the MTA forwards to the nest as its submitter
+    // proof: byte-identical to what the client signed, and it verifies.
+    assert_eq!(
+        out.canonical_bytes,
+        token.to_canonical_bytes().expect("encode token")
+    );
+    let forwarded =
+        fauna_mls::wrapped_blob::SubmissionToken::from_canonical_bytes(&out.canonical_bytes)
+            .expect("forwarded bytes decode");
+    forwarded
+        .verify(&sk.verifying_key())
+        .expect("forwarded bytes carry the user's signature");
 }
 
 #[test]

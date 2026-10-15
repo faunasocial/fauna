@@ -77,6 +77,30 @@ pub struct CallerRef {
     /// `peer_addr` is deliberately `None` (`ws::WsState::subscribe`), and so
     /// is this.
     pub peer_ip: Option<std::net::IpAddr>,
+    /// Did the connection's peer arrive from a loopback address — the nest's
+    /// own box? Recorded on BOTH connection classes from the upgrade's peer
+    /// (the direct TCP peer, or the PROXY-v2 source behind the SNI router,
+    /// which is never loopback for an external client), the same rule the
+    /// sidecar channel's gate applies (`sidecar_channel::internal_ws_allowlist_gate`).
+    /// A separate fact from [`Self::peer_ip`] on purpose: an authenticated
+    /// connection's `peer_addr` stays `None` so the dispatcher's fail-closed
+    /// `requires_loopback_peer` gate keeps refusing it (`ws::WsState::subscribe_with_session`),
+    /// while a handler that admits the developer carve-out
+    /// (`third-party.md` § Developer loop) asks this. `false` when unknown.
+    pub loopback_peer: bool,
+}
+
+/// Run `fut` as the handler of `caller` — what [`spawn_dispatch`] wraps every
+/// client-connection handler in, so [`current_caller`] answers inside it.
+pub async fn scope_caller<F: std::future::Future>(caller: CallerRef, fut: F) -> F::Output {
+    CALLER.scope(caller, fut).await
+}
+
+/// Did the currently-running handler's connection arrive from a loopback
+/// peer ([`CallerRef::loopback_peer`])? `false` outside a handler and on a
+/// plane with no client connection — the carve-outs it admits fail closed.
+pub fn current_caller_is_loopback() -> bool {
+    current_caller().is_some_and(|c| c.loopback_peer)
 }
 
 tokio::task_local! {
@@ -125,6 +149,13 @@ pub trait DispatchSink: Send + Sync + 'static {
     /// `Some`.
     fn caller_peer_ip(&self) -> Option<std::net::IpAddr> {
         None
+    }
+
+    /// Whether this connection's peer was a loopback address. Feeds
+    /// [`CallerRef::loopback_peer`]; only read when [`Self::caller_conn_id`]
+    /// is `Some`.
+    fn caller_loopback_peer(&self) -> bool {
+        false
     }
 
     /// Idempotency lookup for `key`. Each impl owns its cache representation; the
@@ -392,6 +423,7 @@ pub async fn spawn_dispatch<S: DispatchSink>(
         conn_id,
         correlation_id,
         peer_ip: sink.caller_peer_ip(),
+        loopback_peer: sink.caller_loopback_peer(),
     });
     // spawn-ok(request-scoped): one RPC, bounded by two named mechanisms — the
     // `MAX_INFLIGHT_HANDLERS` permit moved in above, and the per-kind
@@ -417,10 +449,10 @@ pub async fn spawn_dispatch<S: DispatchSink>(
         // A refusing gate answers in place of the handler — the failed request
         // a test needs when no ordinary input provokes one.
         #[cfg(feature = "test-hooks")]
-        if crate::rpc_hold_test_hook::hold_if_armed(&handler_state, &handler_kind).await
-            == crate::rpc_hold_test_hook::Verdict::Refuse
+        if let crate::rpc_hold_test_hook::Verdict::Refuse(refusal) =
+            crate::rpc_hold_test_hook::hold_if_armed(&handler_state, &handler_kind).await
         {
-            return Err(crate::rpc_hold_test_hook::refused_error());
+            return Err(crate::rpc_hold_test_hook::refused_error(refusal));
         }
 
         let meta = match meta_lookup(&handler_state, &handler_kind) {
@@ -460,7 +492,7 @@ pub async fn spawn_dispatch<S: DispatchSink>(
         // in which a handler could revoke its own caller.
         let fut = async move {
             match caller {
-                Some(caller) => CALLER.scope(caller, fut).await,
+                Some(caller) => scope_caller(caller, fut).await,
                 None => fut.await,
             }
         };

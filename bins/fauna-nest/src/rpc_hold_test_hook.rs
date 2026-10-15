@@ -73,6 +73,19 @@
 //! counts the requests turned away), and touches no at-rest state — a refused
 //! request never reaches its handler.
 //!
+//! `…/refuse?as=outdated` refuses with the nest's own typed update code
+//! (`fauna.nest.outdated`) instead — the refusal a nest that needs updating
+//! sends, for the rule that a send turned away for that reason says so and
+//! offers no retry (`version-compatibility.md` § Dimension 4).
+//! `…/refuse?as=unauthenticated` refuses with `fauna.protocol.unauthenticated`
+//! — exactly what an OLDER peer nest's federation allowlist answers for a kind
+//! it predates (`federation_channel.rs`, the allowlist-first gate). Armed on a
+//! federation kind of the peer, it stands that peer in for an outdated one, so a
+//! two-nest test can observe the originating nest's typed answer to the user
+//! (`version-compatibility.md` § Dimension 5). The flavour is a
+//! closed set ([`Refusal`]), never a caller-supplied code: a test names a
+//! refusal the product can really meet, not a string it invented.
+//!
 //! ## Dropping the reply — the lost-reply sibling
 //!
 //! `POST …/{kind}/drop-reply` switches the gate to the third failure a client
@@ -108,6 +121,35 @@
 //! open-ended drop cannot: it drops the retry too, so "the retry finishes"
 //! would hinge on releasing inside the client's backoff — a wall-clock race.
 //!
+//! ## Passing the first N — a window AFTER some progress
+//!
+//! `POST …/{kind}?pass=N` arms the hold but lets the next `N` requests of the
+//! kind run first, then parks every later one. It exists for the rules about
+//! what a loop shows *part way through* — a transfer's time left, which only
+//! exists once something has been processed (`mail-export.md` § Wizard steps
+//! step 4: "elapsed + ETA") — where releasing a plain hold and re-arming it
+//! before the loop's next request would be the very race this module ends. The
+//! budget is spent at the gate, one request at a time, so "the second fetch
+//! parks" is decided by arrival order alone, never by how fast the test can
+//! re-arm. `passing` in the status reports what is left of it; `release`
+//! zeroes it.
+//!
+//! ## Holding until shutdown — a request in flight when the nest stops
+//!
+//! `POST …/{kind}/hold-until-shutdown` arms a hold that ends by ITSELF when the
+//! nest begins a graceful shutdown (`WsState::begin_shutdown`, the SIGTERM
+//! path), as well as on `release`. It exists for the rule that a request an
+//! app had already sent when the nest begins to stop is still finished and
+//! answered before the connection closes (`transport-connection.md`
+//! § Graceful shutdown). A plain hold cannot stage that: its release is an
+//! HTTP call, and the first step of the shutdown stops the nest accepting
+//! connections, so nothing could let the held request go once the stop had
+//! begun. Woken by the shutdown flag, the parked request runs its real handler
+//! while the connection drains, and its Reply is what the drain flushes ahead
+//! of the 1001 close. `holding` is the arrival proof the test stops the nest
+//! on, so "in flight" is a state the test has observed, never an interval it
+//! timed. A request arriving after the shutdown began passes straight through.
+//!
 //! ## What it does NOT do
 //!
 //! It holds the *dispatch*, never the connection: other kinds on the same socket
@@ -129,8 +171,10 @@
 //! therefore standalone-nest only: the docker/live artifacts do not compile it.
 //!
 //! Consumers: `tests/e2e-unified/helpers/rpc_hold.py`, and through it
-//! `tests/e2e-unified/tests/test_settings.py`. Production never compiles this
-//! module.
+//! `tests/e2e-unified/tests/test_settings.py` (the hold),
+//! `tests/e2e-unified/tests/api/test_graceful_shutdown_in_flight.py` (the hold
+//! until shutdown) and the other `rpc_hold` callers. Production never compiles
+//! this module.
 
 #![cfg(feature = "test-hooks")]
 
@@ -138,7 +182,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Json};
 use axum::routing::post;
 use serde_json::json;
@@ -154,13 +198,17 @@ enum Mode {
     Open,
     /// Park until the mode changes (`POST …/{kind}`).
     Hold,
+    /// Park until the mode changes OR the nest begins a graceful shutdown
+    /// (`POST …/{kind}/hold-until-shutdown`, module doc § Holding until
+    /// shutdown) — whichever comes first.
+    HoldUntilShutdown,
     /// Answer with an error instead of running the handler (`POST
     /// …/{kind}/refuse`) — both the requests parked under `Hold` when it is
     /// set and every later arrival, until `release`. The failure a user meets
     /// when the nest turns a request away, as a state a test can stand in: a
     /// composer's failed send (`feed.md` § Errors & edge cases) has no ordinary
     /// input that provokes it.
-    Refuse,
+    Refuse(Refusal),
     /// Run the handler, then close the connection instead of replying (`POST
     /// …/{kind}/drop-reply`) — a request that took effect and was never
     /// answered. Does not park: the hold's `park` passes it straight through,
@@ -172,20 +220,42 @@ enum Mode {
     DropReplyOnce,
 }
 
+/// Which error a refusing gate answers with — a closed set, chosen by the
+/// `as` query of `POST …/{kind}/refuse` (module doc § Refusal).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Refusal {
+    /// `fauna.test.refused` — a code no app recognises, rendered as the generic
+    /// `error.unexpected`: the refusal an app too old to know a newer nest's
+    /// code meets.
+    #[default]
+    Unknown,
+    /// `fauna.nest.outdated` — the nest's own "needs updating" refusal.
+    Outdated,
+    /// `fauna.protocol.unauthenticated` — what an older peer nest's federation
+    /// allowlist answers for a kind it predates.
+    Unauthenticated,
+}
+
 /// What [`HoldGate::park`] decided for one request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
     /// Run the handler, exactly as an un-armed request would.
     Pass,
-    /// Reply with [`refused_error`] and never run the handler.
-    Refuse,
+    /// Reply with [`refused_error`] of this flavour and never run the handler.
+    Refuse(Refusal),
 }
 
-/// The error a refused request answers with. The generic `error.unexpected`
-/// string, so the app renders exactly what it renders for any nest failure it
-/// has no specific copy for.
-pub fn refused_error() -> fauna_protocol::RpcError {
-    fauna_protocol::RpcError::new("fauna.test.refused", "error.unexpected")
+/// The error a refused request answers with. [`Refusal::Unknown`] is the
+/// generic `error.unexpected` string, so the app renders exactly what it renders
+/// for any nest failure it has no specific copy for; [`Refusal::Outdated`] is
+/// the degraded nest's own [`fauna_protocol::RpcError::nest_outdated`].
+pub fn refused_error(refusal: Refusal) -> fauna_protocol::RpcError {
+    match refusal {
+        Refusal::Unknown => fauna_protocol::RpcError::new("fauna.test.refused", "error.unexpected"),
+        Refusal::Outdated => fauna_protocol::RpcError::nest_outdated(),
+        Refusal::Unauthenticated => crate::rpc_errors::unauthenticated(),
+    }
 }
 
 /// One kind's gate. Held by `POST`, refused by `POST .../refuse`, opened by
@@ -209,6 +279,9 @@ pub struct HoldGate {
     /// Cumulative replies this gate has thrown away after their handler ran —
     /// the arrival signal of a drop, and the proof the handler DID run.
     dropped: AtomicUsize,
+    /// Requests a held gate still lets through before it starts parking
+    /// (`POST …/{kind}?pass=N`, module doc § Passing the first N).
+    passing: AtomicUsize,
 }
 
 impl HoldGate {
@@ -219,10 +292,22 @@ impl HoldGate {
             released: AtomicUsize::new(0),
             refused: AtomicUsize::new(0),
             dropped: AtomicUsize::new(0),
+            passing: AtomicUsize::new(0),
         }
     }
 
+    /// Arm with no pass budget — the unit tests' shorthand; the route always
+    /// passes its (possibly zero) budget through [`Self::arm_after`].
+    #[cfg(test)]
     fn arm(&self) {
+        self.arm_after(0);
+    }
+
+    /// Arm the hold, letting the next `pass` requests run first. The budget is
+    /// stored BEFORE the mode flips, so a request arriving in between sees the
+    /// gate still open rather than a hold with no budget.
+    fn arm_after(&self, pass: usize) {
+        self.passing.store(pass, Ordering::SeqCst);
         // `send_replace`, never `send`: `Sender::send` FAILS — and leaves the
         // value untouched — when no receiver is currently subscribed, which is
         // the normal state of a gate nothing is parked in. Armed with `send`
@@ -231,10 +316,18 @@ impl HoldGate {
         self.mode.send_replace(Mode::Hold);
     }
 
+    /// Arm a hold that the nest's graceful shutdown ends by itself (module doc
+    /// § Holding until shutdown). No pass budget: the window under test is the
+    /// first request's.
+    fn arm_until_shutdown(&self) {
+        self.passing.store(0, Ordering::SeqCst);
+        self.mode.send_replace(Mode::HoldUntilShutdown);
+    }
+
     /// Refuse every request of this kind until `release` — waking the parked
     /// ones into the same refusal.
-    fn refuse(&self) {
-        self.mode.send_replace(Mode::Refuse);
+    fn refuse(&self, refusal: Refusal) {
+        self.mode.send_replace(Mode::Refuse(refusal));
     }
 
     /// Drop the reply of every request of this kind until `release` — waking
@@ -254,6 +347,7 @@ impl HoldGate {
     /// count *after* the wake-up has been signalled — the waiters may not have
     /// been scheduled yet, so this is the count so far, not a completion proof.
     fn release(&self) -> usize {
+        self.passing.store(0, Ordering::SeqCst);
         // `send_replace` for the same reason as `arm` — and here it also wakes
         // every current waiter, which is the whole point.
         self.mode.send_replace(Mode::Open);
@@ -265,19 +359,36 @@ impl HoldGate {
     }
 
     fn is_armed(&self) -> bool {
-        self.current() == Mode::Hold
+        matches!(self.current(), Mode::Hold | Mode::HoldUntilShutdown)
     }
 
     /// Park while held, then pass or refuse. Returns immediately when the gate
     /// is open or refusing — the un-armed path is one load, which is what keeps
     /// this callable unconditionally from the dispatch hot path.
-    async fn park(&self) -> Verdict {
+    ///
+    /// `shutdown` is the nest's graceful-shutdown flag
+    /// (`WsState::subscribe_shutdown`); only [`Mode::HoldUntilShutdown`] reads
+    /// it. A receiver whose sender is gone counts as "never shutting down".
+    async fn park(&self, mut shutdown: watch::Receiver<bool>) -> Verdict {
         let verdict = match self.current() {
+            // Already stopping: the request this mode stages is one sent
+            // BEFORE the stop, so a later arrival runs as usual.
+            Mode::HoldUntilShutdown if *shutdown.borrow() => return Verdict::Pass,
             // A dropping gate lets the handler run; the drop is the reply
             // task's decision, made once the handler is done.
             Mode::Open | Mode::DropReply | Mode::DropReplyOnce => return Verdict::Pass,
-            Mode::Refuse => Verdict::Refuse,
-            Mode::Hold => {
+            Mode::Refuse(refusal) => Verdict::Refuse(refusal),
+            // One request of the pass budget: spent here, atomically, so two
+            // arriving together cannot both take the last one.
+            Mode::Hold
+                if self
+                    .passing
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok() =>
+            {
+                return Verdict::Pass;
+            }
+            Mode::Hold | Mode::HoldUntilShutdown => {
                 // `_guard` decrements `holding` on ANY exit — including the task
                 // being aborted mid-park, which is exactly what a client `Cancel`
                 // frame does. Without it a cancelled request leaves the count
@@ -285,23 +396,47 @@ impl HoldGate {
                 // ghost.
                 let _guard = HoldingGuard::new(self);
                 let mut rx = self.mode.subscribe();
-                // Errors only if the sender is dropped; the registry owns it for
-                // the process's life, and a vanished sender means "nothing can
-                // re-arm this", so passing is the right reading either way.
-                let woke_to = rx
-                    .wait_for(|mode| *mode != Mode::Hold)
-                    .await
-                    .map(|mode| *mode)
-                    .unwrap_or(Mode::Open);
+                let mut shutdown_gone = false;
+                // Both watches are re-read each pass with `borrow_and_update`,
+                // so a flip landing between the read and the `changed()` await
+                // is still seen: `changed()` resolves for any value newer than
+                // the last one marked seen.
+                let woke_to = loop {
+                    let mode = *rx.borrow_and_update();
+                    let shutting_down = !shutdown_gone && *shutdown.borrow_and_update();
+                    match mode {
+                        Mode::Hold => {}
+                        Mode::HoldUntilShutdown if !shutting_down => {}
+                        // The stop began: let the parked request go, to be
+                        // finished and answered inside the connection's drain.
+                        Mode::HoldUntilShutdown => break Mode::Open,
+                        other => break other,
+                    }
+                    tokio::select! {
+                        // Errors only if the sender is dropped; the registry
+                        // owns it for the process's life, and a vanished
+                        // sender means "nothing can re-arm this", so passing
+                        // is the right reading either way.
+                        changed = rx.changed() => {
+                            if changed.is_err() {
+                                break Mode::Open;
+                            }
+                        }
+                        changed = shutdown.changed(), if !shutdown_gone => {
+                            if changed.is_err() {
+                                shutdown_gone = true;
+                            }
+                        }
+                    }
+                };
                 self.released.fetch_add(1, Ordering::SeqCst);
-                if woke_to == Mode::Refuse {
-                    Verdict::Refuse
-                } else {
-                    Verdict::Pass
+                match woke_to {
+                    Mode::Refuse(refusal) => Verdict::Refuse(refusal),
+                    _ => Verdict::Pass,
                 }
             }
         };
-        if verdict == Verdict::Refuse {
+        if matches!(verdict, Verdict::Refuse(_)) {
             self.refused.fetch_add(1, Ordering::SeqCst);
         }
         verdict
@@ -348,7 +483,7 @@ impl HoldGate {
                     return false;
                 }
             }
-            Mode::Open | Mode::Hold | Mode::Refuse => return false,
+            Mode::Open | Mode::Hold | Mode::HoldUntilShutdown | Mode::Refuse(_) => return false,
         }
         self.dropped.fetch_add(1, Ordering::SeqCst);
         true
@@ -409,7 +544,7 @@ impl RpcHoldRegistry {
 /// mutex-guarded map lookup that misses.
 pub async fn hold_if_armed(state: &AppState, kind: &str) -> Verdict {
     match state.rpc_hold.existing(kind) {
-        Some(gate) => gate.park().await,
+        Some(gate) => gate.park(state.ws.subscribe_shutdown()).await,
         None => Verdict::Pass,
     }
 }
@@ -436,11 +571,21 @@ fn known_kind(state: &AppState, kind: &str) -> bool {
     state.rpc_router.contains(kind) || state.federation_router.contains(kind)
 }
 
-/// `POST /api/v1/test/rpc-hold/{kind}` — arm the hold. Every subsequent request
-/// of `kind` parks until `release`. Returns `{"ok": true, "kind": <kind>}`.
+/// The `pass` query of `POST …/{kind}`; absent means park from the next request.
+#[derive(serde::Deserialize, Default)]
+struct ArmQuery {
+    #[serde(default)]
+    pass: usize,
+}
+
+/// `POST /api/v1/test/rpc-hold/{kind}[?pass=N]` — arm the hold. Every subsequent
+/// request of `kind` — after the first `N`, which run as usual (module doc
+/// § Passing the first N) — parks until `release`. Returns
+/// `{"ok": true, "kind": <kind>}`.
 async fn arm_hold(
     State(state): State<Arc<AppState>>,
     Path(kind): Path<String>,
+    Query(query): Query<ArmQuery>,
 ) -> impl IntoResponse {
     if !known_kind(&state, &kind) {
         return ApiError::bad_request(format!(
@@ -449,14 +594,22 @@ async fn arm_hold(
         ))
         .into_response();
     }
-    state.rpc_hold.gate(&kind).arm();
+    state.rpc_hold.gate(&kind).arm_after(query.pass);
     Json(json!({ "ok": true, "kind": kind })).into_response()
 }
 
-/// `POST /api/v1/test/rpc-hold/{kind}/refuse` — answer every request of `kind`
-/// with [`refused_error`] until `release`, including any parked by an earlier
-/// hold. Returns `{"ok": true, "kind": <kind>}`.
-async fn refuse_kind(
+/// The `as` query of `POST …/{kind}/refuse`; absent means [`Refusal::Unknown`].
+#[derive(serde::Deserialize, Default)]
+struct RefuseQuery {
+    #[serde(default, rename = "as")]
+    refusal: Refusal,
+}
+
+/// `POST /api/v1/test/rpc-hold/{kind}/hold-until-shutdown` — park every
+/// subsequent request of `kind` until `release` or until the nest begins a
+/// graceful shutdown, whichever comes first (module doc § Holding until
+/// shutdown). Returns `{"ok": true, "kind": <kind>}`.
+async fn arm_hold_until_shutdown(
     State(state): State<Arc<AppState>>,
     Path(kind): Path<String>,
 ) -> impl IntoResponse {
@@ -467,7 +620,26 @@ async fn refuse_kind(
         ))
         .into_response();
     }
-    state.rpc_hold.gate(&kind).refuse();
+    state.rpc_hold.gate(&kind).arm_until_shutdown();
+    Json(json!({ "ok": true, "kind": kind })).into_response()
+}
+
+/// `POST /api/v1/test/rpc-hold/{kind}/refuse[?as=outdated|unauthenticated]` — answer every
+/// request of `kind` with [`refused_error`] of that flavour until `release`,
+/// including any parked by an earlier hold. Returns `{"ok": true, "kind": <kind>}`.
+async fn refuse_kind(
+    State(state): State<Arc<AppState>>,
+    Path(kind): Path<String>,
+    Query(query): Query<RefuseQuery>,
+) -> impl IntoResponse {
+    if !known_kind(&state, &kind) {
+        return ApiError::bad_request(format!(
+            "no RPC kind {kind:?} is registered on this nest — check the spelling \
+             against the router registration, not the client-side method name"
+        ))
+        .into_response();
+    }
+    state.rpc_hold.gate(&kind).refuse(query.refusal);
     Json(json!({ "ok": true, "kind": kind })).into_response()
 }
 
@@ -514,8 +686,10 @@ async fn drop_reply_once_kind(
 }
 
 /// `GET /api/v1/test/rpc-hold/{kind}` — the arrival observable.
-/// Returns `{"armed": bool, "refusing": bool, "dropping": bool, "holding": N,
-/// "released": M, "refused": R, "dropped": D}`, where `holding` is the number of
+/// Returns `{"armed": bool, "until_shutdown": bool, "refusing": bool,
+/// "dropping": bool, "holding": N,
+/// "passing": P, "released": M, "refused": R, "dropped": D}`, where `passing` is
+/// what is left of an armed hold's pass budget and `holding` is the number of
 /// requests of `kind` parked right now, `refused` the cumulative number turned
 /// away and `dropped` the cumulative number whose handler ran and whose reply
 /// was thrown away. A test deadline-polls `holding >= 1` (or `refused >= 1`,
@@ -527,9 +701,11 @@ async fn hold_status(
     match state.rpc_hold.existing(&kind) {
         Some(gate) => Json(json!({
             "armed": gate.is_armed(),
-            "refusing": gate.current() == Mode::Refuse,
+            "until_shutdown": gate.current() == Mode::HoldUntilShutdown,
+            "refusing": matches!(gate.current(), Mode::Refuse(_)),
             "dropping": matches!(gate.current(), Mode::DropReply | Mode::DropReplyOnce),
             "holding": gate.holding.load(Ordering::SeqCst),
+            "passing": gate.passing.load(Ordering::SeqCst),
             "released": gate.released.load(Ordering::SeqCst),
             "refused": gate.refused.load(Ordering::SeqCst),
             "dropped": gate.dropped.load(Ordering::SeqCst),
@@ -538,9 +714,11 @@ async fn hold_status(
         // kind it has not armed should see zeros, not a 404 it has to special-case.
         None => Json(json!({
             "armed": false,
+            "until_shutdown": false,
             "refusing": false,
             "dropping": false,
             "holding": 0,
+            "passing": 0,
             "released": 0,
             "refused": 0,
             "dropped": 0,
@@ -571,6 +749,10 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/v1/test/rpc-hold/{kind}/release", post(release_hold))
         .route("/api/v1/test/rpc-hold/{kind}/refuse", post(refuse_kind))
         .route(
+            "/api/v1/test/rpc-hold/{kind}/hold-until-shutdown",
+            post(arm_hold_until_shutdown),
+        )
+        .route(
             "/api/v1/test/rpc-hold/{kind}/drop-reply",
             post(drop_reply_kind),
         )
@@ -590,7 +772,7 @@ mod tests {
     #[tokio::test]
     async fn an_unarmed_gate_does_not_park() {
         let gate = HoldGate::new();
-        tokio::time::timeout(Duration::from_secs(5), gate.park())
+        tokio::time::timeout(Duration::from_secs(5), gate.park(no_shutdown()))
             .await
             .expect("an unarmed gate returns immediately");
         assert_eq!(gate.holding.load(Ordering::SeqCst), 0);
@@ -608,7 +790,7 @@ mod tests {
         // spawn-ok(test): a test-local park the test awaits after release
         let parked = tokio::spawn({
             let gate = Arc::clone(&gate);
-            async move { gate.park().await }
+            async move { gate.park(no_shutdown()).await }
         });
 
         // `holding` is the test's arrival signal, so it must become 1 without
@@ -638,7 +820,7 @@ mod tests {
             .map(|_| {
                 let gate = Arc::clone(&gate);
                 // spawn-ok(test): test-local parks the test awaits after release
-                tokio::spawn(async move { gate.park().await })
+                tokio::spawn(async move { gate.park(no_shutdown()).await })
             })
             .collect();
 
@@ -654,6 +836,57 @@ mod tests {
         assert_eq!(gate.released.load(Ordering::SeqCst), 4);
     }
 
+    /// `?pass=N`: the first N requests run, the next one parks — decided by
+    /// arrival order at the gate, so a test can stand in the window after a
+    /// loop's first request without racing a re-arm. Release zeroes an unspent
+    /// budget, so a later plain `arm` parks from its first request.
+    #[tokio::test]
+    async fn a_pass_budget_lets_the_first_n_through_then_parks() {
+        let gate = Arc::new(HoldGate::new());
+        gate.arm_after(2);
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(5), gate.park(no_shutdown()))
+                .await
+                .expect("a request inside the pass budget does not park");
+        }
+        assert_eq!(gate.passing.load(Ordering::SeqCst), 0);
+        // spawn-ok(test): a test-local park the test awaits after release
+        let parked = tokio::spawn({
+            let gate = Arc::clone(&gate);
+            async move { gate.park(no_shutdown()).await }
+        });
+        wait_for(|| gate.holding.load(Ordering::SeqCst) == 1).await;
+        assert!(
+            !parked.is_finished(),
+            "the request after the budget must park"
+        );
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(5), parked)
+            .await
+            .expect("release wakes the parked request")
+            .expect("the parked task did not panic");
+
+        gate.arm_after(5);
+        gate.release();
+        assert_eq!(
+            gate.passing.load(Ordering::SeqCst),
+            0,
+            "release zeroes the budget"
+        );
+        gate.arm();
+        // spawn-ok(test): a test-local park the test awaits after release
+        let parked = tokio::spawn({
+            let gate = Arc::clone(&gate);
+            async move { gate.park(no_shutdown()).await }
+        });
+        wait_for(|| gate.holding.load(Ordering::SeqCst) == 1).await;
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(5), parked)
+            .await
+            .expect("release wakes the parked request")
+            .expect("the parked task did not panic");
+    }
+
     /// A request that arrives after the release must not park — otherwise the
     /// convergence half of the journey (release, then watch the UI settle)
     /// hangs on the app's next read.
@@ -662,7 +895,7 @@ mod tests {
         let gate = HoldGate::new();
         gate.arm();
         gate.release();
-        tokio::time::timeout(Duration::from_secs(5), gate.park())
+        tokio::time::timeout(Duration::from_secs(5), gate.park(no_shutdown()))
             .await
             .expect("a released gate does not park later arrivals");
         assert_eq!(gate.holding.load(Ordering::SeqCst), 0);
@@ -678,7 +911,7 @@ mod tests {
         // spawn-ok(test): a test-local park the test itself aborts below
         let parked = tokio::spawn({
             let gate = Arc::clone(&gate);
-            async move { gate.park().await }
+            async move { gate.park(no_shutdown()).await }
         });
         wait_for(|| gate.holding.load(Ordering::SeqCst) == 1).await;
 
@@ -697,27 +930,67 @@ mod tests {
         // spawn-ok(test): a test-local park the test awaits after the refusal
         let parked = tokio::spawn({
             let gate = Arc::clone(&gate);
-            async move { gate.park().await }
+            async move { gate.park(no_shutdown()).await }
         });
         wait_for(|| gate.holding.load(Ordering::SeqCst) == 1).await;
 
-        gate.refuse();
+        gate.refuse(Refusal::Unknown);
         let verdict = tokio::time::timeout(Duration::from_secs(5), parked)
             .await
             .expect("refuse wakes the parked request")
             .expect("the parked task did not panic");
-        assert_eq!(verdict, Verdict::Refuse);
+        assert_eq!(verdict, Verdict::Refuse(Refusal::Unknown));
 
-        let later = tokio::time::timeout(Duration::from_secs(5), gate.park())
+        let later = tokio::time::timeout(Duration::from_secs(5), gate.park(no_shutdown()))
             .await
             .expect("a refusing gate does not park later arrivals");
-        assert_eq!(later, Verdict::Refuse);
+        assert_eq!(later, Verdict::Refuse(Refusal::Unknown));
         assert_eq!(gate.refused.load(Ordering::SeqCst), 2);
         assert_eq!(gate.holding.load(Ordering::SeqCst), 0);
 
         gate.release();
-        assert_eq!(gate.park().await, Verdict::Pass);
+        assert_eq!(gate.park(no_shutdown()).await, Verdict::Pass);
         assert_eq!(gate.refused.load(Ordering::SeqCst), 2);
+    }
+
+    /// `?as=outdated` refuses with the nest's own typed update code, which the
+    /// shared classifier routes to the update prompt; the default stays a code
+    /// no app recognises.
+    #[tokio::test]
+    async fn refuse_as_outdated_answers_the_typed_update_code() {
+        let gate = HoldGate::new();
+        gate.refuse(Refusal::Outdated);
+        assert_eq!(
+            gate.park(no_shutdown()).await,
+            Verdict::Refuse(Refusal::Outdated)
+        );
+        let outdated = refused_error(Refusal::Outdated);
+        assert_eq!(outdated.code, fauna_protocol::RpcError::CODE_NEST_OUTDATED);
+        assert_eq!(
+            outdated.action(),
+            fauna_protocol::RpcErrorAction::NeedsUpdate
+        );
+        let unknown = refused_error(Refusal::Unknown);
+        assert_eq!(unknown.code, "fauna.test.refused");
+        assert_eq!(unknown.action(), fauna_protocol::RpcErrorAction::Rejected);
+
+        let parsed: RefuseQuery = serde_json::from_value(json!({"as": "outdated"})).unwrap();
+        assert_eq!(parsed.refusal, Refusal::Outdated);
+        let absent: RefuseQuery = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(absent.refusal, Refusal::Unknown);
+    }
+
+    /// `?as=unauthenticated` refuses with the very error an older peer's
+    /// federation allowlist sends for a kind it predates — the input
+    /// `rpc_errors::map_peer_relay_error` turns into `peer_nest_outdated`.
+    #[test]
+    fn refuse_as_unauthenticated_answers_the_old_peer_allowlist_code() {
+        let e = refused_error(Refusal::Unauthenticated);
+        assert_eq!(e.code, "fauna.protocol.unauthenticated");
+        let mapped = crate::rpc_errors::map_peer_relay_error(e, "a relay");
+        assert_eq!(mapped.code, "fauna.federation.peer_nest_outdated");
+        let parsed: RefuseQuery = serde_json::from_value(json!({"as": "unauthenticated"})).unwrap();
+        assert_eq!(parsed.refusal, Refusal::Unauthenticated);
     }
 
     /// A dropping gate lets the handler run (it never parks and never refuses)
@@ -731,7 +1004,7 @@ mod tests {
         );
 
         gate.drop_replies();
-        let verdict = tokio::time::timeout(Duration::from_secs(5), gate.park())
+        let verdict = tokio::time::timeout(Duration::from_secs(5), gate.park(no_shutdown()))
             .await
             .expect("a dropping gate does not park");
         assert_eq!(verdict, Verdict::Pass, "the handler must run for real");
@@ -749,7 +1022,7 @@ mod tests {
 
         gate.release();
         assert!(!gate.drop_reply(|| panic!("a released gate must not close")));
-        assert_eq!(gate.park().await, Verdict::Pass);
+        assert_eq!(gate.park(no_shutdown()).await, Verdict::Pass);
     }
 
     /// A drop-once gate drops exactly ONE reply and then answers as usual
@@ -761,7 +1034,11 @@ mod tests {
     async fn a_drop_once_gate_drops_one_reply_then_reopens_by_itself() {
         let gate = HoldGate::new();
         gate.drop_one_reply();
-        assert_eq!(gate.park().await, Verdict::Pass, "the handler must run");
+        assert_eq!(
+            gate.park(no_shutdown()).await,
+            Verdict::Pass,
+            "the handler must run"
+        );
         assert!(
             !gate.drop_reply(|| false),
             "a plane that cannot close neither drops nor spends the one drop"
@@ -788,7 +1065,7 @@ mod tests {
         // spawn-ok(test): a test-local park the test awaits after the switch
         let parked = tokio::spawn({
             let gate = Arc::clone(&gate);
-            async move { gate.park().await }
+            async move { gate.park(no_shutdown()).await }
         });
         wait_for(|| gate.holding.load(Ordering::SeqCst) == 1).await;
 
@@ -813,6 +1090,95 @@ mod tests {
             registry.existing("fauna.inbox.mode.set").is_none(),
             "an un-named kind must not even allocate a gate"
         );
+    }
+
+    /// A hold-until-shutdown parks like a hold and is let go by the shutdown
+    /// flag ALONE — no release, which is the property the graceful-shutdown
+    /// witness rests on: once the stop has begun, no HTTP release could reach
+    /// the nest.
+    #[tokio::test]
+    async fn a_hold_until_shutdown_parks_until_the_shutdown_flag_flips() {
+        let gate = Arc::new(HoldGate::new());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        gate.arm_until_shutdown();
+        assert!(gate.is_armed());
+        // spawn-ok(test): a test-local park the test awaits after the flip
+        let parked = tokio::spawn({
+            let gate = Arc::clone(&gate);
+            async move { gate.park(shutdown_rx).await }
+        });
+        wait_for(|| gate.holding.load(Ordering::SeqCst) == 1).await;
+        assert!(!parked.is_finished(), "the gate must park before the stop");
+
+        shutdown_tx.send_replace(true);
+        let verdict = tokio::time::timeout(Duration::from_secs(5), parked)
+            .await
+            .expect("the shutdown flag wakes the parked request")
+            .expect("the parked task did not panic");
+        assert_eq!(verdict, Verdict::Pass, "the handler must run for real");
+        assert_eq!(gate.holding.load(Ordering::SeqCst), 0);
+        assert_eq!(gate.released.load(Ordering::SeqCst), 1);
+    }
+
+    /// `release` still ends a hold-until-shutdown — the `finally` a test runs
+    /// when it fails before it stops the nest — and a plain hold is NOT ended by
+    /// the shutdown flag, so the existing hold keeps its meaning.
+    #[tokio::test]
+    async fn release_ends_a_hold_until_shutdown_and_shutdown_leaves_a_plain_hold_parked() {
+        let gate = Arc::new(HoldGate::new());
+        gate.arm_until_shutdown();
+        // spawn-ok(test): a test-local park the test awaits after release
+        let parked = tokio::spawn({
+            let gate = Arc::clone(&gate);
+            async move { gate.park(no_shutdown()).await }
+        });
+        wait_for(|| gate.holding.load(Ordering::SeqCst) == 1).await;
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(5), parked)
+            .await
+            .expect("release wakes a hold-until-shutdown")
+            .expect("the parked task did not panic");
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        gate.arm();
+        // spawn-ok(test): a test-local park the test releases below
+        let parked = tokio::spawn({
+            let gate = Arc::clone(&gate);
+            async move { gate.park(shutdown_rx).await }
+        });
+        wait_for(|| gate.holding.load(Ordering::SeqCst) == 1).await;
+        shutdown_tx.send_replace(true);
+        tokio::task::yield_now().await;
+        assert!(
+            !parked.is_finished(),
+            "a plain hold is ended by release only, never by the shutdown flag"
+        );
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(5), parked)
+            .await
+            .expect("release wakes the plain hold")
+            .expect("the parked task did not panic");
+    }
+
+    /// A request arriving after the stop began was not in flight when it
+    /// began, so it does not park.
+    #[tokio::test]
+    async fn a_hold_until_shutdown_passes_a_request_arriving_after_the_stop() {
+        let gate = HoldGate::new();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        shutdown_tx.send_replace(true);
+        gate.arm_until_shutdown();
+        let verdict = tokio::time::timeout(Duration::from_secs(5), gate.park(shutdown_rx))
+            .await
+            .expect("an arrival after the stop does not park");
+        assert_eq!(verdict, Verdict::Pass);
+        assert_eq!(gate.holding.load(Ordering::SeqCst), 0);
+    }
+
+    /// The shutdown flag of a nest that never stops: its sender is already
+    /// gone, which `park` reads as "never shutting down".
+    fn no_shutdown() -> watch::Receiver<bool> {
+        watch::channel(false).1
     }
 
     /// A generous deadline poll, not a settle-sleep (`e2e-conventions.md`

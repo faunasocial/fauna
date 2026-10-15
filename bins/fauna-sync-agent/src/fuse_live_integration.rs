@@ -1,5 +1,5 @@
 //! A LIVE FUSE integration test over the **agent's own** on-demand host — the linux
-//! twin of `cfapi_live_integration.rs` (`docs/goal/behavior/on-demand-files.md`
+//! twin of `cfapi_live_integration.rs` (`docs/goal/behavior/on-demand-files-linux.md`
 //! § Linux FUSE binding → *Headless proof*).
 //!
 //! Real: the mount (`/dev/fuse` + the distro's `fusermount3`), the kernel's
@@ -35,7 +35,9 @@ use fauna_ipc::sync::{BearerToken, Event, EventKind, FileStatus, SyncCapability}
 use fauna_sync_engine::FileHydrator;
 use fauna_sync_engine::always_resident::{EngineCommand, LocalWriteHost};
 use fauna_sync_engine::db::{SyncDb, SyncState};
-use fauna_sync_engine::engine::{PlaceholderFold, StaleHydratedRow};
+use fauna_sync_engine::engine::{
+    FoldedDelete, FoldedDeleteOutcome, PlaceholderFold, StaleHydratedRow,
+};
 use fauna_sync_engine::engine_host::CancellationToken;
 use fauna_sync_engine::enumerate::{PlaceholderLister, PlaceholderRow};
 
@@ -83,6 +85,9 @@ struct DbBackedHost {
     /// What the next re-pull's fold reports as stale hydrated rows — how a test
     /// moves a nest head under a hydrated file.
     stale: Arc<std::sync::Mutex<Vec<StaleHydratedRow>>>,
+    /// The `changes.list` entries the next re-pull folds (taken once) — how a test
+    /// plays another device's delete, through the engine's real fold.
+    changes: Arc<std::sync::Mutex<Vec<fauna_protocol::sync::SyncChange>>>,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -159,12 +164,25 @@ impl HydrationHost for DbBackedHost {
         HydrationHost::repoint_placeholder(&self.engine, row).await
     }
 
+    async fn apply_folded_delete(
+        &self,
+        delete: &FoldedDelete,
+        remove: &dyn for<'p> Fn(&'p Path) -> Result<()>,
+    ) -> Result<FoldedDeleteOutcome> {
+        HydrationHost::apply_folded_delete(&self.engine, delete, remove).await
+    }
+
     async fn repull(&self) -> Result<PlaceholderFold> {
         self.ticks.fetch_add(1, Ordering::SeqCst);
-        Ok(PlaceholderFold {
-            stale_hydrated: std::mem::take(&mut *self.stale.lock().unwrap()),
-            ..PlaceholderFold::default()
-        })
+        let changes = std::mem::take(&mut *self.changes.lock().unwrap());
+        let mut fold = if changes.is_empty() {
+            PlaceholderFold::default()
+        } else {
+            self.engine.fold_changes_for_test(&changes)?
+        };
+        fold.stale_hydrated
+            .extend(std::mem::take(&mut *self.stale.lock().unwrap()));
+        Ok(fold)
     }
 
     async fn set_placeholders_off_disk(&self) -> Result<()> {
@@ -199,6 +217,10 @@ impl HydrationHost for DbBackedHost {
     // harness owns, never a trait default.
     async fn converge_corpus_at_start(&self, _folder: &str) {}
 
+    async fn adopt_deposits(&self, _folder: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     async fn refresh_and_converge_corpus(&self, _folder: &str) {}
 
     async fn answer_engine_command(&self, cmd: EngineCommand) {
@@ -219,8 +241,16 @@ impl HydrationHost for DbBackedHost {
         self.engine.subtree_fully_synced(dir_rel).unwrap_or(false)
     }
 
-    async fn is_dehydration_safe(&self, rel: &str) -> bool {
-        self.engine.is_dehydration_safe(rel)
+    async fn is_recorded_content(&self, rel: &str) -> bool {
+        self.engine.is_recorded_content(rel)
+    }
+
+    async fn keeps_own_record(&self, rel: &str) -> bool {
+        self.engine.keeps_own_record(rel)
+    }
+
+    async fn kept_own_records(&self) -> Result<Vec<String>> {
+        self.engine.kept_own_records()
     }
 }
 
@@ -246,6 +276,8 @@ struct Serve {
     commands: Option<mpsc::Receiver<EngineCommand>>,
     /// Stale hydrated rows the next re-pull reports ([`DbBackedHost::stale`]).
     stale: Arc<std::sync::Mutex<Vec<StaleHydratedRow>>>,
+    /// Remote changes the next re-pull folds ([`DbBackedHost::changes`]).
+    changes: Arc<std::sync::Mutex<Vec<fauna_protocol::sync::SyncChange>>>,
 }
 
 impl Default for Serve {
@@ -256,6 +288,7 @@ impl Default for Serve {
             ticks: Arc::default(),
             commands: None,
             stale: Arc::default(),
+            changes: Arc::default(),
         }
     }
 }
@@ -288,7 +321,7 @@ fn harness() -> Harness {
 /// [`harness`], with the engine's byte plane at `nest`.
 fn harness_against(nest: &str) -> Harness {
     let tmp = mountable_tempdir();
-    let paths = SyncPaths::new(Some(tmp.path().to_path_buf()));
+    let paths = SyncPaths::at(tmp.path().to_path_buf());
     let root = tmp.path().join("root");
     std::fs::create_dir_all(&root).expect("create the bound directory");
     let root = root.canonicalize().expect("canonical bound directory");
@@ -357,7 +390,7 @@ impl Harness {
         )));
         let engine = fauna_sync_engine::engine_lifecycle::assemble_engine(
             agent_engine_params(
-                agent_control_plane(capability, nest, [9u8; 32]),
+                agent_control_plane(capability, nest, [9u8; 32], [7u8; 32]),
                 self.db_path
                     .parent()
                     .expect("the state DB sits under the data-root")
@@ -389,6 +422,7 @@ impl Harness {
             rescan: serve.rescan,
             ticks: Arc::clone(&serve.ticks),
             stale: Arc::clone(&serve.stale),
+            changes: Arc::clone(&serve.changes),
         }
     }
 
@@ -732,7 +766,7 @@ fn spawn_guarded_mounting_child(root: &Path) -> std::process::Child {
     cmd.spawn().expect("spawn the mounting child")
 }
 
-/// The crash guard (`on-demand-files.md` § Linux FUSE binding, the lifecycle
+/// The crash guard (`on-demand-files-linux.md` § Linux FUSE binding, the lifecycle
 /// rule): an agent killed while mounted leaves no dead mount behind for long —
 /// its guard, a process of its own, sees the agent go and lazily unmounts, so
 /// within seconds the directory is an ordinary directory of its hydrated files
@@ -766,7 +800,7 @@ async fn a_killed_agents_mount_is_unmounted_by_its_crash_guard() {
 /// outside the set a confined `fusermount3` admits (`/var/tmp` — every user's,
 /// and under none of home, `/mnt`, `/media`, `/run/user/<uid>`, `/tmp`) fails,
 /// and that failure classifies as the LOCATION's code, the one whose line tells
-/// the user to pick another folder (`on-demand-files.md` § Linux FUSE binding,
+/// the user to pick another folder (`on-demand-files-linux.md` § Linux FUSE binding,
 /// the lifecycle rule). On a box whose helper is not confined the mount simply
 /// stands and there is nothing to classify.
 #[tokio::test]
@@ -913,7 +947,7 @@ async fn a_ghost_mount_is_swept_at_boot() {
 /// comes up, and ten seconds after the kill it is still in the mount table,
 /// answering `ENOTCONN`. So no: with this crate and this helper a crashed agent's
 /// mount is cleared by the boot sweep, not by the helper — which is what
-/// [`a_ghost_mount_is_swept_at_boot`] pins and `on-demand-files.md` § Linux FUSE
+/// [`a_ghost_mount_is_swept_at_boot`] pins and `on-demand-files-linux.md` § Linux FUSE
 /// binding records.
 #[tokio::test]
 #[ignore = "measurement probe; run with --ignored --nocapture"]
@@ -1763,6 +1797,7 @@ async fn a_remote_modify_of_a_hydrated_file_refetches() {
             content_key_version: None,
             remote_mtime: CLOUD_MTIME,
             version_num: 2,
+            signed_as: None,
         });
         eventually(
             || {
@@ -1807,8 +1842,191 @@ async fn a_remote_modify_of_a_hydrated_file_refetches() {
     drive_until_asserted(loop_fut, driver).await;
 }
 
+/// A nest `SyncChange` deleting `rel` — another device's delete, as `changes.list`
+/// carries it (`manifest_hash = None`).
+fn remote_delete(seq: i64, rel: &str) -> fauna_protocol::sync::SyncChange {
+    fauna_protocol::sync::SyncChange {
+        seq,
+        path_hash: format!("path-hash-{rel}"),
+        manifest_hash: None,
+        size_bytes: 0,
+        change_type: "delete".to_string(),
+        created_at: 1_700_000_000_000,
+        path: Some(rel.to_string()),
+        device_id: Some("another-device".to_string()),
+        ..Default::default()
+    }
+}
+
+/// How this device holds the file another device is about to delete.
+#[derive(Clone, Copy)]
+enum HeldAs {
+    /// Listed (its row is on the view) but never opened: no bytes under the mount.
+    CloudOnly,
+    /// Opened here: hydrated, `Synced`, in sync with its recorded head.
+    Hydrated,
+}
+
+/// **Another device's delete reaches this disk, however this device holds the file**
+/// (`delete-propagation.md` § *How a delete travels*, the on-demand bullet; the cfapi twin
+/// is `a_remote_delete_reaches_the_disk`). The re-pull folds the delete; the shared apply
+/// then removes the reach file (nothing, for a placeholder — its row is the whole of it),
+/// THEN the row. The view must stop listing the name, read from another process.
+async fn a_remote_delete_reaches_the_disk(held: HeldAs) {
+    const REL: &str = "cloud.txt";
+    let h = harness();
+    let reach = Reach::open(&h.root).expect("open the reach");
+    let changes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let loop_fut = h.serve_with(
+        &reach,
+        CancellationToken::new(),
+        Serve {
+            rescan: Duration::from_millis(500),
+            changes: Arc::clone(&changes),
+            ..Serve::default()
+        },
+    );
+
+    let driver = async {
+        eventually(
+            || h.mounted(),
+            Duration::from_secs(20),
+            "the mount to come up",
+        )
+        .await;
+        match held {
+            HeldAs::Hydrated => {
+                assert_eq!(
+                    cat(&h.root.join(REL)).await,
+                    cloud_bytes(REL, 1234),
+                    "precondition: the open serves the file"
+                );
+                assert!(
+                    reach.path().join(REL).exists(),
+                    "precondition: the bytes are under the mount"
+                );
+                assert_eq!(h.entry(REL).expect("the row").state, SyncState::Synced);
+            }
+            HeldAs::CloudOnly => {
+                assert!(ls(&h.root).await.contains(&REL.to_string()));
+                assert!(
+                    !reach.path().join(REL).exists(),
+                    "precondition: a listed, unopened file is a row only"
+                );
+            }
+        }
+
+        // Another device deletes the file; the next re-pull folds it.
+        changes.lock().unwrap().push(remote_delete(10, REL));
+        eventually(
+            || h.entry(REL).is_none(),
+            Duration::from_secs(20),
+            "the remote delete to remove the row (after the disk)",
+        )
+        .await;
+        assert!(
+            std::fs::symlink_metadata(reach.path().join(REL)).is_err(),
+            "the reach file must be gone before the row is"
+        );
+        // The view's attribute/listing TTL is 1 s: poll from another process.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let listed = ls(&h.root).await;
+            if !listed.contains(&REL.to_string()) {
+                assert!(
+                    listed.contains(&REAL.to_string()),
+                    "other files stay: {listed:?}"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the view still lists the deleted file after its TTL: {listed:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+
+    drive_until_asserted(loop_fut, driver).await;
+}
+
+/// A file this device listed but never opened: its row goes and the view stops listing it.
+#[tokio::test]
+async fn a_remote_delete_removes_a_cloud_only_row() {
+    a_remote_delete_reaches_the_disk(HeldAs::CloudOnly).await;
+}
+
+/// A file this device opened and holds in sync: the hydrated copy, its view entry and its
+/// row all go.
+#[tokio::test]
+async fn a_remote_delete_removes_a_hydrated_in_sync_copy() {
+    a_remote_delete_reaches_the_disk(HeldAs::Hydrated).await;
+}
+
+/// **A remote delete never destroys an unsynced local edit** (`delete-propagation.md`
+/// § *How a delete travels*: a tombstone applies only to a settled row whose disk still
+/// hashes to it; otherwise the bytes are kept and the delete-vs-edit conflict recorded).
+/// The file was opened here, then edited through the mount; another device's delete lands
+/// before the edit uploads. The edit survives whole, the row stays, and a `delete_declined`
+/// conflict is recorded — here the local record, the rung the report falls back to with no
+/// nest to send it to.
+#[tokio::test]
+async fn a_remote_delete_never_destroys_an_unsynced_local_edit() {
+    const REL: &str = "cloud.txt";
+    const EDITED: &str = "edited here and not uploaded yet -- the only copy of it anywhere";
+    let h = harness();
+    let reach = Reach::open(&h.root).expect("open the reach");
+    let changes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let loop_fut = h.serve_with(
+        &reach,
+        CancellationToken::new(),
+        Serve {
+            rescan: Duration::from_millis(500),
+            changes: Arc::clone(&changes),
+            ..Serve::default()
+        },
+    );
+
+    let driver = async {
+        eventually(
+            || h.mounted(),
+            Duration::from_secs(20),
+            "the mount to come up",
+        )
+        .await;
+        assert_eq!(cat(&h.root.join(REL)).await, cloud_bytes(REL, 1234));
+        write_through(&h.root.join(REL), EDITED).await;
+
+        // Another device's delete lands before the edit's upload (the 2 s debounce).
+        changes.lock().unwrap().push(remote_delete(10, REL));
+        eventually(
+            || {
+                SyncDb::open(&h.db_path)
+                    .expect("reopen db")
+                    .has_unresolved_conflict_for_path(REL)
+                    .expect("read conflicts")
+            },
+            Duration::from_secs(30),
+            "the declined delete to record a delete-vs-edit conflict",
+        )
+        .await;
+        assert_eq!(
+            std::fs::read(reach.path().join(REL)).expect("read the local edit back"),
+            EDITED.as_bytes(),
+            "the unsynced local edit must survive whole"
+        );
+        assert_eq!(cat(&h.root.join(REL)).await, EDITED.as_bytes());
+        assert!(
+            h.entry(REL).is_some(),
+            "the row stays: the survivor is still this device's to sync"
+        );
+    };
+
+    drive_until_asserted(loop_fut, driver).await;
+}
+
 // ---------------------------------------------------------------------------
-// Mode flips (`on-demand-files.md` § Linux FUSE binding: *Mode flips and
+// Mode flips (`on-demand-files-linux.md` § Linux FUSE binding: *Mode flips and
 // unbinds are mount/unmount, nothing else*)
 // ---------------------------------------------------------------------------
 

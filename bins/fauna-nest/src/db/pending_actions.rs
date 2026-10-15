@@ -16,6 +16,34 @@ pub(crate) fn genesis_hash() -> Vec<u8> {
     sha2::Sha256::digest(b"fauna-pending-actions-genesis-v1").to_vec()
 }
 
+/// Test-only pause point in the window between `cancel_pending_action` /
+/// `approve_pending_action`'s status pre-check and their guarded `UPDATE`
+/// (two lock holds, so a claim can land between them). The write path signals
+/// `reached`, then waits for `proceed`; a test claims the row in between and
+/// pins the `updated == 0` arm.
+#[cfg(test)]
+pub(crate) struct PrecheckGate {
+    pub reached: std::sync::Arc<tokio::sync::Notify>,
+    pub proceed: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl CacheDb {
+    /// Runs once a pre-check has passed, just before the write takes the
+    /// connection lock. A no-op outside tests.
+    #[cfg(test)]
+    async fn after_precheck(&self) {
+        let gate = self.precheck_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.reached.notify_one();
+            gate.proceed.notified().await;
+        }
+    }
+
+    #[cfg(not(test))]
+    #[inline(always)]
+    async fn after_precheck(&self) {}
+}
+
 /// The `snapshots` rows an action marked `deletion_pending` when it was created.
 ///
 /// Two producers, two encodings, deliberately read in one place so a third can
@@ -451,6 +479,7 @@ impl CacheDb {
         }
 
         let cancelled_by_vec = cancelled_by.to_vec();
+        self.after_precheck().await;
         let conn = self.conn.lock().await;
         let now = now_epoch_secs();
         let updated = conn
@@ -548,12 +577,20 @@ impl CacheDb {
         approvals.push(approver_hex);
         let new_approvals = serde_json::to_string(&approvals).context("serialize approvals")?;
 
+        self.after_precheck().await;
         let conn = self.conn.lock().await;
-        conn.execute(
-            "UPDATE pending_actions SET approvals = ?1 WHERE id = ?2 AND status = 'pending'",
-            rusqlite::params![new_approvals, id],
-        )
-        .context("approve pending_action")?;
+        let updated = conn
+            .execute(
+                "UPDATE pending_actions SET approvals = ?1 WHERE id = ?2 AND status = 'pending'",
+                rusqlite::params![new_approvals, id],
+            )
+            .context("approve pending_action")?;
+
+        if updated == 0 {
+            // The executor claimed (or a cancel landed) between the status
+            // pre-check and this write: the approval was not recorded.
+            bail!("pending action {id} left pending status before the approval was recorded");
+        }
 
         Ok(())
     }
@@ -670,4 +707,80 @@ fn parse_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingActionRow> {
         ip_address: row.get(13)?,
         chain_hash: row.get(14)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    /// Arm the gate, start `write` (which stops at the gate), claim the row
+    /// inside the window, then let the write proceed and return its result.
+    async fn write_losing_to_a_claim<F, Fut>(db: &Arc<CacheDb>, id: i64, write: F) -> Result<()>
+    where
+        F: FnOnce(Arc<CacheDb>) -> Fut,
+        Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+    {
+        let reached = Arc::new(Notify::new());
+        let proceed = Arc::new(Notify::new());
+        *db.precheck_gate.lock().unwrap() = Some(PrecheckGate {
+            reached: reached.clone(),
+            proceed: proceed.clone(),
+        });
+        // spawn-ok(test): the racing write, awaited below.
+        let task = tokio::spawn(write(db.clone()));
+        reached.notified().await;
+        let claimed = db.claim_pending_action(id).await.unwrap();
+        assert!(claimed.is_some(), "the claim must win the window");
+        proceed.notify_one();
+        task.await.unwrap()
+    }
+
+    /// An approval that loses to the executor's claim between its pre-check and
+    /// its write is refused, and the stored approvals stay as they were.
+    #[tokio::test]
+    async fn approve_refuses_when_a_claim_lands_after_the_precheck() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let actor = [1u8; 32];
+        let approver = [2u8; 32];
+        let id = db
+            .create_pending_action(&ActionType::AdminRemove, &actor, Some("t"), None, None)
+            .await
+            .unwrap();
+
+        let res = write_losing_to_a_claim(&db, id, move |db| async move {
+            db.approve_pending_action(id, &approver).await
+        })
+        .await;
+
+        assert!(res.is_err(), "a lost approval must not return Ok");
+        let row = db.get_pending_action(id).await.unwrap().unwrap();
+        assert_eq!(row.approvals, "[]");
+        assert_eq!(row.status, "executing");
+    }
+
+    /// A cancel that loses to the executor's claim between its pre-check and
+    /// its write is refused, and the row is not marked cancelled.
+    #[tokio::test]
+    async fn cancel_refuses_when_a_claim_lands_after_the_precheck() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let actor = [3u8; 32];
+        let id = db
+            .create_pending_action(&ActionType::HandleChange, &actor, Some("h"), None, None)
+            .await
+            .unwrap();
+
+        let res = write_losing_to_a_claim(&db, id, move |db| async move {
+            db.cancel_pending_action(id, &actor).await
+        })
+        .await;
+
+        assert!(res.is_err(), "a lost cancel must not return Ok");
+        let row = db.get_pending_action(id).await.unwrap().unwrap();
+        assert_eq!(row.status, "executing");
+        assert!(row.cancelled_at.is_none());
+    }
 }

@@ -503,12 +503,16 @@ fn health_elements(health: &MailHealthView, warmup_armed: bool, now_ms: i64) -> 
         els.push(Element::label(ids::ADMIN_MAIL_HEALTH_CHECK_DETAIL, detail));
     }
     if let Some(url) = &health.delist_url {
-        els.push(Element::gesture_button(
-            ids::ADMIN_MAIL_HEALTH_DELIST_LINK,
-            format!("{}: {url}", t::mail_page::HEALTH_DELIST),
-            true,
-            Gesture::Admin(Action::CopyMailDelistUrl { url: url.clone() }),
-        ));
+        els.push(
+            Element::gesture_button(
+                ids::ADMIN_MAIL_HEALTH_DELIST_LINK,
+                format!("{}: {url}", t::mail_page::HEALTH_DELIST),
+                true,
+                Gesture::Admin(Action::CopyMailDelistUrl { url: url.clone() }),
+            )
+            // The target as the `href` attribute every app publishes on the link.
+            .attr("href", url.clone()),
+        );
     }
     els.push(Element::gesture_button(
         ids::ADMIN_MAIL_HEALTH_RECHECK_BUTTON,
@@ -931,7 +935,8 @@ fn join_u64(values: &[u64]) -> String {
 #[cfg(test)]
 mod tests {
     use fauna_client_mail_settings::admin_policy::{
-        BaselinePublishView, BaselineStateView, MailHealthCheckView, MailPolicyStatus,
+        BaselinePublishView, BaselineStateView, DmarcPolicyView, MailHealthCheckView,
+        MailPolicyStatus,
     };
 
     use super::*;
@@ -998,6 +1003,20 @@ mod tests {
                 reserved_local_parts: vec!["postmaster".into()],
                 subaddressing_enabled: true,
                 wildcard_prefix_enabled: false,
+            },
+            dmarc: DmarcPolicyView {
+                policy_mode: "reject".into(),
+                subdomain_policy_mode: "reject".into(),
+                pct: 100,
+                adkim_mode: "s".into(),
+                aspf_mode: "s".into(),
+                rua_destination: None,
+                ruf_publish: false,
+                ruf_destination: None,
+                fo_mode: "1".into(),
+                ri_seconds: 86_400,
+                aggregate_retention_days: 90,
+                forensic_retention_days: 30,
             },
             status: MailPolicyStatus::Idle,
             baseline_publish_result: None,

@@ -70,6 +70,20 @@ export CAMBRIA_DISABLE_AOT := "1"
 # Not `trim-paths`: its `cargo-features` line would make the workspace manifest
 # unloadable by stable cargo (build-target-layout-linux.md, Track C-2).
 export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS := "--remap-path-prefix=" + justfile_directory() + "=/fauna --remap-path-prefix=" + env("CARGO_HOME", home_directory() / ".cargo") + "=/cargo --remap-path-prefix=" + env("CARGO_TARGET_DIR", justfile_directory() / "target") + "=/fauna/target"
+# The wasm32 C compiler: the chunks' one C dependency (zstd-sys) is compiled by
+# it and every chunk's `producers` section names it, so every builder SELECTS one
+# pinned upstream LLVM release (`supply-chain/wasm32-cc.toml`) — never the clang
+# on PATH (release-integrity.md § Release signing → Web-app verifiability, piece
+# 1, "The wasm32 C compiler"). Every wasm32 build recipe depends on
+# `_wasm32-cc-check`, which refuses an unpinned or missing install once the pin
+# is ACTIVE — once it records its `clang --version` line, the first install's
+# measurement. The commit that records it also adds, here, the two exports
+# `CC_wasm32_unknown_unknown` / `AR_wasm32_unknown_unknown` naming the fixed
+# per-machine root (`scripts/wasm32-cc.py`'s ROOT, spelled out so no subprocess
+# runs on every `just` parse): an active pin's check refuses unless both name
+# that root, and test_wasm32_cc.py fails an active pin without them. Until then
+# no export, so cc-rs resolves the compiler exactly as before. No override: a
+# build-machine path is wiring, not a choice.
 
 # ── The interpreter: ALWAYS uv, never bare `python3` (user ruling 2026-08-23) ──
 # Bare `python3` resolves to a DIFFERENT interpreter per machine — 3.14 on the
@@ -446,6 +460,20 @@ wasm:
 [parallel]
 _wasm-fanout: wasm-core wasm-onboarding wasm-launch wasm-folders wasm-backups wasm-media wasm-labeler-catalog wasm-share wasm-connected-apps wasm-atproto-settings
 
+# The wasm32 C compiler gate every wasm32 build recipe depends on: exits 0 only
+# when the pinned LLVM install (`supply-chain/wasm32-cc.toml`) is at the fixed
+# root the CC_/AR_wasm32_unknown_unknown exports above name, and otherwise
+# REFUSES, printing the install steps — never a fallback to the clang on PATH
+# (release-integrity.md § Release signing → Web-app verifiability, piece 1).
+_wasm32-cc-check:
+    @{{py}} scripts/wasm32-cc.py check
+
+# Print the commands that install the pinned wasm32 C compiler on this machine
+# (checksum-verified download + unpack into a user-writable root; no sudo). It
+# prints them for a person to run and never runs them itself.
+wasm32-cc-install-steps:
+    @{{py}} scripts/wasm32-cc.py install-steps
+
 # CHECK-tier gate (merge-gate check leg, added 2026-07-29 with the rust-first
 # default-workflow ratification): per-crate wasm32 TYPE-CHECK of every shipped
 # wasm chunk. Catches the "web silently no longer compiles" class (wire-struct
@@ -475,7 +503,7 @@ _wasm-fanout: wasm-core wasm-onboarding wasm-launch wasm-folders wasm-backups wa
 #     web hosts the account runtime these lines are the only thing that
 #     proves they still build for wasm32 (the wasm-wallclock gate cannot see
 #     them before a chunk does either).
-wasm-chunk-check:
+wasm-chunk-check: _wasm32-cc-check
     #!/usr/bin/env bash
     set -euo pipefail
     {{slot_build_body}}
@@ -584,7 +612,7 @@ wasm-core:
     {{py}} scripts/sync-wasm-static.py -q --stem fauna_wasm \
         --from libs/fauna-wasm/pkg --to apps/fauna-web/static
 
-_wasm-core-impl:
+_wasm-core-impl: _wasm32-cc-check
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm --target web
 
 # Test-flavoured core wasm: adds `libs/fauna-wasm`'s `test-helpers` feature, which
@@ -619,7 +647,7 @@ wasm-core-test:
     {{py}} scripts/sync-wasm-static.py -q --stem fauna_wasm \
         --from libs/fauna-wasm/pkg-test --to apps/fauna-web/static
 
-_wasm-core-test-impl:
+_wasm-core-test-impl: _wasm32-cc-check
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm/pkg-test -- {{slot_build}} wasm-pack build libs/fauna-wasm --target web --out-dir pkg-test -- --features test-helpers
 
 # Onboarding WASM chunk (libs/fauna-wasm-onboarding).
@@ -654,7 +682,7 @@ wasm-onboarding:
     @{{py}} scripts/sync-wasm-static.py -q --stem fauna_wasm_onboarding \
         --from libs/fauna-wasm-onboarding/pkg --to apps/fauna-web/static
 
-_wasm-onboarding-impl:
+_wasm-onboarding-impl: _wasm32-cc-check
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-onboarding/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-onboarding --target web
 
 # Launch WASM chunk (libs/fauna-wasm-launch) — the shared `LaunchMachine`'s JS
@@ -689,7 +717,7 @@ wasm-launch:
     @{{py}} scripts/sync-wasm-static.py -q --stem fauna_wasm_launch \
         --from libs/fauna-wasm-launch/pkg --to apps/fauna-web/static
 
-_wasm-launch-impl:
+_wasm-launch-impl: _wasm32-cc-check
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-launch/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-launch --target web
 
 wasm-launch-test:
@@ -703,7 +731,7 @@ wasm-launch-test:
     @{{py}} scripts/sync-wasm-static.py -q --stem fauna_wasm_launch \
         --from libs/fauna-wasm-launch/pkg-test --to apps/fauna-web/static
 
-_wasm-launch-test-impl:
+_wasm-launch-test-impl: _wasm32-cc-check
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-launch/pkg-test -- {{slot_build}} wasm-pack build libs/fauna-wasm-launch --target web --out-dir pkg-test -- --features test-helpers
 
 # Test-flavoured onboarding wasm: includes the test-helpers feature so
@@ -749,7 +777,7 @@ wasm-onboarding-test:
     @{{py}} scripts/sync-wasm-static.py -q --stem fauna_wasm_onboarding \
         --from libs/fauna-wasm-onboarding/pkg-test --to apps/fauna-web/static
 
-_wasm-onboarding-test-impl:
+_wasm-onboarding-test-impl: _wasm32-cc-check
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-onboarding/pkg-test -- {{slot_build}} wasm-pack build libs/fauna-wasm-onboarding --target web --out-dir pkg-test -- --features test-helpers
 
 # Folder wizard + page-level Devices WASM chunk (libs/fauna-wasm-folders:
@@ -767,7 +795,7 @@ wasm-folders:
         --source libs ${VENDOR_SOURCE:-} --source Cargo.lock --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude '*/pkg-panic-witness/*' \
         -- just _wasm-folders-impl
 
-_wasm-folders-impl:
+_wasm-folders-impl: _wasm32-cc-check
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-folders/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-folders --target web
     cp libs/fauna-wasm-folders/pkg/fauna_wasm_folders_bg.wasm apps/fauna-web/static/
     cp libs/fauna-wasm-folders/pkg/fauna_wasm_folders.js apps/fauna-web/static/
@@ -791,7 +819,7 @@ wasm-backups:
         --source libs ${VENDOR_SOURCE:-} --source Cargo.lock --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude '*/pkg-panic-witness/*' \
         -- just _wasm-backups-impl
 
-_wasm-backups-impl:
+_wasm-backups-impl: _wasm32-cc-check
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-backups/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-backups --target web
     cp libs/fauna-wasm-backups/pkg/fauna_wasm_backups_bg.wasm apps/fauna-web/static/
     cp libs/fauna-wasm-backups/pkg/fauna_wasm_backups.js apps/fauna-web/static/
@@ -814,7 +842,7 @@ wasm-media:
         --source libs ${VENDOR_SOURCE:-} --source Cargo.lock --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude '*/pkg-panic-witness/*' \
         -- just _wasm-media-impl
 
-_wasm-media-impl:
+_wasm-media-impl: _wasm32-cc-check
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-media/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-media --target web
     cp libs/fauna-wasm-media/pkg/fauna_wasm_media_bg.wasm apps/fauna-web/static/
     cp libs/fauna-wasm-media/pkg/fauna_wasm_media.js apps/fauna-web/static/
@@ -837,7 +865,7 @@ wasm-labeler-catalog:
         --source libs --source Cargo.lock --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude '*/pkg-panic-witness/*' \
         -- just _wasm-labeler-catalog-impl
 
-_wasm-labeler-catalog-impl:
+_wasm-labeler-catalog-impl: _wasm32-cc-check
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-labeler-catalog/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-labeler-catalog --target web
     cp libs/fauna-wasm-labeler-catalog/pkg/fauna_wasm_labeler_catalog_bg.wasm apps/fauna-web/static/
     cp libs/fauna-wasm-labeler-catalog/pkg/fauna_wasm_labeler_catalog.js apps/fauna-web/static/
@@ -860,7 +888,7 @@ wasm-share:
         --source libs --source Cargo.lock --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude '*/pkg-panic-witness/*' \
         -- just _wasm-share-impl
 
-_wasm-share-impl:
+_wasm-share-impl: _wasm32-cc-check
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-share/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-share --target web
     cp libs/fauna-wasm-share/pkg/fauna_wasm_share_bg.wasm apps/fauna-web/static/
     cp libs/fauna-wasm-share/pkg/fauna_wasm_share.js apps/fauna-web/static/
@@ -885,7 +913,7 @@ wasm-connected-apps:
         --source libs ${VENDOR_SOURCE:-} --source Cargo.lock --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude '*/pkg-panic-witness/*' \
         -- just _wasm-connected-apps-impl
 
-_wasm-connected-apps-impl:
+_wasm-connected-apps-impl: _wasm32-cc-check
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-connected-apps/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-connected-apps --target web
     cp libs/fauna-wasm-connected-apps/pkg/fauna_wasm_connected_apps_bg.wasm apps/fauna-web/static/
     cp libs/fauna-wasm-connected-apps/pkg/fauna_wasm_connected_apps.js apps/fauna-web/static/
@@ -921,7 +949,7 @@ wasm-atproto-settings:
     @{{py}} scripts/sync-wasm-static.py -q --stem fauna_wasm_atproto_settings \
         --from libs/fauna-wasm-atproto-settings/pkg --to apps/fauna-web/static
 
-_wasm-atproto-settings-impl:
+_wasm-atproto-settings-impl: _wasm32-cc-check
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-atproto-settings/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-atproto-settings --target web
 
 wasm-atproto-settings-test:
@@ -935,7 +963,7 @@ wasm-atproto-settings-test:
     @{{py}} scripts/sync-wasm-static.py -q --stem fauna_wasm_atproto_settings \
         --from libs/fauna-wasm-atproto-settings/pkg-test --to apps/fauna-web/static
 
-_wasm-atproto-settings-test-impl:
+_wasm-atproto-settings-test-impl: _wasm32-cc-check
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-atproto-settings/pkg-test -- {{slot_build}} wasm-pack build libs/fauna-wasm-atproto-settings --target web --out-dir pkg-test -- --features test-helpers
 
 # Content-index WASM chunk (libs/fauna-wasm-content-index). ON HOLD — not in
@@ -951,7 +979,7 @@ wasm-content-index:
         --source libs --source Cargo.lock --exclude '*/pkg/*' --exclude '*/pkg-test/*' \
         -- just _wasm-content-index-impl
 
-_wasm-content-index-impl:
+_wasm-content-index-impl: _wasm32-cc-check
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-content-index/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-content-index --target web
     cp libs/fauna-wasm-content-index/pkg/fauna_wasm_content_index_bg.wasm apps/fauna-web/static/
     cp libs/fauna-wasm-content-index/pkg/fauna_wasm_content_index.js apps/fauna-web/static/
@@ -989,7 +1017,7 @@ wasm-panic-witness:
         --source libs ${VENDOR_SOURCE:-} --source Cargo.lock --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude '*/pkg-panic-witness/*' \
         -- just _wasm-panic-witness-impl
 
-_wasm-panic-witness-impl:
+_wasm-panic-witness-impl: _wasm32-cc-check
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-launch/pkg-panic-witness -- {{slot_build}} wasm-pack build libs/fauna-wasm-launch --target web --out-dir pkg-panic-witness --out-name fauna_wasm_launch_panic_witness -- --features test-helpers
     cp libs/fauna-wasm-launch/pkg-panic-witness/fauna_wasm_launch_panic_witness.js apps/fauna-web/static/
     cp libs/fauna-wasm-launch/pkg-panic-witness/fauna_wasm_launch_panic_witness_bg.wasm apps/fauna-web/static/
@@ -1407,7 +1435,8 @@ docker-build: i18n-generate providers-generate
     #!/usr/bin/env bash
     set -euo pipefail
     commit=$(git rev-parse HEAD 2>/dev/null || echo dev)
-    {{slot_build}} docker build --build-arg FAUNA_BUILD_COMMIT="$commit" -t fauna-nest:local .
+    version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+    {{slot_build}} docker build --build-arg FAUNA_BUILD_COMMIT="$commit" --build-arg FAUNA_VERSION="$version" -t fauna-nest:local .
 
 # Run nest Docker container locally (http://localhost:3000, web app at /app/)
 docker-run: docker-build
@@ -1458,6 +1487,9 @@ docker-push-dev:
     # commit from satisfying a release's promotion gate — the exact sequence
     # this recipe's own docs describe.
     build_id="dev-$(date +%s)"
+    # The workspace version, as the image's org.opencontainers.image.version label
+    # (the updater's never-downgrade decision reads it — nest/update-channel.md).
+    version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
     # Bound the build so a stalled RUN step (e.g. a `go mod download` whose
     # proxy connection hangs with no read timeout) fails loudly instead of
     # hanging for hours — buildkit buffers per-step output, so a network stall
@@ -1500,6 +1532,7 @@ docker-push-dev:
         --platform linux/amd64 --progress=plain \
         --build-arg FAUNA_BUILD_COMMIT="$commit" \
         --build-arg FAUNA_BUILD_ID="$build_id" \
+        --build-arg FAUNA_VERSION="$version" \
         --build-arg BUILD_JOBS="$build_jobs" \
         --tag ghcr.io/faunasocial/nest:dev \
         --tag "ghcr.io/faunasocial/nest:$commit" \
@@ -1519,28 +1552,27 @@ docker-push-dev:
     docker push "ghcr.io/faunasocial/nest:$commit"
     echo
     echo "Pushed ghcr.io/faunasocial/nest:dev and :$commit (commit $commit, build $build_id)."
-    echo "Watchtower recreates fauna-nest on its next poll (interval per the VPS .env)."
+    echo "The box's fauna-updater re-creates fauna-nest at its next hourly check (at once: just deploy-dev <host>)."
     echo "Verify it's live:  curl -sk https://<domain>/api/v1/health   # commit should read $commit"
-    echo "Tail on the VPS:   docker compose logs -f watchtower fauna-nest"
+    echo "Tail on the VPS:   docker compose logs -f fauna-updater fauna-nest"
 
-# Build, push :dev, and trigger the VPS to pull immediately via Watchtower's
-# HTTP API (bound to 127.0.0.1 on the VPS, reached over SSH).
+# Build, push :dev, and have the VPS check at once: the updater takes no
+# requests (nest/update-channel.md § The updater), but its first check after a
+# start is immediate, so restarting it over SSH is the instant update.
 # Usage: just deploy-dev user@nest.example.com
 deploy-dev host:
     just docker-push-dev
-    ssh {{host}} 'set -a && . /srv/fauna/.env && set +a && \
-        curl -fsS -H "Authorization: Bearer $WATCHTOWER_HTTP_TOKEN" \
-             -X POST http://127.0.0.1:8080/v1/update'
+    ssh {{host}} 'cd /srv/fauna && docker compose restart fauna-updater'
     @echo "Deploy triggered on {{host}}"
 
 # Turnkey FIRST-TIME VPS bring-up: build+push the :dev image, copy the compose
 # bundle to the host, and `docker compose up -d` (nest + mail bridge + clamd +
-# rspamd + watchtower). Use this once to stand a fresh VPS up; thereafter
-# `deploy-dev` (Watchtower instant-update over SSH) is the fast inner loop.
+# rspamd + fauna-updater). Use this once to stand a fresh VPS up; thereafter
+# `deploy-dev` (an updater restart over SSH) is the fast inner loop.
 # Prereqs on the host: Docker (cloud images ship it) and `docker login
 # ghcr.io` (the image is private). On first run it seeds /srv/fauna/.env from
-# the template and stops so you can fill in your domain + Watchtower token
-# (DNS is published by your Fauna app, not via the .env).
+# the template and stops so you can review it (DNS is published by your Fauna
+# app, not via the .env).
 # Usage: just dev-deploy user@nest.example.com
 dev-deploy host: docker-push-dev
     #!/usr/bin/env bash
@@ -1551,12 +1583,21 @@ dev-deploy host: docker-push-dev
     if ! ssh {{host}} 'test -f /srv/fauna/.env'; then
         ssh {{host}} 'cp /srv/fauna/.env.example /srv/fauna/.env'
         echo "Seeded /srv/fauna/.env on {{host}} from the template."
-        echo "Edit it (WATCHTOWER_HTTP_TOKEN), then re-run: just dev-deploy {{host}}"
+        echo "Review it, then re-run: just dev-deploy {{host}}"
         exit 0
     fi
     ssh {{host}} 'cd /srv/fauna && set -a && . ./.env && set +a && docker compose up -d --remove-orphans'
     echo "Brought up fauna-nest + mail bridge + clamd/rspamd on {{host}}."
     echo "Claim code: ssh {{host}} \"docker logs fauna-nest 2>&1 | grep -i claim\""
+
+# Gate G1-cloud alone (no ssh): asserts the provider-side firewall safety
+# invariant — ≥1 cloud firewall applied to the server, and no applied inbound
+# rule covers an internal-only port {3000,8443,8444,8080}. Token: $HETZNER_API_TOKEN,
+# else the host's cloud project token file (scripts/_cloud_project.py).
+# --warn-only downgrades to advisory.
+# Usage: just deploy-verify-cloud-firewall dev.fauna.build [--warn-only]
+deploy-verify-cloud-firewall host *ARGS:
+    scripts/deploy-verify-cloud-firewall.py {{host}} {{ARGS}}
 
 # Run E2E tests (Python + Playwright)
 e2e: web i18n-generate providers-generate
@@ -1630,7 +1671,7 @@ e2e-tier-4-test *ARGS:
 #
 # The image is NOT built here and never should be: building the nest image on a
 # dev VM is forbidden — the dev VMs share one physical host and the build
-# starves them (build-system.md § Image tags & channels). Pull a published one first
+# starves them (image-pipeline.md § Image tags & channels). Pull a published one first
 # (`docker pull ghcr.io/faunasocial/nest:latest`), or dispatch a real build via
 # `gh workflow run build-nest-image.yml --ref main` and pull its tag. An absent
 # image refuses the run loudly rather than falling back to standalone.
@@ -1662,8 +1703,8 @@ e2e-docker-mode-test IMAGE="ghcr.io/faunasocial/nest:latest" *ARGS:
 # half-authenticated.
 # Usage: just e2e-live-mode-test
 #        just e2e-live-mode-test https://staging.example -k filesync
-#        just e2e-live-mode-test https://example.com --app tui
-e2e-live-mode-test URL="https://example.com" *ARGS:
+#        just e2e-live-mode-test https://dev.fauna.build --app tui
+e2e-live-mode-test URL="https://dev.fauna.build" *ARGS:
     pytest tests/e2e-unified/tests/ --nest live:{{URL}} -v {{ARGS}}
 
 # The CD gate: the curated `cd_suite` journey subset against a deployed box, as
@@ -1684,8 +1725,8 @@ e2e-live-mode-test URL="https://example.com" *ARGS:
 #                     a deselect is not a skip, so --fail-on-skip never sees
 #                     it and the gate passes green having run neither
 #                     (measured 2026-10-04). Refused unless URL is a staging
-#                     box the tree names (dev.example.com, test.example.com), so
-#                     this recipe pointed at example.com still deselects them
+#                     box the tree names (the dev and test nests), so
+#                     this recipe pointed at any other box still deselects them
 #                     (testing.md § The shared-box rule → The disposable-box
 #                     declaration).
 #   --fail-on-skip    is what makes the gate a gate: these tests skip silently
@@ -1694,7 +1735,7 @@ e2e-live-mode-test URL="https://example.com" *ARGS:
 #                     proved nothing (e2e-conventions.md convention 7).
 #
 # ⚠ DESTRUCTIVE against the target box (the suite factory-resets it) — point it
-# at the disposable CD box, never at example.com or any box with real users. The
+# at the disposable CD box, never at the acceptance nest or any box with real users. The
 # admin seed is resolved per box: FAUNA_LIVE_SECRET_HEX > ~/.config/fauna/staging-box/<host>.json > ~/.fauna-id; the destructive residents run only under the
 # --live-box disposable declaration and drive the box it names. The mailbox is
 # resolved per box too: FAUNA_LIVE_MAIL_ADDRESS / FAUNA_LIVE_MAIL_PASSWORD > the
@@ -1793,11 +1834,14 @@ e2e-prev-build *ARGS:
 # can build (§ Dim 6: each leg runs on its own machine). Needs the previous-build
 # cache (`just e2e-prev-build`) — the suites warm it themselves if cold.
 # `--app sweep` (this machine's full set) is the recipe default because the skew
-# grid has no tui leg: under the 2026-08-01 rust-first default (`[tui]`) a bare
-# run collects ZERO tests here and reports success. A trailing `--app <x>` in
-# ARGS still wins (last occurrence).
+# grid is parametrized over the GUI apps and only its mixed-nests cell runs on
+# tui: under the 2026-08-01 rust-first default (`[tui]`) a bare run collects that
+# one cell and nothing of the grid. A trailing `--app <x>` in ARGS still wins
+# (last occurrence). `--include-independent` keeps the nest-only
+# upgrade-in-place cell (`test_nest_data_upgrade.py`: the pinned nest's data dir
+# reopened by the HEAD nest), which launches no app and so is client-independent.
 e2e-version-skew-test *ARGS:
-    pytest tests/e2e-unified/tests/ -m version_skew -v --app sweep {{ARGS}}
+    pytest tests/e2e-unified/tests/ -m version_skew -v --app sweep --include-independent {{ARGS}}
 
 # The macOS CLIENT-ARTIFACT suite: drive the SHIPPED artifacts instead of the
 # locally-built binaries — the real `Fauna.app` bundle, a DMG-installed copy of
@@ -1933,11 +1977,12 @@ tui-release: i18n-generate providers-generate
 
 # Live, OPT-IN Hetzner provisioning e2e: provisions a REAL, PAID VPS through the
 # client onboarding path (real api.hetzner.cloud — server + DNS on ONE token),
-# runs the example.com deploy-verify gates against it (health/TLS/claim/firewall/
+# runs the live-box deploy-verify gates against it (health/TLS/claim/firewall/
 # mail-ports/DKIM, no SSH), then ALWAYS tears the box + DNS records down.
 # The ONLY required input is HETZNER_API_TOKEN (a Cloud Read&Write token) — from
-# the env, or from ~/.hetzner-token, the fleet's per-machine home for it (the env
-# wins when both are set; helpers/live_provision.py `hetzner_token`); this
+# the env, or from the cloud project's token file on this machine
+# (~/.config/fauna/cloud/uat.token for the throwaway boxes; the env wins when
+# both are set; helpers/live_provision.py `hetzner_token`); this
 # recipe sets the FAUNA_E2E_LIVE=1 opt-in for you. Optional env:
 #   FAUNA_E2E_ZONE=<apex>     pick the DNS zone if the token manages >1
 #   FAUNA_E2E_KEEP=1          leave the box up for inspection (no teardown)
@@ -1947,7 +1992,7 @@ tui-release: i18n-generate providers-generate
 # set skips as unbuilt debt rather than running. No `linux-debug` dep: the app
 # under test is built by the conftest's collection-time prebuild, which follows
 # `--app` for all 7 apps — the same path every other `e2e-*` recipe already uses.
-# Usage: just e2e-live-provision                 (token from ~/.hetzner-token)
+# Usage: just e2e-live-provision                 (token from its project file)
 #        HETZNER_API_TOKEN=… just e2e-live-provision tui
 e2e-live-provision APP="linux" *ARGS:
     FAUNA_E2E_LIVE=1 pytest tests/e2e-unified/tests/live/ -m live_provisioning --app {{APP}} -v -s {{ARGS}}
@@ -1957,14 +2002,14 @@ e2e-live-provision APP="linux" *ARGS:
 # PRIVATE nest as a local Docker container from the production
 # ghcr.io/faunasocial/nest:latest (pulled — never built locally), onboards BOTH
 # through the one linux client's real UI, sends real internet mail through
-# example.com's submission port, and reads it back on the private nest via the
+# the live nest's submission port, and reads it back on the private nest via the
 # client UI + a python IMAP client (plus the public no-readable-copy check).
 # Required env on top of HETZNER_API_TOKEN — the live sender identity. Both the
 # SENDER credential and the sender ADDRESS are produced in-test: the credential
 # via the mail-settings UI, the address by deriving the handle from the secret
 # (helpers/live_handle.py — testing.md § The shared-box rule, "derive what the
 # box knows"). FAUNA_LIVE_MAIL_ADDRESS still overrides if you need to pin one.
-#   FAUNA_LIVE_NEST_URL=https://example.com
+#   FAUNA_LIVE_NEST_URL=https://dev.fauna.build
 #   the live box's mail-enabled admin identity seed — resolved per box: FAUNA_LIVE_SECRET_HEX > ~/.config/fauna/staging-box/<host>.json > ~/.fauna-id
 # Runtime ~60-75 min (Hetzner DNS propagation dominates).
 # APP is the first positional arg, default `linux` (see e2e-live-provision).
@@ -1973,7 +2018,7 @@ e2e-live-private-relay APP="linux" *ARGS:
     FAUNA_E2E_LIVE=1 pytest tests/e2e-unified/tests/live/test_private_relay_hetzner.py --app {{APP}} -v -s {{ARGS}}
 
 # Live, OPT-IN ActivityPub SERVING-surface e2e against an already-deployed box
-# (example.com). NON-DESTRUCTIVE and the first resident of testing.md § The
+# (the live nest). NON-DESTRUCTIVE and the first resident of testing.md § The
 # shared-box rule's carve-out: enable AP through the linux client UI -> assert
 # the public routes (nodeinfo, WebFinger, actor doc, note, outbox) -> delete the
 # post -> unlink. Never factory-resets (the AP instance-actor rotation hazard,
@@ -1981,7 +2026,7 @@ e2e-live-private-relay APP="linux" *ARGS:
 # pre-existing AP state rather than "normalizing" it.
 #
 # Only two inputs, and neither is a value the box could have told you:
-#   FAUNA_LIVE_NEST_URL=https://example.com
+#   FAUNA_LIVE_NEST_URL=https://dev.fauna.build
 #   the box's admin identity seed — resolved per box: FAUNA_LIVE_SECRET_HEX > ~/.config/fauna/staging-box/<host>.json > ~/.fauna-id
 # The admin HANDLE is DERIVED from that secret (helpers/live_handle.py) — do not
 # go looking for it; FAUNA_LIVE_HANDLE exists only as an override. Add
@@ -1999,7 +2044,7 @@ e2e-live-ap-serving APP="linux" *ARGS:
     pytest tests/e2e-unified/tests/test_activitypub_live.py --app {{APP}} --nest live:${FAUNA_LIVE_NEST_URL} -v -s {{ARGS}}
 
 # Live, OPT-IN, NON-DESTRUCTIVE bootstrap of a claim-fresh deployed nest
-# (example.com) through the linux app UI: claim (or sign in) -> wait for the claimed
+# (the live nest) through the linux app UI: claim (or sign in) -> wait for the claimed
 # domain's ACME cert under strict TLS -> enable mail + approve the co-located
 # bridges -> wait for mail.<domain> :993/:465/:587 under strict TLS. Idempotent:
 # on an already-bootstrapped box it signs in and mutates nothing. Never resets.
@@ -2020,7 +2065,7 @@ e2e-live-bootstrap APP="linux" *ARGS:
 # local Docker container from ghcr.io/faunasocial/nest:latest (pulled, never
 # built). Proves GoToSocial can follow the fauna actor AND a post authored on the
 # private nest auto-forwards to the public nest and AP-pushes into the real
-# GoToSocial follower's home timeline. Does NOT touch example.com (no live_box).
+# GoToSocial follower's home timeline. Does NOT touch the shared live nest (no live_box).
 # Only env needed on top of the base gate: HETZNER_API_TOKEN (a Cloud R/W token).
 # Real € (2 paid VPSes/run); always tears both down (box fixture, e2e-<runid>
 # anchor). APP is the first positional arg, default `linux` (see e2e-live-provision).
@@ -2030,7 +2075,7 @@ e2e-live-ap-federation APP="linux" *ARGS:
 
 # Run the `test-hooks`-gated fauna-nest integration tests. The feature is OFF by
 # default, and cargo SKIPS a target whose required features are not enabled —
-# silently, with exit 0 — so `cargo test --workspace` never runs them. The six
+# silently, with exit 0 — so `cargo test --workspace` never runs them. The
 # targets below are what `bins/fauna-nest/Cargo.toml` declares
 # `required-features = ["test-hooks"]` on, i.e. the feature's only real coverage.
 # Local mirror of CI's `rust` job step (same silent-rot guard as `nostr`/`bluesky`).
@@ -2058,7 +2103,10 @@ nest-test-hooks *ARGS:
         --test desktop_serve_loop \
         --test desktop_serve_loopback \
         --test desktop_serve_port_change_loopback \
-        --test index_survives_nest_restart {{ARGS}}
+        --test index_survives_nest_restart \
+        --test owed_web_render_drained_at_boot \
+        --test echo_round_trip \
+        --test conformance_custody_hosting_pump_client {{ARGS}}
 
 # Clippy-check the off-by-default cargo features that a session's `cargo build` /
 # `cargo clippy --workspace` never compile, so they rot silently on `main`: `nostr`
@@ -2237,11 +2285,12 @@ feature-test-compile-check:
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-calendar --tests --features nest-segments
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-client-backup --tests --features local-clock
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-client-capabilities --tests --features local-clock,p2p-share
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-client-connected-apps --tests --features rpc-glue
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-client-connected-apps --tests --features local-clock,rpc-glue
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-client-dns --tests --features test-helpers
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-client-folders --tests --features mls,p2p-share
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-client-mail-settings --tests --features rpc-glue
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-client-recovery --tests --features aftermath
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-client-search --tests --features query
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-contacts --tests --features nest-segments
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-conversations --tests --features test-helpers
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-core --tests --features format_text,local-clock,qr_render,sqlite-schema-meta
@@ -2254,7 +2303,7 @@ feature-test-compile-check:
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-labeler-catalog-machine --tests --features rpc-glue
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-launch-machine --tests --features test-helpers,test-observer
     {{ if os() == "linux" { "CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-linux --tests --features live-secret-service" } else { "true" } }}
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-mail --tests --features caldav-schedule,domain-rename,imap-client,imap-client-native,mail-export,multidomain,nest-segments,outbound-net,role-overrides,segments-codec,segments-receive,staged-envelope,tls-test-fixtures
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-mail --tests --features caldav-schedule,dmarc-report,domain-rename,imap-client,imap-client-native,mail-export,multidomain,nest-segments,outbound-net,role-overrides,segments-codec,segments-receive,staged-envelope,tls-test-fixtures,tlsrpt-report
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-media-machine --tests --features rpc-glue
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-nest-http --tests --features launch-machine
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-onboarding-machine --tests --features test-observer
@@ -2804,6 +2853,7 @@ nest-testhooks-check:
     cargo test --locked -p fauna-nest --test index_survives_nest_restart --features test-hooks
     cargo test --locked -p fauna-nest --test owed_web_render_drained_at_boot --features test-hooks
     cargo test --locked -p fauna-nest --test echo_round_trip --features test-hooks
+    cargo test --locked -p fauna-nest --test conformance_custody_hosting_pump_client --features test-hooks
 
 # CHECK-tier gate (merge-gate-check.md § Merge-gate check) — RUNS the whole of
 # `bins/fauna-nest/tests/`: the 277 integration targets `nest-lib-test-check`
@@ -2841,7 +2891,9 @@ nest-testhooks-check:
 # target dir layout).
 #
 # `--all-features`, not `--features test-hooks` (changed 2026-08-30 —
-# merge-gate-check.md's own paragraph for this gate has the full measurement).
+# merge-gate-catalog.md's entry for this gate has the full measurement; the glob +
+# `--all-features` shape is what test_gated_test_target_darkness.py's
+# `_selects_by_glob` pins, so narrowing either reds that ratchet).
 # The single-feature form left 22 of 23 crate-root-gated targets
 # (20 `nostr`, 2 `bluesky`) compiling to EMPTY binaries that exit 0 having run
 # zero tests — indistinguishable from success by exit code, and three of them
@@ -2916,6 +2968,15 @@ sync-agent-tier3-nest-check:
         --test agent_process_tier3 --test same_nest_push_nudge \
         --test cross_nest_agent_capstone --test agent_custody_rekey
 
+# The relay-endpoint driver (`bins/fauna-iroh-relay/examples/nat_probe.rs`): the
+# production peer-leg endpoint as a command-line program. `p2p-nat-probe` runs it
+# on a NAT testbed; the image witness `test_iroh_relay.py` runs it against the
+# nest's own relay. Its last line names the binary (`NAT_PROBE <path>`) so a
+# caller never re-derives the cargo target dir.
+nat-probe:
+    {{slot_build}} cargo build --locked -p fauna-iroh-relay --features relay --example nat_probe
+    @echo "NAT_PROBE ${CARGO_TARGET_DIR:-{{justfile_directory()}}/target}/debug/examples/nat_probe"
+
 # Two devices behind two NATs: does our build ever leave the relayed path? The
 # measurement `behavior/p2p.md` § NAT hole punching cites — a routed control
 # (must go direct), then port-keeping, symmetric and mixed gateways, each graded
@@ -2926,13 +2987,12 @@ sync-agent-tier3-nest-check:
 # relay protocol alone, the shape that shipped before.
 # Docker on this box, no new image: the probe, `nft` and `ip` run from the
 # host's own /usr (scripts/p2p-nat-probe.py).
-p2p-nat-probe EXPECT="cone=direct,symmetric=relay,mixed=relay" SECS="60" DISCOVERY="on":
-    {{slot_build}} cargo build --locked -p fauna-iroh-relay --features relay --example nat_probe
+p2p-nat-probe EXPECT="cone=direct,symmetric=relay,mixed=relay" SECS="60" DISCOVERY="on": nat-probe
     {{py}} scripts/p2p-nat-probe.py --mode all --secs {{SECS}} --expect {{EXPECT}} --discovery {{DISCOVERY}}
 
 # CHECK-tier gate (merge-gate-catalog.md § The heavy gate catalog) — RUNS fauna-sync-agent's
 # live FUSE suite (`--features fuse-live`): the linux on-demand root's headless proof
-# (on-demand-files.md § Linux FUSE binding) over REAL mounts — listing, hydrate-on-open,
+# (on-demand-files-linux.md § Linux FUSE binding) over REAL mounts — listing, hydrate-on-open,
 # pass-through writes, dehydrate never-a-delete, pins, both mode flips, the crash guard and
 # the boot sweep. `feature-test-compile-check` only compiles it. ~20 s warm, mounts under
 # /tmp (the distro's AppArmor profile for fusermount3 admits no other temp root). It needs
@@ -3345,6 +3405,8 @@ android-foss-check: android-foss
         echo "ERROR: the foss APK's dex names com.google.android.play $HITS time(s) — a Play library reached the F-Droid artifact" >&2
         exit 1
     fi
+    # The debug-only cleartext overlay (127.0.0.1) must not be in the packed config.
+    bash scripts/android-apk-nsc-check.sh "$APK"
     echo "android-foss-check: OK — no com.google.android.play class in $APK"
 
 android-ffi-foss profile="release": i18n-generate providers-generate
@@ -3463,7 +3525,7 @@ _android-ffi-flavor buildtype features abis="all" profile="release":
     # invisibly, since both flavors still build.
     # `file-provider-host` rides every flavor: the SAF `DocumentsProvider`
     # serves through `FfiFileProviderHost::app_dead_owned_tree`
-    # (on-demand-files.md § Android SAF DocumentsProvider binding) — the same
+    # (on-demand-files-android.md § Android SAF DocumentsProvider binding) — the same
     # always-on composition the apple recipes use.
     if [ "$FEATURES" = "store-safe" ]; then
         FEATURE_FLAGS="--no-default-features --features store-safe,file-provider-host"
@@ -3943,6 +4005,52 @@ _android-unit-test-compile-check-impl:
     just _android-host-ffi-stage
     {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android :app:compileDebugUnitTestKotlin
 
+# The android FFI seam-diff PAIR check, on a host-target pair — the merge-gate
+# check's stand-in for the pair `_android-ffi-bindgen` runs only on a release
+# build whose `src/debug` sibling is fresh (e2e-automation-surface-gating.md
+# § Implementation status today, the binding-face witness bullet). Nothing
+# built that pair routinely, so a new non-test-named `test-helpers` export sat
+# red for weeks until a bump round ran `just android-release`. The face does not depend on the NDK or the ABI: a host `.so` with
+# and without `test-helpers` reproduced that exact red.
+#
+# The pair differs by `test-helpers` ALONE, like `android-ffi` vs
+# `android-ffi-test` — never `_android-host-ffi-stage`'s
+# `test-helpers,file-provider-host` build, whose extra feature would put its
+# own exports in the difference and read as unwitnessed seams.
+#
+# Order is load-bearing: both flavors land at the ONE path
+# `debug/libfauna_ffi.so`, so each is copied aside before the next build, and
+# the bindgen binary is the one the default-feature build left beside it — a
+# `cargo run --bin uniffi-bindgen` would rebuild the lib with default features
+# over the test copy.
+android-ffi-seam-pair-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # ONE build grant for the whole body: the two builds and the bindgen runs
+    # share a product that must not be evicted between them.
+    {{slot_build_body}}
+    # Explicit-target artifact build: per-invocation feature resolution, never
+    # workspace-unified (.cargo/config.toml § feature unification).
+    export CARGO_RESOLVER_FEATURE_UNIFICATION=selected
+    TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps 2>/dev/null | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null || echo target)}"
+    WORK="$TARGET_DIR/android-ffi-seam-pair"
+    rm -rf "$WORK"
+    mkdir -p "$WORK/production" "$WORK/test"
+    # Production face first: default features, lib + the uniffi-bindgen bin.
+    cargo build --locked -p fauna-ffi
+    cp "$TARGET_DIR/debug/libfauna_ffi.so" "$WORK/production.so"
+    cp "$TARGET_DIR/debug/uniffi-bindgen" "$WORK/uniffi-bindgen"
+    # Test face: the lib alone, so the bin above is not relinked.
+    cargo build --locked -p fauna-ffi --lib --features test-helpers
+    cp "$TARGET_DIR/debug/libfauna_ffi.so" "$WORK/test.so"
+    for face in production test; do
+        "$WORK/uniffi-bindgen" generate --library "$WORK/$face.so" \
+            --language kotlin --out-dir "$WORK/$face" >"$WORK/$face.bindgen.log" 2>&1 \
+            || { cat "$WORK/$face.bindgen.log" >&2; exit 1; }
+    done
+    {{py}} scripts/check-ffi-seam-diff.py --lang kotlin \
+        --test-tree "$WORK/test" --production-tree "$WORK/production"
+
 # Build fauna-ffi for the Apple targets something can LINK, and generate Swift
 # bindings. Three slices by default — `aarch64-apple-{ios, ios-sim, darwin}`.
 #
@@ -4028,6 +4136,17 @@ apple-ffi-test profile="release": i18n-generate providers-generate
 # `apple-ffi-host-store-safe`, via `just apple-store-safe-check`.
 apple-ffi-store-safe profile="release": i18n-generate providers-generate
     @just _apple-ffi-flavor "store-safe" "" "{{profile}}"
+
+# Fauna Kids full FFI — the iOS kids target's xcframework flavor
+# (`family-safety.md` § The account age band, the kids-app bullet, item (5);
+# `dynamic-features.md` § Compile-time excision). Built
+# `--no-default-features --features kids-safe,kids-floor`: the complement the
+# kids app keeps, named ONCE inside `store-safe`, plus the compiled content
+# floor. The android twin is `android-ffi-kids`; the witness is
+# `just apple-kids-check`. iOS only — macOS is not a kids door, so there is no
+# host-app kids build, only `apple-ffi-host-kids` for compiling FaunaKit.
+apple-ffi-kids profile="release": i18n-generate providers-generate
+    @just _apple-ffi-flavor "kids-safe,kids-floor" "" "{{profile}}"
 
 # Shared implementation of the two full-slice flavors above.
 #
@@ -4220,8 +4339,16 @@ _apple-ffi-build-impl:
     # hand-spelled excision set). It rides the same one staging slot as the other
     # two, so the `.ffi-flavor` marker below (FLAVOR:FEATURES) is what keeps a
     # payments-carrying xcframework from being served to a store-safe app build.
+    # The kids flavor (family-safety.md § The account age band, the kids-app
+    # bullet, item (5)) is the same shape one complement further: `kids-safe` is
+    # nested INSIDE `store-safe`, so it is a complement root exactly as
+    # `store-safe` is, and `kids-floor` is the addition the kids build asks for.
+    # Mirrors android's `_android-ffi-flavor` kids branch. Without it the `elif`
+    # below would build `kids-safe,kids-floor` WITH defaults — nothing excised.
     if [ "$FEATURES" = "store-safe" ]; then
         FEATURE_ARGS=(--no-default-features --features "store-safe,file-provider-host")
+    elif [ "$FEATURES" = "kids-safe,kids-floor" ]; then
+        FEATURE_ARGS=(--no-default-features --features "kids-safe,kids-floor,file-provider-host")
     elif [ -n "$FEATURES" ]; then
         FEATURE_ARGS=(--features "$FEATURES,file-provider-host")
     else
@@ -4435,6 +4562,13 @@ apple-ffi-host-test config="debug" profile="": i18n-generate providers-generate
 apple-ffi-host-store-safe config="debug" profile="": i18n-generate providers-generate
     @just _apple-ffi-host-flavor "{{config}}" "store-safe" "{{profile}}"
 
+# Kids host-only FFI — the 1-slice twin of `apple-ffi-kids`. No app links it
+# (macOS has no kids app); it is what compiles FaunaKit `-D FAUNA_KIDS` on the
+# host, so a kids-absent FFI name in shared Swift is a fast compile error
+# rather than a twenty-minute archive failure.
+apple-ffi-host-kids config="debug" profile="": i18n-generate providers-generate
+    @just _apple-ffi-host-flavor "{{config}}" "kids-safe,kids-floor" "{{profile}}"
+
 # Shared implementation of the two host-only flavors above. Same feature
 # semantics as `_apple-ffi-flavor` (testing.md § convention 15).
 #
@@ -4468,6 +4602,9 @@ _apple-ffi-host-flavor config features profile="":
     FEATURES="{{features}}"
     if [ "$FEATURES" = "store-safe" ]; then
         FEATURE_ARGS=(--no-default-features --features "store-safe,file-provider-host")
+    elif [ "$FEATURES" = "kids-safe,kids-floor" ]; then
+        # The kids flavor — see `_apple-ffi-build-impl`'s kids branch.
+        FEATURE_ARGS=(--no-default-features --features "kids-safe,kids-floor,file-provider-host")
     elif [ -n "$FEATURES" ]; then
         FEATURE_ARGS=(--features "$FEATURES,file-provider-host")
     else
@@ -5713,7 +5850,7 @@ mail-bridge-ffi profile="release":
         --target "$LIB" \
         --source libs ${VENDOR_SOURCE:-} --source Cargo.lock --source rust-toolchain.toml \
         --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude 'libs/fauna-mail-go/*' \
-        -- {{slot_build}} bash -c 'cargo build --locked -p fauna-ffi --profile {{profile}} --no-default-features --features labeler && cp "$CARGO_LIB" "$LIB"'
+        -- {{slot_build}} bash -c 'cargo build --locked -p fauna-ffi --profile {{profile}} --no-default-features --features labeler && cp "$CARGO_LIB" "$LIB.$$.tmp" && mv -f "$LIB.$$.tmp" "$LIB"'
     # The bindgen stages OUTSIDE libs/ (generator/mtime contract —
     # build-system.md § How the gate works): uniffi-bindgen-go rewrites its
     # out-dir unconditionally, and libs/ is `--source` for all nine wasm chunk
@@ -5880,7 +6017,7 @@ e2e-ffi profile="release":
         --target "$LIB" \
         --source libs ${VENDOR_SOURCE:-} --source Cargo.lock --source rust-toolchain.toml \
         --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude 'libs/fauna-mail-go/*' \
-        -- {{slot_build}} bash -c 'cargo build --locked -p fauna-ffi --no-default-features --features labeler,e2e-harness '"$PROFILE_FLAG"' && cp "$CARGO_LIB" "$LIB"'
+        -- {{slot_build}} bash -c 'cargo build --locked -p fauna-ffi --no-default-features --features labeler,e2e-harness '"$PROFILE_FLAG"' && cp "$CARGO_LIB" "$LIB.$$.tmp" && mv -f "$LIB.$$.tmp" "$LIB"'
 
 # CHECK-tier gate (merge-gate-catalog.md): type-check the EXACT flavor `e2e-ffi`
 # above builds — same package, same `--no-default-features` feature list, the
@@ -6219,10 +6356,11 @@ _ffi-store-safe-check-impl:
     # catalogued on 2026-08-22. Its five sibling carriers (`compose-sell-price`,
     # `compose-sell-subscribers-free`, `gated-post-price`, `gated-post-payment-link`,
     # `gated-post-buy-button` — the same record docs plus `FfiFeedManager`'s method
-    # docs, gated the same day) join this array the day the catalog carries them:
-    # the spine pin holds this array to the payments catalog, and that entry lands
-    # with the last family's gates (the ruling's *Catalog shape and sequencing*).
-    PAY_ID_PATS=('subscription-claim-' 'post-tip-' 'compose-sell-asking-price')
+    # docs, gated the same day) joined this array with the catalog entry (2026-10-10):
+    # the spine pin holds this array to the payments catalog.
+    PAY_ID_PATS=('subscription-claim-' 'post-tip-' 'compose-sell-asking-price' \
+        'compose-sell-price' 'compose-sell-subscribers-free' 'gated-post-price' \
+        'gated-post-payment-link' 'gated-post-buy-button')
     # The `p2p-share` member, its own axis (2026-09-28): the ceremony half
     # (`offline-share`) left `store-safe` for `p2p-share`, the plane half
     # (`share_plane`) was never in it. All FOUR catalog prefixes are live here —
@@ -7254,6 +7392,7 @@ android-store-safe-check: i18n-generate providers-generate
     {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android assembleStoreSafe
     SS_APK="$(find_apk storeSafe)"
     [ -n "$SS_APK" ] || { echo "ERROR: no store-safe APK produced." >&2; exit 1; }
+    bash scripts/android-apk-nsc-check.sh "$SS_APK"
     apk_strings "$SS_APK" "$WORK/ss-dex" dex > "$WORK/ss-dex.txt"
     apk_strings "$SS_APK" "$WORK/ss-all" all > "$WORK/ss-all.txt"
     # The `p2p-share` member's four catalog prefixes ride the element-id
@@ -7293,17 +7432,17 @@ android-store-safe-check: i18n-generate providers-generate
     {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android assembleRelease
     REL_APK="$(find_apk release)"
     [ -n "$REL_APK" ] || { echo "ERROR: no release APK produced." >&2; exit 1; }
+    bash scripts/android-apk-nsc-check.sh "$REL_APK"
     apk_strings "$REL_APK" "$WORK/rel-dex" dex > "$WORK/rel-dex.txt"
     apk_strings "$REL_APK" "$WORK/rel-all" all > "$WORK/rel-all.txt"
-    # Only `offline-share-` of the p2p-share prefixes, MEASURED (2026-09-30):
-    # `share-transfer-` / `share-serve-` are painted nowhere on android, and
-    # the default release dex carries just one ceremony id,
-    # `offline-share-own-code`. R8 folds the section's two gates
-    # (`showsEntryButtons`, `showsCodeWidgets`) to false in every minified
-    # build and drops the rest of the render with them, a release-only defect
-    # that predates the P2P_SHARE leg.
-    # `offline-receive-` joins this column when that lands.
-    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'nostr-zap-signer-' 'offline-share-' 'fauna\.payments\.' 'fauna\.nostr\.zap_signers\.' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button'; do
+    # The two p2p-share prefixes android paints: `share-transfer-` /
+    # `share-serve-` are painted nowhere on android. `offline-receive-` is the
+    # one that caught a minified-build defect (2026-09-30, fixed 2026-10-08):
+    # with the `uniffi.*` binding packages unkept, R8 folded the ceremony's
+    # gates to false and the default dex carried no `offline-receive-` id at
+    # all — `offline-share-own-code` alone survived, which `offline-share-`
+    # by itself could not tell apart from a working build.
+    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'nostr-zap-signer-' 'offline-share-' 'offline-receive-' 'fauna\.payments\.' 'fauna\.nostr\.zap_signers\.' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button'; do
         case "$pat" in
             fauna*) SCAN="$WORK/rel-all.txt" ;;
             *)      SCAN="$WORK/rel-dex.txt" ;;
@@ -7344,13 +7483,15 @@ android-store-safe-check: i18n-generate providers-generate
 #    critical alerts or connected apps, and no `FfiFeedManager` /
 #    `FfiSearchManager` / `FfiWebClient` / mail-settings / DNS-credential face:
 #    the packaged library must export no UniFFI symbol of any of them.
-#  * **Kind strings (criterion 2) are NOT asserted yet — a measured gap, not an
-#    oversight (2026-10-05).** The kids `.so` still carries `fauna.feed.*`,
-#    `fauna.search.query` and `fauna.web.*` strings: the thin `FfiFeedClient` /
-#    `FfiSearchClient` RPC clients are ungated in `fauna-ffi`, and
-#    `fauna-protocol`'s kind catalog lists every plane with no per-plane feature
-#    (dynamic-features.md § Implementation status today, the kids paragraph).
-#    The kind-string column joins this witness when that shared-Rust leg lands.
+#  * **Kind strings (criterion 2: no wire senders).** No `fauna.feed.`,
+#    `fauna.search.` or `fauna.web.` text anywhere in the kids APK — dex or
+#    `.so`. The excised planes' senders and their kind-catalog entries are
+#    gated per plane in shared Rust (`fauna-protocol`'s `feed`/`search`/`web`,
+#    forwarded only by each plane's client crate; `fauna-ffi`'s `feed-client` /
+#    `search-client` / `web-content`, which also forward the devices machine's
+#    and the sync engine's `web` — dynamic-features.md § Implementation status
+#    today, the kids paragraph). The patterns are unanchored: Rust literals run
+#    together in a `strings` line, so a kind can sit mid-line.
 #  * **The store identity.** `social.fauna.faunakids` must be in the kids APK's
 #    manifest and NOT in the release one (a kids listing is its own registry
 #    unit, never a suffix — installers/android.md § Store identity).
@@ -7411,6 +7552,8 @@ android-kids-check: i18n-generate providers-generate
     ID_PATS=('^feed-' '^search-' '^atproto-' '^personalization-' '^nostr-' '^labeler-catalog' '^connected-app' '^mail-settings-' '^web-settings-' '^admin-mail-' '^admin-dns-' '^bridge-' '^profile-follow-button' '^profile-tiers-tab' '^link-preview-card' '^folder-paywall-tier-select')
     # UniFFI export symbols, one per line in the `.so`'s dynamic string table.
     FACE_PATS=('^uniffi_fauna_feed_fn_' '^uniffi_fauna_client_search_fn_' '^uniffi_fauna_atproto_settings_machine_fn_' '^uniffi_fauna_labeler_catalog_machine_fn_' '^uniffi_fauna_client_alerts_fn_' '^uniffi_fauna_client_connected_apps_fn_' '^uniffi_fauna_ffi_fn_.*ffifeedmanager' '^uniffi_fauna_ffi_fn_.*ffisearchmanager' '^uniffi_fauna_ffi_fn_.*ffiwebclient' '^uniffi_fauna_ffi_fn_func_build_mail_settings_machine' '^uniffi_fauna_ffi_fn_func_build_dns_management_machine_with_credentials')
+    # Wire kinds of the excised planes, in the dex or the library (criterion 2).
+    KIND_PATS=('fauna\.feed\.' 'fauna\.search\.' 'fauna\.web\.')
     KIDS_ID='social\.fauna\.faunakids'
 
     # --- column 1: the kids APK carries none of it ---------------------------
@@ -7418,6 +7561,7 @@ android-kids-check: i18n-generate providers-generate
     {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android assembleKids
     KIDS_APK="$(find_apk kids)"
     [ -n "$KIDS_APK" ] || { echo "ERROR: no kids APK produced." >&2; exit 1; }
+    bash scripts/android-apk-nsc-check.sh "$KIDS_APK"
     apk_strings "$KIDS_APK" "$WORK/kids-dex" dex > "$WORK/kids-dex.txt"
     apk_strings "$KIDS_APK" "$WORK/kids-all" all > "$WORK/kids-all.txt"
     apk_strings "$KIDS_APK" "$WORK/kids-manifest" manifest > "$WORK/kids-manifest.txt"
@@ -7437,6 +7581,14 @@ android-kids-check: i18n-generate providers-generate
             fail=1
         fi
     done
+    for pat in "${KIND_PATS[@]}"; do
+        n="$(count "$pat" "$WORK/kids-all.txt")"
+        if [ "$n" != "0" ]; then
+            echo "ERROR: the kids APK still carries $n line(s) of '$pat' kind text:" >&2
+            grep -o -- "${pat}[A-Za-z0-9_.]*" "$WORK/kids-all.txt" | sort -u | head -5 | sed 's/^/    /' >&2
+            fail=1
+        fi
+    done
     if [ "$fail" != "0" ]; then
         echo "  ($KIDS_APK)" >&2
         echo "  A kids artifact must contain NO UI surface and NO wire sender for an" >&2
@@ -7453,6 +7605,20 @@ android-kids-check: i18n-generate providers-generate
         echo "  identity (installers/android.md § Store identity)." >&2
         exit 1
     fi
+    # Permissions of surfaces item (4) does not keep (photo backup, the battery
+    # prompt, the foreground sync service); `app/src/kids/AndroidManifest.xml`
+    # removes them. Matched at end of line (`$`), so `FOREGROUND_SERVICE`
+    # does not match a longer name by accident of prefix.
+    REMOVED_PERMS=(READ_MEDIA_IMAGES READ_MEDIA_VIDEO READ_EXTERNAL_STORAGE REQUEST_IGNORE_BATTERY_OPTIMIZATIONS FOREGROUND_SERVICE FOREGROUND_SERVICE_DATA_SYNC FOREGROUND_SERVICE_SPECIAL_USE)
+    for perm in "${REMOVED_PERMS[@]}"; do
+        if grep -q -- "android\.permission\.$perm\$" "$WORK/kids-manifest.txt"; then
+            echo "ERROR: the kids APK's manifest still names android.permission.$perm," >&2
+            echo "  a permission of a surface outside item (4)'s Kept set. Remove it in" >&2
+            echo "  app/src/kids/AndroidManifest.xml (tools:node=\"remove\"), or — if a kept" >&2
+            echo "  surface now needs it — drop it from REMOVED_PERMS with the ruling." >&2
+            exit 1
+        fi
+    done
 
     # --- column 2: the DEFAULT (release) APK must still ship all of it -------
     # Without this the assertions above are indistinguishable from greps that
@@ -7481,11 +7647,26 @@ android-kids-check: i18n-generate providers-generate
             exit 1
         fi
     done
+    for pat in "${KIND_PATS[@]}"; do
+        if [ "$(count "$pat" "$WORK/rel-all.txt")" = "0" ]; then
+            echo "ERROR: the DEFAULT Android APK carries no '$pat' kind text — the kids" >&2
+            echo "  assertion above is vacuous (or the plane's kinds were renamed)." >&2
+            exit 1
+        fi
+    done
     if [ "$(count "$KIDS_ID" "$WORK/rel-manifest.txt")" != "0" ]; then
         echo "ERROR: the DEFAULT Android APK's manifest carries the Fauna Kids identity." >&2
         exit 1
     fi
-    echo "android-kids-check: OK — kids-excised element ids + exported UniFFI faces present in release, absent in kids; kids identity on the kids APK only"
+    for perm in "${REMOVED_PERMS[@]}"; do
+        if ! grep -q -- "android\.permission\.$perm\$" "$WORK/rel-manifest.txt"; then
+            echo "ERROR: the DEFAULT Android APK's manifest does not name android.permission.$perm —" >&2
+            echo "  the kids permission assertion above is vacuous (or the permission was" >&2
+            echo "  renamed or dropped from the default build; update REMOVED_PERMS)." >&2
+            exit 1
+        fi
+    done
+    echo "android-kids-check: OK — kids-excised element ids, exported UniFFI faces and feed/search/web kind text present in release, absent in kids; kids identity on the kids APK only; photo-backup/battery/foreground-service permissions in release, absent from the kids manifest"
 
 # Build the excised macOS app — the apple family's escape-hatch artifact
 # (`dynamic-features.md` § Platform-family surface excision). Twin of
@@ -7780,6 +7961,185 @@ apple-ios-store-safe-check: i18n-generate providers-generate
     done
     echo "apple-ios-store-safe-check: OK — payments + p2p-share UI and payments kinds present in the default archive, absent in the store-safe one"
 
+# The Fauna Kids witness for iOS (family-safety.md § The account age band, the
+# kids-app bullet, item (5); installers/ios.md): the `Fauna-Kids-iOS` archive
+# carries none of the surfaces the kids flavor excises, and the DEFAULT
+# `Fauna-iOS` archive carries all of them. `android-kids-check`'s two-column
+# shape over `apple-ios-store-safe-check`'s artifact (an unsigned Release
+# `.xcarchive` for a real device); read both recipes' headers for their traps.
+#
+# What each column scans, and why:
+#
+#  * **Element ids (criterion 1, the app binary).** The same anchored prefixes
+#    `android-kids-check` greps (`ID_PATS` there, `KIDS_EXCISED_ID_PREFIXES` in
+#    `scripts/ui-ids-generate.py`, held equal by test_kids_excision_spine.py).
+#    Swift's generated `Ids` table would ship an unreferenced id, so the
+#    generator puts these in an `#if !FAUNA_KIDS` extension: a kept render
+#    that names one is a compile error in the kids build, and a surface that
+#    lost its own `#if` dies here.
+#  * **Exported faces (the device `.a`).** A Release archive links the Rust
+#    library statically and strips its symbols, so the app binary names no
+#    UniFFI function in EITHER flavor and a face column there would be vacuous.
+#    The column reads the device slice the archive links,
+#    `target/aarch64-apple-ios/release/libfauna_ffi.a`, right after that
+#    column's own FFI build — both flavors write the one path.
+#  * **Kind strings (criterion 2, the app binary).** No `fauna.feed.`,
+#    `fauna.search.` or `fauna.web.` text — the same unanchored patterns as
+#    `android-kids-check`'s `KIND_PATS`, over the archive binary, which carries
+#    the statically linked Rust half's literals (`apple-ios-store-safe-check`
+#    greps it for `fauna.payments.` the same way). Unanchored because those
+#    literals run together in a `strings` line.
+#  * **The store identity.** `social.fauna.faunakids` is the kids archive's
+#    bundle identifier and never the default one's.
+#
+# The content floor (`kids-floor`) has no string to grep, exactly as on
+# android: `apple-ffi-kids` passing it and `fauna-ffi`'s own floor tests pin it.
+#
+# The Swift conditions ride the command line, as in the store-safe archive: a
+# target's `SWIFT_ACTIVE_COMPILATION_CONDITIONS` does not reach the FaunaKit
+# package, and a command-line `OTHER_SWIFT_FLAGS` does. The kids build is a
+# store-safe build one complement further, so it passes the two store-safe
+# conditions too. ⚠ The xcframework is ONE staging slot: each column rebuilds
+# it before its archive.
+#
+# Deliberately NOT in the merge-gate check (two device xcframeworks and two
+# archives, ~45 min cold on the macOS VM).
+[macos]
+apple-kids-check: i18n-generate providers-generate
+    #!/usr/bin/env bash
+    set -euo pipefail
+    SCRATCH="{{tmp_root}}/fauna-apple-kids-check"
+    rm -rf "$SCRATCH"; mkdir -p "$SCRATCH"
+
+    archive() {  # $1 = archive name, $2 = scheme, $3… = extra xcodebuild settings
+        local name="$1" scheme="$2"; shift 2
+        rm -rf "$SCRATCH/$name.xcarchive"
+        {{slot_build}} xcodebuild archive \
+            -project apps/fauna-apple/Fauna.xcodeproj \
+            -scheme "$scheme" \
+            -destination generic/platform=iOS \
+            -archivePath "$SCRATCH/$name.xcarchive" \
+            -skipPackagePluginValidation -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO "$@" >"$SCRATCH/$name.log" 2>&1 || {
+                echo "ERROR: the $name iOS archive failed to build; tail of $SCRATCH/$name.log:" >&2
+                tail -40 "$SCRATCH/$name.log" >&2
+                exit 1
+            }
+        local app="$SCRATCH/$name.xcarchive/Products/Applications/$scheme.app"
+        strings -a "$app/$scheme" > "$SCRATCH/$name.strings"
+        plutil -extract CFBundleIdentifier raw "$app/Info.plist" > "$SCRATCH/$name.bundle-id"
+        just _apple-assert-no-fp-test-cli "$app/$scheme" "$name iOS archive"
+        just _apple-assert-no-e2e-env "$app/$scheme" "$name iOS archive"
+    }
+    faces() {  # $1 = output file — the defined global symbols of the device slice
+        # `nm` exits 1 on this archive by design of the toolchains, not of the
+        # build: the Rust nightly's LLVM writes members Xcode's older LLVM cannot
+        # parse ("Unknown attribute kind"), and `nm` lists every other member's
+        # symbols anyway. So its status is not the verdict; an empty read is.
+        { nm -g -U target/aarch64-apple-ios/release/libfauna_ffi.a 2>/dev/null \
+            | awk 'NF { print $NF }' | sed 's/^_//' > "$1"; } || true
+        grep -q '^uniffi_' "$1" || {
+            echo "ERROR: read no UniFFI symbol off target/aarch64-apple-ios/release/libfauna_ffi.a —" >&2
+            echo "  the face column would be vacuous." >&2
+            exit 1
+        }
+    }
+    count() { grep -c -- "$1" "$2" || true; }
+    # An element id is a WHOLE `strings` line: Swift emits its literals
+    # NUL-terminated, while the statically linked Rust library's literals are not
+    # and run together (`fauna-mls`'s `atproto-identity` blob label read as
+    # `atproto-identitysubmission-token…`). Unlike android's dex column, this
+    # binary carries the Rust half, so a bare prefix would match Rust data.
+    id_line() { printf '%s[a-z0-9-]*$' "$1"; }
+
+    # Anchored prefixes, one id per `strings` line (see `android-kids-check`).
+    ID_PATS=('^feed-' '^search-' '^atproto-' '^personalization-' '^nostr-' '^labeler-catalog' '^connected-app' '^mail-settings-' '^web-settings-' '^admin-mail-' '^admin-dns-' '^bridge-' '^profile-follow-button' '^profile-tiers-tab' '^link-preview-card' '^folder-paywall-tier-select')
+    FACE_PATS=('^uniffi_fauna_feed_fn_' '^uniffi_fauna_client_search_fn_' '^uniffi_fauna_atproto_settings_machine_fn_' '^uniffi_fauna_labeler_catalog_machine_fn_' '^uniffi_fauna_client_alerts_fn_' '^uniffi_fauna_client_connected_apps_fn_' '^uniffi_fauna_ffi_fn_.*ffifeedmanager' '^uniffi_fauna_ffi_fn_.*ffisearchmanager' '^uniffi_fauna_ffi_fn_.*ffiwebclient' '^uniffi_fauna_ffi_fn_func_build_mail_settings_machine' '^uniffi_fauna_ffi_fn_func_build_dns_management_machine_with_credentials')
+    # Wire kinds of the excised planes (criterion 2), unanchored.
+    KIND_PATS=('fauna\.feed\.' 'fauna\.search\.' 'fauna\.web\.')
+    KIDS_ID='social.fauna.faunakids'
+
+    # --- column 1: the kids archive carries none of it -----------------------
+    # ⚠ The device xcframework must be the LAST FFI build before the archive (a
+    # `mac-debug` / `swift-test` in between reassembles it host-only).
+    just apple-ffi-kids
+    faces "$SCRATCH/kids.faces"
+    archive kids Fauna-Kids-iOS OTHER_SWIFT_FLAGS='$(inherited) -D FAUNA_KIDS -D FAUNA_EXCISE_PAYMENTS -D FAUNA_EXCISE_P2P_SHARE'
+    fail=0
+    for pat in "${ID_PATS[@]}"; do
+        n="$(count "$(id_line "$pat")" "$SCRATCH/kids.strings")"
+        if [ "$n" != "0" ]; then
+            echo "ERROR: the kids iOS archive still carries $n '$pat' element id(s):" >&2
+            grep -- "$(id_line "$pat")" "$SCRATCH/kids.strings" | sort -u | head -5 | sed 's/^/    /' >&2
+            fail=1
+        fi
+    done
+    for pat in "${FACE_PATS[@]}"; do
+        n="$(count "$pat" "$SCRATCH/kids.faces")"
+        if [ "$n" != "0" ]; then
+            echo "ERROR: the kids device libfauna_ffi.a still exports $n '$pat' UniFFI symbol(s)." >&2
+            fail=1
+        fi
+    done
+    for pat in "${KIND_PATS[@]}"; do
+        n="$(count "$pat" "$SCRATCH/kids.strings")"
+        if [ "$n" != "0" ]; then
+            echo "ERROR: the kids iOS archive still carries $n line(s) of '$pat' kind text:" >&2
+            grep -o -- "${pat}[A-Za-z0-9_.]*" "$SCRATCH/kids.strings" | sort -u | head -5 | sed 's/^/    /' >&2
+            fail=1
+        fi
+    done
+    if [ "$fail" != "0" ]; then
+        echo "  A kids artifact must contain NO UI surface and NO wire sender for an" >&2
+        echo "  excised plane (family-safety.md § The account age band, the kids-app" >&2
+        echo "  bullet, item (4)). Two causes, in order of likelihood:" >&2
+        echo "   * a shared render with no '#if !FAUNA_KIDS' of its own, or a literal" >&2
+        echo "     id spelled outside the generated Ids table;" >&2
+        echo "   * an exported face: a fauna-ffi module the kids-safe set reaches again." >&2
+        exit 1
+    fi
+    if [ "$(cat "$SCRATCH/kids.bundle-id")" != "$KIDS_ID" ]; then
+        echo "ERROR: the kids iOS archive's bundle identifier is '$(cat "$SCRATCH/kids.bundle-id")'," >&2
+        echo "  not $KIDS_ID (installers/ios.md — a kids listing is its own record)." >&2
+        exit 1
+    fi
+
+    # --- column 2: the DEFAULT archive must still ship all of it ---------------
+    # Without this the assertions above are indistinguishable from greps that
+    # match nothing — a renamed id, or a face spelled differently, would read as
+    # a successful excision.
+    just apple-ffi
+    faces "$SCRATCH/default.faces"
+    archive default Fauna-iOS
+    for pat in "${ID_PATS[@]}"; do
+        if [ "$(count "$(id_line "$pat")" "$SCRATCH/default.strings")" = "0" ]; then
+            echo "ERROR: the DEFAULT iOS archive carries no '$pat' element id — the kids" >&2
+            echo "  assertion above is therefore vacuous. Either the surface was removed" >&2
+            echo "  from the default build (a product regression) or it was renamed and" >&2
+            echo "  this witness needs its patterns updated." >&2
+            exit 1
+        fi
+    done
+    for pat in "${FACE_PATS[@]}"; do
+        if [ "$(count "$pat" "$SCRATCH/default.faces")" = "0" ]; then
+            echo "ERROR: the DEFAULT device libfauna_ffi.a exports no '$pat' UniFFI" >&2
+            echo "  symbol — the kids assertion above is vacuous (or the symbol was renamed)." >&2
+            exit 1
+        fi
+    done
+    for pat in "${KIND_PATS[@]}"; do
+        if [ "$(count "$pat" "$SCRATCH/default.strings")" = "0" ]; then
+            echo "ERROR: the DEFAULT iOS archive carries no '$pat' kind text — the kids" >&2
+            echo "  assertion above is vacuous (or the plane's kinds were renamed)." >&2
+            exit 1
+        fi
+    done
+    if [ "$(cat "$SCRATCH/default.bundle-id")" = "$KIDS_ID" ]; then
+        echo "ERROR: the DEFAULT iOS archive carries the Fauna Kids identity." >&2
+        exit 1
+    fi
+    echo "apple-kids-check: OK — kids-excised element ids, exported UniFFI faces and feed/search/web kind text present in the default iOS archive, absent in the kids one; kids identity on the kids archive only"
+
 # The WASM/web column of the same witness (`dynamic-features.md` § The
 # feature-matrix test story). Third and last of the store-safe family:
 # `ffi-store-safe-check` keeps the native-client flavor honest,
@@ -7832,7 +8192,7 @@ apple-ios-store-safe-check: i18n-generate providers-generate
 wasm-store-safe-check: i18n-generate providers-generate
     {{slot_build}} just _wasm-store-safe-check-impl
 
-_wasm-store-safe-check-impl:
+_wasm-store-safe-check-impl: _wasm32-cc-check
     #!/usr/bin/env bash
     set -euo pipefail
     # Artifact/flavor build: per-invocation feature resolution, never
@@ -7890,11 +8250,12 @@ _wasm-store-safe-check-impl:
     # `buyUnlockOffer` exports' docs spell `compose-sell-price`,
     # `compose-sell-subscribers-free`, `gated-post-price`, `gated-post-payment-link`
     # and `gated-post-buy-button` — each a `payments`-gated doc line since
-    # 2026-10-07. They join this array (as FULL ids: the natural prefixes also
-    # cover ids outside the plane) with the catalog row that lands the class:
-    # this witness compiles for wasm32, which the ruling pass's machine could
-    # not do, so the measurement is that row's.
-    PAY_ID_PATS=('subscription-claim-' 'post-tip-')
+    # 2026-10-07. They joined this array (as FULL ids: the natural prefixes also
+    # cover ids outside the plane) with the catalog entry (2026-10-10), measured
+    # on Linux (the ruling pass's machine could not compile wasm32).
+    PAY_ID_PATS=('subscription-claim-' 'post-tip-' 'compose-sell-price' \
+        'compose-sell-subscribers-free' 'gated-post-price' 'gated-post-payment-link' \
+        'gated-post-buy-button')
 
     absent() {  # absent <flavor-label> <pattern>...
         local flavor="$1"; shift
@@ -8096,6 +8457,11 @@ web-store-safe-check: wasm i18n-generate providers-generate
     snapshot store-safe
     for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' \
                'subscription-tier-form-asking-price' 'compose-sell-asking-price' \
+               'subscription-tier-form-price-hint' 'subscription-tier-form-payment-url' \
+               'compose-sell-price' 'compose-sell-subscribers-free' \
+               'subscription-tier-price' 'subscription-offer-price' \
+               'subscription-offer-payment-link' 'gated-post-price' \
+               'gated-post-payment-link' 'gated-post-buy-button' \
                'paymentsProvidersSet' 'paymentsClaimsMint' 'paymentsKnownKinds' \
                'paymentsWebhookUrl'; do
         # ⚠ `|| true` inside the braces, not after the pipe: grep exits 1 when it
@@ -8130,6 +8496,11 @@ web-store-safe-check: wasm i18n-generate providers-generate
     snapshot default
     for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' \
                'subscription-tier-form-asking-price' 'compose-sell-asking-price' \
+               'subscription-tier-form-price-hint' 'subscription-tier-form-payment-url' \
+               'compose-sell-price' 'compose-sell-subscribers-free' \
+               'subscription-tier-price' 'subscription-offer-price' \
+               'subscription-offer-payment-link' 'gated-post-price' \
+               'gated-post-payment-link' 'gated-post-buy-button' \
                'paymentsProvidersSet' 'paymentsClaimsMint' 'paymentsKnownKinds' \
                'paymentsWebhookUrl'; do
         n="$({ grep -ro "$pat" "$WORK/default" || true; } | wc -l)"
@@ -8251,7 +8622,7 @@ atproto-bridge-build: mail-bridge-ffi
     # built artifact, the shape `scripts/check-wasm-seam-exclusion.py`
     # established. e2e-automation-surface-gating.md § Implementation status
     # today → the Go bridges' leg.
-    for lit in seize-did FAUNA_ATPROTO_FAKE_DNS_URL FAUNA_ATPROTO_PLC_DIRECTORY_URL FAUNA_ATPROTO_PROXY_FIXTURES FAUNA_ATPROTO_PERMISSION_SET_FIXTURES; do
+    for lit in seize-did FAUNA_ATPROTO_FAKE_DNS_URL FAUNA_ATPROTO_PLC_DIRECTORY_URL FAUNA_ATPROTO_PROXY_FIXTURES FAUNA_ATPROTO_PERMISSION_SET_FIXTURES FAUNA_ATPROTO_RELAY_URL; do
         if grep -a -q -- "$lit" bins/fauna-bridges/fauna-atproto-bridge; then
             echo "ERROR: the production fauna-atproto-bridge carries the e2e seam '$lit' (convention 15)" >&2
             exit 1
@@ -8262,7 +8633,8 @@ atproto-bridge-build: mail-bridge-ffi
 # hostile-rotation seam (`--seize-did`, `fauna_e2e_seize`) and the three
 # harness redirect seams (`fauna_e2e_fixtures`: FAUNA_ATPROTO_PLC_DIRECTORY_URL,
 # FAUNA_ATPROTO_FAKE_DNS_URL, FAUNA_ATPROTO_PROXY_FIXTURES — since 2026-09-13 —
-# and FAUNA_ATPROTO_PERMISSION_SET_FIXTURES since 2026-09-25),
+# FAUNA_ATPROTO_PERMISSION_SET_FIXTURES since 2026-09-25, and the fake-relay
+# FAUNA_ATPROTO_RELAY_URL since 2026-10-09),
 # written to a DISTINCT path so the two flavors can never be confused for one
 # another (windows' single-slot marker dance is unnecessary here — a Go build
 # is cheap and a second name is honest). Every tests/e2e-unified test that sets
@@ -8285,7 +8657,7 @@ atproto-bridge-build-e2e: mail-bridge-ffi
     {{slot_build}} go -C bins/fauna-bridges build -tags fauna_e2e_seize,fauna_e2e_fixtures -o fauna-atproto-bridge-e2e ./cmd/fauna-atproto-bridge
     # The gate must switch BOTH ways, or the production witness above proves
     # nothing about the mechanism (a tag nobody honours also greps clean).
-    for lit in seize-did FAUNA_ATPROTO_FAKE_DNS_URL FAUNA_ATPROTO_PLC_DIRECTORY_URL FAUNA_ATPROTO_PROXY_FIXTURES FAUNA_ATPROTO_PERMISSION_SET_FIXTURES; do
+    for lit in seize-did FAUNA_ATPROTO_FAKE_DNS_URL FAUNA_ATPROTO_PLC_DIRECTORY_URL FAUNA_ATPROTO_PROXY_FIXTURES FAUNA_ATPROTO_PERMISSION_SET_FIXTURES FAUNA_ATPROTO_RELAY_URL; do
         if ! grep -a -q -- "$lit" bins/fauna-bridges/fauna-atproto-bridge-e2e; then
             echo "ERROR: the e2e fauna-atproto-bridge is missing the seam '$lit' the tags should compile in" >&2
             exit 1
@@ -8509,7 +8881,7 @@ windows-atproto-bridge-build rust_target="aarch64-pc-windows-gnullvm" go_arch="a
     # `--features test-helpers` MSI, testing.md § convention 15). The seize seam is
     # keyed on its FLAG NAME (no `seize-did` in the binary means no invocation can
     # reach it); the three redirect seams on the ENV-VAR NAMES they read.
-    for lit in seize-did FAUNA_ATPROTO_FAKE_DNS_URL FAUNA_ATPROTO_PLC_DIRECTORY_URL FAUNA_ATPROTO_PROXY_FIXTURES FAUNA_ATPROTO_PERMISSION_SET_FIXTURES; do
+    for lit in seize-did FAUNA_ATPROTO_FAKE_DNS_URL FAUNA_ATPROTO_PLC_DIRECTORY_URL FAUNA_ATPROTO_PROXY_FIXTURES FAUNA_ATPROTO_PERMISSION_SET_FIXTURES FAUNA_ATPROTO_RELAY_URL; do
         if grep -a -q -- "$lit" target/fauna-atproto-bridge.exe; then
             echo "ERROR: the production fauna-atproto-bridge.exe carries the e2e seam '$lit' (convention 15)" >&2
             exit 1
@@ -8528,7 +8900,7 @@ windows-atproto-bridge-build-e2e rust_target="aarch64-pc-windows-gnullvm" go_arc
     just _windows-go-cgo-build "./cmd/fauna-atproto-bridge" "fauna-atproto-bridge-e2e.exe" "{{rust_target}}" "{{go_arch}}" "{{profile}}" "fauna_e2e_seize,fauna_e2e_fixtures"
     # The gate must switch BOTH ways, or the production witness above proves
     # nothing about the mechanism (a tag nobody honours also greps clean).
-    for lit in seize-did FAUNA_ATPROTO_FAKE_DNS_URL FAUNA_ATPROTO_PLC_DIRECTORY_URL FAUNA_ATPROTO_PROXY_FIXTURES FAUNA_ATPROTO_PERMISSION_SET_FIXTURES; do
+    for lit in seize-did FAUNA_ATPROTO_FAKE_DNS_URL FAUNA_ATPROTO_PLC_DIRECTORY_URL FAUNA_ATPROTO_PROXY_FIXTURES FAUNA_ATPROTO_PERMISSION_SET_FIXTURES FAUNA_ATPROTO_RELAY_URL; do
         if ! grep -a -q -- "$lit" target/fauna-atproto-bridge-e2e.exe; then
             echo "ERROR: the e2e fauna-atproto-bridge.exe is missing the seam '$lit' the tags should compile in" >&2
             exit 1
@@ -9390,6 +9762,7 @@ shipped-suite-test:
         scripts/test_lint_winui_xbind_datatemplate_scope.py -q
     pytest tests/e2e-unified/fakes -q
     pytest tests/scripts/test_actuation_sweep_report.py \
+        tests/scripts/test_check_wasm_seam_exclusion.py \
         tests/scripts/test_cross_client.py tests/scripts/test_door_deploy_receive.py \
         tests/scripts/test_duplication_report.py \
         tests/scripts/test_features_catalog.py tests/scripts/test_features_lint.py \
@@ -9551,6 +9924,15 @@ features-parity *ARGS:
 # not once per caller) — cheap merge tier.
 features-lint *ARGS:
     {{py}} scripts/features_lint.py {{ARGS}}
+
+# Remove every ledger record whose test its feature's contract no longer maps (a test
+# re-marked to another feature, renamed, deleted, or filed under a feature whose page
+# is gone) — the fix `features-lint` rule 6 names (feature-catalog.md § The ledger,
+# *Stale records*). Decided from the contract, never one machine's collection. Run it
+# in the commit that moves the marker, then `just features-render`. `--check` reports
+# and writes nothing. Maintainer operation: the ledger does not ship.
+features-prune *ARGS:
+    {{py}} scripts/features-prune.py {{ARGS}}
 
 # Mode 5 (testing.md convention 7): informational inventory of PlatformDriver
 # capability predicates (supports_unclean_kill and friends) each leaf app

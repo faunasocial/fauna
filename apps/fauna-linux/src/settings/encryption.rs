@@ -4,8 +4,6 @@ use fauna_ui_ids as ids;
 use crate::i18n::strings::common;
 use crate::i18n::strings::settings::encryption_page as enc;
 
-const LOW_KEY_THRESHOLD: u32 = 10;
-
 /// Build the "Encryption" preferences page.
 pub fn build_encryption_page() -> gtk::Box {
     let page = adw::PreferencesPage::builder()
@@ -130,7 +128,7 @@ pub fn update_key_count(count: u32) {
     });
     WARNING_ROW.with(|cell| {
         if let Some(row) = cell.borrow().as_ref() {
-            row.set_visible(count < LOW_KEY_THRESHOLD);
+            row.set_visible(fauna_conversations::keypackages_low(u64::from(count)));
         }
     });
 }

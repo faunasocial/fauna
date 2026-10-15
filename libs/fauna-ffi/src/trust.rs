@@ -58,11 +58,17 @@ pub fn install_nest_identity_pin_store_read_only(data_dir: String) {
 /// (the user domain, never the TCC-protected app-group container). Meant for
 /// unsandboxed desktop shells; a sandboxed shell (iOS) keeps its own container
 /// dir, where this resolver would point outside the sandbox.
+///
+/// Throws (`FfiError::General`, the shared no-home refusal) when the process
+/// has no absolute home — the caller logs it and keeps the in-memory pin store,
+/// never a panic.
 #[uniffi::export]
-pub fn install_scoped_trust_home() -> String {
+pub fn install_scoped_trust_home() -> Result<String, crate::FfiError> {
     fauna_client::cert_binding::install_scoped_trust_home()
-        .to_string_lossy()
-        .into_owned()
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .ok_or_else(|| crate::FfiError::General {
+            msg: fauna_core::platform_ids::NO_HOME_REFUSAL.to_owned(),
+        })
 }
 
 /// [`install_nest_identity_pin_store`] plus a **read replica**: every persist

@@ -48,7 +48,10 @@ use fauna_core::format::CONNECTION_UNREACHABLE_AFTER_CONSECUTIVE_FAILURES;
 use fauna_protocol::reconnect::{
     Backoff, ESTABLISH_PROBE, Establish, demand_nap, probe_established,
 };
-use fauna_protocol::{KindRegistry, PushEvent, RpcDispatcher, RpcError, RpcRequester};
+use fauna_protocol::{
+    KindRegistry, ProvenIdentityMemo, PushEvent, RpcDispatcher, RpcError, RpcErrorAction,
+    RpcRequester,
+};
 
 use crate::adapter::{GlooAdapter, ReconnectSignal};
 use crate::error::WsRpcError;
@@ -151,17 +154,19 @@ impl ConnectionState {
 
 /// Why this client's reconnect loop stopped for good, kept in a form every
 /// later request can be failed with. The wasm twin of `fauna_client`'s
-/// `SupervisorStop`, holding only the three endings this loop has: it backs off
+/// `SupervisorStop`, holding only the four endings this loop has: it backs off
 /// on any other token-provider failure rather than stopping, and the browser
 /// shows it neither the nest's identity nor an upgrade refusal.
 ///
-/// **No current nest reaches either ending.** A nest never closes a per-actor
-/// socket with 1000 (it shuts down with 1001), and never with 4426: it refuses
-/// a subprotocol mismatch with an HTTP 426 at the upgrade, which the browser
-/// reports as an ordinary close, `Retry`. So a version-skewed web tab keeps
-/// retrying and ends on "Cannot connect", not on this error. The record is
-/// parity with native and a pin for the close-frame path, should a nest ever
-/// send either code (`transport-connection.md` § Connection lifecycle).
+/// **A nest reaches the 4426 ending, never the 1000 one.** A nest never closes
+/// a per-actor socket with 1000 (it shuts down with 1001), so `Clean` is parity
+/// with native and a pin for the close-frame path. It does close an upgrade
+/// offering only a `fauna.v<N>` it no longer serves with 4426
+/// (`transport-connection.md` § Connection lifecycle, the 4426 paragraph) — a
+/// browser cannot read an HTTP 426 — and a version-skewed tab meets that close
+/// on the loop's own dial or on its token provider's re-mint, whose anonymous
+/// dial is closed the same way; both stop here, the app-outdated verdict
+/// (`version-compatibility.md` § Dimension 4, *The other direction*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SupervisorStop {
     /// A clean close (1000): nothing to name beyond "no connection will come",
@@ -177,6 +182,15 @@ enum SupervisorStop {
     /// (`onboarding.md` § App-launch routing, the previously-signed-in row:
     /// the same verdict mid-session lands the same surface).
     Refused,
+    /// The token provider's re-mint was refused with a code
+    /// [`RpcError::action`] reads as `NeedsUpdate` (`fauna.nest.outdated`):
+    /// the nest restarted into its degraded needs-update mode. The browser
+    /// cannot see the degraded nest's `401` at the bearer upgrade, but the
+    /// dropped connection makes every later dial re-mint (the `Retry` arm),
+    /// and that re-mint meets the refusal. No retry can clear it, so the loop
+    /// stops — the twin of native's `connect_error_is_terminal` case 4
+    /// (`version-compatibility.md` § Dimension 4, the *Mid-session* bullet).
+    NestOutdated,
 }
 
 impl SupervisorStop {
@@ -186,6 +200,7 @@ impl SupervisorStop {
             Self::Clean => WsRpcError::NotConnected,
             Self::SubprotocolMismatch => WsRpcError::SubprotocolMismatch,
             Self::Refused => WsRpcError::from(RpcError::not_registered()),
+            Self::NestOutdated => WsRpcError::from(RpcError::nest_outdated()),
         }
     }
 }
@@ -206,11 +221,8 @@ impl TokenProvider {
         // Promise, and wraps a plain value into a resolved one).
         let promise = js_sys::Promise::resolve(&ret);
         let value = JsFuture::from(promise).await.map_err(|e| {
-            if is_sign_in_refusal(&e) {
-                WsRpcError::from(RpcError::not_registered())
-            } else {
-                WsRpcError::Token(format!("promise rejected: {e:?}"))
-            }
+            typed_refusal(&e)
+                .unwrap_or_else(|| WsRpcError::Token(format!("promise rejected: {e:?}")))
         })?;
         value
             .as_string()
@@ -218,16 +230,29 @@ impl TokenProvider {
     }
 }
 
-/// Whether a token provider's rejection is the nest's
-/// `fauna.auth.not_registered` refusal: the SPA's `getAuthToken` rejects with
-/// a `SignInRefusedError` whose `code` property is the wire code
-/// (`apps/fauna-web/src/lib/auth-errors.ts`). Keyed on the wire code, never
-/// the human message, so the text can change without breaking the stop.
-fn is_sign_in_refusal(rejection: &JsValue) -> bool {
-    js_sys::Reflect::get(rejection, &JsValue::from_str("code"))
-        .ok()
-        .and_then(|code| code.as_string())
-        .is_some_and(|code| code == RpcError::CODE_NOT_REGISTERED)
+/// The nest refusal a token provider's rejection carries, typed — `None` for
+/// any other failure, which stays a retryable token error. The SPA's
+/// `getAuthToken` rejects with a typed error (`apps/fauna-web/src/lib/auth-errors.ts`)
+/// whose `code` property is the wire code — `SignInRefusedError` for
+/// `fauna.auth.not_registered`, `NestOutdatedError` for `fauna.nest.outdated` —
+/// or, for the one refusal with no wire code, whose `arm` property is
+/// [`WsRpcError`]'s own tag: `AppOutdatedError` carries `subprotocol_mismatch`,
+/// the re-mint's anonymous dial having been closed 4426. Keyed on those typed
+/// properties, never the human message (nor the silent challenge's text
+/// prefixes), so the text can change without breaking the stop.
+fn typed_refusal(rejection: &JsValue) -> Option<WsRpcError> {
+    let prop = |key: &str| {
+        js_sys::Reflect::get(rejection, &JsValue::from_str(key))
+            .ok()
+            .and_then(|v| v.as_string())
+    };
+    match prop("code").as_deref() {
+        Some(RpcError::CODE_NOT_REGISTERED) => return Some(RpcError::not_registered().into()),
+        Some(RpcError::CODE_NEST_OUTDATED) => return Some(RpcError::nest_outdated().into()),
+        _ => {}
+    }
+    (prop("arm").as_deref() == Some("subprotocol_mismatch"))
+        .then_some(WsRpcError::SubprotocolMismatch)
 }
 
 struct Inner {
@@ -278,6 +303,17 @@ struct Inner {
     /// a subscription survives reconnects (each connection's own broadcast
     /// dies with it).
     pushes: broadcast::Sender<PushEvent>,
+    /// What the live connection has proven about the nest at its far end —
+    /// the wasm twin of native `NestClient::proven_identity_memo`, consulted
+    /// and filled by `fauna_client_pair`'s bound-identity resolver and keyed
+    /// on the live dispatcher's `connection_id`, so a reconnect remembers
+    /// nothing.
+    proven_identity: ProvenIdentityMemo,
+    /// The live connection's `fauna.nest.info` reply, read once per
+    /// connection through `fauna_protocol::read_nest_info` — the wasm twin
+    /// of native `NestClient`'s memo, keyed on the live dispatcher's
+    /// `connection_id`.
+    nest_info: fauna_protocol::NestInfoMemo,
     /// `false` until the first successful connect, then permanently `true`. Gates
     /// `on_reconnected` so the initial connect doesn't count as a reconnect
     /// (mirrors native's watch, which bumps on every `Connected` *after the
@@ -373,6 +409,8 @@ impl Inner {
             on_push_event: RefCell::new(None),
             reconnects: tokio::sync::watch::channel(0).0,
             pushes: broadcast::channel(256).0,
+            proven_identity: ProvenIdentityMemo::new(),
+            nest_info: fauna_protocol::NestInfoMemo::new(),
             has_connected: Cell::new(false),
             closed: Cell::new(false),
             stopped_by: Cell::new(None),
@@ -470,6 +508,26 @@ impl WsRpcClient {
     /// port-built client (the owner holds the socket's pushes).
     pub fn subscribe_pushes(&self) -> Option<broadcast::Receiver<PushEvent>> {
         self.own().map(|inner| inner.pushes.subscribe())
+    }
+
+    /// The number of the connection a request issued now would ride (the
+    /// live dispatcher's `connection_id`), or `None` while none is live — and
+    /// `None` on a port-built client, whose socket is the owner's. The wasm
+    /// twin of native `NestClient::live_connection`; the key of
+    /// [`Self::proven_identity_memo`].
+    pub fn live_connection(&self) -> Option<u64> {
+        let inner = self.own()?;
+        let dispatcher = inner.dispatcher.borrow();
+        dispatcher.as_ref().map(|d| d.connection_id())
+    }
+
+    /// What this client's connections have proven about the nest at the far
+    /// end, per connection — the wasm twin of native
+    /// `NestClient::proven_identity_memo`. `None` on a port-built client: it
+    /// holds no connection of its own to remember anything for, so its reads
+    /// prove afresh.
+    pub fn proven_identity_memo(&self) -> Option<&ProvenIdentityMemo> {
+        self.own().map(|inner| &inner.proven_identity)
     }
 
     /// Permanently tear the client down: stop the reconnect loop, close any
@@ -687,6 +745,29 @@ impl WsRpcClient {
             .is_some_and(|stop| stop == SupervisorStop::Refused)
     }
 
+    /// Whether the reconnect loop stopped because its re-mint met a nest that
+    /// restarted degraded (`fauna.nest.outdated`) — the needs-update
+    /// session-ending verdict, mirroring native
+    /// `NestClientError::session_ending_verdict`'s `NestOutdated`.
+    pub fn stopped_by_nest_outdated(&self) -> bool {
+        self.own()
+            .and_then(|inner| inner.stopped_by.get())
+            .is_some_and(|stop| stop == SupervisorStop::NestOutdated)
+    }
+
+    /// Whether the reconnect loop stopped because the nest refused this app's
+    /// subprotocol with a 4426 close — on the loop's own dial or on its token
+    /// provider's re-mint: the app-outdated session-ending verdict, mirroring
+    /// native `NestClientError::session_ending_verdict`'s `AppOutdated`, and
+    /// kept apart from [`Self::stopped_by_nest_outdated`] here as at every
+    /// other seam (`version-compatibility.md` § Dimension 4, *The other
+    /// direction*).
+    pub fn stopped_by_app_outdated(&self) -> bool {
+        self.own()
+            .and_then(|inner| inner.stopped_by.get())
+            .is_some_and(|stop| stop == SupervisorStop::SubprotocolMismatch)
+    }
+
     /// Run one request whose payload is ALREADY canonical DAG-CBOR bytes and
     /// hand back the reply's canonical bytes — the socket owner's half of the
     /// shared rpc port (`crate::shared_port`): the SPA core chunk exposes it
@@ -844,6 +925,17 @@ impl RpcRequester for WsRpcClient {
                 Self::request_over_port(port, kind, idem, payload).await
             }
         }
+    }
+
+    /// `None` on a port-built client ([`Self::live_connection`]).
+    fn live_connection_id(&self) -> Option<u64> {
+        self.live_connection()
+    }
+
+    /// `None` on a port-built client: its socket is the owner's, so its
+    /// readers read on every call.
+    fn nest_info_memo(&self) -> Option<&fauna_protocol::NestInfoMemo> {
+        self.own().map(|inner| &inner.nest_info)
     }
 }
 
@@ -1039,7 +1131,7 @@ const PRESENCE_ANNOUNCE_MS: u32 = 5_000;
 async fn announce_presence(dispatcher: Rc<RpcDispatcher>, device_id: String) {
     let request = fauna_protocol::push::PresenceRequest {
         device_id,
-        extra: Default::default(),
+        ..Default::default()
     };
     let reply: Result<fauna_protocol::push::PresenceReply, _> = dispatch_typed(
         &dispatcher,
@@ -1276,6 +1368,27 @@ async fn run_reconnect_loop(inner: Rc<Inner>, mut close_rx: oneshot::Receiver<()
             Err(WsRpcError::Rpc(e)) if e.is_not_registered() => {
                 tracing::warn!("token fetch refused ({}); stopping", e.code);
                 record_supervisor_stop(&inner, SupervisorStop::Refused);
+                return;
+            }
+            // The nest restarted degraded: it refuses every mint until an
+            // admin updates it, so stop with the needs-update verdict rather
+            // than retry a refusal no retry can clear. Read by
+            // `RpcError::action`, as native's supervisor reads it.
+            Err(WsRpcError::Rpc(e)) if e.action() == RpcErrorAction::NeedsUpdate => {
+                tracing::warn!(
+                    "token fetch refused ({}); the nest needs an update, stopping",
+                    e.code
+                );
+                record_supervisor_stop(&inner, SupervisorStop::NestOutdated);
+                return;
+            }
+            // The re-mint's anonymous dial was closed 4426: this app is too old
+            // for the nest, and no retry clears it — the stop the loop's own
+            // dial records on the same close (native twin: the supervisor's
+            // `connect_error_is_terminal` on `SubprotocolMismatch`).
+            Err(WsRpcError::SubprotocolMismatch) => {
+                tracing::warn!("token fetch refused (4426); this app needs an update, stopping");
+                record_supervisor_stop(&inner, SupervisorStop::SubprotocolMismatch);
                 return;
             }
             Err(e) => refused_nap!(format!("token fetch failed: {e}")),
@@ -1934,6 +2047,44 @@ mod tests {
             matches!(stop, Some(WsRpcError::SubprotocolMismatch)),
             "got {stop:?}"
         );
+        assert!(client.stopped_by_app_outdated());
+        assert!(!client.stopped_by_nest_outdated());
+    }
+
+    /// One request over a fixed (non-reconnecting) connection the fake closes
+    /// with `close_code` — `fixed_conn`'s road, which the anonymous and the
+    /// one-shot token clients share.
+    async fn fixed_conn_request_closed_with(close_code: u16) -> WsRpcError {
+        use fauna_protocol::RpcRequester;
+        install_fake_ws(close_code);
+        let client = crate::AnonymousWsRpcClient::connect("http://127.0.0.1:1")
+            .expect("the anonymous connect queues its dial");
+        let result = client
+            .request::<(), fauna_protocol::Value>("fauna.nest.info", ())
+            .await;
+        restore_real_ws();
+        result.expect_err("the fake closed the connection before any reply")
+    }
+
+    /// The nest's 4426 close to an app offering a `fauna.v<N>` it does not
+    /// serve reaches a fixed connection's request as the typed
+    /// [`WsRpcError::SubprotocolMismatch`] (`transport-connection.md`
+    /// § Connection lifecycle, the 4426 paragraph) — the one refusal a browser
+    /// can read, so the onboarding probe lands the needs-update surface.
+    #[wasm_bindgen_test]
+    async fn a_fixed_connection_closed_4426_fails_its_request_as_a_subprotocol_mismatch() {
+        let err = fixed_conn_request_closed_with(4426).await;
+        assert!(
+            matches!(err, WsRpcError::SubprotocolMismatch),
+            "got {err:?}"
+        );
+    }
+
+    /// The negative control: any other close stays the ordinary disconnect.
+    #[wasm_bindgen_test]
+    async fn a_fixed_connection_closed_1000_fails_its_request_as_a_disconnect() {
+        let err = fixed_conn_request_closed_with(1000).await;
+        assert!(matches!(err, WsRpcError::Disconnected), "got {err:?}");
     }
 
     /// **A refused re-mint stops the loop, typed.** The token provider rejects
@@ -1970,6 +2121,63 @@ mod tests {
         );
         refused.close();
         blip.close();
+    }
+
+    /// **A re-mint refused `fauna.nest.outdated` stops the loop, typed as the
+    /// needs-update verdict.** The token provider rejects the way the SPA's
+    /// `getAuthToken` does when the nest restarted degraded (a
+    /// `NestOutdatedError` whose `code` is the wire code); the loop must stop
+    /// rather than back off, with the needs-update stop the SPA routes to its
+    /// update surface — and never read it as the sign-in refusal. The
+    /// rejection's message deliberately carries no `"outdated:"` prefix: the
+    /// stop is keyed on the code alone.
+    #[wasm_bindgen_test]
+    async fn a_token_mint_refused_nest_outdated_stops_the_loop_as_needs_update() {
+        let outdated = WsRpcClient::connect(
+            "http://127.0.0.1:1".into(),
+            "00".repeat(32),
+            js_sys::Function::new_no_args(
+                "return Promise.reject(Object.assign(new Error('update the nest'), \
+                 { code: 'fauna.nest.outdated' }))",
+            ),
+        );
+        let stop = wait_for_stop(&outdated).await;
+        assert!(
+            matches!(&stop, Some(WsRpcError::Rpc(e)) if e.action() == RpcErrorAction::NeedsUpdate),
+            "got {stop:?}"
+        );
+        assert!(outdated.stopped_by_nest_outdated());
+        assert!(!outdated.stopped_by_sign_in_refusal());
+        assert!(!outdated.stopped_by_app_outdated());
+        outdated.close();
+    }
+
+    /// **A re-mint whose anonymous dial was closed 4426 stops the loop, typed
+    /// as the app-outdated verdict.** The SPA's `getAuthToken` rejects with an
+    /// `AppOutdatedError` whose `arm` is `subprotocol_mismatch` when the nest
+    /// refuses this app's subprotocol; the loop must stop rather than back off,
+    /// recording the same stop its own dial records on a 4426 close — and never
+    /// read it as the nest being outdated. The message deliberately says
+    /// nothing a text match could key on: the stop is keyed on `arm` alone.
+    #[wasm_bindgen_test]
+    async fn a_token_mint_refused_by_a_4426_stops_the_loop_as_app_outdated() {
+        let skewed = WsRpcClient::connect(
+            "http://127.0.0.1:1".into(),
+            "00".repeat(32),
+            js_sys::Function::new_no_args(
+                "return Promise.reject(Object.assign(new Error('update the app'), \
+                 { arm: 'subprotocol_mismatch' }))",
+            ),
+        );
+        let stop = wait_for_stop(&skewed).await;
+        assert!(
+            matches!(stop, Some(WsRpcError::SubprotocolMismatch)),
+            "got {stop:?}"
+        );
+        assert!(skewed.stopped_by_app_outdated());
+        assert!(!skewed.stopped_by_nest_outdated());
+        assert!(!skewed.stopped_by_sign_in_refusal());
+        skewed.close();
     }
 
     /// **Composes the two halves above: a request against the loop's OWN

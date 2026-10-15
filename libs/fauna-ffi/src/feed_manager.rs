@@ -552,7 +552,8 @@ impl FfiFeedManager {
     /// caller's empty-body `Reference::Repost` post; present → un-reposts it
     /// through the interact door. No confirmation dialog — instantly
     /// reversible by the same toggle. A bridged post routes through interact
-    /// verbatim; the manager decides, so the app leg does not have to know
+    /// (a Bluesky one as `repost`/`unrepost` on the post itself, the rest
+    /// one-way); the manager decides, so the app leg does not have to know
     /// the source.
     pub async fn repost(&self, post_id: String) -> Result<(), FfiError> {
         self.inner
@@ -569,9 +570,10 @@ impl FfiFeedManager {
     ///
     /// **Call this, not `interact(id, "like", None)`.** That call is one-way:
     /// the nest's like arm is idempotent per (actor, post), so a second tap
-    /// moves nothing and the user can never take a like back. A bridged post
-    /// keeps the shipped one-way path internally — the manager decides, so the
-    /// app leg does not have to know the source.
+    /// moves nothing and the user can never take a like back. A Bluesky post
+    /// toggles the same way; any other bridged post keeps the shipped one-way
+    /// path internally — the manager decides, so the app leg does not have to
+    /// know the source.
     pub async fn like(&self, post_id: String) -> Result<(), FfiError> {
         self.inner
             .like(post_id)
@@ -652,6 +654,21 @@ impl FfiFeedManager {
     /// in [`fauna_feed::FeedSnapshot::deep_linked_post`] costs no round trip.
     pub async fn resolve_post(&self, post_id: String) -> fauna_feed::PostResolution {
         self.inner.resolve_post(post_id).await
+    }
+
+    /// `feed-post-view-thread-button` — open the Bluesky thread page for the
+    /// post `post_id` names (`bridges.md` § Bluesky-native thread view).
+    /// [`fauna_feed::FeedSnapshot::thread`] reads loading at once, then the
+    /// loaded thread (the opened post marked from the nest's `focal_index`) or
+    /// the failure; observers are notified at each step. Whether a post offers
+    /// the button is the exported `post_offers_thread_view`.
+    pub async fn open_thread(&self, post_id: String) {
+        self.inner.open_thread(post_id).await;
+    }
+
+    /// Leave the thread page, back to the post detail.
+    pub fn close_thread(&self) {
+        self.inner.close_thread();
     }
 
     /// Buy a sold post via the self-serve teaser affordance — the existing
@@ -782,33 +799,17 @@ impl FfiFeedManager {
             .map_err(|e| FfiError::General { msg: e })
     }
 
-    /// Report one per-exposure engagement observation when a card leaves the
-    /// viewport (or its media ends). All *derivation* is shared Rust — the shell
-    /// only supplies what a visibility/playback observer can honestly compute:
-    /// the peak playback fraction (`media_played_pm`, per-mille; `None` for a
-    /// non-media post) and the cumulative substantially-visible dwell at the two
-    /// gate fractions. The manager derives the `watch-complete`/`skip` verdict,
+    /// Report one per-exposure engagement observation — exactly the record
+    /// [`FfiCueTracker`] emitted, relayed whole. All *derivation* is shared
+    /// Rust, and the shell never spells the record's fields: it has no honest
+    /// way of its own to know how an exposure ended (`ended_by`, which a `skip`
+    /// requires to be a scroll — engagement-cues.md § Cue vocabulary &
+    /// derivation). The manager derives the `watch-complete`/`skip` verdict,
     /// folds it into the rollup, and puts it on the debounce (`CUE_PUT_DEBOUNCE_S`
-    /// or [`flush_cues`](Self::flush_cues)). `observed_at_ms` is the shell's event
-    /// time — the manager reads no clock.
-    pub async fn record_observation(
-        &self,
-        content_id: String,
-        is_media: bool,
-        media_played_pm: Option<u32>,
-        dwell_ms_at_skip_visibility: u64,
-        dwell_ms_at_long_visibility: u64,
-        observed_at_ms: u64,
-    ) -> Result<(), FfiError> {
+    /// or [`flush_cues`](Self::flush_cues)).
+    pub async fn record_observation(&self, obs: CueObservation) -> Result<(), FfiError> {
         self.inner
-            .record_observation(CueObservation {
-                content_id,
-                is_media,
-                media_played_pm,
-                dwell_ms_at_skip_visibility,
-                dwell_ms_at_long_visibility,
-                observed_at_ms,
-            })
+            .record_observation(obs)
             .await
             .map(|_verdict| ())
             .map_err(|e| FfiError::General { msg: e })
@@ -1126,6 +1127,41 @@ impl FfiCueTracker {
     }
 }
 
+// ── The engagement-cue test clock (test-helpers) ─────────────────────────────
+// The UniFFI faces of `CueTracker` § The test clock — what each UniFFI shell's
+// `feed_cue_clock_*` / `feed_cue_probe` agent arms drive, the twins of tui's
+// direct calls, linux's `feed::viewport::test_clock` and web's
+// `WasmCueTracker` faces. Compiled only into the test-flavored FFI build
+// (convention 15): a release binding carries no test clock at all.
+#[cfg(feature = "test-helpers")]
+#[uniffi::export]
+impl FfiCueTracker {
+    /// Freeze both clocks at the shell's current real readings. Idempotent.
+    pub fn freeze_clock_for_test(&self, mono_now_ms: u64, wall_now_ms: u64) {
+        self.lock().freeze_clock_for_test(mono_now_ms, wall_now_ms);
+    }
+
+    /// Move both frozen clocks forward by `ms`. Refused when nothing is frozen
+    /// or `ms` exceeds one sample's credit cap — the shell samples right after
+    /// an accepted step so it lands as exactly one sample's credit.
+    pub fn advance_clock_for_test(&self, ms: u64) -> Result<(), FfiError> {
+        self.lock()
+            .advance_clock_for_test(ms)
+            .map_err(|msg| FfiError::General { msg })
+    }
+
+    /// Back to the shell's real readings.
+    pub fn thaw_clock_for_test(&self) {
+        self.lock().thaw_clock_for_test();
+    }
+
+    /// The shared [`fauna_feed::CueProbe`] as JSON — the one shape every app's
+    /// `feed_cue_probe` publishes, serialized here so no shell re-spells it.
+    pub fn probe_for_test(&self) -> String {
+        serde_json::to_string(&self.lock().probe_for_test()).unwrap_or_else(|_| "null".to_string())
+    }
+}
+
 impl FfiCueTracker {
     /// Recover a poisoned lock rather than surfacing it: a panic mid-sample can
     /// cost at most one exposure's bookkeeping, and refusing to capture cues for
@@ -1141,6 +1177,15 @@ impl FfiCueTracker {
 #[uniffi::export]
 pub fn cue_sample_interval_ms() -> u64 {
     fauna_core::scoring::cues::CUE_SAMPLE_INTERVAL_MS
+}
+
+/// A player's position through its media as the per-mille a [`CueRow`]'s
+/// `media_played_pm` carries — the UniFFI face of
+/// [`fauna_core::scoring::cues::played_per_mille`], so no shell re-derives the
+/// clamp. Both readings in one unit; `None` while the duration is unknown.
+#[uniffi::export]
+pub fn cue_played_per_mille(position: f64, duration: f64) -> Option<u32> {
+    fauna_core::scoring::cues::played_per_mille(position, duration)
 }
 
 /// The i18n key to paint for a feed-manager error that is a stated refusal
@@ -1255,6 +1300,44 @@ mod tests {
             cue_sample_interval_ms(),
             fauna_core::scoring::cues::CUE_SAMPLE_INTERVAL_MS
         );
+    }
+
+    /// The test-clock faces forward to the shared tracker's seam: a freeze
+    /// holds, an advance past one sample's credit cap is refused rather than
+    /// let the excess vanish, a frozen sample credits exactly the advance, and
+    /// the probe crosses as the shared `CueProbe` JSON.
+    #[cfg(feature = "test-helpers")]
+    #[test]
+    fn the_tracker_face_carries_the_frozen_test_clock() {
+        let t = FfiCueTracker::new(LeaveModel::AbsenceIsLeave);
+        assert!(
+            t.advance_clock_for_test(10).is_err(),
+            "nothing is frozen yet"
+        );
+        t.freeze_clock_for_test(1_000, 5_000);
+        let row = CueRow {
+            post_id: "p".to_string(),
+            top: 0.0,
+            height: 1000.0,
+            is_media: false,
+            media_played_pm: None,
+        };
+        let win = vec!["p".to_string()];
+        // Real readings far apart: a frozen tracker substitutes its own.
+        t.sample(vec![row.clone()], win.clone(), 0.0, 1000.0, 1_000, 5_000);
+        t.advance_clock_for_test(400).expect("a step under the cap");
+        t.sample(vec![row], win, 0.0, 1000.0, 999_999, 999_999);
+        assert!(
+            t.advance_clock_for_test(fauna_core::scoring::cues::CUE_MAX_SAMPLE_CREDIT_MS + 1)
+                .is_err()
+        );
+        let probe: serde_json::Value = serde_json::from_str(&t.probe_for_test()).unwrap();
+        assert_eq!(probe["frozen"], true);
+        assert_eq!(probe["tracked"], serde_json::json!(["p"]));
+        assert_eq!(probe["exposures"][0]["dwell_ms_at_long_visibility"], 400);
+        t.thaw_clock_for_test();
+        let probe: serde_json::Value = serde_json::from_str(&t.probe_for_test()).unwrap();
+        assert_eq!(probe["frozen"], false);
     }
 
     /// The façade holds ONE tracker across calls — the whole point of the object.

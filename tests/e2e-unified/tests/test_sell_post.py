@@ -11,12 +11,13 @@ build the birth `KeyBlob`, build the gated body naming that tier, take
 `post_id = blake3(body)`, then `commit_tier` with `unlocks_post = post_id` —
 and the app finishes through the **unchanged** `submit_gated_post` pair.
 
-**Why this journey is provable on tui, and `test_gated_post_compose.py` is not.**
+**Why this journey was first provable on tui, ahead of `test_gated_post_compose.py`.**
 That suite's author leg needs the §1 Tiers tab to create the tier first, a
-surface tui has not built (`ui-actual-tui.yaml:164`). Selling needs **no
+surface tui had not yet built when this journey was written (tui has had it
+since 2026-08-01, and joined that suite 2026-09-21). Selling needs **no
 pre-existing tier** — the tier is auto-minted as part of the submit — so the
-lead app can drive the entire authoring journey today. That is a property of the
-ratified shape, not a workaround.
+lead app could drive the entire authoring journey from the start. That is a
+property of the ratified shape, not a workaround.
 
 **What this asserts, and what it deliberately does not.** The author-side chain
 is proven end to end, including that the nest really did record the designation:
@@ -24,7 +25,7 @@ the badge names a `post-unlock-…` tier, which only exists if the mint + gate +
 create sequence all landed. The **buyer** leg (claim-code redemption → §2
 approve → unseal) is proven separately below, on apps that have a §5 claim
 surface — see the module-level residual note at the bottom of this file for
-which apps still lack it.
+which apps still lack it (none today: all 7 apps carry the buyer leg's surface).
 """
 
 import time
@@ -412,9 +413,8 @@ def test_sell_post_teaser_price_and_self_serve_buy(app, request, sell_nest):
     that has the teaser affordance (tui included — the lead app); the
     §2-approve + detail-open-unseal completion (the same chain the claim-code
     buyer arm above proves) additionally needs an author-side subscriptions
-    management surface, which tui does not have at all (`monetization.md`:
-    "tui, which has no author-side subscriptions surface at all") — the exact
-    reason the claim-code buyer test above skips on tui too."""
+    management surface and runs on every app but android (the guard below
+    says why)."""
     app.subscriptions.require_teaser_buy_supported()
 
     admin_sk = _as_signing_key(sell_nest["admin"]["signing_key"])
@@ -490,30 +490,14 @@ def test_sell_post_teaser_price_and_self_serve_buy(app, request, sell_nest):
     print(f"[sell-post] other sold posts on the buyer's screen: {other_buy_buttons}")
 
     # ── The completion (§2-approve + detail-open-unseal) needs an author-side
-    # subscriptions management surface — tui has none at all (the same reason
-    # the claim-code buyer test above skips there), so this leg is linux/web/
-    # windows (+ any future lift that gains §1/§2), never tui.
-    #
-    # macOS/iOS have the §1/§2 surface (the claim-code buyer arm proves it,
-    # `test_sell_post_buyer_redeems_claim_and_unseals`) but are DELIBERATELY
-    # excluded here too — measured 2026-08-25: §2-approve genuinely
-    # works on apple (wait_for_pending_request + wait_for_subscriber both
-    # green), but the FINAL detail-open unseal fails with "sealed model
-    # failed to decrypt: backup chunk decryption failed (wrong key or
-    # tampered data): aead::Error" — the SAME error signature already under
-    # active investigation elsewhere on apple for a different ceremony
-    # (multi-actor-switch key material, the succession-aftermath leg-1
-    # track) after repeated actor switches in one process (this test
-    # does four: seller, buyer, seller, buyer). A pre-existing, apple-wide
-    # gap this row's teaser-render scope did not create and should not carry
-    # — tracked separately rather than silently included in gap (2c)'s green.
-    if not (
-        app.driver.is_linux()
-        or app.driver.is_web()
-        or app.driver.is_windows()
-        or app.driver.is_macos()
-        or app.driver.is_ios()
-    ):
+    # subscriptions management surface, which every app but android drives here.
+    # macOS/iOS joined 2026-08-25 (what looked like an apple unseal failure was
+    # a purchase that enrolled the seller plus a stale WS-RPC connection, both
+    # fixed then); tui, the lead app, has had the surface since 2026-08-01 and
+    # joined 2026-10-11. android has the surface too (the claim-code buyer arm
+    # runs on it) but stays out until this leg is run on the host emulator:
+    # android's suite has not been run against a device.
+    if app.driver.is_android():
         return
 
     # ── Seller: the buy button's subscribe call queued a real request — the ──
@@ -668,6 +652,16 @@ def test_sell_post_existing_subscriber_reads_it_free(app, request, sell_nest):
         "the fan-out row must be payment-marked (the drain lane)"
     )
     subs.approve_first_request()
+    # The click returns before the mint+upload lands; the row leaves §2 only
+    # once `requests.approve` has stored the covering KeyBlob. Switching
+    # account before that (web's in-tab switch drops the in-flight approve)
+    # left the subscriber `not_subscribed` to the unlock tier (2026-10-10).
+    # gold's roster already holds them, so `wait_for_subscriber(1)` cannot
+    # observe this approve — the emptied §2 can.
+    assert subs.wait_for_pending_request_count(0), (
+        f"the fan-out row should leave §2 once its mint lands; "
+        f"still pending={subs.pending_request_ids()}; error={subs.error_text()!r}"
+    )
 
     # ── Subscriber: the sold post unseals on detail open — readability. ──────
     _login_as(app, request, sell_nest, sub, handle=sub_handle)
@@ -696,4 +690,4 @@ def test_sell_post_existing_subscriber_reads_it_free(app, request, sell_nest):
 # (the web e2e test-agent's actor-switch bug that used to block it — was fully fixed 2026-07-30), on macos + ios (2026-08-02),
 # and on tui, which gained the §5 mint surface with the tui Tiers author track
 # (2026-08-01) and the consumer redeem input with `subscription-settings`
-# (2026-08-02). **windows is the one app still owed**; widen the buyer test's guard when its lift lands.
+# (2026-08-02), and on windows (2026-08-03) — all 7 apps now carry it.

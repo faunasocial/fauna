@@ -136,6 +136,8 @@ public sealed partial class AdminMailPage : Page
         AutoEnableNewUsersToggle.IsOn = _vm.AutoEnableMailForNewUsers;
         _syncing = false;
 
+        RenderHealth();
+
         // ── Spam / inbound perimeter ──
         var s = _vm.Spam;
         ThresholdJunkInput.Text = s.MaxScoreBeforeSpamFolder.ToString();
@@ -169,12 +171,16 @@ public sealed partial class AdminMailPage : Page
         }
         else
         {
-            var msg = bp.Published
-                ? Strings.Get("admin/mail_page/spam_baseline_published")
-                    .Replace("{contributors}", bp.Contributors.ToString())
-                    .Replace("{samples}", bp.SampleCount.ToString())
-                : Strings.Get("admin/mail_page/spam_baseline_withheld")
-                    .Replace("{contributors}", bp.Contributors.ToString());
+            // `Deferred` first: a delta-floor deferral also carries published = false
+            // and must never read as "too few contributors".
+            var msg = bp.Deferred
+                ? Strings.Get("admin/mail_page/spam_baseline_waiting")
+                : bp.Published
+                    ? Strings.Get("admin/mail_page/spam_baseline_published")
+                        .Replace("{contributors}", bp.Contributors.ToString())
+                        .Replace("{samples}", bp.SampleCount.ToString())
+                    : Strings.Get("admin/mail_page/spam_baseline_withheld")
+                        .Replace("{contributors}", bp.Contributors.ToString());
             // The holder-side erosion count (silent-erosion fix, mail-spam.md
             // § Encrypted-mode interaction) — surfaced beside the published/
             // withheld message whenever the last run skipped anyone.
@@ -184,6 +190,29 @@ public sealed partial class AdminMailPage : Page
                     .Replace("{count}", bp.SkippedContributors.ToString());
             }
             PublishSpamBaselineResult.Text = msg;
+        }
+
+        // ── Standing publish toggle (persisted group value) + served-baseline state ──
+        _syncing = true;
+        BaselineStandingToggle.IsOn = s.BaselineStandingPublish;
+        _syncing = false;
+        var bs = _vm.BaselineState;
+        if (bs is null)
+        {
+            SpamBaselineState.Text = "";
+        }
+        else
+        {
+            var state = bs.Published && bs.PublishedAtMs is long at
+                ? Strings.Get("admin/mail_page/spam_baseline_state_published")
+                    .Replace("{contributors}", bs.Contributors.ToString())
+                    .Replace("{date}", FaunaFfiMethods.FormatUnixLocalDateMs(at))
+                : Strings.Get("admin/mail_page/spam_baseline_state_none");
+            if (bs.Deferred)
+            {
+                state += " " + Strings.Get("admin/mail_page/spam_baseline_waiting");
+            }
+            SpamBaselineState.Text = state;
         }
 
         // ── Auth enforcement ──
@@ -231,6 +260,56 @@ public sealed partial class AdminMailPage : Page
         AliasReservedInput.Text = string.Join("\n", al.ReservedLocalParts);
         AliasSubaddressingToggle.IsOn = al.SubaddressingEnabled;
         AliasWildcardPrefixToggle.IsOn = al.WildcardPrefixEnabled;
+    }
+
+    /// <summary>Paint the mail health readout (<c>mail-deliverability.md</c> § The mail
+    /// health readout) — a dumb render of <see cref="AdminMailViewModel.Health"/>. The
+    /// whole section is collapsed while the VM holds no readout. Every render disarms the
+    /// warm-up reset (the VM clears <c>WarmupResetArmed</c> on each re-read), so the
+    /// button always returns to its resting label here.</summary>
+    private void RenderHealth()
+    {
+        if (_vm is null) return;
+        HealthWarmupResetButton.Content = Strings.Get(_vm.WarmupResetArmed
+            ? "admin/mail_page/health_warmup_reset_confirm"
+            : "admin/mail_page/health_warmup_reset");
+        var health = _vm.Health;
+        if (health is null)
+        {
+            HealthSection.Visibility = Visibility.Collapsed;
+            return;
+        }
+        HealthSection.Visibility = Visibility.Visible;
+        HealthStatus.Text = health.StatusText;
+        HealthChecks.ItemsSource = health.Checks;
+        _delistUrl = health.DelistUrl;
+        // The link's target, readable as its `href` attribute (UIA's one
+        // app-supplied string): the button's text is only its label.
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
+            HealthDelistLink, health.DelistUrl ?? "");
+        HealthDelistLink.Visibility = health.DelistUrl is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    // The readout's removal-page URL; opened by the delist link.
+    private string? _delistUrl;
+
+    private async void HealthRecheckButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null) return;
+        await _vm.RecheckHealthAsync();
+        RenderState();
+    }
+
+    private void HealthDelistLink_Click(object sender, RoutedEventArgs e)
+        => FaunaApp.Services.UrlOpener.Open(_delistUrl, "admin-mail");
+
+    // Same-button two-click confirm: the first press arms (relabels), the second
+    // dispatches ResetWarmup and the re-read disarms.
+    private async void HealthWarmupResetButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null) return;
+        await _vm.PressWarmupResetAsync();
+        RenderState();
     }
 
     /// <summary>Render the VM's last action error onto the app-wide
@@ -292,6 +371,14 @@ public sealed partial class AdminMailPage : Page
     {
         if (_vm is null) return;
         await _vm.PublishSpamBaselineAsync();
+        RenderState();
+    }
+
+    // ── Standing baseline publish toggle → its own SetBaselineStandingPublish ──
+    private async void BaselineStandingToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_syncing || _vm is null || sender is not ToggleSwitch sw) return;
+        await _vm.SetBaselineStandingPublishAsync(sw.IsOn);
         RenderState();
     }
 

@@ -34,6 +34,7 @@ fn test_sync_engine(
     server_uri: &str,
     watch_dir: std::path::PathBuf,
     device_id: [u8; 32],
+    folder: &str,
 ) -> SyncEngine {
     let kp = ActorKeypair::generate();
     let http = reqwest::Client::new();
@@ -53,7 +54,7 @@ fn test_sync_engine(
         watch_dir,
         db,
         client,
-        Some("__test".to_string()),
+        Some(folder.to_string()),
         device_id,
         None,
         None,
@@ -91,10 +92,23 @@ const USER_BODY: &[u8] = b"the user's unpublished edit \xff\xfe\xfd";
 /// A peer's version of [`REL`] sits on the (mock) nest; a fresh device holds
 /// an unpublished local edit at the same path.
 async fn scenario(server: &MockServer) -> (SyncEngine, tempfile::TempDir, ContentHash) {
+    scenario_in(server, "__test").await
+}
+
+/// [`scenario`] on a set named `folder`.
+async fn scenario_in(
+    server: &MockServer,
+    folder: &str,
+) -> (SyncEngine, tempfile::TempDir, ContentHash) {
     let store = MockNest::new().mount(server).await;
     {
         let peer_watch = tempfile::tempdir().unwrap();
-        let peer = test_sync_engine(&server.uri(), peer_watch.path().to_path_buf(), [0xAAu8; 32]);
+        let peer = test_sync_engine(
+            &server.uri(),
+            peer_watch.path().to_path_buf(),
+            [0xAAu8; 32],
+            folder,
+        );
         std::fs::write(peer_watch.path().join(REL), PEER_BODY).unwrap();
         peer.upload_file(REL).await.expect("peer upload_file");
     }
@@ -104,7 +118,7 @@ async fn scenario(server: &MockServer) -> (SyncEngine, tempfile::TempDir, Conten
         .unwrap()
         .expect("the peer's upload must have POSTed a manifest");
     let watch = tempfile::tempdir().unwrap();
-    let engine = test_sync_engine(&server.uri(), watch.path().to_path_buf(), [0u8; 32]);
+    let engine = test_sync_engine(&server.uri(), watch.path().to_path_buf(), [0u8; 32], folder);
     std::fs::write(watch.path().join(REL), USER_BODY).unwrap();
     (engine, watch, peer_manifest)
 }
@@ -155,6 +169,76 @@ async fn a_skip_row_never_arms_the_verbatim_winner_apply() {
     );
 }
 
+/// **A resolved report leaves the engine hash-addressed, like every by-name
+/// set request** (`path-sealing.md` § the set-name plane — the one funnel,
+/// `fauna_protocol::folders::addressed`). The report used to go out with the
+/// set's plaintext name and no `name_hash`, so a nest holding the set by
+/// hash alone answered `folder not found`: the conflict stayed unresolved on
+/// both seats and two concurrent writers never converged (the seat plan's
+/// `clash` step).
+#[tokio::test]
+async fn a_resolved_report_addresses_its_set_by_hash() {
+    let server = MockServer::start().await;
+    let (engine, _watch, peer_manifest) = scenario_in(&server, "docs").await;
+    let control = FakeSyncControl::accepting();
+    engine.set_control_api(Arc::new(control.clone()));
+
+    engine
+        .apply_remote_changes(&[create_change_with_manifest(7, REL, peer_manifest)], 0)
+        .await
+        .expect("apply_remote_changes");
+
+    let reports = control.conflict_reports();
+    let r = reports
+        .iter()
+        .find(|r| r.resolution.is_some())
+        .unwrap_or_else(|| panic!("the divergence must be reported resolved; got {reports:?}"));
+    assert_eq!(
+        r.name_hash.as_deref().map(Vec::as_slice),
+        Some(&fauna_core::path_crypto::set_name_hash("docs")[..]),
+        "the report must address its set by hash"
+    );
+    assert_eq!(
+        r.folder, "",
+        "the set's plaintext name never leaves the app"
+    );
+}
+
+/// **A report carries the engine's row** (`set-addressing.md` § The row
+/// form → *Whoever holds the row sends it*): an engine bound to a `Local` row
+/// stamps `folder_id`, so the nest files the conflict on that set and not on a
+/// same-named own one; an engine holding no row, or a `Foreign` one, stamps
+/// none. The record and the list are pinned in `set_row_stamp_test`.
+#[tokio::test]
+async fn a_report_carries_the_engines_row() {
+    use fauna_core::folder_keys::FolderRef;
+    for (row, want) in [
+        (Some(FolderRef::Local(9)), Some(9)),
+        (None, None),
+        (Some(FolderRef::Foreign([0x5c; 32])), None),
+    ] {
+        let server = MockServer::start().await;
+        let (engine, _watch, peer_manifest) = scenario_in(&server, "docs").await;
+        let engine = match row {
+            Some(row) => engine.with_folder_ref(row),
+            None => engine,
+        };
+        let control = FakeSyncControl::accepting();
+        engine.set_control_api(Arc::new(control.clone()));
+
+        engine
+            .apply_remote_changes(&[create_change_with_manifest(7, REL, peer_manifest)], 0)
+            .await
+            .expect("apply_remote_changes");
+
+        let reports = control.conflict_reports();
+        assert!(!reports.is_empty(), "the divergence must be reported");
+        for r in &reports {
+            assert_eq!(r.folder_id, want, "bound to {row:?}; report {r:?}");
+        }
+    }
+}
+
 /// Slice 4 — the cure. A reported skip on the path, then a later change lands
 /// (here a kept local winner, the head after the resolved report): the local
 /// row is resolved and its nest row gets the candidate-free resolve.
@@ -192,6 +276,125 @@ async fn a_landed_later_change_cures_the_skip_and_resolves_its_nest_row() {
             .unwrap()
             .is_empty()
     );
+}
+
+fn delete_change(seq: i64, path: &str) -> SyncChange {
+    SyncChange {
+        seq,
+        path_hash: hex::encode(fauna_core::sync::path_hash(path)),
+        manifest_hash: None,
+        change_type: "delete".to_string(),
+        created_at: 1_700_000_000_000,
+        path: Some(path.to_string()),
+        device_id: Some(hex::encode([0xAAu8; 32])),
+        ..Default::default()
+    }
+}
+
+/// A reported skip (nest id 77) on [`REL`] for `engine`.
+fn reported_skip(engine: &SyncEngine) -> FakeSyncControl {
+    let control = FakeSyncControl::accepting();
+    engine.set_control_api(Arc::new(control.clone()));
+    let skip = engine
+        .db()
+        .record_skipped_change(REL, false, None, Some("path escapes the sync root"))
+        .unwrap()
+        .unwrap();
+    engine.db().set_conflict_nest_id(skip.id, 77).unwrap();
+    control
+}
+
+fn assert_cured(engine: &SyncEngine, control: &FakeSyncControl) {
+    assert_eq!(unresolved_of_kind(engine, "catchup_failed"), 0, "cured");
+    let resolves = control.conflict_resolves();
+    assert_eq!(resolves.len(), 1, "{resolves:?}");
+    assert_eq!(resolves[0].id, 77);
+}
+
+/// A later remote DELETE that lands cures the skip too (the Lifecycle
+/// paragraph: "a later change to that path" — a tombstone is one). The common
+/// shape: the skipped create never wrote a file, so the tombstone has nothing
+/// to unlink.
+#[tokio::test]
+async fn a_delete_on_a_skipped_path_with_no_local_file_cures_the_skip() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = crate::pull_remote_changes_test::test_engine(watch.path().to_path_buf());
+    let control = reported_skip(&engine);
+
+    engine
+        .apply_remote_changes(&[delete_change(9, REL)], 0)
+        .await
+        .expect("apply_remote_changes");
+
+    assert_cured(&engine, &control);
+}
+
+/// The file-present shape: a tracked copy the delete unlinks.
+#[tokio::test]
+async fn an_applied_delete_of_a_tracked_copy_cures_the_skip() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = crate::pull_remote_changes_test::test_engine(watch.path().to_path_buf());
+    crate::pull_remote_changes_test::seed_tracked_file(&engine, watch.path(), REL, b"old");
+    let control = reported_skip(&engine);
+
+    engine
+        .apply_remote_changes(&[delete_change(9, REL)], 0)
+        .await
+        .expect("apply_remote_changes");
+
+    assert!(!watch.path().join(REL).exists(), "the delete applied");
+    assert_cured(&engine, &control);
+}
+
+/// A DECLINED delete keeps the local copy, which is still behind: the skip
+/// stands.
+#[tokio::test]
+async fn a_declined_delete_leaves_the_skip_standing() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = crate::pull_remote_changes_test::test_engine(watch.path().to_path_buf());
+    // An untracked local file: the verdict keeps it silently.
+    std::fs::write(watch.path().join(REL), USER_BODY).unwrap();
+    let control = reported_skip(&engine);
+
+    engine
+        .apply_remote_changes(&[delete_change(9, REL)], 0)
+        .await
+        .expect("apply_remote_changes");
+
+    assert!(watch.path().join(REL).exists(), "the local copy is kept");
+    assert_eq!(unresolved_of_kind(&engine, "catchup_failed"), 1);
+    assert!(control.conflict_resolves().is_empty());
+}
+
+/// The on-demand fold's delete (`apply_folded_delete`) cures at both applied
+/// outcomes and on a path with no row at all.
+#[tokio::test]
+async fn a_folded_delete_cures_the_skip() {
+    let folded = || crate::engine::FoldedDelete {
+        relative_path: REL.to_string(),
+        deleting_device: Some("bb".repeat(32)),
+    };
+    // No row, no file (a skipped create).
+    let watch = tempfile::tempdir().unwrap();
+    let engine = crate::pull_remote_changes_test::test_engine(watch.path().to_path_buf());
+    let control = reported_skip(&engine);
+    engine
+        .apply_folded_delete(&folded(), |_| Ok(()))
+        .await
+        .unwrap();
+    assert_cured(&engine, &control);
+
+    // A tracked copy the binding removes.
+    let watch = tempfile::tempdir().unwrap();
+    let engine = crate::pull_remote_changes_test::test_engine(watch.path().to_path_buf());
+    crate::pull_remote_changes_test::seed_tracked_file(&engine, watch.path(), REL, b"old");
+    let control = reported_skip(&engine);
+    let outcome = engine
+        .apply_folded_delete(&folded(), |p| std::fs::remove_file(p).map_err(Into::into))
+        .await
+        .unwrap();
+    assert_eq!(outcome, crate::engine::FoldedDeleteOutcome::Applied);
+    assert_cured(&engine, &control);
 }
 
 // ── The two report sites, against key-holding fixtures ──────────────────────

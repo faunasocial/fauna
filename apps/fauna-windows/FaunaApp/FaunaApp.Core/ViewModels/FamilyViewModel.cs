@@ -58,6 +58,11 @@ public partial class FamilyViewModel : ObservableObject
     /// Cleared and refilled by <see cref="LoadPolicyFromWard"/> on every ward
     /// load/switch, same shape as <see cref="Wards"/>/<see cref="Approvals"/>.</summary>
     public ObservableCollection<FamilyDeviceRow> Devices { get; } = new();
+    /// <summary>The selected ward's denied bridge-DM peers (<c>family-blocked-peer-item</c>,
+    /// indexed — family-safety.md § The bridge-DM gate → <i>The un-deny surface</i>).
+    /// Cleared and refilled by <see cref="LoadPolicyFromWard"/> alongside
+    /// <see cref="Devices"/>.</summary>
+    public ObservableCollection<FamilyBlockedPeerRow> BlockedPeers { get; } = new();
 
     /// <summary>The ward currently loaded into the shared policy editor —
     /// <c>null</c> until a <see cref="SelectWard"/> call (auto-selects the
@@ -66,7 +71,14 @@ public partial class FamilyViewModel : ObservableObject
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(GraduateConfirmButtonText))]
     [NotifyPropertyChangedFor(nameof(WardDevicesHint))]
+    [NotifyPropertyChangedFor(nameof(BlockedPeersHint))]
     private string? _selectedWardHandle;
+
+    /// <summary>"People you denied for {handle}. Their new messages are refused…"
+    /// (<c>family/blocked_peers_hint</c>) — same named-placeholder resolution as
+    /// <see cref="WardDevicesHint"/>.</summary>
+    public string BlockedPeersHint
+        => Strings.Get("family/blocked_peers_hint").Replace("{handle}", SelectedWardHandle ?? "");
 
     /// <summary>"Yes, graduate {handle}" — resolved here (named-placeholder
     /// substitution is per-app, i18n_placeholder_named_not_numeric).</summary>
@@ -273,6 +285,10 @@ public partial class FamilyViewModel : ObservableObject
         // PropertyChanged handler.
         Devices.Clear();
         foreach (var d in ward.Devices) Devices.Add(d);
+        // The un-deny list: same full clear+refill (the nest carries only `block`
+        // rows, so an allowed peer simply drops out on the next read).
+        BlockedPeers.Clear();
+        foreach (var p in ward.BlockedPeers) BlockedPeers.Add(p);
         SelectedWardHandle = ward.Handle;
         SelectedWardActorId = ward.ActorId;
     }
@@ -285,6 +301,30 @@ public partial class FamilyViewModel : ObservableObject
         TransferInput = string.Empty;
         IsConfirmingGraduate = false;
         Devices.Clear();
+        BlockedPeers.Clear();
+    }
+
+    /// <summary><c>family-blocked-peer-allow-button</c> — un-deny ONE denied bridge-DM
+    /// peer for the selected ward (family-safety.md § The bridge-DM gate → <i>The
+    /// un-deny surface</i>). <paramref name="row"/> carries the nest's own record by
+    /// value, handed whole to the shared <c>AllowBlockedPeer</c>: a concurrent refetch
+    /// that reorders the list must never route the click at a different person, which
+    /// is why this takes the row and not an index (rule (f)). Re-reads on success so the
+    /// list shows the nest's truth (an allowed peer drops out — the nest carries only
+    /// <c>block</c> rows).</summary>
+    public async Task AllowBlockedPeerAsync(FamilyBlockedPeerRow row)
+    {
+        if (SelectedWardActorId is not { } wardId) return;
+        ActionError = null;
+        try
+        {
+            await _rpc.FamilyAllowBlockedPeerAsync(wardId, row.Peer);
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            ActionError = Strings.Error(ex);
+        }
     }
 
     /// <summary><c>fauna.family.device.mark</c> for one of the selected ward's
@@ -625,6 +665,11 @@ public sealed class FamilyWardRow
     /// marking).</summary>
     public IReadOnlyList<FamilyDeviceRow> Devices { get; init; } = Array.Empty<FamilyDeviceRow>();
 
+    /// <summary>The ward's denied bridge-DM peers for the un-deny list
+    /// (<c>family-blocked-peer-item</c>, family-safety.md § The bridge-DM gate → <i>The
+    /// un-deny surface</i>) — the nest's <c>blocked_dm_peers</c> verbatim, one row each.</summary>
+    public IReadOnlyList<FamilyBlockedPeerRow> BlockedPeers { get; init; } = Array.Empty<FamilyBlockedPeerRow>();
+
     /// <summary>The guardian's per-ward band readout (<c>family-ward-age-band</c>,
     /// family-safety.md § App surface → *Age-band surfaces*) — <c>null</c> (absent, never
     /// placeholdered) for a band-less admission or a band this client cannot name.</summary>
@@ -646,6 +691,7 @@ public sealed class FamilyWardRow
     {
         ActorId = w.@actorId,
         Handle = w.@handle,
+        BlockedPeers = w.blockedDmPeers.Select(FamilyBlockedPeerRow.From).ToList(),
         ContactApproval = w.@policy.@contactApproval,
         UnknownSenderMail = w.@policy.@unknownSenderMail,
         FederationContact = w.@policy.@federationContact,
@@ -705,6 +751,30 @@ public sealed partial class FamilyDeviceRow : ObservableObject
         Label = d.@label,
         GuardianMarked = d.@guardianMarked,
     };
+}
+
+/// <summary>One denied bridge-DM peer on the guardian's per-ward un-deny list
+/// (<c>family-blocked-peer-item</c> / <c>family-blocked-peer-allow-button</c>,
+/// family-safety.md § The bridge-DM gate → <i>The un-deny surface</i>). Holds the
+/// nest's <see cref="FfiFamilyBlockedPeer"/> <b>whole</b>: the allow button hands that
+/// exact record to the shared <c>AllowBlockedPeer</c>, so no button can address a
+/// different peer than the row it sits on (rule (f)) — never an index into a list a
+/// refresh could reorder.</summary>
+public sealed class FamilyBlockedPeerRow
+{
+    internal FfiFamilyBlockedPeer Peer { get; }
+
+    private FamilyBlockedPeerRow(FfiFamilyBlockedPeer peer) => Peer = peer;
+
+    /// <summary>The peer id — the only name this nest has for an external bridge peer
+    /// (which is why the gate exists at all); the row's text and its automation
+    /// name.</summary>
+    public string PeerId => Peer.@peerId;
+
+    /// <summary>The bridge the peer messages through.</summary>
+    public string BridgeId => Peer.@bridgeId;
+
+    internal static FamilyBlockedPeerRow From(FfiFamilyBlockedPeer p) => new(p);
 }
 
 /// <summary>An incoming transfer proposal naming this account as proposed guardian

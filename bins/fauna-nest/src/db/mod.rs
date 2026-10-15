@@ -35,6 +35,7 @@ pub mod conv_attachment_refs;
 pub mod custody_hosting;
 pub mod custody_receipts;
 pub mod delivery;
+pub mod dmarc_reports;
 pub mod domain_expiry;
 pub mod drafts;
 pub mod email;
@@ -66,6 +67,9 @@ pub mod mail_policy;
 pub mod mail_serving;
 pub mod mail_srs;
 pub mod mail_warmup;
+/// The in-flight marker of a re-seed's flip (`backup-destinations.md` § *the
+/// in-flight marker*).
+pub mod materialize_in_flight;
 pub mod membership;
 pub mod meta;
 pub mod migrations;
@@ -111,6 +115,7 @@ pub mod subscriptions;
 pub mod successions;
 pub mod sync_storage;
 pub mod third_party_principals;
+pub mod tlsrpt_inbound_reports;
 pub mod transport_policy;
 pub mod trends;
 pub mod web;
@@ -370,6 +375,10 @@ pub struct NamespaceEntry {
 
 pub struct CacheDb {
     conn: Mutex<Connection>,
+    /// Test-only pause point between a pending-action pre-check and its
+    /// guarded write (see `pending_actions::PrecheckGate`).
+    #[cfg(test)]
+    precheck_gate: std::sync::Mutex<Option<pending_actions::PrecheckGate>>,
 }
 
 pub(crate) fn now_epoch_millis() -> i64 {
@@ -605,6 +614,21 @@ pub struct InviteRequestRow {
     /// for a claim the nest verified at submit, `none` for declared-only.
     #[serde(default)]
     pub age_provenance: Option<String>,
+}
+
+/// Which rows beyond the default projection a `versions.list` read takes
+/// (`CacheDb::list_file_versions_in_sets`): the two additive request flags,
+/// named so a call site reads as what it asks for rather than a pair of
+/// bools.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VersionScope {
+    /// The recovery browse (`file-versions.md` § Retention (3)): soft-pruned
+    /// rows still inside their `purge_after` window.
+    pub include_pruned: bool,
+    /// The snapshot restore's licence read (`backup-restore.md` § Security
+    /// Properties → Integrity): rows the GC purge stamped `superseded_at`,
+    /// whose signed statement outlives their bytes.
+    pub include_superseded: bool,
 }
 
 /// One file version — a live `sync_changes` row projected as a version
@@ -1036,7 +1060,7 @@ impl FolderRow {
     /// in themselves: it is a property of the caller's rail, not of the folder.
     #[must_use]
     pub fn rests_plaintext_paths(&self) -> bool {
-        self.is_public_audience()
+        audience_rests_plaintext_paths(self.audience.as_deref())
     }
 
     /// Whether this folder's **plaintext** files feed the render pipeline and
@@ -1053,21 +1077,36 @@ impl FolderRow {
     /// leg through: moving a legacy `mode = "web"` folder to `sync` takes its
     /// templates out of the render's inputs while touching neither
     /// `website_enabled` nor `audience`, so nothing marked and the pages it had
-    /// rendered kept serving. Any
-    /// future column `rests_plaintext_paths` grows is covered for free.
+    /// rendered kept serving. The
+    /// body lives in the free [`serves_plaintext_web_files`] over the raw
+    /// columns, so the marker's caller shares it literally.
     #[must_use]
     pub fn serves_plaintext_web_files(&self) -> bool {
-        self.website_enabled && self.rests_plaintext_paths()
+        serves_plaintext_web_files(self.website_enabled, self.audience.as_deref())
     }
 }
 
-/// [`FolderRow::serves_plaintext_web_files`] off the raw columns, for a caller
-/// holding an open transaction rather than a mapped row
-/// (`update_folder_for_user`, which reads the two columns either side of its
-/// own UPDATE). Same predicate, one place.
+/// The plaintext-paths class over the raw columns — the ONE body behind
+/// [`FolderRow::rests_plaintext_paths`]. A column the class grows is a new
+/// parameter HERE, so every caller that holds raw columns (the free
+/// [`serves_plaintext_web_files`] and through it the owed-render marker and
+/// the enable-time backfill) fails to compile until it passes the column on,
+/// rather than silently keeping the old class.
+#[must_use]
+pub(crate) fn audience_rests_plaintext_paths(audience: Option<&str>) -> bool {
+    audience == Some(fauna_protocol::folders::AUDIENCE_PUBLIC)
+}
+
+/// The serving predicate off the raw columns, for a caller holding an open
+/// transaction rather than a mapped row (`update_folder_for_user`, which reads
+/// the columns either side of its own UPDATE; the enable-time backfill in
+/// `folder_handlers`). [`FolderRow::serves_plaintext_web_files`] is this
+/// function over its own fields, and the class check is
+/// [`audience_rests_plaintext_paths`], so the serve gate and the marker are one
+/// body in fact.
 #[must_use]
 pub(crate) fn serves_plaintext_web_files(website_enabled: bool, audience: Option<&str>) -> bool {
-    website_enabled && audience == Some(fauna_protocol::folders::AUDIENCE_PUBLIC)
+    website_enabled && audience_rests_plaintext_paths(audience)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1317,6 +1356,15 @@ pub struct FeedPostRow {
     /// `FeedPostItem.reposted_post_id`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reposted_post_id: Option<Vec<u8>>,
+    /// On a repost row, the TARGET's `content_meta.gated_tier` (and below, its
+    /// `gated_room`), filled beside `reposted_post_id` by
+    /// `project_repost_targets` — never the row's own `gated_*`, which stay
+    /// the (public) repost post's. Drives `FeedPostItem.reposted_gated_tier`
+    /// / `reposted_gated_room` → the repost card's `gated-post-badge`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reposted_gated_tier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reposted_gated_room: Option<Vec<u8>>,
     /// 32-byte post id of the **viewer's** own live repost of this row's post,
     /// filled by `augment_viewer_state` (never by the viewer-independent query
     /// fns). Drives `FeedPostItem.viewer_repost_id` — `unrepost`'s argument.
@@ -1741,6 +1789,8 @@ impl CacheDb {
         migrations::run_migrations(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            #[cfg(test)]
+            precheck_gate: std::sync::Mutex::new(None),
         })
     }
 
@@ -1753,6 +1803,8 @@ impl CacheDb {
         migrations::run_migrations(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            #[cfg(test)]
+            precheck_gate: std::sync::Mutex::new(None),
         })
     }
 
@@ -2579,6 +2631,37 @@ mod tests {
     fn an_ordinary_folder_rests_no_plaintext_paths() {
         assert!(!folder(None).rests_plaintext_paths());
         assert!(!folder(Some("shared")).rests_plaintext_paths());
+    }
+
+    /// The serve gate (the row method) and the owed-render marker / backfill
+    /// (the free fn over raw columns) answer one predicate on every
+    /// `(website_enabled, audience)` input, and the class both ride is the
+    /// row's own `rests_plaintext_paths`. Shape 1 makes the free fn the shared
+    /// body; this pin keeps it from being re-inlined.
+    #[test]
+    fn the_serve_gate_and_the_marker_twin_agree_on_every_input() {
+        for website_enabled in [false, true] {
+            for audience in [
+                None,
+                Some(""),
+                Some("private"),
+                Some("shared"),
+                Some("public"),
+            ] {
+                let mut row = folder(audience);
+                row.website_enabled = website_enabled;
+                assert_eq!(
+                    row.serves_plaintext_web_files(),
+                    serves_plaintext_web_files(website_enabled, audience),
+                    "gate vs twin on ({website_enabled}, {audience:?})"
+                );
+                assert_eq!(
+                    serves_plaintext_web_files(website_enabled, audience),
+                    website_enabled && row.rests_plaintext_paths(),
+                    "twin vs class on ({website_enabled}, {audience:?})"
+                );
+            }
+        }
     }
 
     #[test]
@@ -4050,7 +4133,7 @@ mod tests {
         .unwrap();
 
         let versions = db
-            .list_file_versions_in_sets(&[7], &path_hash, false)
+            .list_file_versions_in_sets(&[7], &path_hash, VersionScope::default())
             .await
             .unwrap();
         assert_eq!(versions.len(), 2);
@@ -4069,7 +4152,7 @@ mod tests {
 
         // Empty scope → nothing (the handler's unreadable-set shape).
         assert!(
-            db.list_file_versions_in_sets(&[], &path_hash, false)
+            db.list_file_versions_in_sets(&[], &path_hash, VersionScope::default())
                 .await
                 .unwrap()
                 .is_empty()

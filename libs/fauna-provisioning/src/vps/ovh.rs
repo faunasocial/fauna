@@ -55,6 +55,27 @@ impl Ovh {
         Ok(ts)
     }
 
+    /// The project and instance a server id names. A row listed with no
+    /// project chosen carries `<project>/<instance>` (see
+    /// `list_managed_servers`); a bare id belongs to the chosen project.
+    fn project_and_instance<'a>(&'a self, server_id: &'a str) -> (&'a str, &'a str) {
+        server_id
+            .split_once('/')
+            .unwrap_or((self.project_id.as_str(), server_id))
+    }
+
+    /// The project ids the credentials can see (`GET /1.0/cloud/project`).
+    async fn projects(
+        &self,
+        client: &Client,
+        timestamp: u64,
+    ) -> Result<Vec<String>, ProvisionError> {
+        let url = format!("{}/1.0/cloud/project", self.api_base);
+        let resp = self.signed_get(client, &url, timestamp).await?;
+        let resp = ensure_success(resp).await?;
+        Ok(resp.json().await?)
+    }
+
     async fn signed_get(
         &self,
         client: &Client,
@@ -142,13 +163,8 @@ struct OvhIpAddress {
 impl VpsProvider for Ovh {
     async fn verify(&self, client: &Client) -> Result<Vec<VpsLocation>, ProvisionError> {
         let timestamp = self.get_timestamp(client).await?;
-        let url = format!("{}/1.0/cloud/project", self.api_base);
-        let resp = self.signed_get(client, &url, timestamp).await?;
-
-        let resp = ensure_success(resp).await?;
-
         // Returns a list of project IDs; we return the project as a single location
-        let projects: Vec<String> = resp.json().await?;
+        let projects = self.projects(client, timestamp).await?;
         Ok(projects
             .into_iter()
             .map(|p| VpsLocation {
@@ -212,9 +228,10 @@ impl VpsProvider for Ovh {
         instance: &VpsInstance,
     ) -> Result<(), ProvisionError> {
         let timestamp = self.get_timestamp(client).await?;
+        let (project, instance_id) = self.project_and_instance(&instance.server_id);
         let url = format!(
             "{}/1.0/cloud/project/{}/instance/{}",
-            self.api_base, self.project_id, instance.server_id
+            self.api_base, project, instance_id
         );
         let resp = self.signed_delete(client, &url, timestamp).await?;
         crate::vps::finish_delete(resp).await
@@ -295,24 +312,37 @@ impl VpsProvider for Ovh {
     /// risk of a non-fauna box appearing in the list
     /// (`vps.md` § Uninstall → *Listing primitive*).
     ///
-    /// The endpoint returns the whole project in one array, so there is no
-    /// pagination to follow.
+    /// **With no project chosen** (the retire view builds the adapter from
+    /// credentials alone, with no project picker) it walks every project the
+    /// credentials see — the list holds every server in the account — and
+    /// each row's `server_id` is `<project>/<instance>`, so `delete_server`
+    /// reaches the right project. With a project chosen it lists that one
+    /// project under bare instance ids.
+    ///
+    /// Each project's endpoint returns the whole project in one array, so
+    /// there is no pagination to follow; the project walk is bounded by
+    /// [`crate::vps::MAX_LIST_PAGES`].
     async fn list_managed_servers(
         &self,
         client: &Client,
     ) -> Result<Vec<ManagedServer>, ProvisionError> {
         let timestamp = self.get_timestamp(client).await?;
-        let url = format!(
-            "{}/1.0/cloud/project/{}/instance",
-            self.api_base, self.project_id
-        );
-        let resp = self.signed_get(client, &url, timestamp).await?;
-        let resp = ensure_success(resp).await?;
-
-        let instances: Vec<OvhInstance> = resp.json().await?;
-        Ok(instances
+        let account_wide = self.project_id.is_empty();
+        let projects = if account_wide {
+            self.projects(client, timestamp).await?
+        } else {
+            vec![self.project_id.clone()]
+        };
+        let mut out = Vec::new();
+        for project in projects
             .into_iter()
-            .map(|inst| {
+            .take(crate::vps::MAX_LIST_PAGES as usize)
+        {
+            let url = format!("{}/1.0/cloud/project/{}/instance", self.api_base, project);
+            let resp = self.signed_get(client, &url, timestamp).await?;
+            let resp = ensure_success(resp).await?;
+            let instances: Vec<OvhInstance> = resp.json().await?;
+            out.extend(instances.into_iter().map(|inst| {
                 let ipv4 = inst
                     .ip_addresses
                     .iter()
@@ -324,7 +354,11 @@ impl VpsProvider for Ovh {
                     .find(|a| a.version == 6 && a.addr_type == "public")
                     .map(|a| a.ip.clone());
                 ManagedServer {
-                    server_id: inst.id,
+                    server_id: if account_wide {
+                        format!("{project}/{}", inst.id)
+                    } else {
+                        inst.id
+                    },
                     name: inst.name,
                     ipv4,
                     ipv6,
@@ -332,8 +366,9 @@ impl VpsProvider for Ovh {
                     created_at: inst.created,
                     marked: false,
                 }
-            })
-            .collect())
+            }));
+        }
+        Ok(out)
     }
 
     async fn get_ptr(

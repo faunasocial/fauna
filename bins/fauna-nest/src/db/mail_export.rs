@@ -320,7 +320,20 @@ impl crate::db::CacheDb {
                 ceiling: ceilings.held_bytes,
             });
         }
-        conn.execute(
+        // § A failed export is a record the wizard shows until the user moves
+        // on: a new start is the user's answer to a failure, so the caller's
+        // `errored` records go in the same write as the insert. Their blobs
+        // went with `fail_export_session`; a file a crash left behind is no
+        // longer named by any row, which is what the orphan reclaim collects.
+        let tx = conn
+            .unchecked_transaction()
+            .context("begin start export_session")?;
+        tx.execute(
+            "DELETE FROM export_sessions WHERE actor_id = ?1 AND state = 'errored'",
+            rusqlite::params![&actor[..]],
+        )
+        .context("retire errored export_sessions")?;
+        tx.execute(
             "INSERT INTO export_sessions
                (session_id, actor_id, format, scope_descriptor, state, started_at,
                 last_progress_at, blob_path, blob_decryption_key_wrapped_for_actor,
@@ -338,6 +351,7 @@ impl crate::db::CacheDb {
             ],
         )
         .context("insert export_session")?;
+        tx.commit().context("commit start export_session")?;
         Ok(CreateExportSessionOutcome::Created)
     }
 
@@ -874,6 +888,40 @@ impl crate::db::CacheDb {
             .context("delete expired export_session")?;
         Ok(deleted > 0)
     }
+
+    /// Age ONE actor's export sessions and import sessions past their thirty
+    /// days (`expires_at = 1`), returning `(exports, imports)` aged. The
+    /// `test-hooks` fast-forward for `mail-export.md` § Expiry and
+    /// `mailbox-migration.md` § Resume: the production sweep / lazy GC then
+    /// does the forgetting, so a test observes it and not a shortcut.
+    #[doc(hidden)]
+    pub async fn test_age_mail_portability_sessions(
+        &self,
+        actor: &[u8; 32],
+        exports: bool,
+        imports: bool,
+    ) -> Result<(usize, usize)> {
+        let conn = self.conn.lock().await;
+        let e = if exports {
+            conn.execute(
+                "UPDATE export_sessions SET expires_at = 1 WHERE actor_id = ?1",
+                rusqlite::params![&actor[..]],
+            )
+            .context("age export_sessions")?
+        } else {
+            0
+        };
+        let i = if imports {
+            conn.execute(
+                "UPDATE import_sessions SET expires_at = 1 WHERE actor_id = ?1",
+                rusqlite::params![&actor[..]],
+            )
+            .context("age import_sessions")?
+        } else {
+            0
+        };
+        Ok((e, i))
+    }
 }
 
 /// One row [`crate::db::CacheDb::expired_export_sessions`] found past its
@@ -1095,6 +1143,46 @@ mod tests {
             CreateExportSessionOutcome::Created,
             "a completed export must not keep occupying a slot"
         );
+    }
+
+    /// § A failed export is a record the wizard shows until the user moves
+    /// on: a start retires the caller's `errored` records in the same write as
+    /// its insert — never a `completed` or `cancelled` row, never another
+    /// actor's.
+    #[tokio::test]
+    async fn a_start_retires_the_callers_failed_records_and_nothing_else() {
+        let db = CacheDb::open_in_memory().unwrap();
+        for (actor, id, to) in [
+            (&ACTOR, "e1", ExportState::Errored),
+            (&ACTOR, "e2", ExportState::Errored),
+            (&ACTOR, "done", ExportState::Completed),
+            (&ACTOR, "gone", ExportState::Cancelled),
+            (&OTHER, "theirs", ExportState::Errored),
+        ] {
+            open_with_session(&db, actor, id).await;
+            db.transition_export_session(actor, id, to, &[ExportState::Running], None, None)
+                .await
+                .unwrap()
+                .expect("running -> terminal");
+        }
+
+        assert_eq!(
+            db.create_export_session(&ACTOR, "new", "mbox", b"", "p", None, &cap(4))
+                .await
+                .unwrap(),
+            CreateExportSessionOutcome::Created
+        );
+
+        let mut listed: Vec<String> = db
+            .list_export_sessions(&ACTOR)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.session_id)
+            .collect();
+        listed.sort();
+        assert_eq!(listed, ["done", "gone", "new"]);
+        assert_eq!(db.list_export_sessions(&OTHER).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

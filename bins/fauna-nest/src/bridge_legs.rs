@@ -22,6 +22,7 @@
 //! composing the verdict (`docs/goal/behavior/family-safety.md` § The
 //! bridge-DM gate → *Enforcement points*).
 
+use std::future::Future;
 use std::sync::Arc;
 
 use fauna_core::data::{DmVerdict, UnknownPeerDm, supervised_dm_verdict};
@@ -120,23 +121,81 @@ pub async fn serving(db: &CacheDb, account: &[u8; 32]) -> anyhow::Result<Vec<Leg
     Ok(legs)
 }
 
-/// The far room id `address` names on the leg `principal_id`, where the leg
-/// keys its rooms on something other than the address as typed: the Nostr
-/// leg's canonical hex, whichever spelling names the key, and the ActivityPub
-/// leg's canonical actor URI. `None` for a principal that is no such leg, or
-/// an address the leg does not canonicalise.
-#[must_use]
+/// The far networks' answers for the human spelling of an address — the one
+/// network step `conversation.rooms.open` takes, behind a seam so what the
+/// legs do with an answer is pinned without a far end. Each answer is the
+/// stable id the room and the gate's verdict key on, never the spelling typed
+/// (`family-safety.md` § The bridge-DM gate → *The peer identity the verdict
+/// keys on*); `None` when the spelling names no one or the far side could not
+/// be asked.
+pub trait FarResolve: Sync {
+    /// The DID the Bluesky handle `handle` names, asked under `account`'s
+    /// session.
+    fn bluesky_handle(
+        &self,
+        account: &[u8; 32],
+        handle: &str,
+    ) -> impl Future<Output = Option<String>> + Send;
+
+    /// The canonical actor URI the Fediverse account `user@host` names —
+    /// WebFinger at `host`, then the actor document fetched and cached.
+    fn fediverse_account(
+        &self,
+        user: &str,
+        host: &str,
+    ) -> impl Future<Output = Option<String>> + Send;
+}
+
+/// [`FarResolve`] over the networks themselves.
+pub struct NetResolve<'a> {
+    pub state: &'a AppState,
+}
+
+impl FarResolve for NetResolve<'_> {
+    #[allow(unused_variables)]
+    async fn bluesky_handle(&self, account: &[u8; 32], handle: &str) -> Option<String> {
+        #[cfg(feature = "bluesky")]
+        return crate::bluesky::dm_leg::resolve_handle(self.state, account, handle).await;
+        #[cfg(not(feature = "bluesky"))]
+        None
+    }
+
+    #[allow(unused_variables)]
+    async fn fediverse_account(&self, user: &str, host: &str) -> Option<String> {
+        #[cfg(feature = "activitypub")]
+        return crate::activitypub::dm_leg::resolve_account(self.state, user, host).await;
+        #[cfg(not(feature = "activitypub"))]
+        None
+    }
+}
+
+/// The far room id `address` names on the bridge `principal_id`: the address
+/// as typed on a bridge that is no leg, else the stable id the leg keys its
+/// rooms on — the Nostr leg's canonical hex, whichever spelling names the key;
+/// the Bluesky leg's DID, a handle resolved through `far`; the ActivityPub
+/// leg's canonical actor URI, an `@user@host` resolved through `far`. `None`
+/// for an address the leg's grammar admitted but that names no one — the
+/// family's typed `address_refused`.
 #[allow(unused_variables)]
-pub fn far_room_id(principal_id: &[u8], address: &str) -> Option<String> {
+pub async fn far_room_id(
+    far: &impl FarResolve,
+    principal_id: &[u8],
+    account: &[u8; 32],
+    address: &str,
+) -> Option<String> {
     #[cfg(feature = "nostr")]
     if principal_id == NOSTR.principal_id {
         return crate::nostr::bridge_leg::far_room_id(address);
     }
+    #[cfg(feature = "bluesky")]
+    if principal_id == BLUESKY.principal_id {
+        return crate::bluesky::dm_leg::far_room_id(far, account, address).await;
+    }
     #[cfg(feature = "activitypub")]
     if principal_id == ACTIVITYPUB.principal_id {
-        return crate::activitypub::dm_leg::canonical_actor(address);
+        return crate::activitypub::dm_leg::far_room_id(far, address).await;
     }
-    None
+    Some(address.to_string())
 }
 
 /// Could the leg `principal_id` deliver a message `account` sends right now?
@@ -419,6 +478,49 @@ pub(crate) mod test_support {
         crate::bluesky::init_db(db).await.unwrap();
         #[cfg(feature = "activitypub")]
         crate::activitypub::init_db(db).await.unwrap();
+    }
+
+    /// A far end that knows the spellings it is built with: each human
+    /// spelling (a Bluesky handle; a Fediverse `user@host`) answers its stable
+    /// id, anything else names no one. Records every Bluesky ask with the
+    /// account it was asked under.
+    #[cfg(any(feature = "bluesky", feature = "activitypub"))]
+    #[derive(Default)]
+    pub(crate) struct FakeResolve {
+        pub(crate) known: Vec<(&'static str, &'static str)>,
+        pub(crate) bluesky_asks: std::sync::Mutex<Vec<([u8; 32], String)>>,
+    }
+
+    #[cfg(any(feature = "bluesky", feature = "activitypub"))]
+    impl FakeResolve {
+        pub(crate) fn knowing(known: &[(&'static str, &'static str)]) -> Self {
+            Self {
+                known: known.to_vec(),
+                ..Default::default()
+            }
+        }
+
+        fn lookup(&self, spelling: &str) -> Option<String> {
+            self.known
+                .iter()
+                .find(|(s, _)| *s == spelling)
+                .map(|(_, id)| id.to_string())
+        }
+    }
+
+    #[cfg(any(feature = "bluesky", feature = "activitypub"))]
+    impl super::FarResolve for FakeResolve {
+        async fn bluesky_handle(&self, account: &[u8; 32], handle: &str) -> Option<String> {
+            self.bluesky_asks
+                .lock()
+                .unwrap()
+                .push((*account, handle.to_string()));
+            self.lookup(handle)
+        }
+
+        async fn fediverse_account(&self, user: &str, host: &str) -> Option<String> {
+            self.lookup(&format!("{user}@{host}"))
+        }
     }
 
     /// Put `ward` under a guardian's supervision (creating both accounts) and

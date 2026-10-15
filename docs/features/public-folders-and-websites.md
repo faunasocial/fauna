@@ -51,18 +51,18 @@ Stamped 2026-09-19 at 25eff180d4.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| linux | ⚠ partial | 0.1.2-dev+ce6fd0a0 standalone |
-| windows | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| macos | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| ios | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+15971055.dirty standalone |
+| web | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| linux | ✅ full | 0.1.2-dev+ce6fd0a0 standalone |
+| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| android | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| tui | ✅ full | 0.1.2-dev+15971055.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_folder_audience_control.py::test_the_audience_control_arms_before_it_publishes` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_folder_audience_control.py::test_the_website_toggle_is_orthogonal_to_the_audience` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed |
+| 1 | app | `tests/e2e-unified/tests/test_folder_audience_control.py::test_the_website_toggle_is_orthogonal_to_the_audience` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_public_website_folder_serve.py::test_public_website_folder_serves_the_file_a_user_dropped_in_it` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_public_website_folder_serve.py::test_a_private_folder_is_not_served_even_with_the_website_toggle_on` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_media_upload_one_shape.py::test_a_media_upload_into_a_public_website_folder_is_served_at_the_owners_address` | tui (linux): passed |
@@ -70,11 +70,11 @@ Stamped 2026-09-19 at 25eff180d4.
 | 3 | app | `tests/e2e-unified/tests/test_folder_bound_flip_back.py::test_a_member_seat_keeps_what_it_adds_sealed_through_the_public_window_and_after` | web (linux): passed, tui (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_web_folder_audience.py::test_a_born_public_website_folder_serves_and_the_toggle_gates_it` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_web_folder_audience.py::test_a_flip_back_to_private_stops_the_anonymous_serve_on_the_next_request` | nest (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_folder_audience_copy.py::test_a_website_folder_says_whether_anyone_can_reach_it` | tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_folder_audience_copy.py::test_a_website_folder_says_whether_anyone_can_reach_it` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/api/test_web_folder_serving_switches.py::test_turning_the_website_switch_on_serves_the_files_already_there` | nest (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_folder_audience_copy.py::test_the_go_public_confirmation_states_both_consequences` | tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_folder_audience_copy.py::test_a_shared_folder_offers_no_private_and_says_why` | tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_folder_audience_copy.py::test_the_go_public_confirmation_states_both_consequences` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_folder_audience_copy.py::test_a_shared_folder_offers_no_private_and_says_why` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 9 | nest | `tests/e2e-unified/tests/api/test_web_folder_serving_switches.py::test_public_refuses_webdav_and_a_paywall_whichever_moves_second` | nest (linux): passed |
 | 10 | nest | `tests/e2e-unified/tests/api/test_web_folder_serving_switches.py::test_an_executable_file_is_never_served_however_it_got_into_the_folder` | nest (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_folder_audience_reconfirm.py::test_an_unattested_public_folder_is_healed_by_the_owners_reconfirm` | tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_folder_audience_reconfirm.py::test_an_unattested_public_folder_is_healed_by_the_owners_reconfirm` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

@@ -40,6 +40,7 @@ from common.scope_store import XdgScopeStore
 from conftest import _seeded_environment
 from drivers import create_driver
 from drivers.machine_test_setter import set_handle_check_snapshot
+from helpers import enrollment
 from helpers.app_surface import skip_environment
 from helpers.budgets import APP_RELAUNCH_S, RPC_ROUNDTRIP_S, UI_SETTLE_S
 from helpers.waiting import (
@@ -99,20 +100,33 @@ ACCOUNT_PAGE_NAV = {
 }
 
 
-def _seed_two_accounts(nest_instance, active="user"):
+def _seed_two_accounts(nest_instance, active="user", second="admin"):
     """A claimed-admin account + a freshly-registered regular-user account, seeded
     into the registry active on the regular user (``active="admin"`` flips it, which
     the admin auto-default journey needs). Returns (seed_map, user_actor_id,
     admin_actor_id). The admin is `nest_instance`'s own claimed identity (so
     `am-i-admin` is true for it); the user is registered via the admin key.
 
+    ``second="user"`` seeds a second fresh regular user in the admin's row
+    instead, for a journey that needs two identities but not an admin — one
+    that removes the second identity or keeps its store past teardown. The
+    admin is shared by the whole run, and a machine signed into it that the
+    harness cannot retire at teardown leaves its grant live and pins the
+    admin's fleet scope (`e2e-launch-isolation.md`, *A discarded driver
+    retires its machine*).
+
     No-modes retirement (ratified 2026-07-12): a nest is content-ready from
     first boot now (no storage-mode-unresolved launch row to route around),
     so this module's launches take the Online row straight into the
     authenticated main app with no preliminary commit needed."""
     admin_sk = nest_instance["admin"]["signing_key"]
-    admin_actor = bytes(admin_sk.verify_key).hex()
-    admin_secret = bytes(admin_sk).hex()
+    if second == "user":
+        other = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)
+        admin_actor = other["actor_id_hex"]
+        admin_secret = bytes(other["signing_key"]).hex()
+    else:
+        admin_actor = bytes(admin_sk.verify_key).hex()
+        admin_secret = bytes(admin_sk).hex()
 
     user = create_actor_and_register(
         nest_instance["port"], admin_signing_key=admin_sk
@@ -928,25 +942,31 @@ def test_linux_add_account_abandon_recovers_prior_identity_on_relaunch(
 
     Uses real-libsecret persistence (`use_real_keyring`) so the state survives a
     genuine process relaunch; the append mutation is driven through the switcher UI
-    (as a real user would, not an API shortcut). Account #1 is the nest's own claimed ADMIN, so
-    `admin-tab` presence is a clean "routed to the active #1" discriminator: if
-    routing followed the abandoned #2 (a regular user), the authenticated shell
-    would have NO admin-tab.
+    (as a real user would, not an API shortcut). The live session's
+    ``session.actor_id`` is the "routed to the active #1" discriminator: if
+    routing followed the abandoned #2, it would name #2.
+
+    Account #1 is a dedicated identity, never the run's shared admin: this
+    test owns its keyring store, so the teardown cannot retire the machine,
+    and a shared actor signed in on it would keep a live grant that pins the
+    account's fleet scope for the rest of the run (`e2e-launch-isolation.md`,
+    *A discarded driver retires its machine*).
     """
     store = real_keyring_store
 
-    # (0) Account #1 = the nest's own claimed ADMIN (so `am-i-admin` → admin-tab).
-    # A regular SECOND identity is registered to import-then-ABANDON (matches web's
-    # abandon test, which registers its second identity too).
+    # (0) Account #1 and a SECOND identity, both registered fresh. The second
+    # is the one to import-then-ABANDON (matches web's abandon test, which
+    # registers its second identity too).
     admin_sk = nest_instance["admin"]["signing_key"]
-    admin_actor = bytes(admin_sk.verify_key).hex()
-    admin_secret = bytes(admin_sk).hex()
+    first = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)
+    first_actor = first["actor_id_hex"]
+    first_secret = bytes(first["signing_key"]).hex()
     second = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)
     second_secret = bytes(second["signing_key"]).hex()
 
     # Seed #1 in the registry shape (a first-run install's shape: one account,
-    # active on the admin).
-    store.inject_identity(secret_hex=admin_secret, node_url=nest_instance["url"])
+    # active on #1).
+    store.inject_identity(secret_hex=first_secret, node_url=nest_instance["url"])
     second_actor = bytes(second["signing_key"].verify_key).hex()
 
     config = _real_keyring_config(
@@ -955,14 +975,9 @@ def test_linux_add_account_abandon_recovers_prior_identity_on_relaunch(
     driver = create_driver("linux")
     driver.launch(config)
     try:
-        # (1) LAUNCH #1: authenticate as the admin over the seeded registry.
-        # admin-tab confirms the active identity is the admin.
-        driver.wait_for_state(
-            lambda s: bool(s.get("session", {}).get("authenticated")), timeout=30
-        )
-        driver.wait_for(ADMIN_TAB, timeout=45)
-        assert driver.is_visible(ADMIN_TAB), (
-            "launch #1 must authenticate as the admin identity (admin-tab present)"
+        # (1) LAUNCH #1: a live session as #1 over the seeded registry.
+        await_session_actor(
+            driver, first_actor, budget_s=APP_RELAUNCH_S, what="launch #1 over the seeded registry"
         )
         assert store.read_field(INDEX_ACCOUNT) is not None, (
             "launch #1 must have kept the seeded fauna/index"
@@ -985,7 +1000,7 @@ def test_linux_add_account_abandon_recovers_prior_identity_on_relaunch(
 
         # An append-mode confirm writes NOTHING: no per-actor slot for #2, no
         # single-slot residue, and the registry is unchanged (one account, still
-        # active on the admin — no `add_account` until LoggedIn).
+        # active on #1 — no `add_account` until LoggedIn).
         assert store.read_field(f"fauna/{second_actor}/secret") is None, (
             "an append-mode confirm must not register the imported #2"
         )
@@ -993,7 +1008,7 @@ def test_linux_add_account_abandon_recovers_prior_identity_on_relaunch(
             "nothing on linux writes the pre-registry single slot any more"
         )
         idx = json.loads(store.read_field(INDEX_ACCOUNT))
-        assert len(idx["accounts"]) == 1 and idx["active"] == admin_actor, (
+        assert len(idx["accounts"]) == 1 and idx["active"] == first_actor, (
             "abandoning before Continue must NOT append to the registry"
         )
 
@@ -1010,22 +1025,26 @@ def test_linux_add_account_abandon_recovers_prior_identity_on_relaunch(
         )
         driver.launch(config)
 
-        # (4) Launch routing reads the registry's active account — the admin —
-        # so the relaunch authenticates as the admin, NOT the abandoned #2:
-        driver.wait_for_state(
-            lambda s: bool(s.get("session", {}).get("authenticated")), timeout=30
-        )
-        driver.wait_for(ADMIN_TAB, timeout=45)
-        assert driver.is_visible(ADMIN_TAB), (
-            "the relaunch must route to the ACTIVE admin (admin-tab), not the "
-            "abandoned #2 — the append wrote nothing the routing could read"
+        # (4) Launch routing reads the registry's active account — #1 — so
+        # the relaunch authenticates as #1, NOT the abandoned #2:
+        # `actor_id` is published a beat after `authenticated`: wait for both,
+        # then compare, so a misroute fails at once instead of timing out.
+        routed = driver.wait_for_state(
+            lambda s: bool(s.get("session", {}).get("authenticated"))
+            and bool(s.get("session", {}).get("actor_id")),
+            timeout=APP_RELAUNCH_S,
+        )["session"]["actor_id"]
+        assert routed == first_actor, (
+            "the relaunch must route to the ACTIVE #1, not the abandoned #2 — the "
+            f"append wrote nothing the routing could read; routed to {routed!r} "
+            f"(#1 {first_actor!r}, #2 {second_actor!r})"
         )
         assert store.read_field(f"fauna/{second_actor}/secret") is None, (
             "the abandoned #2 must not have been materialized by the relaunch"
         )
         idx2 = json.loads(store.read_field(INDEX_ACCOUNT))
-        assert len(idx2["accounts"]) == 1 and idx2["active"] == admin_actor, (
-            "an abandoned append leaves the registry unchanged (one account, admin active)"
+        assert len(idx2["accounts"]) == 1 and idx2["active"] == first_actor, (
+            "an abandoned append leaves the registry unchanged (one account, #1 active)"
         )
     finally:
         driver.teardown()
@@ -1304,11 +1323,32 @@ def test_linux_removing_an_identity_deletes_its_data_and_leaves_the_others(
     `test_linux_remove_account_shrinks_switcher_live` proves the row and the
     registry entry go; neither says anything about the account's on-device
     state — the half a user cannot see and cannot get back. Both identities
-    first run a real session each (the admin's through a switch), so each owns
-    a populated scope; the removal must then leave no admin scope under ANY
-    base the erase sweeps (`common.scope_store.XdgScopeStore`) while the user's
-    `mls_state.db` and secret are still there. Every wait is on state."""
-    seed, user_actor, admin_actor = _seed_two_accounts(nest_instance)
+    first run a real session each (the second's through a switch), so each owns
+    a populated scope; the removal must then leave no scope of the removed
+    identity under ANY base the erase sweeps (`common.scope_store.XdgScopeStore`)
+    while the user's `mls_state.db` and secret are still there. Every wait is on
+    state.
+
+    The removal also retires this machine from the removed identity, as a
+    sign-out does (§ Erasure follows scope → *Removing an account retires this
+    machine from it, as a sign-out does*): the removed identity's named row
+    stays on its nest with its grant cleared. Until that ruling the removal was
+    local only, and this test measured the gap — the row kept a live grant for
+    the rest of the run. The roster read sits behind causal barriers
+    (convention 14): the removed identity's own enrollment latch before the
+    removal, the cleared roster within a named budget after it.
+
+    Both identities are dedicated, never the run's shared admin: the roster
+    must be exact (``helpers.enrollment``), and a removal whose nest half were
+    deferred would leave a grant no teardown could find to retire
+    (`e2e-launch-isolation.md`, *A discarded driver retires its machine*)."""
+    seed, user_actor, other_actor = _seed_two_accounts(nest_instance, second="user")
+    # The removed identity as the roster helpers address it: its id and its
+    # signing key, read back out of the seed that carries its secret.
+    other = {
+        "actor_id_hex": other_actor,
+        "signing_key": SigningKey(bytes.fromhex(seed[f"fauna/{other_actor}/secret"])),
+    }
 
     driver = create_driver("linux")
     driver.launch({
@@ -1323,14 +1363,22 @@ def test_linux_removing_an_identity_deletes_its_data_and_leaves_the_others(
         user_db = store.scope_dirs(user_actor)[0] / "mls_state.db"
         _wait_for_path(user_db, "the user's own MLS state")
 
-        # Give the admin a real session of its own, so it has data to lose.
+        # Give the other identity a real session of its own, so it has data to lose.
         _wait_switcher_count(driver, 2, timeout=30)
         driver.click(SWITCHER_ITEM, index=1)
-        _await_working_session(driver, admin_actor, "the switch to the admin")
-        admin_dirs = store.scope_dirs(admin_actor)
-        _wait_for_path(admin_dirs[0] / "mls_state.db", "the admin's own MLS state")
+        _await_working_session(driver, other_actor, "the switch to the other identity")
+        other_dirs = store.scope_dirs(other_actor)
+        _wait_for_path(other_dirs[0] / "mls_state.db", "the other identity's own MLS state")
+        # This machine is enrolled on it now: its named row carries a grant.
+        url = nest_instance["url"]
+        _writer, other_row, _ = enrollment.await_enrollment(
+            SimpleNamespace(driver=driver), url, other
+        )
+        assert enrollment.principals(url, other).get(other_row), (
+            f"the precondition: the latched row {other_row} carries this machine's grant"
+        )
 
-        # Back to the user: the admin row is now the non-active one, the only
+        # Back to the user: the other row is now the non-active one, the only
         # row the switcher offers a remove button on.
         _wait_switcher_count(driver, 2, timeout=30)
         driver.click(SWITCHER_ITEM, index=0)
@@ -1340,27 +1388,32 @@ def test_linux_removing_an_identity_deletes_its_data_and_leaves_the_others(
         driver.click(REMOVE_BUTTON)
         index = _wait_registry_index(driver, 1, timeout=30)
         assert [a["actor_id"] for a in index["accounts"]] == [user_actor], (
-            f"only the removed admin may leave the registry; got {index!r}"
+            f"only the removed identity may leave the registry; got {index!r}"
         )
 
         wait_until(
-            lambda: not any(d.exists() for d in admin_dirs),
+            lambda: not any(d.exists() for d in other_dirs),
             RPC_ROUNDTRIP_S,
             diagnose=lambda: (
                 "the removed identity's scope survived under: "
-                f"{[str(d) for d in admin_dirs if d.exists()]}; error-message: "
+                f"{[str(d) for d in other_dirs if d.exists()]}; error-message: "
                 f"{driver.get_text('error-message') if driver.is_visible('error-message') else ''!r}"
             ),
         )
         assert user_db.exists(), (
-            "removing the admin must leave the remaining identity's data "
+            "removing the other identity must leave the remaining identity's data "
             f"untouched; {user_db} is gone"
         )
-        assert _read_store_slot(driver, f"fauna/{admin_actor}/secret") is None, (
+        assert _read_store_slot(driver, f"fauna/{other_actor}/secret") is None, (
             "the removed identity's secret must be gone from this device"
         )
         assert _read_store_slot(driver, f"fauna/{user_actor}/secret"), (
             "the remaining identity's secret must survive the removal"
+        )
+        # The nest half: the named row stays, its grant cleared — as after a
+        # sign-out (the barrier's diagnosis names every other reading).
+        enrollment.await_grant_cleared(
+            url, other, other_row, "after removing the identity through the switcher"
         )
     finally:
         driver.teardown()

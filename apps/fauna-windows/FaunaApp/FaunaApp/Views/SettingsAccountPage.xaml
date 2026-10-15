@@ -444,6 +444,34 @@
                                 Click="IdentityStolenButton_Click"
                                 Content="{loc:Localize Key=settings/recovery_kit/stolen}" />
                     </StackPanel>
+
+                    <!-- The let-go of a dead generation, beside the four actions
+                         (settings.md § Recovery kit, the fifth act;
+                         account-data-taxonomy.md clause (3)(j)): the line, its
+                         type-to-confirm field and its button — all three ONLY while
+                         the account runtime's dead read answers non-empty, the veto's
+                         optional_elements shape (FlaUI does not count a Collapsed
+                         element). The line is the shared projection's copy, with
+                         AutomationId ONLY, no static Name (a get_text target with both
+                         returns the Name). The token is the shared LET_GO_CONFIRM_WORD,
+                         NEVER localized; the button arms on it alone and the handler
+                         re-checks it, because the data cannot be brought back. -->
+                    <StackPanel x:Name="LetGoPanel" Visibility="Collapsed" Spacing="8">
+                        <TextBlock x:Name="LetGoStatusText"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitUnreadableStatus}"
+                                   TextWrapping="Wrap" />
+                        <TextBox x:Name="LetGoConfirmBox"
+                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitLetGoConfirmField}"
+                                 TextChanged="LetGoConfirmBox_TextChanged"
+                                 PlaceholderText="{loc:Localize Key=settings/recovery_kit/let_go_confirm_placeholder}" />
+                        <Button x:Name="RecoveryLetGoButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitLetGoButton}"
+                                IsEnabled="False"
+                                Background="#C42B1C"
+                                Foreground="White"
+                                Click="RecoveryLetGoButton_Click"
+                                Content="{loc:Localize Key=settings/recovery_kit/let_go}" />
+                    </StackPanel>
                 </StackPanel>
 
                 <!-- Separator -->

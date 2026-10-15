@@ -1777,9 +1777,16 @@ async fn handle_update(
                 );
                 return Ok(StatusCode::ACCEPTED);
             }
+            // The version this edit supersedes, withdrawn after the new one is
+            // stored (below) — ingested notes only, on `handle_delete`'s rule: a
+            // local account's own post is user data no remote verb destroys.
+            let mut superseded: Option<String> = None;
             if let Some(old_post_id) = old_mapping {
                 let new_hex = hex::encode(new_content_id);
                 if old_post_id != new_hex {
+                    if !db_helpers::is_local_account_post(&conn, &ap_url)? {
+                        superseded = Some(old_post_id.clone());
+                    }
                     db_helpers::tombstone_post_map(&conn, &old_post_id)?;
                     db_helpers::insert_post_map(
                         &conn,
@@ -1814,6 +1821,12 @@ async fn handle_update(
                 Some("activitypub"),
             )
             .await?;
+            // Tombstoning the old map row alone left the superseded version in
+            // the feed beside the edit — serving never reads
+            // `ap_post_map.tombstoned` (`handle_delete` has the same note).
+            if let Some(old_post_id) = superseded {
+                withdraw_translated_post(state, &old_post_id, &ap_url, "Update").await;
+            }
             // Only a first sighting moves the parent's counter: an edit re-hashes
             // the reply, and a second count for the same reply would inflate it.
             if unseen {
@@ -4776,6 +4789,61 @@ mod tests {
         assert!(
             !state.db.post_exists(&digest).await.unwrap(),
             "a remote Delete must withdraw the translated post, not orphan it in the feed"
+        );
+    }
+
+    /// An inbound `Update{Note}` replaces the ingested post: the edited version
+    /// is stored and the version it supersedes is withdrawn, the same teardown
+    /// as a remote `Delete`. Tombstoning only the map row left both versions in
+    /// the feed, since serving never reads `ap_post_map.tombstoned`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_inbound_update_withdraws_the_superseded_version() {
+        let state = state_with_user().await;
+        seed_follow_of(&state, "https://remote.example/users/mallory").await;
+        let ap_url = "https://remote.example/notes/s7";
+        let public = json!(["https://www.w3.org/ns/activitystreams#Public"]);
+        handle_create(
+            &state,
+            &create_note_activity(ap_url, "the first version", public.clone(), json!([])),
+            None,
+        )
+        .await
+        .unwrap();
+        let mapped = |state: Arc<AppState>| async move {
+            let conn = state.db.conn().await;
+            let hex = db_helpers::get_post_id_for_ap_url(&conn, ap_url)
+                .unwrap()
+                .expect("the Note is mapped");
+            fauna_core::hex32::decode(&hex).unwrap()
+        };
+        let original = mapped(state.clone()).await;
+
+        let code = handle_update(
+            &state,
+            &update_note_activity(
+                "https://remote.example/users/mallory",
+                ap_url,
+                "https://remote.example/users/mallory",
+                public,
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, StatusCode::ACCEPTED);
+
+        let edited = mapped(state.clone()).await;
+        assert_ne!(
+            edited, original,
+            "the edit stores a new content-addressed post"
+        );
+        assert!(
+            state.db.post_exists(&edited).await.unwrap(),
+            "the edit is readable"
+        );
+        assert!(
+            !state.db.post_exists(&original).await.unwrap(),
+            "the superseded version must be withdrawn, not left beside the edit"
         );
     }
 

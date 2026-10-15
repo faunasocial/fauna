@@ -59,6 +59,13 @@ pub struct EmailState {
     /// when idle (empty HashMap).
     pub tlsrpt_aggregator:
         std::sync::Arc<std::sync::Mutex<fauna_mail::outbound::tlsrpt::TlsrptAggregator>>,
+    /// Outbound DMARC aggregate-report buckets (RFC 7489 §7.2). The
+    /// `report_dmarc_observation` handler counts each inbound message the Go
+    /// MTA verified, and `spawn_dmarc_daily_dispatch` drains it once a UTC day
+    /// (`dmarc-reporting.md` § Outbound aggregate-report sender). Bounded by
+    /// the aggregator's own domain and row caps.
+    pub dmarc_aggregator:
+        std::sync::Arc<std::sync::Mutex<fauna_mail::outbound::dmarc::DmarcAggregator>>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -68,6 +75,9 @@ impl Default for EmailState {
             inbound_deliver_key: None,
             tlsrpt_aggregator: std::sync::Arc::new(std::sync::Mutex::new(
                 fauna_mail::outbound::tlsrpt::TlsrptAggregator::default(),
+            )),
+            dmarc_aggregator: std::sync::Arc::new(std::sync::Mutex::new(
+                fauna_mail::outbound::dmarc::DmarcAggregator::default(),
             )),
         }
     }
@@ -378,6 +388,11 @@ pub struct NostrState {
     /// `try_send` and ignore the result: a full channel means a wake is
     /// already pending, a closed one means no worker is running.
     pub bunker_wake_tx: tokio::sync::mpsc::Sender<()>,
+    /// Best-effort wake nudge to the sync worker's inbound-subscription
+    /// refresh — one pass of its 60 s follow sweep, now. Sent today only by
+    /// the `test-hooks` poll-now route (`nostr::inbound_test_hook`). Same
+    /// `try_send`-and-ignore contract as `bunker_wake_tx`.
+    pub inbound_wake_tx: tokio::sync::mpsc::Sender<()>,
     /// Per-recipient rate limiter for the unauthenticated gift-wrap (kind 1059)
     /// inbox (slice B). `None` disables the limit (test states that never
     /// exercise the inbox); production always sets it.
@@ -410,10 +425,12 @@ impl Default for NostrState {
         let (relay_tx, _) = tokio::sync::broadcast::channel(256);
         let (sync_tx, _) = tokio::sync::mpsc::channel(256);
         let (bunker_wake_tx, _) = tokio::sync::mpsc::channel(1);
+        let (inbound_wake_tx, _) = tokio::sync::mpsc::channel(1);
         Self {
             relay_tx,
             sync_tx,
             bunker_wake_tx,
+            inbound_wake_tx,
             gift_wrap_limiter: Some(Arc::new(
                 crate::nostr::relay_endpoint::new_gift_wrap_limiter(),
             )),
@@ -689,6 +706,7 @@ impl crate::routes::AppState {
             oauth_as: std::sync::Arc::new(crate::oauth_as_state::OAuthAsRuntime::production(
                 fauna_core::data::Timestamp::now_secs_or_zero(),
             )),
+            atproto_service_auth: std::sync::Arc::new(crate::atproto_oracle::new_requests()),
             // No data directory: a test that installs a plugin overrides this
             // with a runner over its own tempdir.
             plugins: std::sync::Arc::new(crate::plugin_runner::PluginRunner::new(None)),
@@ -727,6 +745,10 @@ impl crate::routes::AppState {
             web_app_origin: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
                 fauna_protocol::web_app_origin::WebAppOrigin::Bundled,
             )),
+            // No `FAUNA_IMAGE_TAG` in tests ⇒ the Stable seed.
+            update_channel: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(Some(
+                fauna_provisioning::cloud_init::UpdateChannel::Stable,
+            ))),
             identity_domain: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
             acme_dir,
             backup_service: None,
@@ -848,6 +870,12 @@ impl crate::routes::AppState {
                 ),
             ),
             invite_verify_rate_limit_shed: std::sync::Arc::new(fauna_conn_limit::ShedCounter::new()),
+            paywall_door_rate_limit: std::sync::Arc::new(
+                crate::bridge_rate_limit::Limiter::with_config(
+                    crate::anonymous_rate_limit::paywall_door_config(),
+                ),
+            ),
+            paywall_door_rate_limit_shed: std::sync::Arc::new(fauna_conn_limit::ShedCounter::new()),
             register_rate_limit: std::sync::Arc::new(
                 crate::bridge_rate_limit::Limiter::with_config(
                     crate::anonymous_rate_limit::register_config(),
@@ -905,15 +933,28 @@ impl crate::routes::AppState {
             #[cfg(feature = "test-hooks")]
             outbound_clock_override: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
             #[cfg(feature = "test-hooks")]
+            mail_health_state_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(feature = "test-hooks")]
             rescore_worklist_serves: std::sync::Arc::new(Default::default()),
             #[cfg(feature = "test-hooks")]
             post_fanout_initiations: std::sync::Arc::new(Default::default()),
             #[cfg(feature = "test-hooks")]
+            account_lock_refusals: std::sync::Arc::new(Default::default()),
+            #[cfg(feature = "test-hooks")]
             epoch_sealing_test_override: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 false,
             )),
+            custody_hosting_brakes: std::sync::Arc::default(),
             #[cfg(feature = "test-hooks")]
             custody_hosting_periodic_held: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
+            #[cfg(feature = "test-hooks")]
+            custody_hosting_clock_offset_secs: std::sync::Arc::new(
+                std::sync::atomic::AtomicI64::new(0),
+            ),
+            #[cfg(feature = "test-hooks")]
+            custody_hosting_meter_fault: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 false,
             )),
             mta_sts_fetcher: std::sync::Arc::new(fauna_mail::outbound::mta_sts::NullMtaStsFetcher),
@@ -949,11 +990,21 @@ impl crate::routes::AppState {
                 std::collections::HashSet::new(),
             )),
             #[cfg(feature = "test-hooks")]
+            capabilities_withheld: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
+            #[cfg(feature = "test-hooks")]
+            tls_cert_fetch_withheld: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
+            #[cfg(feature = "test-hooks")]
             channel_send_refusal: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
             #[cfg(feature = "test-hooks")]
             rpc_hold: std::sync::Arc::new(crate::rpc_hold_test_hook::RpcHoldRegistry::default()),
+            #[cfg(feature = "test-hooks")]
+            region_status_registry_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 }

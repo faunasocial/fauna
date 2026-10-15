@@ -42,13 +42,13 @@ Stamped 2026-09-26 at 7cd27fc591.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+d2b9791b standalone |
-| linux | ⚠ partial | 0.1.2-dev+9d23e44e.dirty standalone |
+| web | ✅ full | 0.1.2-dev+d2b9791b standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | 0.1.2-dev+6d8dc256.dirty standalone |
 | macos | ⚠ partial | 0.1.2-dev+5893bba8 standalone |
 | ios | ⚠ partial | 0.1.2-dev+5893bba8 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+9d23e44e.dirty standalone |
+| tui | ⚠ partial | 0.1.3-dev+680a14c2.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -59,7 +59,7 @@ Stamped 2026-09-26 at 7cd27fc591.
 | 2 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_displayed_settings_error_is_captured` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_displayed_banner_reaches_ring` | web (linux): passed, linux (linux): skipped, windows (windows): skipped, macos (macos): failed, ios (macos): failed, tui (linux): skipped |
 | 3 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_a_copied_notice_reaches_the_ring_at_info` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_what_the_app_printed_or_swallowed_reaches_the_ring` | web (linux): skipped, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_what_the_app_printed_or_swallowed_reaches_the_ring` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_message_text_never_reaches_the_log` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 6 | app | (none) | — |
 | 6 | app | absent by design on web | — |

@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// Rich compose dialog for feed posts (ui.yaml `feed-compose-dialog`). Shared
@@ -70,3 +73,4 @@ public struct FeedComposeDialog: View {
         #endif
     }
 }
+#endif // !FAUNA_KIDS

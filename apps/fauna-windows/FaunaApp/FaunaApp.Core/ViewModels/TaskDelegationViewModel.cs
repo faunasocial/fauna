@@ -73,12 +73,49 @@ public partial class TaskDelegationViewModel : ViewModelBase
         }
     }
 
+    /// <summary>Start re-reading the rows on the shared store-change notice —
+    /// call from the page's <c>Page_Loaded</c>, pair with
+    /// <see cref="ViewModelBase.CleanupStoreChange"/> on navigate-away.</summary>
+    public void WatchStore() => WatchStoreChange(_nest, StoreResyncAsync);
+
+    // Count of pin writes in flight: a store-change re-read waits them out (the
+    // write's own reload paints the authoritative answer).
+    private int _pinsInFlight;
+
+    /// <summary>The store-change re-read (<c>account-runtime.md</c> § A runtime's
+    /// own pump is a source of the notice too, part 4): the assignment another
+    /// device pinned shows on the OPEN page with no re-visit. Skipped while a pin
+    /// write is in flight; leaves <see cref="ViewModelBase.ErrorMessage"/> alone
+    /// and keeps the painted rows when the read fails; answers <c>false</c>
+    /// (paints nothing) when the rows are what shows.</summary>
+    internal async Task<bool> StoreResyncAsync()
+    {
+        if (_pinsInFlight > 0) return false;
+        var labels = await DeviceLabelsAsync();
+        // A roster read that failed answers empty (DeviceLabelsAsync's degrade):
+        // keep the names already painted rather than fall back to short hex.
+        if (labels.Count == 0) labels = Labels;
+        var rows = await _nest.TaskDelegationListAsync(_deviceId);
+        if (_pinsInFlight > 0) return false;
+        var fresh = rows.Select(r => TaskDelegationRowVm.From(r, labels)).ToList();
+        if (fresh.Count == Rows.Count && fresh.Zip(Rows).All(p => p.First.SameAs(p.Second)))
+        {
+            Labels = labels;
+            return false;
+        }
+        Labels = labels;
+        Rows.Clear();
+        foreach (var row in fresh) Rows.Add(row);
+        return true;
+    }
+
     /// <summary>Persist a pin change for <paramref name="taskKind"/>, then reload
     /// so the runner column + the picker reflect authoritative state (a CAS
     /// read-modify-write — a failure changed nothing).</summary>
     internal async Task SetAssignmentAsync(string taskKind, FfiPinOption option)
     {
         ErrorMessage = null;
+        _pinsInFlight++;
         try
         {
             await _nest.TaskDelegationSetAssignmentAsync(_deviceId, taskKind, option);
@@ -87,6 +124,10 @@ public partial class TaskDelegationViewModel : ViewModelBase
         catch (Exception ex)
         {
             ShowError(ex);
+        }
+        finally
+        {
+            _pinsInFlight--;
         }
     }
 
@@ -129,6 +170,15 @@ internal sealed class TaskDelegationRowVm
     public required string RunnerText { get; init; }
     public required FfiPinOption Assignment { get; init; }
     public required IReadOnlyList<FfiPinOption> PinOptions { get; init; }
+
+    /// <summary>Whether <paramref name="other"/> paints the same row — the
+    /// store-change re-read's "nothing changed" test.</summary>
+    internal bool SameAs(TaskDelegationRowVm other) =>
+        TaskKind == other.TaskKind
+        && Name == other.Name
+        && RunnerText == other.RunnerText
+        && Equals(Assignment, other.Assignment)
+        && PinOptions.SequenceEqual(other.PinOptions);
 
     internal static TaskDelegationRowVm From(FfiTaskDelegationRow row, Dictionary<string, string> labels) =>
         new()
@@ -182,24 +232,5 @@ internal sealed class TaskDelegationRowVm
     /// no normalization (reference_windows_flaui_select_exact_name) — so this
     /// must back <c>AutomationProperties.Name</c>, never the visible Content.</summary>
     internal static string OptionKey(FfiPinOption option) =>
-        option switch
-        {
-            FfiPinOption.Automatic => "automatic",
-            FfiPinOption.ThisDevice => "this-device",
-            FfiPinOption.Other other => ParticipantKeyHex(other.@who),
-            _ => string.Empty,
-        };
-
-    /// <summary>The stable cross-app hex key for a participant ref — the
-    /// <see cref="OptionKey"/> encoding, distinct from the display name (which
-    /// the shared <c>option_label</c>/<c>runner_label</c> functions resolve
-    /// internally from the same roster, via <see cref="ResolveRunnerText"/> /
-    /// <see cref="OptionLabel"/>).</summary>
-    private static string ParticipantKeyHex(FfiParticipantRef who) =>
-        who switch
-        {
-            FfiParticipantRef.Device device => device.@deviceId,
-            FfiParticipantRef.Nest nest => FaunaFfiMethods.HexFull(nest.@actorPubkey),
-            _ => string.Empty,
-        };
+        FaunaFfiMethods.TaskDelegationOptionKey(option);
 }

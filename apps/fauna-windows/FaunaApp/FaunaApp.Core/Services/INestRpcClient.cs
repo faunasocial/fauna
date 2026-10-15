@@ -62,6 +62,21 @@ internal interface INestRpcClient
     event Action? Reconnected;
 
     /// <summary>
+    /// Raised on the UI thread when the shared store-change watch reports that the
+    /// account store may have changed — this app's own pump applied another
+    /// device's row, or another process committed
+    /// (<c>account-runtime.md</c> § Multi-instance concurrency → <i>A runtime's own
+    /// pump is a source of the notice too</i>, part 4). A payload-free LEVEL, not an
+    /// event: the open store-backed surface re-runs its own load (via
+    /// <c>ViewModelBase.WatchStoreChange</c>), paints only what differs and never
+    /// discards an edit in progress. A gesture's own write never raises it.
+    /// Production raises it from the UniFFI face registered in
+    /// <see cref="NestRpcClient.StartAccountRuntimeAsync"/>; the test double raises
+    /// it via <c>RaiseStoreChanged()</c>.
+    /// </summary>
+    event Action? StoreChanged;
+
+    /// <summary>
     /// Raised on the UI thread for each inbound contact-request (knock) push
     /// (<c>fauna.knock</c>), carrying the decoded <see cref="FfiKnock"/>. Re-homes
     /// the Windows knock OS toast + the contacts roster refresh onto WS-RPC push —
@@ -116,6 +131,19 @@ internal interface INestRpcClient
     /// <c>RaiseAddressBookPushChanged(actorId, addressbookId)</c>.
     /// </summary>
     event Action<string, string>? AddressBookPushChanged;
+
+    /// <summary>
+    /// Raised on the UI thread when the shared classifier marks a push stale for the
+    /// spam training history (<c>StaleSurfacesForPushEvent(ev).mailSpam</c>) — an
+    /// undo or reset made on another device (<c>mail-spam.md</c> § Reset step 6,
+    /// § Undo step 4). Carries no payload: the subscriber re-hydrates its machine.
+    /// <c>MailSpamPanel</c> subscribes while it is loaded (and to
+    /// <see cref="Reconnected"/> with the same handler) and re-reads WITHOUT
+    /// disarming a reset confirm the user is looking at. Production raises it from the
+    /// push pump (<see cref="NestRpcClient.StartPushPump"/>); the test double raises it
+    /// via <c>RaiseMailSpamPushChanged()</c>.
+    /// </summary>
+    event Action? MailSpamPushChanged;
 
     /// <summary>
     /// Raised on the UI thread for each inbound <c>fauna.sync.changed</c> push (a
@@ -186,6 +214,17 @@ internal interface INestRpcClient
     /// <summary><c>create_calendar</c> — create a calendar named
     /// <paramref name="name"/>.</summary>
     Task CaldavCreateCalendarAsync(string name);
+
+    /// <summary><c>import_calendar_ics</c> — seal and store every VEVENT in
+    /// <paramref name="icsText"/> into calendar <paramref name="calendarIdHex"/>;
+    /// the shared parse/seal/PUT walk answers the imported and skipped counts
+    /// (events.md § Import / Export).</summary>
+    Task<FfiIcsImportResult> CaldavImportCalendarIcsAsync(string calendarIdHex, string icsText);
+
+    /// <summary><c>export_calendar_ics</c> — the whole calendar
+    /// <paramref name="calendarIdHex"/> as one <c>.ics</c> text, built by the shared
+    /// <c>CalDavClient::export_calendar_ics</c> (events.md § Import / Export).</summary>
+    Task<string> CaldavExportCalendarIcsAsync(string calendarIdHex);
 
     /// <summary><c>query_events</c> — the events in calendar
     /// <paramref name="calendarIdHex"/> (hex calendar id). Bodies are decrypted
@@ -263,13 +302,6 @@ internal interface INestRpcClient
     // `interactWithPost` helper in the same change; windows' member outlived it
     // only because that session had no Windows machine to compile the deletion on.)
 
-    /// <summary><c>fauna.posts.get</c> → the post's extracted body text, for a
-    /// moderation-queue <b>server-row</b> spam train on the sealed client-write path
-    /// (mirrors linux <c>train_moderation_flow</c>: <c>posts_get</c> →
-    /// <c>DecodePostFull().body</c>). <c>null</c> on a missing / bodiless / undecodable
-    /// post, so the caller degrades to the server-side <c>fauna.moderation.train</c>.</summary>
-    Task<string?> PostBodyTextAsync(string contentId);
-
     // ── fauna.account.* / fauna.quota.get ───────────────────────────────
 
     /// <summary><c>fauna.account.get</c> composed into the app's
@@ -292,6 +324,11 @@ internal interface INestRpcClient
     /// source, never a fold point (dynamic-features.md § Transparency &amp;
     /// auditability).</summary>
     Task<IReadOnlyList<FfiFeatureRow>> FeaturesRowsAsync();
+
+    /// <summary>The Status snapshot's node leg (<c>FfiStatusClient.Node</c> —
+    /// <c>fauna.nest.info</c>: the nest's domain and version). A pure read; one per
+    /// visit to the Status page (<c>ui/status.md</c> § State &amp; data shape).</summary>
+    Task<FfiNodeLeg> StatusNodeAsync();
 
     /// <summary>Ask this session's nest — the relay, <c>fauna.region.artifact.get</c>
     /// — for every policy on the device's declared region chain, and fold the
@@ -523,8 +560,17 @@ internal interface INestRpcClient
     /// <c>POST /api/v1/inbox/{actor}</c> twin, which only reached same-nest
     /// recipients). The WS-RPC successor of that twin
     /// (<c>federation.md</c> § Federation residue surface); mirrors linux
-    /// <c>client.send_knock</c> / apple <c>sendToInbox</c>.</summary>
-    Task SendKnockAsync(string actorId);
+    /// <c>client.send_knock</c> / apple <c>sendToInbox</c>.
+    ///
+    /// <para><paramref name="recipientNestUrl"/> is where the knock is delivered when
+    /// the recipient lives elsewhere: the profile page's route from the shared
+    /// <c>FaunaFfiMethods.KnockRecipientNestUrl</c> over the profile it already
+    /// fetched (<c>profile.md</c> § Where logic lives → <i>Request contact
+    /// routing</i>). <c>null</c> = this nest (the contacts page's find-user knock).
+    /// When the nest refuses a supervised sender it throws
+    /// <c>FfiException.GuardianApprovalRequired</c> — the typed refusal the ward's ask
+    /// is offered on.</para></summary>
+    Task SendKnockAsync(string actorId, string? recipientNestUrl = null);
 
     /// <summary><c>fauna.inbox.mode.get</c> — the calling actor's inbox-acceptance
     /// mode (<c>open</c> / <c>allow_knock</c> / <c>contacts_only</c> / <c>closed</c>).</summary>
@@ -620,12 +666,6 @@ internal interface INestRpcClient
     /// Empty when nothing was flagged (not an error).</summary>
     Task<IReadOnlyList<FfiObligationAction>> ModerationActionsAsync();
 
-    /// <summary><c>fauna.moderation.train</c> — submit a training correction for a
-    /// queue item. The queue is the caller's own flagged content, so the page only
-    /// ever submits the not-spam correction (<paramref name="verdict"/> <c>"ham"</c>,
-    /// matching linux/apple); it retrains the caller's Bayesian model.</summary>
-    Task ModerationTrainAsync(string contentId, string verdict);
-
     /// <summary><c>fauna.moderation.report_share.set</c> — set the caller's
     /// distributed report-sharing opt-in (report-sharing.md § Client wire +
     /// transparency surface; default off). Caller-scoped; <paramref name="share"/>
@@ -703,6 +743,25 @@ internal interface INestRpcClient
     /// Returns the value now persisted.</summary>
     Task<uint?> SpamThresholdOverrideSetAsync(uint? value);
 
+    /// <summary><c>fauna.bridges.get_forward_all_to</c> — the caller's per-account
+    /// "forward all incoming mail to" address, or <c>null</c> when forwarding is off
+    /// (mail-forwarding.md § Per-account "forward all").</summary>
+    Task<string?> ForwardAllToGetAsync();
+
+    /// <summary><c>fauna.bridges.set_forward_all_to</c> — set (or clear, with
+    /// <c>null</c>) the forward-all address, then re-read; returns the value the nest
+    /// now holds.</summary>
+    Task<string?> ForwardAllToSetAsync(string? address);
+
+    /// <summary><c>fauna.bridges.get_forward_per_hour</c> — the caller's hourly
+    /// forwarding limit and the admin ceiling it may not pass (mail-forwarding.md
+    /// § Per-account forward rate-limit).</summary>
+    Task<ForwardPerHour> ForwardPerHourGetAsync();
+
+    /// <summary><c>fauna.bridges.set_forward_per_hour</c> — set the hourly limit,
+    /// then re-read (value + ceiling).</summary>
+    Task<ForwardPerHour> ForwardPerHourSetAsync(uint value);
+
     // ── fauna.family.* (Family page — family-safety.md § App surface) ──
 
     /// <summary><c>fauna.family.status</c> — "what are my family relationships?":
@@ -766,6 +825,32 @@ internal interface INestRpcClient
     /// <summary><c>fauna.family.contact.add</c> — pre-approve a contact on the
     /// ward's behalf (guardian-side complement of contact-approval mode).</summary>
     Task FamilyContactAddAsync(byte[] supervisedActorId, byte[] peerActorId);
+
+    /// <summary><c>fauna.family.contact.request</c> — the supervised ward's ask,
+    /// offered only after a knock came back refused by the guardian gate
+    /// (family-safety.md § Child-initiated contact requests → <i>App
+    /// affordance</i>). On success it re-reads the ward's own asks through
+    /// <see cref="FamilyStatusAsync"/>, so what paints is what the NEST holds; a failed
+    /// re-read is not a failed ask (the guardian has been rung), so it degrades to
+    /// "keep what <c>WardAsksCache</c> holds" and the caller's just-asked flag carries
+    /// the render. Mirrors android <c>familyContactRequest</c> / tui
+    /// <c>contacts::ask_guardian</c>.</summary>
+    Task FamilyContactRequestAsync(string peerActorIdHex);
+
+    /// <summary><c>fauna.family.feed_source.request</c> — the ward's "ask your
+    /// guardian" beside a <c>feed_sources</c> refusal (family-safety.md §
+    /// Feed-source approvals). <paramref name="operation"/> is the wire spelling
+    /// (<c>FeedSourceOperationWire</c>); <paramref name="label"/> is display-only,
+    /// never authorizing. Same re-read-and-keep-on-failure shape as
+    /// <see cref="FamilyContactRequestAsync"/>.</summary>
+    Task FamilyFeedSourceRequestAsync(string bridgeId, string operation, string target, string label);
+
+    /// <summary>The guardian's un-deny of one denied bridge-DM peer (family-safety.md
+    /// § The bridge-DM gate → <i>The un-deny surface</i>) — the shared
+    /// <c>FfiFamilyClient.AllowBlockedPeer</c>, which owns the approving
+    /// <c>dm_hold</c> decide's wire shape. Takes the denied row <b>whole</b>, so no
+    /// caller can address a different peer than the row it read.</summary>
+    Task FamilyAllowBlockedPeerAsync(byte[] supervisedActorId, FfiFamilyBlockedPeer peer);
 
     /// <summary><c>fauna.family.graduate</c> — supervised → full account, in place
     /// (callable by the guardian or the admin).</summary>
@@ -897,8 +982,12 @@ internal interface INestRpcClient
     /// Returns the number of served sets the re-provisioned blob now carries. A
     /// <c>NoMsek</c> failure (the actor has no mail credential yet) surfaces like
     /// any other failed gesture on this page — the disable-with-hint is a tracked
-    /// open design question, not built here.</summary>
-    Task<uint> FoldersServeSetAsync(ConversationsSession session, string name, string? mlsGroupIdHex, bool enable);
+    /// open design question, not built here.
+    /// <paramref name="deviceIdHex"/> is the app's recording device
+    /// (<c>ISessionAccount.ResolveDeviceId()</c>): with it, an enable of an
+    /// unshared set re-seals the set's pre-serve files onto the served key
+    /// (<c>webdav-server.md</c> § Key model (c)); <c>null</c> builds no walk.</summary>
+    Task<uint> FoldersServeSetAsync(ConversationsSession session, string name, string? mlsGroupIdHex, bool enable, string? deviceIdHex = null);
 
     /// <summary>Paywall a website-enabled folder to one of the creator's own subscription tiers
     /// end-to-end (<c>FoldersAuthor::paywall_set</c> via
@@ -1035,6 +1124,16 @@ internal interface INestRpcClient
     /// adopted. Requires an already-bound seat, same as consent.</summary>
     Task OfflineShareDeclineAsync(FfiCeremonySeat seat, byte[] scopeId);
 
+    /// <summary>Start the peer-transfer plane for this session
+    /// (<c>FfiNestClient.StartSharePlane</c> over <c>AgentReplicaAccess(provisioner)</c> —
+    /// the desktops' arm; p2p.md § Cross-user shared-set transfer → <i>Implementation
+    /// status today</i>). <b>No ordering against</b> <c>StartAccountRuntimeAsync</c> /
+    /// <c>BuildConversationsSessionAsync</c>: shared Rust waits (bounded) for the account
+    /// store and the conversations session, so this is one call from wherever the
+    /// provisioner starts. See <see cref="SharePlaneModel"/>.</summary>
+    Task StartSharePlaneAsync(
+        FfiSyncAgentProvisioner provisioner, string spoolDir, FfiSharePlaneListener listener);
+
     /// <summary>List pending group-share invitations and already-landed group
     /// scopes (<c>FaunaFfiMethods.OfflineShareLoadGroupShares</c>) — the
     /// consent-card and landed-scope-row data source, read from the group
@@ -1089,15 +1188,14 @@ internal interface INestRpcClient
     // tier-definition display (docs/goal/behavior/admin.md § Users, § User actions).
     // Tier create/update is deferred (no ui.yaml IDs yet — approval-gated).
 
-    /// <summary><c>fauna.admin.stats</c> — nest-wide counters for the admin
-    /// dashboard (users / storage / inbox bytes / WS connections). Replaces the
-    /// deleted <c>GET /admin/api/stats</c> HTTP twin.</summary>
-    Task<FfiAdminStats> AdminStatsAsync();
-
-    /// <summary><c>fauna.admin.status</c> — the running nest version + any pending
-    /// self-update advisory. The admin dashboard's Version card reads it, replacing
-    /// the deleted <c>GET /api/v1/node-info</c> HTTP twin.</summary>
-    Task<FfiAdminStatus> AdminStatusAsync();
+    /// <summary>The admin dashboard's one card set — the shared
+    /// <c>AdminClient::dashboard_snapshot</c> (its five reads, each tolerated on
+    /// its own, folded by <c>fauna_client_admin::admin_dashboard_cards</c>;
+    /// admin.md § 1. Dashboard → <i>The card set</i>). A free FFI function (not
+    /// <c>FfiAdminClient</c>), same shape as <c>AdminRegionStatusAsync</c>. Never
+    /// fails as a whole once connected: a failed read drops its own cards and
+    /// rides <c>error</c>.</summary>
+    Task<FfiAdminDashboardSnapshot> AdminDashboardSnapshotAsync();
 
     /// <summary><c>fauna.admin.users.list</c> — paged user roster (<paramref name="offset"/>
     /// + optional <paramref name="limit"/>; page size 50 per admin.md).</summary>
@@ -1149,6 +1247,13 @@ internal interface INestRpcClient
     /// admin-settings in-place tier-cap editing; the name keys the row, caps are raw
     /// i64). A missing tier is <c>fauna.admin.not_found</c>.</summary>
     Task AdminTiersUpdateAsync(
+        string name, long maxInboxBytes, long maxStorageBytes, long maxDevices, long maxBlobSize, long maxFeeds);
+
+    /// <summary><c>fauna.admin.tiers.create</c> — define a new tier with the given caps
+    /// (the admin-settings add-a-tier form; the name is already trimmed, caps are raw
+    /// i64). An empty/duplicate name is <c>fauna.admin.conflict</c> — the nest's
+    /// call.</summary>
+    Task AdminTiersCreateAsync(
         string name, long maxInboxBytes, long maxStorageBytes, long maxDevices, long maxBlobSize, long maxFeeds);
 
     // ── fauna.admin.set_registration_mode / fauna.admin.users.create ─────
@@ -1227,6 +1332,21 @@ internal interface INestRpcClient
     /// <summary><c>fauna.admin.invite_requests.deny</c> — deny with an optional reason.</summary>
     Task AdminInviteRequestsDenyAsync(long id, string? reason);
 
+    /// <summary><c>fauna.admin.pending_actions.list</c> — every account's still-<c>pending</c>
+    /// admin action (the wire reply carries every status; the implementation narrows to
+    /// <c>isPending</c>), the read behind the Users hub's <c>admin-users-pending-section</c>
+    /// (admin.md § Pending admin actions).</summary>
+    Task<IReadOnlyList<FfiAdminPendingAction>> AdminPendingActionsListAsync();
+
+    /// <summary><c>fauna.pending_actions.approve</c> — add this admin's approval
+    /// (<c>admin-pending-action-approve-button</c>). The nest refuses self-approval and a row
+    /// no longer pending.</summary>
+    Task AdminPendingActionApproveAsync(long id);
+
+    /// <summary><c>fauna.pending_actions.cancel</c> from the admin console
+    /// (<c>admin-pending-action-cancel-button</c>) — one click, no confirm.</summary>
+    Task AdminPendingActionCancelAsync(long id);
+
     /// <summary><c>fauna.admin.services.list</c> — the sidecar-service enable flags
     /// (<c>bridge</c> / <c>pairing</c>) backing the <c>admin-services</c>
     /// toggles. The dns toggle is the deployment "Fauna controls DNS" master switch — NOT a
@@ -1272,6 +1392,18 @@ internal interface INestRpcClient
     /// name="region"/> null). Both retire the previous region's feature-policy
     /// document nest-side, so this is never a mere toggle.</summary>
     Task SetRegionAsync(string? region);
+
+    /// <summary><c>fauna.admin.web_app_origin.get</c>, folded through the shared
+    /// <c>fauna_client_admin::admin_web_app_origin_view</c> (admin.md § N Nest →
+    /// Web-app origin) — the one call <c>admin-nest-web-app-origin-section</c> needs
+    /// to paint every field. A free FFI function, same shape as
+    /// <see cref="AdminRegionStatusAsync"/>.</summary>
+    Task<FfiAdminWebAppOriginView> AdminWebAppOriginStatusAsync();
+
+    /// <summary><c>fauna.admin.web_app_origin.set</c> — commit
+    /// <paramref name="mode"/>; the reply is the same view the get folds, so the
+    /// section repaints from the set's own answer.</summary>
+    Task<FfiAdminWebAppOriginView> SetWebAppOriginAsync(FfiWebAppOrigin mode);
 
     /// <summary>The shared <c>fauna_client_admin::seed_rotation_confirm_view</c>
     /// fold (<c>admin-nest-seed-rotate-button</c>'s arm click,
@@ -1322,8 +1454,9 @@ internal interface INestRpcClient
 
     /// <summary>The co-admin deployment-seed custody self-heal
     /// (box-recovery.md § Mechanism, the co-admin bullet) over this session's
-    /// connection.</summary>
-    Task<FfiDeploymentSeedSelfHeal> SelfHealDeploymentSeedCustodyAsync();
+    /// connection — the warning it owes the admin as the shared
+    /// <c>LocalizedText</c>, or <c>null</c> when nothing is owed.</summary>
+    Task<uniffi.fauna_core.LocalizedText?> SelfHealDeploymentSeedCustodyAsync();
 
     /// <summary>One critical-alert sweep pass (critical-alerts.md § Mechanism →
     /// <i>Who runs the detector</i>) over this session's connection.</summary>
@@ -1675,9 +1808,33 @@ internal interface INestRpcClient
     /// (<see cref="AccountStateDir.SyncAgentStateDir"/>) the covered-folder mirror
     /// plane's population is anchored in; <c>null</c> is the declared absence
     /// (presence over the destination's list alone). The owner secret comes
-    /// from session crypto, never the page.</summary>
+    /// from session crypto, never the page. <paramref name="ownCustodian"/> is this
+    /// device's own custodian store read (device id + standing source regressions)
+    /// the shared pass folds into the row that assigns this device
+    /// (client-device-custodian.md § Implementation status today → *The fold*);
+    /// <c>null</c> = "no store was read", which leaves the row's record standing.</summary>
     Task<IReadOnlyList<FfiDestinationAuditRow>> BackupAuditRunPassAsync(
-        string statePath, string? syncStateDir);
+        string statePath, string? syncStateDir, FfiOwnCustodianStore? ownCustodian = null);
+
+    /// <summary><c>backup_recover_from_destination</c> — the confirm of
+    /// <c>backup-audit-recover-button</c> (backups.md § Audit-alert surface, the
+    /// fifth reason): the shared recovery from one <b>nest</b> destination into the
+    /// owner's own nest. Which sets run and how the result reads are the shared
+    /// driver's. <paramref name="deviceIdHex"/> is this device's sync id,
+    /// <paramref name="statePath"/> the same actor-scoped audit-state file
+    /// <see cref="BackupAuditRunPassAsync"/> reads (the run clears its notice). The
+    /// caller re-runs the audit pass afterwards; the owner secret comes from
+    /// session crypto.</summary>
+    Task<FfiRecoveryResult> BackupRecoverFromDestinationAsync(
+        string deviceIdHex, string destinationId, string statePath);
+
+    /// <summary>The same confirm on THIS DEVICE'S OWN custodian row
+    /// (client-device-custodian.md § Restore → *Recovery from this device's own
+    /// store*): the leg runs in the sync agent that owns the store, through
+    /// <c>RecoverCustodianStore</c>. The agent derives the key and its job grants it
+    /// to the nest first — the app grants nothing. The owner secret comes from
+    /// session crypto; the caller re-runs the audit pass afterwards.</summary>
+    Task<FfiRecoveryResult> RecoverOwnCustodianStoreAsync(IFfiSyncAgentProvisioner agent);
 
     /// <summary><c>backup_audit_observe</c> — feed the audit loop's freshness
     /// comparison an observation: the newest message-kind record this client has
@@ -1971,7 +2128,7 @@ internal interface INestRpcClient
     /// § Coordination primitive → <i>The <c>index</c> kind under the lease</i>:
     /// "a lease holder is a <b>device</b>, and a device id is app-owned state that
     /// the FFI <c>conversations_session</c> factory was never handed"). Supplied by
-    /// the caller from <c>ISessionAccount.DeviceId</c> — the same plumbing
+    /// the caller from <c>ISessionAccount.ResolveDeviceId()</c> — the same plumbing
     /// <see cref="TaskDelegationListAsync"/> and <c>BackupDestinationStatusAsync</c>
     /// already use. Omitted/null yields no seat: the builder still indexes
     /// everything, it just does not coordinate, and the Task-delegation row reads
@@ -2005,7 +2162,7 @@ internal interface INestRpcClient
     /// <para>The identity seed is read from this client's own <c>CryptoService</c> and
     /// consumed in-Rust (grant signing, <c>BackupKey</c> derivation); only the minted
     /// capability ever reaches the agent. The agent resolves every set's content keys from
-    /// the account's custody itself (on-demand-files.md § Shared sets on a capability host →
+    /// the account's custody itself (on-demand-files-shared-sets.md § Shared sets on a capability host →
     /// <i>One mechanism</i>), so nothing content-key-shaped is passed here.</para>
     /// </summary>
     Task<FfiSyncAgentProvisioner> BuildSyncAgentProvisionerAsync(
@@ -2486,7 +2643,7 @@ internal interface INestRpcClient
     // The Settings → Task delegation sub-page: per heavy-task-kind runner +
     // assignment picker, over the shared fauna_client_delegation::TaskDelegationView.
     // The secret comes from session crypto (never the page); deviceId (hex) is
-    // supplied by the caller — the same ISessionAccount.DeviceId plumbing as
+    // supplied by the caller — the same ISessionAccount.ResolveDeviceId() plumbing as
     // BackupDestinationStatusAsync above.
 
     /// <summary>
@@ -2544,6 +2701,16 @@ internal interface INestRpcClient
     Task<FfiMintedKit> RecoveryCreateKitAsync(string? heldKitInput);
 
     /// <summary>
+    /// The <c>fauna://recovery</c> URI a minted kit's QR <b>and</b> copy button carry
+    /// (<c>identity-succession.md</c> § The RecoveryKey, <i>Which encoding each
+    /// affordance carries</i>) — the shared <c>recovery_kit_display_uri</c> export fed
+    /// this client's identity seed, registry handle and nest URL. The on-screen
+    /// display stays the bare hex. Throws when the builder refuses; the caller falls
+    /// back to the bare kit.
+    /// </summary>
+    Task<string> RecoveryKitDisplayUriAsync(string kitSecretHex);
+
+    /// <summary>
     /// <c>recovery_request_seed_alone_replacement</c> —
     /// <c>recovery-kit-lost-button</c>. Opens the 30-day window rather than
     /// taking effect now, but still mints a secret that must be shown at once.
@@ -2564,6 +2731,26 @@ internal interface INestRpcClient
     /// is deliberately not a create. Returns the unix seconds the blob landed.
     /// </summary>
     Task<long> RecoveryResealEscrowWithHeldKitAsync(string heldKitInput);
+
+    /// <summary>
+    /// <c>recovery_dead_generations</c> — the account runtime's dead read, what
+    /// the section's let-go renders from (<c>settings.md</c> § Recovery kit, the
+    /// fifth act; <c>account-data-taxonomy.md</c> clause (3)(j)). The record's
+    /// <c>unreadableStatus</c> is the render gate: the shared projection's line,
+    /// null while nothing is dead. <b>Never throws on the Rust side</b> — no
+    /// runtime, or a failed read, answers the empty read.
+    /// </summary>
+    Task<FfiDeadGenerations> RecoveryDeadGenerationsAsync();
+
+    /// <summary>
+    /// <c>recovery_let_go</c> — <c>recovery-kit-let-go-button</c>: let go of
+    /// <paramref name="generationIds"/> (the last dead read's own ids), then
+    /// re-read. The runtime re-reads each generation dead before it retires
+    /// anything; one that no longer reads dead is kept and reported through
+    /// <c>kept</c>. The caller must have gated it behind
+    /// <c>recovery-kit-let-go-confirm-field</c> reading the shared confirm word.
+    /// </summary>
+    Task<FfiLetGoOutcome> RecoveryLetGoAsync(byte[][] generationIds);
 
     /// <summary>
     /// <c>succession_succeed_with_held_kit</c> — <c>identity-stolen-button</c>'s
@@ -2650,6 +2837,13 @@ internal interface INestRpcClient
     /// applied whether or not <c>Error</c> is set.</summary>
     Task<FfiCustodyActOutcome> CustodyRevokeAsync(byte[] grantId, byte[]? holder);
 
+    /// <summary><c>custody_escrow_holders</c> — lowercase-hex identities of the
+    /// nests holding this account's generation-key escrow, read from the hosted
+    /// account runtime: the Nests page's <c>participant-escrow-holder-badge</c>
+    /// source. <c>null</c> = unreadable this pass — the caller keeps the
+    /// previous set.</summary>
+    Task<IReadOnlyList<string>?> CustodyEscrowHoldersAsync();
+
     /// <summary><c>custody_drive</c> — one ceremony drive pass, fire-and-forget
     /// (deposits nothing to await; a receipt landed since the last visit is
     /// already in the next <see cref="CustodyFacetLoadAsync"/> read). Call on
@@ -2718,7 +2912,7 @@ internal interface INestRpcClient
     /// page's <c>device-this-mark-badge</c> marks (behavior/devices.md
     /// § This-device marker): the row this machine's enrollment latched on,
     /// else <paramref name="ownDeviceId"/> (the app's own
-    /// <c>ISessionAccount.DeviceId</c>), else <c>null</c>. The rule —
+    /// <c>ISessionAccount.ResolveDeviceId()</c>), else <c>null</c>. The rule —
     /// <i>enrolled wins; the own id is the fallback</i> — is shared Rust
     /// (<c>fauna_devices_machine::this_device_row</c>); nothing here decides it.
     /// A local slot read, never a network call.</summary>

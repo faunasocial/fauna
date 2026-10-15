@@ -5,11 +5,12 @@ Lifted out of ``test_crash_recovery_journeys.py`` (the kill-between-the-legs
 journey, 2026-09-20) when ``test_device_member_removal.py`` needed the same
 sibling seat, the same ``device_set_state`` reader and the same merge barrier
 — one home, never two copies (priority #2). Owner of the plane these observe:
-``docs/goal/architecture/account-data-taxonomy.md`` § The generation machinery
-→ *Fleet-scope reclamation*, clause (4).
+``docs/goal/architecture/fleet-scope-reclamation.md``
+§ *Fleet-scope reclamation*, clause (4).
 
 Every wait here is a deadline poll on plane STATE (convention 14): a poked pump
-pass where this process holds the pump, and a read of the effect either way.
+pass — the app's own where it holds the pump, its co-located sync agent's where
+the agent took it — and a read of the effect either way.
 """
 from __future__ import annotations
 
@@ -91,36 +92,99 @@ def require_device_set_reader(driver) -> None:
 
 
 def poked_pass(driver, *, what: str, budget_s: float = 90.0) -> None:
-    """One full account-pump pass, begun after this call and observed finished —
-    when this process is the pump HOLDER; otherwise a no-op.
+    """One full account-pump pass, begun after this call and observed finished,
+    by whichever co-located process holds this seat's pump.
 
     The pump's reconcile runs once per FULL pass, so every assertion about what
     it did wants a pass barrier rather than a settle-sleep (convention 14). The
     poke only spends the production cadence — it is not a user gesture, and
     nothing here drives a removal a second time.
 
-    ⚠ The holder is often the co-located sync agent rather than the app
-    (`helpers/waiting.py`'s role table), and a runtime that lost the role runs
-    no pass at all — so poking it and waiting would be waiting on something
-    nothing guarantees. Every caller wraps this in a poll on the EFFECT itself,
-    which is the barrier that holds either way (convergence reaches a
-    non-holder through the shared store), so the non-holder branch simply
-    returns and lets that poll do the work.
+    ⚠ On a desktop whose agent is up the settled holder is the co-located sync
+    agent, by rule — the app holds only until its agent mounts
+    (`helpers/waiting.py`'s role table) — and a runtime that lost the role runs
+    no pass at all. So the barrier follows the role: while the app holds, its
+    own poked pass (a wait the handover may cut short); once it does not, the
+    agent's — `ReconcileAccountRuntime`, the production nudge the app itself
+    sends on its yield, whose reply comes after the agent's `reconcile_now`
+    (`pipe_server.rs::handle_reconcile_account_runtime`). Without the agent leg a
+    seat whose pump moved mid-journey passed only on the agent's own 300 s
+    cadence, and `await_fleet_member` timed out (seen 2026-10-08 on tui). A
+    non-holder with no agent to reach (an app that publishes no election, a
+    windows tui seat, which runs no agent) returns, and the caller's poll on the
+    EFFECT — which every caller wraps this in — is the barrier.
     """
     from helpers.waiting import (
         account_pump_cycles,
         account_pump_role,
-        await_pump_cycle_after,
         poke_account_pump,
     )
 
-    if account_pump_role(driver) != (True, True):
-        return
-    cycles = account_pump_cycles(driver)
-    if cycles is None:
-        return
-    poke_account_pump(driver)
-    await_pump_cycle_after(driver, cycles[0], budget_s=budget_s, what=what)
+    role = account_pump_role(driver)
+    if role == (True, True):
+        cycles = account_pump_cycles(driver)
+        if cycles is None:
+            return
+        poke_account_pump(driver)
+        # The handover can land INSIDE the wait: the app held the role at the
+        # check above and its agent mounted a moment later, so no pass of the
+        # app's will ever begin (the counters freeze by design). Losing the role
+        # ends the wait and hands the barrier to the agent below. Seen
+        # 2026-10-09 on a tui sibling seat: role `(True, False)` with the
+        # counters frozen at the baseline.
+        wait_until(
+            lambda: (account_pump_cycles(driver) or (0, 0))[1] > cycles[0]
+            or account_pump_role(driver) != (True, True),
+            budget_s,
+            diagnose=lambda: (
+                f"no account-pump pass that began after {what} ever completed while "
+                f"this app kept the holder role (passes started at baseline: "
+                f"{cycles[0]}; now: {account_pump_cycles(driver)}; role: "
+                f"{account_pump_role(driver)}) — a held pump that stopped passing"
+            ),
+        )
+        role = account_pump_role(driver)
+    if role == (True, False):
+        poke_co_located_agent(driver)
+
+
+def poke_co_located_agent(driver) -> bool:
+    """Send this seat's own sync agent the account-pass nudge and wait for its
+    reply; ``False`` when the seat has no agent to reach.
+
+    The agent's socket is the driver's per-launch one (convention 10), so the
+    nudge reaches this seat's agent and no other. A non-holder agent's
+    `reconcile_now` is the re-election, so the nudge also settles a role the
+    app just yielded. An absent socket — no agent on this launch, or one not
+    listening yet — is the only quiet outcome; any other failure is the agent
+    misbehaving and raises.
+    """
+    socket_path = getattr(driver, "sync_agent_socket", None)
+    if socket_path:
+        from helpers import sync_agent_ipc_unix as unix_ipc
+
+        try:
+            unix_ipc.reconcile_account_runtime(socket_path, 1)
+        except (FileNotFoundError, ConnectionRefusedError):
+            return False
+        return True
+    pipe_path = getattr(driver, "sync_agent_pipe", None)
+    if pipe_path:
+        import os
+
+        from helpers import sync_agent_ipc as ipc
+
+        if not os.path.exists(pipe_path):
+            return False
+        payload = ipc.unwrap_ok(
+            ipc.send_request(pipe_path, ipc.encode_frame(ipc.reconcile_account_runtime_request(1)))
+        )
+        if payload != "Empty":
+            raise AssertionError(
+                f"ReconcileAccountRuntime expected 'Empty' payload, got {payload!r}"
+            )
+        return True
+    return False
 
 
 def await_fleet_member(remover, sibling, fleet_id_hex: str, *, budget_s: float) -> None:

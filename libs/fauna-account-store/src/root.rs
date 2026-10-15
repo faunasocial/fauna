@@ -15,7 +15,7 @@
 //!   decision ever binding the next one — `installers/macos.md`
 //!   § Identifier domain, record item 5. The container is now the
 //!   sandboxed File Provider extension's root ONLY — it is not a store
-//!   consumer — `on-demand-files.md` § Apple File Provider binding,
+//!   consumer — `on-demand-files-apple.md` § Apple File Provider binding,
 //!   *state unification*)
 //! * **linux (+ other unix)** — `$XDG_CONFIG_HOME/fauna/sync`
 //! * **web** — no filesystem: a per-origin store NAME,
@@ -63,9 +63,11 @@ pub const STORE_SUBDIR: &str = "account-store";
 pub struct StoreRoot(PathBuf);
 
 impl StoreRoot {
-    /// The production desktop root — [`platform_state_base`].
-    pub fn platform() -> Self {
-        Self(platform_state_base())
+    /// The production desktop root — [`platform_state_base`]. `Err` (with
+    /// [`NO_HOME_REFUSAL`]) when no absolute home exists; every surface fails
+    /// closed on it with a logged reason, never a panic.
+    pub fn platform() -> Result<Self> {
+        platform_state_base().map(Self)
     }
 
     /// An explicit root: sandboxed mobile shells passing their app
@@ -93,22 +95,33 @@ impl StoreRoot {
 ///
 /// **The result is always ABSOLUTE** — an agent under launchd/systemd can
 /// start with a cwd it cannot write, where a relative base panics the
-/// first path touch before there is any log to diagnose it from — so a
-/// missing/empty/relative home falls back to `/tmp` rather than a
-/// relative path (the shipped `SyncPaths` posture, kept identical here
-/// because `SyncPaths` now delegates to this function).
-pub fn platform_state_base() -> PathBuf {
-    production_base()
+/// first path touch before there is any log to diagnose it from.
+///
+/// **A missing/empty/relative home is REFUSED, never mapped to `/tmp`**
+/// (closing the 2026-07-20 fallback): `/tmp` is
+/// world-writable, so another local account could pre-create the fallback
+/// path and read, or plant a `config.toml` in, the victim's account store and
+/// sync state. The refusal is an `Err` (with [`NO_HOME_REFUSAL`]) on a unix
+/// target with no absolute home, for every caller to log and fail closed on —
+/// a process entry point exits, an app surface shows the error; never a
+/// panic. Windows reads `%LOCALAPPDATA%`, which the OS always supplies, and
+/// never refuses.
+pub fn platform_state_base() -> Result<PathBuf> {
+    production_base().ok_or_else(|| anyhow::anyhow!(NO_HOME_REFUSAL))
 }
 
+/// The reason [`platform_state_base`] refuses — one text, owned by
+/// `fauna-core`.
+pub use fauna_core::platform_ids::NO_HOME_REFUSAL;
+
 #[cfg(windows)]
-fn production_base() -> PathBuf {
+fn production_base() -> Option<PathBuf> {
     let local = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\ProgramData".into());
-    PathBuf::from(local).join("Fauna").join("sync")
+    Some(PathBuf::from(local).join("Fauna").join("sync"))
 }
 
 #[cfg(target_os = "macos")]
-fn production_base() -> PathBuf {
+fn production_base() -> Option<PathBuf> {
     // `dirs::home_dir()` (not `env::var("HOME")`) so an unset HOME falls
     // back to the passwd database.
     macos_user_domain_base(dirs::home_dir())
@@ -127,21 +140,25 @@ fn production_base() -> PathBuf {
 /// prompt-y. `~/Library/Application Support` carries no such gate (bisected
 /// out as a confound in the same record). The container stays the sandboxed
 /// File Provider extension's root, which is not a store consumer
-/// (`on-demand-files.md` § Apple File Provider binding, *state unification*).
+/// (`on-demand-files-apple.md` § Apple File Provider binding, *state unification*).
 ///
-/// Always absolute — see [`platform_state_base`]; the incident behind the
-/// rule is 2026-07-20's `.pkg` install failure, where an unset HOME
-/// yielded a RELATIVE base that crash-looped the LaunchAgent (cwd `/`,
-/// `fauna_log::init` panicking before any log existed to explain why).
+/// Always absolute, `None` without an absolute home — see
+/// [`platform_state_base`]; the incident behind the rule is 2026-07-20's
+/// `.pkg` install failure, where an unset HOME yielded a RELATIVE base that
+/// crash-looped the LaunchAgent (cwd `/`, `fauna_log::init` panicking before
+/// any log existed to explain why). The refusal is an error the entry point
+/// logs, not a `/tmp` fallback.
 #[cfg(target_os = "macos")]
-pub(crate) fn macos_user_domain_base(home: Option<PathBuf>) -> PathBuf {
-    fauna_core::platform_ids::apple_user_domain_home(home)
-        .join("Fauna")
-        .join("sync")
+pub(crate) fn macos_user_domain_base(home: Option<PathBuf>) -> Option<PathBuf> {
+    Some(
+        fauna_core::platform_ids::apple_user_domain_home(home)?
+            .join("Fauna")
+            .join("sync"),
+    )
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn production_base() -> PathBuf {
+fn production_base() -> Option<PathBuf> {
     unix_config_base(
         std::env::var_os("XDG_CONFIG_HOME"),
         std::env::var_os("HOME"),
@@ -152,15 +169,17 @@ fn production_base() -> PathBuf {
 /// process env): `$XDG_CONFIG_HOME/fauna/sync`, else
 /// `$HOME/.config/fauna/sync`. An empty value counts as unset per the
 /// basedir spec, and a relative value falls back too — always absolute,
-/// see [`platform_state_base`].
+/// `None` when neither yields an absolute root; see [`platform_state_base`].
 #[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn unix_config_base(
     xdg_config_home: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
-) -> PathBuf {
-    fauna_core::platform_ids::xdg_config_root(xdg_config_home, home)
-        .join("fauna")
-        .join("sync")
+) -> Option<PathBuf> {
+    Some(
+        fauna_core::platform_ids::xdg_config_root(xdg_config_home, home)?
+            .join("fauna")
+            .join("sync"),
+    )
 }
 
 #[cfg(test)]
@@ -186,20 +205,28 @@ mod tests {
         // `SyncDriver` (`apps/fauna-linux/src/sync.rs::sync_state_dir`) and
         // the sync agent resolve — one root per user per machine.
         assert_eq!(
-            unix_config_base(Some("/run/user/1000/xdg".into()), None),
+            unix_config_base(Some("/run/user/1000/xdg".into()), None).unwrap(),
             Path::new("/run/user/1000/xdg/fauna/sync")
         );
         assert_eq!(
-            unix_config_base(None, Some("/home/alice".into())),
+            unix_config_base(None, Some("/home/alice".into())).unwrap(),
             Path::new("/home/alice/.config/fauna/sync")
         );
         // Empty and relative values count as unset.
         assert_eq!(
-            unix_config_base(Some("".into()), Some("/home/alice".into())),
+            unix_config_base(Some("".into()), Some("/home/alice".into())).unwrap(),
             Path::new("/home/alice/.config/fauna/sync")
         );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn unix_base_refuses_a_missing_empty_or_relative_home_instead_of_tmp() {
+        // The old `/tmp/.config/fauna/sync` fallback is a
+        // world-writable base another local account can pre-create.
         for home in [None, Some("".into()), Some("rel".into())] {
-            assert!(unix_config_base(None, home).is_absolute());
+            assert_eq!(unix_config_base(None, home.clone()), None);
+            assert_eq!(unix_config_base(Some("rel".into()), home), None);
         }
     }
 
@@ -207,7 +234,7 @@ mod tests {
     #[test]
     fn macos_base_is_the_user_domain_sync_dir_and_always_absolute() {
         assert_eq!(
-            macos_user_domain_base(Some("/Users/alice".into())),
+            macos_user_domain_base(Some("/Users/alice".into())).unwrap(),
             Path::new("/Users/alice/Library/Application Support/Fauna/sync")
         );
         // The one place the base must NEVER resolve: the TCC-protected
@@ -215,16 +242,23 @@ mod tests {
         // and no user decision binds the next one — the 2026-08-25 record).
         assert!(
             !macos_user_domain_base(Some("/Users/alice".into()))
+                .unwrap()
                 .to_string_lossy()
                 .contains("Group Containers")
         );
+        // A missing/empty/relative home is refused — no `/tmp` base.
         for home in [None, Some("".into()), Some("rel".into())] {
-            assert!(macos_user_domain_base(home).is_absolute());
+            assert_eq!(macos_user_domain_base(home), None);
         }
     }
 
     #[test]
     fn platform_state_base_is_absolute() {
-        assert!(platform_state_base().is_absolute());
+        assert!(platform_state_base().unwrap().is_absolute());
+    }
+
+    #[test]
+    fn the_refusal_names_the_cause() {
+        assert!(NO_HOME_REFUSAL.contains("refusing"));
     }
 }

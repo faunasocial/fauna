@@ -91,6 +91,7 @@ use fauna_core::identity::{ActorId, ActorKeypair};
 use fauna_peer_share::admission::{GroupRosterState, SetMembership};
 
 use crate::account_runtime::AccountStoreHandle;
+use crate::peer_leg::PeerLegNestFacts;
 
 /// The page state the Folders surface paints from.
 #[derive(Default)]
@@ -297,16 +298,35 @@ pub fn spawn_record_persist(
 }
 
 /// What an app's ceremony transport factory hands back: the seam-typed
-/// transport plus the one fact only the concrete constructor can observe —
-/// where the endpoint actually bound. That address list is the compare code's
-/// **addressing half**, and the share plane's publish pump crosses it with
-/// this device's interface list.
+/// transport plus the two facts only the concrete constructor can observe —
+/// where the endpoint actually bound, and the relay it was actually bound
+/// with. The address list is the compare code's **addressing half**, and the
+/// share plane's publish pump crosses it with this device's interface list;
+/// the relay is what that pump advertises and what its dials compare a
+/// member's relay against.
 ///
 /// Mirrors [`crate::peer_leg::PeerLegBinding`] deliberately: same seam, same
 /// reason the transport trait itself carries no `bound_addrs`.
 pub struct CeremonyBinding {
     pub transport: Arc<dyn fauna_transport::PeerTransport>,
     pub bound_addrs: Vec<SocketAddr>,
+    /// The relay the endpoint was bound with — `None` when it was handed none
+    /// or could not use the one it was handed (a seat never advertises a
+    /// relay it does not hold).
+    pub relay_url: Option<String>,
+}
+
+/// What a bind door hands the factory — mirrors
+/// [`crate::peer_leg::PeerLegFactoryInputs`].
+pub struct CeremonyTransportInputs {
+    /// The actor secret — the endpoint's identity (PT-1b).
+    pub secret: [u8; 32],
+    /// The relay URL this device's nest advertises
+    /// (`NestInfoReply.iroh_relay_url`, live-or-cached own-nest facts read by
+    /// the binding door — never a peer advert), or `None` for a relay-less
+    /// seat. A seat bound without one stays without one for its life
+    /// (`p2p.md` § The relay → *The cross-user seat and the relay*, ruling 1).
+    pub relay_url: Option<String>,
 }
 
 /// Constructs the ceremony's **actor-keyed** transport (PT-1b — the NodeId is
@@ -317,20 +337,24 @@ pub struct CeremonyBinding {
 /// This callback is the app's whole remaining share of a bind door, and it is
 /// a callback rather than a call because this crate names no concrete
 /// transport substrate (module docs): the `fauna_iroh` assembly belongs on the
-/// app side of the seam. Every app passes a closure over
-/// `fauna_iroh::peer_leg_transport(secret, None)`; a test passes an in-memory
-/// transport. Same shape, and the same reason, as
+/// app side of the seam. Every app passes `fauna_iroh::ceremony_transport()`,
+/// a closure over `fauna_iroh::peer_leg_transport`; a test passes an
+/// in-memory transport. Same shape, and the same reason, as
 /// [`crate::peer_leg::PeerTransportFactory`].
 ///
-/// ⚠ The relay URL stays `None` in every production closure today — by ruling,
-/// until the nest's relay serves address discovery (`p2p.md` § The relay →
-/// *The cross-user seat and the relay*). A co-present pair is on the same
-/// network by construction and its dials never attach a relay (their
-/// candidates come from the spoken code alone), so the seat takes the relay
-/// for the share plane's dials only; whether an unreachable relay slows a
-/// direct dial is the measurement that build lands first.
+/// The seat takes its nest's relay when the door's nest facts carry one
+/// (`p2p.md` § The relay → *The cross-user seat and the relay*). It is there
+/// for the share plane's dials only: a co-present pair is on one network by
+/// construction and every ceremony dial composes its candidates from the
+/// spoken code alone, so `relay_available` is false on each of them and the
+/// relay hands the ceremony no dial path. An unreachable relay on the
+/// endpoint leaves such a direct dial as fast and as sure as a relay-less
+/// bind's — measured, `fauna_iroh`'s
+/// `an_unreachable_relay_leaves_a_direct_lan_dial_as_fast_and_sure`.
 pub type CeremonyTransportFactory = Arc<
-    dyn Fn([u8; 32]) -> futures_util::future::BoxFuture<'static, Result<CeremonyBinding, String>>
+    dyn Fn(
+            CeremonyTransportInputs,
+        ) -> futures_util::future::BoxFuture<'static, Result<CeremonyBinding, String>>
         + Send
         + Sync,
 >;
@@ -456,13 +480,14 @@ impl SessionSeat {
     }
 
     /// This session's seat and its bound addresses, binding it first when no
-    /// door has. `evidence` is awaited only by the door that binds: a seat
-    /// already bound is handed back without reading the brake again.
+    /// door has. `evidence` — the nest facts the brake and the relay URL are
+    /// read from — is awaited only by the door that binds: a seat already
+    /// bound is handed back without reading either again.
     async fn get_or_bind(
         &self,
         secret_hex: &str,
         device_label: &str,
-        evidence: impl std::future::Future<Output = Option<Vec<String>>>,
+        evidence: impl std::future::Future<Output = Option<PeerLegNestFacts>>,
         transport: &CeremonyTransportFactory,
     ) -> Result<(Arc<CeremonySeat>, Vec<SocketAddr>), String> {
         let _serialized = self.0.bind_lock.lock().await;
@@ -483,7 +508,7 @@ impl SessionSeat {
             secret_hex,
             device_label,
             Arc::clone(&self.0.record),
-            evidence.as_deref(),
+            evidence.as_ref(),
             roster,
             group_roster,
             transport,
@@ -613,16 +638,12 @@ pub async fn bind_seat(
     device_label: &str,
     transport: &CeremonyTransportFactory,
 ) -> Result<Arc<CeremonySeat>, String> {
-    // Rule 7's brake, read live. `Err` is NO evidence, never optimism — the
-    // shared verdict function turns `None` into a refusal.
-    let capabilities = async move {
-        fauna_client_features::FeaturesClient::new(nest)
-            .node_capabilities()
-            .await
-            .ok()
-    };
+    // Rule 7's brake and the relay URL, read live from one `fauna.nest.info`.
+    // `Err` is NO evidence, never optimism — the shared verdict function
+    // turns `None` into a refusal.
+    let facts = async move { crate::peer_leg::fetch_nest_facts(&nest).await.ok() };
     let (seat, _bound) = session_seat
-        .get_or_bind(secret_hex, device_label, capabilities, transport)
+        .get_or_bind(secret_hex, device_label, facts, transport)
         .await?;
     Ok(seat)
 }
@@ -635,10 +656,10 @@ pub async fn bind_seat(
 /// replica's store ([`SessionGroupRoster`]). The per-set serve
 /// router the pump feeds rides the same seat (`CeremonyNode::set_shared_sets`).
 ///
-/// `evidence` is the shared driver's composed brake reading — live
+/// `evidence` is the shared driver's composed nest facts — live
 /// `fauna.nest.info` when reachable, else the peer leg's cached last-known
-/// capabilities (rule 7's offline half); the verdict typing inside the bind
-/// still refuses no-evidence.
+/// facts (rule 7's offline half); the brake verdict inside the bind still
+/// refuses no-evidence, and the seat takes the facts' relay URL.
 ///
 /// Returns the bound socket addresses too: the publish pump crosses them with
 /// the interface list and advertises the result on each set's own channel.
@@ -647,7 +668,7 @@ pub async fn bind_share_plane_seat(
     session_seat: &SessionSeat,
     secret_hex: &str,
     device_label: &str,
-    evidence: Option<Vec<String>>,
+    evidence: Option<PeerLegNestFacts>,
     membership: &Arc<dyn SetMembership + Send + Sync>,
     group_roster: &Arc<dyn GroupRosterState + Send + Sync>,
     transport: &CeremonyTransportFactory,
@@ -673,14 +694,14 @@ async fn bind(
     secret_hex: &str,
     device_label: &str,
     record: Arc<SessionRecord>,
-    evidence: Option<&[String]>,
+    evidence: Option<&PeerLegNestFacts>,
     membership: Arc<dyn SetMembership + Send + Sync>,
     group_roster: Arc<dyn GroupRosterState + Send + Sync>,
     transport: &CeremonyTransportFactory,
 ) -> Result<(Arc<CeremonySeat>, Vec<SocketAddr>), String> {
     let keypair =
         ActorKeypair::from_secret_hex(secret_hex).map_err(|e| format!("invalid secret: {e}"))?;
-    let verdict = ceremony_bind_verdict(evidence);
+    let verdict = ceremony_bind_verdict(evidence.map(|facts| facts.capabilities.as_slice()));
 
     // Lent → the resting record; not yet → an empty replica the lend replays.
     let loaded = match record.lent() {
@@ -697,7 +718,12 @@ async fn bind(
     let CeremonyBinding {
         transport,
         bound_addrs,
-    } = transport(*keypair.secret_bytes()).await?;
+        relay_url,
+    } = transport(CeremonyTransportInputs {
+        secret: *keypair.secret_bytes(),
+        relay_url: evidence.and_then(|facts| facts.iroh_relay_url.clone()),
+    })
+    .await?;
 
     let node = CeremonyNode::bind_with_share_plane(
         verdict,
@@ -713,7 +739,9 @@ async fn bind(
     .map_err(|e| e.to_string())?
     // The seat carries its bound addresses too (the compare code's addressing
     // half); the returned copy feeds the publish pump.
-    .with_bound_addrs(bound_addrs.clone());
+    .with_bound_addrs(bound_addrs.clone())
+    // What the seat was bound with, so the share plane advertises the truth.
+    .with_relay_url(relay_url);
     // Every seat carries the door's evaluator, lent or not: unlent it holds no
     // scope and refuses every group witness, exactly as an unwired server did.
     node.set_group_roster(group_roster);
@@ -1280,7 +1308,8 @@ mod tests {
         seen: Arc<Mutex<Vec<[u8; 32]>>>,
         bound: Vec<SocketAddr>,
     ) -> CeremonyTransportFactory {
-        Arc::new(move |secret| {
+        Arc::new(move |inputs: CeremonyTransportInputs| {
+            let (secret, relay_url) = (inputs.secret, inputs.relay_url);
             let seen = Arc::clone(&seen);
             let bound = bound.clone();
             Box::pin(async move {
@@ -1293,6 +1322,7 @@ mod tests {
                         listeners: fauna_transport::testing::listeners(),
                     }),
                     bound_addrs: bound,
+                    relay_url,
                 })
             })
         })
@@ -1302,10 +1332,13 @@ mod tests {
         ActorKeypair::from_secret([13u8; 32])
     }
 
-    fn brake_open() -> Option<Vec<String>> {
-        Some(vec![
-            fauna_client_capabilities::group_ceremony_node::P2P_SHARE_CAPABILITY.to_string(),
-        ])
+    fn brake_open() -> Option<PeerLegNestFacts> {
+        Some(PeerLegNestFacts {
+            capabilities: vec![
+                fauna_client_capabilities::group_ceremony_node::P2P_SHARE_CAPABILITY.to_string(),
+            ],
+            iroh_relay_url: None,
+        })
     }
 
     /// **The transport is keyed to the ACTOR secret** (PT-1b), never to some
@@ -1370,7 +1403,8 @@ mod tests {
     /// A transport factory on a SHARED network, so a test can watch the
     /// listener's accept side come and go.
     fn shared_transport(net: fauna_transport::testing::Listeners) -> CeremonyTransportFactory {
-        Arc::new(move |secret| {
+        Arc::new(move |inputs: CeremonyTransportInputs| {
+            let (secret, relay_url) = (inputs.secret, inputs.relay_url);
             let net = Arc::clone(&net);
             Box::pin(async move {
                 Ok(CeremonyBinding {
@@ -1381,6 +1415,7 @@ mod tests {
                         listeners: net,
                     }),
                     bound_addrs: vec![],
+                    relay_url,
                 })
             })
         })
@@ -1578,7 +1613,10 @@ mod tests {
             &SessionSeat::default(),
             &secret_hex(),
             "fauna-test",
-            Some(vec!["some-other-capability".to_string()]),
+            Some(PeerLegNestFacts {
+                capabilities: vec!["some-other-capability".to_string()],
+                iroh_relay_url: None,
+            }),
             &no_members(),
             &no_group_roster(),
             &recording_transport(Arc::default(), vec![]),
@@ -1647,7 +1685,8 @@ mod tests {
     /// builds, so two doors racing into a bind genuinely interleave there.
     fn counting_transport(assembled: &Assembled) -> CeremonyTransportFactory {
         let assembled = Arc::clone(assembled);
-        Arc::new(move |_secret| {
+        Arc::new(move |inputs: CeremonyTransportInputs| {
+            let relay_url = inputs.relay_url;
             let assembled = Arc::clone(&assembled);
             Box::pin(async move {
                 tokio::task::yield_now().await;
@@ -1659,6 +1698,7 @@ mod tests {
                 Ok(CeremonyBinding {
                     transport,
                     bound_addrs: vec![],
+                    relay_url,
                 })
             })
         })
@@ -1710,7 +1750,7 @@ mod tests {
     }
 
     /// Evidence no door may read once the session's seat is bound.
-    fn brake_must_not_be_read() -> Option<Vec<String>> {
+    fn brake_must_not_be_read() -> Option<PeerLegNestFacts> {
         panic!("a bound session seat must be handed back without reading the brake again")
     }
 
@@ -2169,6 +2209,191 @@ mod tests {
             scopes,
             vec![on_seat, elsewhere],
             "lent: the durable record joined with the replica"
+        );
+    }
+
+    // ---- the cross-user seat and the relay (`p2p.md` § The relay → *The
+    // cross-user seat and the relay*). ----
+
+    const NEST_RELAY: &str = "https://relay.nest.example/";
+
+    fn facts_with_relay(relay: &str) -> Option<PeerLegNestFacts> {
+        brake_open().map(|facts| PeerLegNestFacts {
+            iroh_relay_url: Some(relay.to_string()),
+            ..facts
+        })
+    }
+
+    /// A transport that records every dial's candidates before handing the
+    /// dial to an in-memory network.
+    struct RecordsDials {
+        inner: fauna_transport::testing::MemTransport,
+        dials: Arc<Mutex<Vec<fauna_transport::PathCandidates>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl fauna_transport::PeerTransport for RecordsDials {
+        async fn dial(
+            &self,
+            peer: fauna_transport::EndpointKey,
+            candidates: fauna_transport::PathCandidates,
+        ) -> Result<Box<dyn fauna_transport::PeerConn>, fauna_transport::TransportError> {
+            self.dials.lock().unwrap().push(candidates.clone());
+            self.inner.dial(peer, candidates).await
+        }
+
+        async fn listen(
+            &self,
+        ) -> Result<fauna_transport::IncomingConns, fauna_transport::TransportError> {
+            self.inner.listen().await
+        }
+
+        fn local_identity(&self) -> fauna_transport::EndpointKey {
+            self.inner.local_identity()
+        }
+    }
+
+    /// A factory on a shared network whose endpoints record their dials, and
+    /// which reports back the relay it was handed, as the production one does
+    /// for a relay it can use.
+    fn dial_recording_transport(
+        net: fauna_transport::testing::Listeners,
+        dials: Arc<Mutex<Vec<fauna_transport::PathCandidates>>>,
+    ) -> CeremonyTransportFactory {
+        Arc::new(move |inputs: CeremonyTransportInputs| {
+            let (net, dials) = (Arc::clone(&net), Arc::clone(&dials));
+            Box::pin(async move {
+                Ok(CeremonyBinding {
+                    transport: Arc::new(RecordsDials {
+                        inner: fauna_transport::testing::MemTransport {
+                            me: fauna_transport::EndpointKey::from_bytes(
+                                ActorKeypair::from_secret(inputs.secret).actor_id().0,
+                            ),
+                            listeners: net,
+                        },
+                        dials,
+                    }),
+                    bound_addrs: vec![],
+                    relay_url: inputs.relay_url,
+                })
+            })
+        })
+    }
+
+    async fn bind_with(
+        session: &SessionSeat,
+        secret_hex: &str,
+        facts: Option<PeerLegNestFacts>,
+        transport: &CeremonyTransportFactory,
+    ) -> Arc<CeremonySeat> {
+        bind_share_plane_seat(
+            session,
+            secret_hex,
+            "fauna-test",
+            facts,
+            &no_members(),
+            &no_group_roster(),
+            transport,
+        )
+        .await
+        .expect("an open brake binds")
+        .0
+    }
+
+    /// Ruling 1: the seat takes its nest's relay — the URL the binding door's
+    /// nest facts carry, handed to the factory and recorded on the seat — and
+    /// a seat bound without one stays without one for its life: a later door
+    /// whose facts now carry a relay is handed the same relay-less seat.
+    #[tokio::test]
+    async fn a_seat_takes_its_nests_relay_and_one_bound_without_stays_without() {
+        let transport =
+            dial_recording_transport(fauna_transport::testing::listeners(), Arc::default());
+
+        let with = bind_with(
+            &SessionSeat::default(),
+            &secret_hex(),
+            facts_with_relay(NEST_RELAY),
+            &transport,
+        )
+        .await;
+        assert_eq!(with.node.relay_url(), Some(NEST_RELAY));
+
+        let session = SessionSeat::default();
+        let other = "22".repeat(32);
+        let without = bind_with(&session, &other, brake_open(), &transport).await;
+        assert_eq!(
+            without.node.relay_url(),
+            None,
+            "no relay in the facts, none on the seat"
+        );
+
+        let again = bind_with(&session, &other, facts_with_relay(NEST_RELAY), &transport).await;
+        assert!(Arc::ptr_eq(&without, &again), "one seat per session");
+        assert_eq!(
+            again.node.relay_url(),
+            None,
+            "a relay-less seat stays relay-less"
+        );
+    }
+
+    /// Rulings 1 and 3: the share advertisement carries the relay the seat
+    /// was bound with, and `None` for a seat bound without one.
+    #[tokio::test]
+    async fn the_share_advertisement_carries_the_seats_own_relay() {
+        let transport =
+            dial_recording_transport(fauna_transport::testing::listeners(), Arc::default());
+        let addr: SocketAddr = "192.168.44.7:41999".parse().unwrap();
+        let lan = ["192.168.44.7".parse().unwrap()];
+        let own = secret_hex_keypair().actor_id();
+        for (facts, advertised) in [
+            (facts_with_relay(NEST_RELAY), Some(NEST_RELAY)),
+            (brake_open(), None),
+        ] {
+            let seat = bind_with(&SessionSeat::default(), &secret_hex(), facts, &transport).await;
+            let endpoints = crate::share_glue::share_advertisement(&own, &[addr], &lan, &seat.node);
+            assert_eq!(endpoints.relay_url.as_deref(), advertised);
+            assert_eq!(endpoints.node_id, own.0);
+            assert!(endpoints.public_addrs.is_empty());
+        }
+    }
+
+    /// Ruling 2's load-bearing fact: a seat bound WITH a relay hands the
+    /// ceremony no relayed dial path — every ceremony dial (by key, by the
+    /// spoken code, and the share probe's) carries `relay_available: false`.
+    #[tokio::test]
+    async fn every_ceremony_dial_on_a_relay_bound_seat_is_direct_only() {
+        let dials: Arc<Mutex<Vec<fauna_transport::PathCandidates>>> = Arc::default();
+        let transport =
+            dial_recording_transport(fauna_transport::testing::listeners(), Arc::clone(&dials));
+        let seat = bind_with(
+            &SessionSeat::default(),
+            &secret_hex(),
+            facts_with_relay(NEST_RELAY),
+            &transport,
+        )
+        .await;
+        assert_eq!(
+            seat.node.relay_url(),
+            Some(NEST_RELAY),
+            "the seat holds a relay"
+        );
+
+        let counterpart = ActorKeypair::from_secret([0x22; 32]).actor_id();
+        let code = fauna_client_capabilities::group_ceremony_view::PeerCode {
+            actor: counterpart,
+            lan_endpoints: vec!["192.168.44.9:41999".parse().unwrap()],
+        };
+        // The outcomes do not matter (nothing listens as the counterpart);
+        // what the transport was asked to dial does.
+        let _ = seat.node.dial(counterpart).await;
+        let _ = seat.node.dial_code(&code).await;
+        let _ = crate::share_probe::probe_set(&seat.node, &code, [0x5E; 32], &[]).await;
+
+        let dials = dials.lock().unwrap();
+        assert!(dials.len() >= 3, "every ceremony door dialed: {dials:?}");
+        assert!(
+            dials.iter().all(|c| !c.relay_available),
+            "a ceremony dial attached the seat's relay: {dials:?}"
         );
     }
 }

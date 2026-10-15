@@ -63,8 +63,14 @@ pub fn read_file_header<R: Read>(r: &mut R) -> Result<V1Header, Error> {
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
+    decode_file_header(&buf)
+}
+
+/// Decode the CARv1 file header's dag-cbor body (the bytes after its varint
+/// length prefix) and validate that its `version` field is 1.
+pub fn decode_file_header(buf: &[u8]) -> Result<V1Header, Error> {
     let header: V1Header =
-        serde_ipld_dagcbor::from_slice(&buf).map_err(|e| Error::BadV1Header(e.to_string()))?;
+        serde_ipld_dagcbor::from_slice(buf).map_err(|e| Error::BadV1Header(e.to_string()))?;
     if header.version != 1 {
         return Err(Error::BadV1Header(format!(
             "version field is {}, expected 1",
@@ -101,7 +107,13 @@ pub fn read_record<R: Read>(r: &mut R) -> Result<(UpstreamCid, Vec<u8>), Error> 
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
-    let mut cursor = std::io::Cursor::new(&buf[..]);
+    decode_record(&buf)
+}
+
+/// Split one record's body (the bytes after its varint length prefix) into the
+/// on-disk CID and the block bytes.
+pub fn decode_record(buf: &[u8]) -> Result<(UpstreamCid, Vec<u8>), Error> {
+    let mut cursor = std::io::Cursor::new(buf);
     let cid = UpstreamCid::read_bytes(&mut cursor)
         .map_err(|e| Error::BadIndex(format!("cid decode: {e}")))?;
     let pos = cursor.position() as usize;

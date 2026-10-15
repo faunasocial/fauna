@@ -18,6 +18,7 @@ use fauna_core::localized::LocalizedText;
 use fauna_mail::forward_config::{
     ForwardPerHourError, validate_forward_per_hour, validate_forward_target,
 };
+use serde::Serialize;
 
 /// Parse the "forward all incoming mail to" draft. Blank (after trimming)
 /// clears forwarding — `Ok(None)`, the doc's "clearing it disables". A
@@ -55,7 +56,53 @@ pub fn parse_forward_per_hour_draft(draft: &str, ceiling: u32) -> Result<u32, Lo
     Ok(value)
 }
 
+/// The outcome of checking the "forward all incoming mail to" draft, in the
+/// shape the UniFFI and WASM boundaries can carry (neither can return a
+/// `Result<_, LocalizedText>`): [`parse_forward_all_to_draft`] as data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ForwardAllToDraftOutcome {
+    /// Blank draft — commit `None`, forwarding off.
+    Clear,
+    /// A well-formed address (trimmed) — commit `Some(address)`.
+    Set { address: String },
+    /// Refused; show `message` on the page and send nothing.
+    Refused { message: LocalizedText },
+}
+
+/// The outcome of checking the hourly-limit draft; see [`ForwardAllToDraftOutcome`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ForwardPerHourDraftOutcome {
+    /// A value in `1..=ceiling` — commit it.
+    Value { value: u32 },
+    /// Refused; show `message` on the page and send nothing.
+    Refused { message: LocalizedText },
+}
+
+/// [`parse_forward_all_to_draft`] as an exported outcome record.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn forward_all_to_draft_outcome(draft: &str) -> ForwardAllToDraftOutcome {
+    match parse_forward_all_to_draft(draft) {
+        Ok(None) => ForwardAllToDraftOutcome::Clear,
+        Ok(Some(address)) => ForwardAllToDraftOutcome::Set { address },
+        Err(message) => ForwardAllToDraftOutcome::Refused { message },
+    }
+}
+
+/// [`parse_forward_per_hour_draft`] as an exported outcome record.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn forward_per_hour_draft_outcome(draft: &str, ceiling: u32) -> ForwardPerHourDraftOutcome {
+    match parse_forward_per_hour_draft(draft, ceiling) {
+        Ok(value) => ForwardPerHourDraftOutcome::Value { value },
+        Err(message) => ForwardPerHourDraftOutcome::Refused { message },
+    }
+}
+
 /// The limit field's explainer, naming the ceiling the value may not pass.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn forward_per_hour_hint(ceiling: u32) -> LocalizedText {
     LocalizedText::key_arg(
         "mail_settings.forward_per_hour_subtitle",
@@ -133,6 +180,32 @@ mod tests {
                 "bad={bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_outcome_wrappers_mirror_the_parsers() {
+        assert_eq!(
+            forward_all_to_draft_outcome(" "),
+            ForwardAllToDraftOutcome::Clear
+        );
+        assert_eq!(
+            forward_all_to_draft_outcome(" a@b.example "),
+            ForwardAllToDraftOutcome::Set {
+                address: "a@b.example".into()
+            }
+        );
+        assert!(matches!(
+            forward_all_to_draft_outcome("nope"),
+            ForwardAllToDraftOutcome::Refused { .. }
+        ));
+        assert_eq!(
+            forward_per_hour_draft_outcome("5", 10),
+            ForwardPerHourDraftOutcome::Value { value: 5 }
+        );
+        assert!(matches!(
+            forward_per_hour_draft_outcome("11", 10),
+            ForwardPerHourDraftOutcome::Refused { .. }
+        ));
     }
 
     /// Every key the parsers emit resolves in the shared string table — a typo

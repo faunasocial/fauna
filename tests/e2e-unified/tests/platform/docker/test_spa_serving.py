@@ -30,8 +30,11 @@ builds are forbidden on dev VMs)::
     FAUNA_REUSE_IMAGE=1 pytest tests/e2e-unified/tests/platform/docker/test_spa_serving.py -v
 """
 
+import html
+import re
 import ssl
 import subprocess
+import urllib.error
 import urllib.request
 
 import pytest
@@ -150,6 +153,102 @@ def test_spa_origin_security_headers_ride_the_real_mount(nest):
     assert "frame-ancestors 'none'" in lower.get("content-security-policy", ""), lower
     assert lower.get("x-content-type-options") == "nosniff", lower
     assert lower.get("referrer-policy") == "no-referrer", lower
+
+
+def _get_raw(port: int, path: str):
+    """GET → (status, body text, the raw header message), never raising on an
+    error status: repeated headers (``Set-Cookie``) survive, and a 404's headers
+    are as much under test as a 200's."""
+    try:
+        resp = urllib.request.urlopen(
+            f"https://127.0.0.1:{port}{path}", timeout=15,
+            context=ssl._create_unverified_context(),
+        )
+        return resp.status, resp.read().decode("utf-8", "replace"), resp.headers
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace"), e.headers
+
+
+def _policies(headers, body: str) -> list[str]:
+    """Every Content-Security-Policy the page is under: the response headers'
+    and the document's own ``<meta http-equiv>`` (where SvelteKit's hash-mode
+    resource policy lives)."""
+    found = list(headers.get_all("Content-Security-Policy") or [])
+    for tag in re.findall(r"<meta\b[^>]*>", body, flags=re.I):
+        if re.search(r'http-equiv\s*=\s*["\']content-security-policy["\']', tag, re.I):
+            m = re.search(r'content\s*=\s*"([^"]*)"', tag) or re.search(
+                r"content\s*=\s*'([^']*)'", tag)
+            if m:
+                found.append(html.unescape(m.group(1)))
+    return found
+
+
+def _directive(policies: list[str], name: str) -> list[str] | None:
+    """The source list of directive ``name`` in whichever policy states it."""
+    for policy in policies:
+        for part in policy.split(";"):
+            tokens = part.split()
+            if tokens and tokens[0].lower() == name:
+                return tokens[1:]
+    return None
+
+
+def _script_srcs(body: str) -> list[str]:
+    return re.findall(r'<script\b[^>]*\bsrc\s*=\s*["\']([^"\']+)["\']', body, flags=re.I)
+
+
+@pytest.mark.feature("nest-serves-the-app")
+def test_the_served_app_runs_only_its_own_scripts(nest):
+    """The app page the nest serves is under a policy that lets it run only
+    scripts from its own address — no inline script except the ones it names by
+    hash, nothing from another site, no plugins (`web-content-hosting.md`
+    § Implementation status today: the resource CSP `script-src 'self'
+    'wasm-unsafe-eval'`, no `'unsafe-inline'`, `object-src 'none'`). Read from
+    the page and headers the real image serves, which is what a browser obeys."""
+    port, _ = nest
+    status, body, headers = _get_raw(port, "/app/")
+    assert status == 200 and SPA_MARKER in body, f"GET /app/ did not serve the SPA: {status}"
+    policies = _policies(headers, body)
+
+    script_src = _directive(policies, "script-src") or _directive(policies, "default-src")
+    assert script_src is not None, f"the app page is under no script policy: {policies}"
+    lowered = [t.lower() for t in script_src]
+    assert "'self'" in lowered, f"script-src must admit the app's own scripts: {script_src}"
+    assert "'unsafe-inline'" not in lowered, f"inline scripts are allowed: {script_src}"
+    assert "'unsafe-eval'" not in lowered, f"string eval is allowed: {script_src}"
+    outside = [t for t in lowered
+               if t == "*" or t.endswith(":") or "://" in t or "." in t.split("'")[0]]
+    assert not outside, f"script-src admits scripts from elsewhere: {outside} in {script_src}"
+
+    object_src = _directive(policies, "object-src")
+    assert object_src is not None and [t.lower() for t in object_src] == ["'none'"], (
+        f"plugins must be refused (object-src 'none'): {object_src} in {policies}"
+    )
+
+    for src in _script_srcs(body):
+        assert src.startswith("/app/") or not re.match(r"^[a-z][a-z0-9+.-]*:|^//", src, re.I), (
+            f"the app page loads a script from elsewhere: {src!r}"
+        )
+
+
+@pytest.mark.feature("nest-serves-the-app")
+def test_the_served_app_never_sets_a_cookie(nest):
+    """The app the nest serves hands a browser no cookie — not on its page, its
+    manifest, its scripts, or a miss (`web-content-hosting.md` invariant 2: no
+    auth cookie may ever be introduced). The sites a nest serves are walked at
+    tier_3 in `tests/api/test_web_served_headers.py`."""
+    port, _ = nest
+    status, body, _ = _get_raw(port, "/app/")
+    assert status == 200 and SPA_MARKER in body, f"GET /app/ did not serve the SPA: {status}"
+    paths = ["/app/", "/app", "/app/manifest.json", "/app/no-such-route",
+             "/app/_app/no-such-asset.js",
+             *[s for s in _script_srcs(body) if s.startswith("/app/")]]
+    cookies = []
+    for path in paths:
+        st, _, hd = _get_raw(port, path)
+        if hd.get_all("Set-Cookie"):
+            cookies.append(f"{path} ({st}): {hd.get_all('Set-Cookie')}")
+    assert not cookies, "the served app handed a browser a cookie:\n" + "\n".join(cookies)
 
 
 @pytest.mark.feature("nest-serves-the-app")

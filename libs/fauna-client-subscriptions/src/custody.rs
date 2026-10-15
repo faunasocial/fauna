@@ -196,17 +196,27 @@ pub fn rotate(
 /// (`SubscriptionsConfig::fold_row`, *one mint reads as one period*) — so a
 /// re-stamp never costs an archival backfill a duplicate version.
 ///
-/// **No-op when `current` is no longer `version`** (a peer device's rotation
-/// won the merge in between): that period has moved to `prior`, where the
-/// stamp buys nothing.
+/// **No-op unless `current` is still the period `(version, key)` names.** A
+/// peer device's rotation may have won the merge in between, either at a later
+/// version (our period moved to `prior`, where the stamp buys nothing) or at the
+/// SAME version under a different key (two devices rotating one tier
+/// concurrently both mint version N+1, and `TierPeriodKeys::merge` keeps
+/// both). In the second case `current` is the peer's period, and stamping it
+/// with ours would leave the next merge with the peer's own copy holding that
+/// key twice (as `current` and as `prior`, differing only by stamp) — the
+/// duplicate an archival backfill would mint twice.
 pub fn restamp_current(
     custody: &mut SubscriptionsConfig,
     tier_name: &str,
     version: u64,
+    key: &[u8; 32],
     rotated_at: u64,
 ) -> bool {
     match tier_index(custody, tier_name) {
-        Some(i) if custody.tiers[i].current.version == version => {
+        Some(i)
+            if custody.tiers[i].current.version == version
+                && custody.tiers[i].current.key == *key =>
+        {
             custody.tiers[i].current.rotated_at = rotated_at;
             true
         }
@@ -395,6 +405,47 @@ mod tests {
         // advance so the nest's stale_rotation check passes.
         let p = rotate(&mut c, ME, "gold", [0x22; 32], 4000).expect("rotates");
         assert_eq!(p.rotated_at, 5001, "max(now, prev+1)");
+    }
+
+    /// Two devices rotate one tier concurrently and both mint v2: the merge
+    /// keeps B's (later-stamped) period as `current`. A's leg must not re-stamp
+    /// it — doing so leaves the next merge with B's own copy holding B's key
+    /// twice (`current` at A's stamp, `prior` at B's).
+    #[test]
+    fn restamp_current_leaves_a_peers_same_version_period_alone() {
+        let mut base = cfg();
+        record_new_tier(&mut base, ME, "gold", [0x11; 32], 1000);
+        let mut a = base.clone();
+        let mut b = base;
+        rotate(&mut a, ME, "gold", [0x22; 32], 2000).expect("A rotates");
+        rotate(&mut b, ME, "gold", [0x33; 32], 2500).expect("B rotates");
+
+        // A's copy after the merge with B's: B's period wins `current`.
+        let mut merged = a.merge(&b);
+        assert_eq!(current_period(&merged, "gold").unwrap().key, [0x33; 32]);
+        let before = merged.clone();
+
+        // A's leg won its upload at a later stamp and tries to re-stamp.
+        assert!(
+            !restamp_current(&mut merged, "gold", 2, &[0x22; 32], 3000),
+            "A's key is not current: nothing to re-stamp"
+        );
+        assert_eq!(merged, before, "current untouched");
+
+        // The merge with B's own copy keeps B's key once.
+        let remerged = merged.merge(&b);
+        let holders = |c: &SubscriptionsConfig| {
+            let t = &c.tiers[0];
+            std::iter::once(&t.current)
+                .chain(t.prior.iter())
+                .filter(|p| p.key == [0x33; 32])
+                .count()
+        };
+        assert_eq!(holders(&remerged), 1, "no duplicate of B's key");
+
+        // The re-stamp of the key that IS current still lands.
+        assert!(restamp_current(&mut merged, "gold", 2, &[0x33; 32], 3000));
+        assert_eq!(current_period(&merged, "gold").unwrap().rotated_at, 3000);
     }
 
     #[test]

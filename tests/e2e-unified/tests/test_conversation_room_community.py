@@ -61,6 +61,8 @@ pytestmark = [
     # trickle-down, each arriving with its own marker AND a
     # `helpers.room_seats.ROOM_APPS` entry.
     pytest.mark.tui,
+    pytest.mark.linux,
+    pytest.mark.windows,
 ]
 
 SEARCH_BUDGET_S = MESSAGE_BUDGET_S

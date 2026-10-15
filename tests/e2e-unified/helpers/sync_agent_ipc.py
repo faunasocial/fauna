@@ -16,6 +16,7 @@ import ctypes
 import ctypes.wintypes
 import struct
 import time
+from contextlib import contextmanager
 
 import cbor2
 
@@ -55,15 +56,25 @@ def provision_capability_request(
     device_id: str,
     bearer_token: str,
     bearer_expires_at: int | None,
+    provisioned_at_ms: int | None = None,
 ) -> dict:
     """Build a ProvisionCapability Request dict.
 
     Returns:
         {"id": req_id, "method": {"ProvisionCapability": <SyncCapability map>}}
 
+    The map is every field `SyncCapability` serializes for an identity that
+    never succeeded — the shape `SyncCapability::new` encodes: the two
+    predecessor lists empty, `provisioned_at_ms` stamped. `provisioned_at_ms` is
+    REQUIRED by the agent's decoder (a capability without it "is not one this
+    software wrote", `fauna-ipc/src/sync.rs`) — omitted here, it is stamped now,
+    as the app's builder stamps it at mint.
+
     Field ordering is irrelevant — cbor2 canonical=True handles sorting.
     backup_key and actor_id are CBOR byte strings (major type 2); pass raw bytes.
     """
+    if provisioned_at_ms is None:
+        provisioned_at_ms = int(time.time() * 1000)
     return {
         "id": req_id,
         "method": {
@@ -76,6 +87,9 @@ def provision_capability_request(
                     "token": bearer_token,
                     "expires_at": bearer_expires_at,
                 },
+                "predecessor_backup_keys": b"",
+                "predecessor_actor_ids": b"",
+                "provisioned_at_ms": provisioned_at_ms,
             }
         },
     }
@@ -95,6 +109,18 @@ def get_service_status_request(req_id: int) -> dict:
     Unit variant encodes as the bare variant-name string.
     """
     return {"id": req_id, "method": "GetServiceStatus"}
+
+
+def reconcile_account_runtime_request(req_id: int) -> dict:
+    """Build a ReconcileAccountRuntime Request dict — the account-pass nudge.
+
+    The production verb an app runtime sends its co-located agent when it
+    yields the engine role (`fauna-ipc/src/sync.rs`); the agent runs
+    `reconcile_now` on its mounted store whether or not it holds the role and
+    replies `Empty` once the pass finished (or after its 10 s reply cap).
+    Unit variant encodes as the bare variant-name string.
+    """
+    return {"id": req_id, "method": "ReconcileAccountRuntime"}
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +238,49 @@ def _read_frame(handle, pipe_path: str) -> bytes:
     return bytes(buf)
 
 
+def _open_pipe(pipe_path: str):
+    """Open one client connection to ``pipe_path``; raises OSError on failure."""
+    handle = ctypes.windll.kernel32.CreateFileW(
+        pipe_path,
+        _GENERIC_READ | _GENERIC_WRITE,
+        0,
+        None,
+        _OPEN_EXISTING,
+        0,
+        None,
+    )
+    if handle in _INVALID_HANDLE_VALUES:
+        err = ctypes.get_last_error()
+        raise OSError(f"Cannot open pipe {pipe_path!r}: Win32 error {err}")
+    return handle
+
+
+def _exchange(handle, pipe_path: str, frame: bytes) -> dict:
+    """Write ``frame`` on an open connection and return its decoded Response."""
+    written = ctypes.wintypes.DWORD()
+    ok = ctypes.windll.kernel32.WriteFile(
+        handle, frame, len(frame), ctypes.byref(written), None
+    )
+    if not ok:
+        err = ctypes.get_last_error()
+        raise OSError(f"WriteFile failed on {pipe_path!r}: Win32 error {err}")
+
+    # The agent broadcasts its events (`SyncProgress`, `FileStatusChanged`, …)
+    # to every open connection, a request's own included, so a pushed event
+    # frame can arrive before the reply (measured on Windows 2026-09-29: a
+    # `GetFileStatus` read a `SyncProgress` event and failed `KeyError:
+    # 'result'`). Skip event frames until the Response; bounded, so a
+    # connection that only ever pushes events fails loudly instead of hanging.
+    for _ in range(_MAX_EVENTS_BEFORE_REPLY):
+        decoded = cbor2.loads(_read_frame(handle, pipe_path))
+        if isinstance(decoded, dict) and "event" in decoded and "result" not in decoded:
+            continue
+        return decoded
+    raise OSError(
+        f"{pipe_path!r} pushed {_MAX_EVENTS_BEFORE_REPLY} event frames and no reply"
+    )
+
+
 def send_request(pipe_path: str, frame: bytes, timeout: float = 10.0) -> dict:
     """Send a framed request to the named pipe and return the decoded Response.
 
@@ -230,43 +299,28 @@ def send_request(pipe_path: str, frame: bytes, timeout: float = 10.0) -> dict:
     Raises:
         OSError: On any Win32 failure (bad handle, WriteFile, ReadFile).
     """
-    handle = ctypes.windll.kernel32.CreateFileW(
-        pipe_path,
-        _GENERIC_READ | _GENERIC_WRITE,
-        0,
-        None,
-        _OPEN_EXISTING,
-        0,
-        None,
-    )
-    if handle in _INVALID_HANDLE_VALUES:
-        err = ctypes.get_last_error()
-        raise OSError(f"Cannot open pipe {pipe_path!r}: Win32 error {err}")
-
+    handle = _open_pipe(pipe_path)
     try:
-        # Write request frame
-        written = ctypes.wintypes.DWORD()
-        ok = ctypes.windll.kernel32.WriteFile(
-            handle, frame, len(frame), ctypes.byref(written), None
-        )
-        if not ok:
-            err = ctypes.get_last_error()
-            raise OSError(f"WriteFile failed on {pipe_path!r}: Win32 error {err}")
+        return _exchange(handle, pipe_path, frame)
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
 
-        # The agent broadcasts its events (`SyncProgress`, `FileStatusChanged`, …)
-        # to every open connection, a request's own included, so a pushed event
-        # frame can arrive before the reply (measured on Windows 2026-09-29: a
-        # `GetFileStatus` read a `SyncProgress` event and failed `KeyError:
-        # 'result'`). Skip event frames until the Response; bounded, so a
-        # connection that only ever pushes events fails loudly instead of hanging.
-        for _ in range(_MAX_EVENTS_BEFORE_REPLY):
-            decoded = cbor2.loads(_read_frame(handle, pipe_path))
-            if isinstance(decoded, dict) and "event" in decoded and "result" not in decoded:
-                continue
-            return decoded
-        raise OSError(
-            f"{pipe_path!r} pushed {_MAX_EVENTS_BEFORE_REPLY} event frames and no reply"
-        )
+
+@contextmanager
+def held_request(pipe_path: str, frame: bytes):
+    """Send a framed request and keep its connection open past the reply.
+
+    Yields the decoded Response; the connection closes when the ``with`` body
+    ends. For a request whose effect lasts exactly as long as the connection
+    that carried it — ``AttachApp``'s lease, which the agent ends when the app's
+    connection closes (a crash included).
+
+    Raises:
+        OSError: On any Win32 failure opening, writing or reading.
+    """
+    handle = _open_pipe(pipe_path)
+    try:
+        yield _exchange(handle, pipe_path, frame)
     finally:
         ctypes.windll.kernel32.CloseHandle(handle)
 

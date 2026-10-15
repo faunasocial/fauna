@@ -58,6 +58,33 @@
 //! set, so a copy holding content and no journal is a delivery that has not
 //! finished, and is refused as one.
 //!
+//! ## An interrupted flip completes on retry — the in-flight marker
+//!
+//! The verb runs under the dispatcher's deadline and abort, and a nest can die
+//! at any write, so a flip can be torn between its first write and its commit
+//! while mail keeps arriving. The empty-target rule is therefore judged
+//! **once, at the gesture** (`backup-destinations.md` § Third destination kind
+//! → *Re-seed* → *An interrupted flip completes on retry, whatever arrived
+//! since — the in-flight marker*): before its first write anything else can
+//! observe, the verb records a `materialize_in_flight` row naming the set and
+//! the corpus's segment ids, and the commit transaction deletes it. While it
+//! stands, a retry asks no freshness question and keeps everything live
+//! outside those ids. Three rules make the keep exact: the content counter is
+//! **floored** to the corpus's ledger generation first, so an arrival's
+//! segment never takes or reclaims a corpus id; a journaled mail copy writes
+//! the corpus's **mailbox tree before the halves**, so an arrival mints its UID
+//! above the corpus's under the corpus's UIDVALIDITY; and the corpus's journal
+//! **supersedes** the target's, with every post-gesture placement **re-filed**
+//! into it under the UID it holds. The marker is no force arm, never expires,
+//! and is never finished at boot. Calendar and contacts keep the same three
+//! rules over their own containers and journals: the corpus's calendars and
+//! address books are written before the halves, so an arrival's change number
+//! is minted above the corpus's, and an arrival is re-filed as the current
+//! version of its `(collection, UID)` resource under the change number it was
+//! served — a resource the corpus also holds going to the later write by
+//! server receive time, recovery's collision rule (a) (`recover.rs`'s
+//! [`super::recover::DavFold`]).
+//!
 //! ## The two axes, and why only one of them holds a key
 //!
 //! A segment corpus rests sealed under the owner's `NestBackupKey` root, so
@@ -82,7 +109,7 @@
 //! [`ScopeNotEmpty`]: MaterializeRefusal::ScopeNotEmpty
 //! [`PlacementNotFresh`]: MaterializeRefusal::PlacementNotFresh
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Context as _;
@@ -94,6 +121,7 @@ use fauna_sync_engine::segment_backup::{
     LiveManifestMirror, SegmentFamily, parse_reserved_backup_set_name, verify_meta_against,
 };
 
+use super::recover::{DavFold, DavRecord, DavVersion, dav_journal, held_write_stands};
 use crate::db::nest_backup_keys::NEST_BACKUP_KEY_LEN;
 use crate::routes::AppState;
 
@@ -256,7 +284,8 @@ pub(crate) enum MaterializeRefusal {
     /// is not a fresh target: refuse, name what exists, and change nothing. There
     /// is deliberately **no force arm** — merging a backed-up corpus into a
     /// lived-in account is a named non-goal, and the alternative to refusing is a
-    /// verb that could destroy data the owner cannot recreate.
+    /// verb that could destroy data the owner cannot recreate. Not asked while
+    /// the scope's in-flight marker stands.
     ScopeNotEmpty { kind: &'static str, records: i64 },
     /// **The empty-target rule's journal half, and it is freshness rather than
     /// emptiness.** The account's containers of `kind` have held content: its
@@ -274,7 +303,8 @@ pub(crate) enum MaterializeRefusal {
     /// same one: this is a lived-in account, point at another nest. What is
     /// NOT refused is a target holding container scaffolding and nothing else
     /// (the standard mailboxes, a lazily provisioned Personal calendar) — the
-    /// corpus supersedes that.
+    /// corpus supersedes that. Not asked of mail while the scope's in-flight
+    /// marker stands; calendar and contacts are still asked.
     PlacementNotFresh { kind: &'static str, history: u64 },
     /// The set holds no `manifest.<kind>` mirror. Delivery writes the mirror
     /// **last**, so its absence is the signature of a torn or never-finished
@@ -619,7 +649,8 @@ impl BlobFetcher for LocalStoreFetcher {
 /// (bytes before custody, mirror last):
 ///
 /// 1. every refusal that can be decided without reading a byte — set shape,
-///    kind, grant, and the empty-target rule;
+///    kind, grant, and the empty-target rule, which is not asked while the
+///    kind's in-flight marker stands (the gesture already answered it);
 /// 2. open the `manifest.<kind>` mirror, which names the segments to restore;
 /// 3. open **and verify** every segment pair, entirely in memory, before
 ///    anything touches the scope's segment area — so an integrity failure on
@@ -627,10 +658,14 @@ impl BlobFetcher for LocalStoreFetcher {
 ///    first. **Both families**: the placement journal's pairs are verified
 ///    here too, staged, and the journal's own freshness judged, so a journal
 ///    that fails any of it leaves the content unwritten as well;
-/// 4. write the content pairs, `FramedSegment::open` each one as its own
-///    admission check, and adopt the journal;
-/// 5. rebuild the mirror rows and replay the placement rows in **one** SQLite
-///    transaction.
+/// 4. floor the content counter, re-assert the empty-target rule, record the
+///    in-flight marker, and (a journaled mail copy) write the corpus's mailbox
+///    tree — the containers before the halves;
+/// 5. write the content pairs, `FramedSegment::open` each one as its own
+///    admission check, adopt the journal superseding whatever it held, and
+///    re-file mail that arrived since the gesture;
+/// 6. rebuild the mirror rows and re-state the placement rows in **one**
+///    SQLite transaction, which also retires the marker.
 pub(crate) async fn materialize_segment_set(
     state: &Arc<AppState>,
     actor: &[u8; 32],
@@ -651,29 +686,55 @@ pub(crate) async fn materialize_segment_set(
     // the one kind whose name carries a scope; it is not reachable here.)
     let scope = *actor;
 
-    // ── The empty-target rule, before anything is read ───────────────────
-    let live = state
+    // ── The in-flight marker: is a flip of this kind already under way? ──
+    //
+    // A standing marker means the empty-target rule was judged at the gesture
+    // and an earlier run was interrupted after its first observable write. The
+    // verb is then in MARKER MODE: it asks no freshness question, and what is
+    // live outside the marker's ids is post-gesture activity it keeps
+    // (`backup-destinations.md` § Third destination kind → *Re-seed* → *the
+    // in-flight marker*).
+    let in_flight = state
         .db
-        .segment_records_count_live(&scope, kind)
+        .materialize_in_flight_get(&scope, kind)
         .await
         .map_err(MaterializeRefusal::Integrity)?;
-    if live > 0 {
-        return Err(MaterializeRefusal::ScopeNotEmpty {
-            kind,
-            records: live,
-        });
+    if let Some(marker) = &in_flight
+        && marker.set_name != set_name
+    {
+        // Unreachable: a kind has exactly one reserved set.
+        return Err(MaterializeRefusal::Integrity(anyhow::anyhow!(
+            "the in-flight `{kind}` flip is of `{}`, not `{set_name}`",
+            marker.set_name
+        )));
     }
-    // The journal half's cheap form: a placement row is a filed message. The
-    // full form (history the rows no longer show) needs the journal's fold and
-    // is judged below, once the corpus has been read.
-    let filed = count_placed_rows(state, &scope, arm)
-        .await
-        .map_err(MaterializeRefusal::Integrity)?;
-    if filed > 0 {
-        return Err(MaterializeRefusal::PlacementNotFresh {
-            kind,
-            history: filed,
-        });
+    let mid_flip = in_flight.is_some();
+
+    // ── The empty-target rule, before anything is read ───────────────────
+    if !mid_flip {
+        let live = state
+            .db
+            .segment_records_count_live(&scope, kind)
+            .await
+            .map_err(MaterializeRefusal::Integrity)?;
+        if live > 0 {
+            return Err(MaterializeRefusal::ScopeNotEmpty {
+                kind,
+                records: live,
+            });
+        }
+        // The journal half's cheap form: a placement row is a filed message.
+        // The full form (history the rows no longer show) needs the journal's
+        // fold and is judged below, once the corpus has been read.
+        let filed = count_placed_rows(state, &scope, arm)
+            .await
+            .map_err(MaterializeRefusal::Integrity)?;
+        if filed > 0 {
+            return Err(MaterializeRefusal::PlacementNotFresh {
+                kind,
+                history: filed,
+            });
+        }
     }
 
     // ── The key the owner granted at enrollment ──────────────────────────
@@ -749,8 +810,10 @@ pub(crate) async fn materialize_segment_set(
                 .await?;
             // Staged and judged: the empty-target rule's journal half, in full,
             // as a pre-flight — a lived-in account is refused HERE, with nothing
-            // written in either family.
-            Some(StagedAny::stage(arm, state, &scope, &journal_pairs, kind).await?)
+            // written in either family. Mid-flip, freshness was settled at the
+            // gesture and is not asked again, for any journaled kind.
+            let judge = !mid_flip;
+            Some(StagedAny::stage(arm, state, &scope, &journal_pairs, kind, judge).await?)
         } else if arm.has_journal() && !pairs.is_empty() {
             return Err(MaterializeRefusal::NoManifestMirror {
                 set_name: set_name.to_string(),
@@ -768,7 +831,8 @@ pub(crate) async fn materialize_segment_set(
     // records, and each pair goes under its own segment id — was an inference
     // about the SQLite mirror, and DB rows are not disk files (see
     // [`MaterializeRefusal::SegmentPathOccupied`] for the two ways they
-    // diverge). Three guards, outermost first:
+    // diverge). Three guards, outermost first, with the counter floor between
+    // the first two:
     //
     //   1. `finalize_open`, so an open writable segment for this scope (none on
     //      a fresh target, but a crashed earlier attempt could leave one) is
@@ -778,6 +842,8 @@ pub(crate) async fn materialize_segment_set(
     //      during the corpus fetch is visible now, including the case where its
     //      segment ids do NOT collide with ours and guard 3 would therefore let
     //      a backup corpus merge into a scope that has since become lived-in.
+    //      Under a standing in-flight marker the rule was judged at the
+    //      gesture, so what is live is post-gesture activity and is kept.
     //   3. Every destination path checked free before ANY half is written, and
     //      each half then written create-new. The pre-flight is what keeps
     //      "verify everything before writing anything" true of this block too:
@@ -790,18 +856,99 @@ pub(crate) async fn materialize_segment_set(
         .await
         .context("finalize_open before materialize")
         .map_err(MaterializeRefusal::Integrity)?;
-    let live_now = state
-        .db
-        .segment_records_count_live(&scope, kind)
+    // ── Partition the id space: floor the content counter ────────────────
+    //
+    // Before guard 2, so every arrival guard 2 lets through opens its segment
+    // at or above the corpus's ledger generation. The store only ever unlinks
+    // at the id it is about to open, and it now opens above every corpus id,
+    // so an arrival's segment can never take, or reclaim, an id the corpus
+    // needs — mid-flip or not. Raising a counter writes nothing anything reads
+    // as content, so a refusal below leaves only spent ids behind.
+    let ids: Vec<u32> = pairs.iter().map(|(id, _, _)| *id).collect();
+    segments
+        .floor_counter(&scope, ledger_generation)
         .await
-        .context("re-read the live record count at the write")
+        .context("floor the content counter to the corpus's ledger generation")
         .map_err(MaterializeRefusal::Integrity)?;
-    if live_now > 0 {
-        return Err(MaterializeRefusal::ScopeNotEmpty {
-            kind,
-            records: live_now,
-        });
+    if mid_flip {
+        // Everything live is post-gesture activity, except a row in one of the
+        // corpus's own segments: the transaction that writes those deletes the
+        // marker, so one standing beside them is not a state this verb leaves.
+        let corpus_rows = count_live_rows_in(state, &scope, kind, &ids)
+            .await
+            .map_err(MaterializeRefusal::Integrity)?;
+        if corpus_rows > 0 {
+            return Err(MaterializeRefusal::Integrity(anyhow::anyhow!(
+                "{corpus_rows} live `{kind}` row(s) sit in the corpus's own segments while \
+                 its in-flight marker still stands"
+            )));
+        }
+    } else {
+        let live_now = state
+            .db
+            .segment_records_count_live(&scope, kind)
+            .await
+            .context("re-read the live record count at the write")
+            .map_err(MaterializeRefusal::Integrity)?;
+        if live_now > 0 {
+            return Err(MaterializeRefusal::ScopeNotEmpty {
+                kind,
+                records: live_now,
+            });
+        }
     }
+
+    // ── The gesture, recorded: the in-flight marker ──────────────────────
+    //
+    // Before the first write anything else can observe. From here until the
+    // commit deletes it, the target is mid-flip: an interruption anywhere below
+    // — the dispatcher's deadline abort, a nest crash — is completed by the
+    // owner's retry, whatever arrived in between. A retry re-puts the marker
+    // with its own run's ids and keeps the gesture's time.
+    state
+        .db
+        .materialize_in_flight_put(
+            &scope,
+            kind,
+            &crate::db::materialize_in_flight::MaterializeInFlight {
+                set_name: set_name.to_string(),
+                segment_ids: ids.clone(),
+                journal: if journal.is_some() {
+                    crate::db::materialize_in_flight::InFlightJournal::Adopt
+                } else {
+                    crate::db::materialize_in_flight::InFlightJournal::None
+                },
+                started_at: in_flight
+                    .as_ref()
+                    .map_or_else(now_epoch_secs, |m| m.started_at),
+            },
+        )
+        .await
+        .context("record the in-flight marker")
+        .map_err(MaterializeRefusal::Integrity)?;
+
+    // ── The containers before the halves (any journaled copy) ────────────
+    //
+    // Right after the marker, so every arrival from here on mints its number
+    // from the container it will end in — a UID above the corpus's, under the
+    // corpus's UIDVALIDITY; a change number above the corpus calendar's or
+    // address book's — and the re-filing keeps the number it was served under.
+    // Every door allocates from these SQLite rows (a calendar or card PUT is
+    // refused without one), so the rows are what the rule writes.
+    match &journal {
+        Some(StagedAny::Mail(staged)) => {
+            write_corpus_mailboxes(state, &scope, &staged.fold().mailboxes)
+                .await
+                .map_err(MaterializeRefusal::Integrity)?;
+        }
+        Some(dav @ (StagedAny::Calendar(_) | StagedAny::Card(_))) => {
+            write_corpus_collections(state, &scope, arm, &dav.dav_fold())
+                .await
+                .map_err(MaterializeRefusal::Integrity)?;
+        }
+        None => {}
+    }
+
     let root = segments.scope_dir(&scope);
     std::fs::create_dir_all(&root)
         .with_context(|| format!("create the segment area at {}", root.display()))
@@ -825,7 +972,7 @@ pub(crate) async fn materialize_segment_set(
     // weak to delete by: it licenses removing bytes whose provenance we never
     // established. What we CAN prove is whether a file is this run's own
     // interrupted write — a crash leaves a PREFIX of the half we were writing
-    // (the empty file being the limiting case, and the exact example.com shape),
+    // (the empty file being the limiting case, and the exact live-nest shape),
     // and foreign content is not a prefix of ours. So:
     //
     //   * every occupant a prefix of what we mean to write, and the pair is
@@ -861,27 +1008,11 @@ pub(crate) async fn materialize_segment_set(
     // check below), so the classification's soundness is entirely the
     // carv2 header's, not this function's and not the sidecar's.
     //
-    // ⚠ **Known, DECLINED-for-now race: guard 2 → guard 3 → write hold no
-    // per-scope lock, and a 0-byte `.dat` is a prefix of everything by
-    // design.** `FramedSegment::create`'s `create_new` returns a 0-byte file
-    // BEFORE the carv2 pragma write; a delivery that lands its `create_new`
-    // in the microseconds between this function's `live_now` re-read and its
-    // own `classify_occupant` call would have its just-created (still-empty)
-    // segment classified `OurWrite`/reclaimed — unlinked out from under the
-    // delivery holding the descriptor. This is DECLINED rather than closed
-    // this pass: the kind's `fauna_segment_store::SegmentManager`
-    // holds its per-scope lock privately, used only internally by
-    // `append_record_with_bucket`/`finalize_open`; exposing a hold-across-
-    // calls guard for this call site is a concurrency-API change to a
-    // DIFFERENT crate, not a materialize-local fix, and risks a
-    // self-deadlock against guard 1's own internal `finalize_open` lock if
-    // done carelessly. The window is microseconds inside one synchronous
-    // function, reachable only by the scope's OWN owner racing their own
-    // delivery against their own restore (never a third party — `scope =
-    // *actor` throughout), so it is not this row's floor. Follow-up: expose
-    // an owned per-scope lock guard from `SegmentManager` and hold it across
-    // this whole write block, verifying guard 1's internal lock use composes
-    // with it (a re-entrant or lock-ordering hazard otherwise).
+    // (Historical: a delivery's still-empty `create_new` landing between guard
+    // 2 and this classification could once be reclaimed as our residue — a
+    // race this verb had declined. The counter floor above closed it: every
+    // segment an arrival opens is at or above the ledger generation, never at
+    // a corpus id this loop classifies.)
     let manifest = segments
         .load_manifest(&scope)
         .await
@@ -977,7 +1108,6 @@ pub(crate) async fn materialize_segment_set(
     // (an empty-output compaction retires without minting), and a re-seeded
     // nest that restarted below it would mint retired ids again and hand every
     // device that verified the old ledger a rollback to explain.
-    let ids: Vec<u32> = pairs.iter().map(|(id, _, _)| *id).collect();
     segments
         .adopt_segments(&scope, &ids, ledger_generation)
         .await
@@ -990,12 +1120,14 @@ pub(crate) async fn materialize_segment_set(
     // truth the placement rows are replayed FROM, so it is in place before any
     // row exists (append before commit —
     // `message-segment-store.md` § Invariants, invariant 1). A crash here
-    // leaves both families on disk and nothing served, which a re-run resumes:
-    // the content by its adopted-and-complete classification, the journal by
-    // recognising its own adoption.
+    // leaves both families on disk and the corpus unserved, which the retry
+    // completes under the marker: the content by its adopted-and-complete
+    // classification, the journal by keeping an adoption it already made (or
+    // superseding one it never finished), and mail that arrived meanwhile by
+    // the re-filing, from rows only the commit removes.
     let journal = match journal {
         None => None,
-        Some(staged) => Some(staged.adopt(state, &scope, kind).await?),
+        Some(staged) => Some(staged.adopt(state, &scope, &ids).await?),
     };
 
     // A post corpus's records are read back through the store before the
@@ -1013,9 +1145,19 @@ pub(crate) async fn materialize_segment_set(
     //
     // The mirror rebuild and the placement rows commit together or not at all,
     // so the state this whole arm exists to end — mail that is live and in no
-    // mailbox — is not a state a crash can leave behind.
+    // mailbox — is not a state a crash can leave behind. The marker leaves in
+    // the same transaction: the flip is complete exactly when it commits.
     let (records, placements) = {
         let conn = state.db.conn().await;
+        // The journal's fold is read again under the connection, so an
+        // arrival whose door finished before this point is in it (its row and
+        // its journal record both written); one whose door is between those
+        // two writes keeps its row through the re-statement
+        // ([`restate_mail_rows`], [`restate_dav_rows`]).
+        let journal = match journal {
+            Some(fold) => Some(current_fold(state, &scope, fold.arm()).await?),
+            None => None,
+        };
         let tx = conn
             .unchecked_transaction()
             .context("begin the materialize transaction")
@@ -1037,6 +1179,12 @@ pub(crate) async fn materialize_segment_set(
             )
             .context("count the rebuilt mirror rows")
             .map_err(MaterializeRefusal::Integrity)?;
+        tx.execute(
+            "DELETE FROM materialize_in_flight WHERE actor_id = ?1 AND kind = ?2",
+            rusqlite::params![scope.as_slice(), kind],
+        )
+        .context("retire the in-flight marker")
+        .map_err(MaterializeRefusal::Integrity)?;
         tx.commit()
             .context("commit the materialize transaction")
             .map_err(MaterializeRefusal::Integrity)?;
@@ -1114,6 +1262,42 @@ impl KindArm {
     fn has_journal(self) -> bool {
         !matches!(self, Self::Post)
     }
+
+    /// The names a DAV kind's placement tables spell its parts with; `None`
+    /// for mail and posts. The calendar and contacts arms are one code path
+    /// over these.
+    fn dav_tables(self) -> Option<DavTables> {
+        match self {
+            Self::Calendar => Some(DavTables {
+                kind: "calendar",
+                collections: "bridge_caldav_calendars",
+                collection_id: "calendar_id",
+                items: "bridge_caldav_events",
+                item_id: "event_id",
+            }),
+            Self::Card => Some(DavTables {
+                kind: "card",
+                collections: "bridge_carddav_addressbooks",
+                collection_id: "addressbook_id",
+                items: "bridge_carddav_cards",
+                item_id: "card_id",
+            }),
+            Self::Mail | Self::Post => None,
+        }
+    }
+}
+
+/// A DAV kind's placement tables, by the names its columns use.
+#[derive(Debug, Clone, Copy)]
+struct DavTables {
+    /// The `segment_records` kind its content records are mirrored under.
+    kind: &'static str,
+    /// The containers' table and its id column.
+    collections: &'static str,
+    collection_id: &'static str,
+    /// The placed items' table and its content-record id column.
+    items: &'static str,
+    item_id: &'static str,
 }
 
 /// A corpus's journal, staged and judged fresh, for whichever kind it is.
@@ -1141,16 +1325,17 @@ impl StagedAny {
         scope: &[u8; 32],
         pairs: &[VerifiedPair],
         kind: &'static str,
+        judge: bool,
     ) -> Result<Self, MaterializeRefusal> {
         Ok(match arm {
             KindArm::Mail => {
-                Self::Mail(stage_journal(&state.mail_placement, scope, pairs, kind).await?)
+                Self::Mail(stage_journal(&state.mail_placement, scope, pairs, kind, judge).await?)
             }
-            KindArm::Calendar => {
-                Self::Calendar(stage_journal(&state.cal_placement, scope, pairs, kind).await?)
-            }
+            KindArm::Calendar => Self::Calendar(
+                stage_journal(&state.cal_placement, scope, pairs, kind, judge).await?,
+            ),
             KindArm::Card => {
-                Self::Card(stage_journal(&state.card_placement, scope, pairs, kind).await?)
+                Self::Card(stage_journal(&state.card_placement, scope, pairs, kind, judge).await?)
             }
             KindArm::Post => {
                 return Err(MaterializeRefusal::Integrity(anyhow::anyhow!(
@@ -1160,25 +1345,151 @@ impl StagedAny {
         })
     }
 
+    /// The staged corpus's fold in recover's kind-neutral DAV shape (empty for
+    /// mail, which has no DAV collections).
+    fn dav_fold(&self) -> DavFold {
+        let mut fold = DavFold::default();
+        match self {
+            Self::Calendar(s) => fold.absorb_cal(s.fold()),
+            Self::Card(s) => fold.absorb_card(s.fold()),
+            Self::Mail(_) => {}
+        }
+        fold
+    }
+
     /// Adopt the staged journal under the journal's own per-actor lock.
+    ///
+    /// Every kind adopts **superseding** — it always runs under the in-flight
+    /// marker, which the verb writes before it gets here — and then re-files
+    /// what arrived since the gesture: mail by mailbox and UID
+    /// ([`refile_mail_arrivals`]), calendar and contacts by resource and change
+    /// number ([`refile_dav_arrivals`]).
     async fn adopt(
         self,
         state: &Arc<AppState>,
         scope: &[u8; 32],
-        kind: &'static str,
+        corpus_ids: &[u32],
     ) -> Result<AdoptedFold, MaterializeRefusal> {
         Ok(match self {
             Self::Mail(s) => {
-                AdoptedFold::Mail(adopt_journal(&state.mail_placement, scope, s, kind).await?)
+                state
+                    .mail_placement
+                    .adopt_staged_superseding(scope, s)
+                    .await
+                    .context("adopt the corpus's placement journal")
+                    .map_err(MaterializeRefusal::Integrity)?;
+                refile_mail_arrivals(state, scope, corpus_ids).await?;
+                AdoptedFold::Mail(
+                    state
+                        .mail_placement
+                        .current_manifest(scope)
+                        .await
+                        .context("read the adopted journal's fold")
+                        .map_err(MaterializeRefusal::Integrity)?,
+                )
             }
             Self::Calendar(s) => {
-                AdoptedFold::Calendar(adopt_journal(&state.cal_placement, scope, s, kind).await?)
+                state
+                    .cal_placement
+                    .adopt_staged_superseding(scope, s)
+                    .await
+                    .context("adopt the corpus's placement journal")
+                    .map_err(MaterializeRefusal::Integrity)?;
+                refile_dav_arrivals(state, scope, KindArm::Calendar, corpus_ids).await?;
+                current_fold(state, scope, KindArm::Calendar).await?
             }
             Self::Card(s) => {
-                AdoptedFold::Card(adopt_journal(&state.card_placement, scope, s, kind).await?)
+                state
+                    .card_placement
+                    .adopt_staged_superseding(scope, s)
+                    .await
+                    .context("adopt the corpus's placement journal")
+                    .map_err(MaterializeRefusal::Integrity)?;
+                refile_dav_arrivals(state, scope, KindArm::Card, corpus_ids).await?;
+                current_fold(state, scope, KindArm::Card).await?
             }
         })
     }
+}
+
+impl AdoptedFold {
+    /// The kind whose journal this is.
+    fn arm(&self) -> KindArm {
+        match self {
+            Self::Mail(_) => KindArm::Mail,
+            Self::Calendar(_) => KindArm::Calendar,
+            Self::Card(_) => KindArm::Card,
+        }
+    }
+
+    /// The fold in recover's kind-neutral DAV shape (empty for mail).
+    fn dav_fold(&self) -> DavFold {
+        let mut fold = DavFold::default();
+        match self {
+            Self::Calendar(m) => fold.absorb_cal(m),
+            Self::Card(m) => fold.absorb_card(m),
+            Self::Mail(_) => {}
+        }
+        fold
+    }
+
+    /// Each placed item's ETag, by content-record id (empty for mail).
+    fn dav_etags(&self) -> HashMap<[u8; 32], String> {
+        match self {
+            Self::Calendar(m) => m
+                .events
+                .iter()
+                .map(|e| (e.event_id, e.etag.clone()))
+                .collect(),
+            Self::Card(m) => m
+                .cards
+                .iter()
+                .map(|c| (c.card_id, c.etag.clone()))
+                .collect(),
+            Self::Mail(_) => HashMap::new(),
+        }
+    }
+}
+
+/// The fold `arm`'s journal holds now.
+async fn current_fold(
+    state: &Arc<AppState>,
+    scope: &[u8; 32],
+    arm: KindArm,
+) -> Result<AdoptedFold, MaterializeRefusal> {
+    let integrity = MaterializeRefusal::Integrity;
+    let read = "read the adopted journal's fold";
+    Ok(match arm {
+        KindArm::Mail => AdoptedFold::Mail(
+            state
+                .mail_placement
+                .current_manifest(scope)
+                .await
+                .context(read)
+                .map_err(integrity)?,
+        ),
+        KindArm::Calendar => AdoptedFold::Calendar(
+            state
+                .cal_placement
+                .current_manifest(scope)
+                .await
+                .context(read)
+                .map_err(integrity)?,
+        ),
+        KindArm::Card => AdoptedFold::Card(
+            state
+                .card_placement
+                .current_manifest(scope)
+                .await
+                .context(read)
+                .map_err(integrity)?,
+        ),
+        KindArm::Post => {
+            return Err(integrity(anyhow::anyhow!(
+                "the post kind has no placement journal"
+            )));
+        }
+    })
 }
 
 async fn stage_journal<K: crate::segments::AdoptableJournal>(
@@ -1186,12 +1497,16 @@ async fn stage_journal<K: crate::segments::AdoptableJournal>(
     scope: &[u8; 32],
     pairs: &[VerifiedPair],
     kind: &'static str,
+    judge: bool,
 ) -> Result<crate::segments::StagedJournal<K>, MaterializeRefusal> {
     let staged = journal
         .stage_corpus(scope, pairs)
         .await
         .context("stage the corpus's placement journal")
         .map_err(MaterializeRefusal::Integrity)?;
+    if !judge {
+        return Ok(staged);
+    }
     if let crate::segments::AdoptionVerdict::LivedIn { history } = journal
         .adoption_verdict(scope, &staged)
         .await
@@ -1201,20 +1516,6 @@ async fn stage_journal<K: crate::segments::AdoptableJournal>(
         return Err(MaterializeRefusal::PlacementNotFresh { kind, history });
     }
     Ok(staged)
-}
-
-async fn adopt_journal<K: crate::segments::AdoptableJournal>(
-    journal: &crate::segments::PlacementJournal<K>,
-    scope: &[u8; 32],
-    staged: crate::segments::StagedJournal<K>,
-    kind: &'static str,
-) -> Result<K::Manifest, MaterializeRefusal> {
-    journal
-        .adopt_staged(scope, staged)
-        .await
-        .context("adopt the corpus's placement journal")
-        .map_err(MaterializeRefusal::Integrity)?
-        .map_err(|history| MaterializeRefusal::PlacementNotFresh { kind, history })
 }
 
 /// How many items the actor has placed for `arm`'s kind — the rows of its
@@ -1238,48 +1539,1095 @@ async fn count_placed_rows(
     Ok(n.max(0) as u64)
 }
 
-/// Clear the actor's placement scaffolding for `arm`'s kind, inside the
-/// caller's transaction, ahead of the adopted fold's replay.
+/// How many live `kind` rows the scope's mirror holds in the segments `ids`
+/// name — the corpus's own, under a standing in-flight marker.
+async fn count_live_rows_in(
+    state: &Arc<AppState>,
+    scope: &[u8; 32],
+    kind: &str,
+    ids: &[u32],
+) -> anyhow::Result<u64> {
+    let conn = state.db.conn().await;
+    let mut stmt = conn
+        .prepare(
+            "SELECT segment_id FROM segment_records
+             WHERE scope_id = ?1 AND kind = ?2 AND tombstoned = 0",
+        )
+        .context("prepare the corpus-segment row count")?;
+    let segment_ids = stmt
+        .query_map(rusqlite::params![scope.as_slice(), kind], |r| {
+            r.get::<_, i64>(0)
+        })
+        .context("count the rows in the corpus's segments")?
+        .collect::<Result<Vec<_>, _>>()
+        .context("read the live rows' segment ids")?;
+    Ok(segment_ids
+        .into_iter()
+        .filter(|id| u32::try_from(*id).is_ok_and(|id| ids.contains(&id)))
+        .count() as u64)
+}
+
+fn now_epoch_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// Write the corpus's mailbox tree into the target's mailbox state — the
+/// containers before the halves (`backup-destinations.md` § *the in-flight
+/// marker*, rule (2)).
 ///
-/// What is cleared can only be container scaffolding — rows describing
-/// mailboxes, calendars or addressbooks that hold nothing, which the adopted
-/// journal re-states wherever it still means them — because a placed item is
-/// refused, and it is refused **here**, at the write, inside the transaction
-/// that would otherwise overwrite it. The checks above this one hold no lock
-/// across the corpus fetch; this one cannot be raced.
-fn clear_placement_scaffolding(
+/// One small transaction, and an upsert that never lowers a counter: a retry
+/// over arrivals finds the corpus's mailboxes already advanced past it. A
+/// mailbox's UIDVALIDITY becomes the corpus's, so an arrival is served under
+/// the validity it will keep. The prune floor is raised to the corpus's and
+/// never lowered either; the commit's re-statement carries it on.
+async fn write_corpus_mailboxes(
+    state: &Arc<AppState>,
+    scope: &[u8; 32],
+    mailboxes: &[fauna_mail::segments::placement::MailboxState],
+) -> anyhow::Result<()> {
+    let conn = state.db.conn().await;
+    let tx = conn
+        .unchecked_transaction()
+        .context("begin the corpus containers write")?;
+    for m in mailboxes {
+        tx.execute(
+            "INSERT INTO bridge_imap_mailbox_state
+                (actor_id, mailbox, uid_validity, uid_next, highestmodseq, pruned_modseq)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(actor_id, mailbox) DO UPDATE SET
+                uid_validity  = excluded.uid_validity,
+                uid_next      = MAX(uid_next, excluded.uid_next),
+                highestmodseq = MAX(highestmodseq, excluded.highestmodseq),
+                pruned_modseq = MAX(pruned_modseq, excluded.pruned_modseq)",
+            rusqlite::params![
+                scope.as_slice(),
+                &m.name,
+                i64::from(m.uid_validity),
+                i64::from(m.uid_next),
+                m.highestmodseq as i64,
+                m.pruned_modseq as i64,
+            ],
+        )
+        .with_context(|| format!("write the corpus's mailbox `{}`", m.name))?;
+    }
+    tx.commit().context("commit the corpus containers write")?;
+    Ok(())
+}
+
+/// One live arrival's placement as its door wrote it.
+struct ArrivalRow {
+    mailbox: String,
+    uid: u32,
+    flags: String,
+    message_id: Vec<u8>,
+    internal_date: i64,
+    uid_validity: u32,
+}
+
+/// **Re-file what arrived since the gesture into the adopted journal**
+/// (`backup-destinations.md` § *the in-flight marker*, rule (3)): by mailbox
+/// name, under the UID it already holds, flags and dates kept, a mailbox
+/// created where the corpus lacks one.
+///
+/// What arrived is read from the rows the arrival doors wrote
+/// (`bridge_imap_messages`, joined to a live record outside the corpus's
+/// segments), not from the journal the adoption superseded. Those rows are the
+/// state the owner was served, and only the commit transaction removes them —
+/// so a crash anywhere between the superseding adoption and the commit leaves
+/// them for the retry, where a superseded journal's would be gone. A row the
+/// adopted journal already places (an arrival journaled after an earlier
+/// adoption, or one an earlier run re-filed) is skipped.
+///
+/// The UID is kept unless the corpus's mailbox has already handed it out —
+/// only an arrival that minted before the containers landed — and then the
+/// mailbox's next UID is taken. The mail's tombstones, subscriptions and empty
+/// mailboxes are not re-filed: consequence (2) of *Where restored mail lands*.
+async fn refile_mail_arrivals(
+    state: &Arc<AppState>,
+    scope: &[u8; 32],
+    corpus_ids: &[u32],
+) -> Result<(), MaterializeRefusal> {
+    use fauna_mail::segments::placement::MailPlacementRecord;
+    let integrity = MaterializeRefusal::Integrity;
+
+    let arrivals: Vec<ArrivalRow> = {
+        let conn = state.db.conn().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.mailbox, m.uid, m.flags, m.message_id, m.internal_date,
+                        COALESCE(s.uid_validity, 1), sr.segment_id
+                 FROM bridge_imap_messages m
+                 JOIN segment_records sr
+                   ON sr.kind = 'mail' AND sr.scope_id = m.actor_id
+                  AND substr(sr.record_cid, 5) = m.message_id AND sr.tombstoned = 0
+                 LEFT JOIN bridge_imap_mailbox_state s
+                   ON s.actor_id = m.actor_id AND s.mailbox = m.mailbox
+                 WHERE m.actor_id = ?1
+                 ORDER BY m.mailbox, m.uid",
+            )
+            .context("prepare the arrivals read")
+            .map_err(integrity)?;
+        let rows = stmt
+            .query_map(rusqlite::params![scope.as_slice()], |r| {
+                Ok((
+                    ArrivalRow {
+                        mailbox: r.get(0)?,
+                        uid: r.get::<_, i64>(1)? as u32,
+                        flags: r.get(2)?,
+                        message_id: r.get(3)?,
+                        internal_date: r.get(4)?,
+                        uid_validity: r.get::<_, i64>(5)? as u32,
+                    },
+                    r.get::<_, i64>(6)?,
+                ))
+            })
+            .context("read the arrivals")
+            .map_err(integrity)?
+            .collect::<Result<Vec<_>, _>>()
+            .context("collect the arrivals")
+            .map_err(integrity)?;
+        let mut seen = std::collections::HashSet::new();
+        rows.into_iter()
+            .filter(|(_, seg)| u32::try_from(*seg).is_ok_and(|s| !corpus_ids.contains(&s)))
+            .map(|(row, _)| row)
+            .filter(|row| seen.insert((row.mailbox.clone(), row.uid)))
+            .collect()
+    };
+
+    for arrival in arrivals {
+        let fold = state
+            .mail_placement
+            .current_manifest(scope)
+            .await
+            .context("read the adopted journal's fold")
+            .map_err(integrity)?;
+        if fold
+            .placements
+            .iter()
+            .any(|p| p.content_record_id == arrival.message_id)
+        {
+            continue;
+        }
+        let mailbox = match fold.mailboxes.iter().find(|m| m.name == arrival.mailbox) {
+            Some(m) => (m.uid_next, m.highestmodseq),
+            None => {
+                state
+                    .mail_placement
+                    .append_event(
+                        scope,
+                        &MailPlacementRecord::Create {
+                            mailbox: arrival.mailbox.clone(),
+                            uid_validity: arrival.uid_validity,
+                            attrs: crate::db::bridge_imap::standard_mailbox_attrs(&arrival.mailbox),
+                        },
+                    )
+                    .await
+                    .context("re-create an arrival's mailbox in the adopted journal")
+                    .map_err(integrity)?;
+                (1, 1)
+            }
+        };
+        let (uid_next, highestmodseq) = mailbox;
+        let uid = if arrival.uid >= uid_next {
+            arrival.uid
+        } else {
+            uid_next
+        };
+        state
+            .mail_placement
+            .append_event(
+                scope,
+                &MailPlacementRecord::Append {
+                    mailbox: arrival.mailbox,
+                    uid,
+                    modseq: highestmodseq + 1,
+                    flags: arrival.flags.split_whitespace().map(String::from).collect(),
+                    content_record_id: arrival.message_id,
+                    internal_date: arrival.internal_date,
+                },
+            )
+            .await
+            .context("re-file an arrival into the adopted journal")
+            .map_err(integrity)?;
+    }
+    Ok(())
+}
+
+/// One `bridge_imap_messages` row as the target held it before the commit.
+struct HeldMessageRow {
+    mailbox: String,
+    uid: i64,
+    message_id: Vec<u8>,
+    flags: String,
+    modseq: i64,
+    internal_date: i64,
+    created_at: i64,
+    from_norm: String,
+    to_norm: String,
+    cc_norm: String,
+    subject_norm: String,
+}
+
+/// Re-state the actor's mail placement rows from the adopted journal's fold,
+/// inside the commit transaction.
+///
+/// The four tables are replaced wholesale and replayed from `fold` — which
+/// loses nothing, because every row the ceremony did not write is either
+/// container scaffolding the corpus supersedes or a post-gesture placement the
+/// re-filing put in the fold (`backup-destinations.md` § *the in-flight
+/// marker*). Three things the fold cannot say are carried over from the rows
+/// it replaces:
+///
+/// * a re-stated message's plaintext search floor (`created_at` and the
+///   `*_norm` columns), which the journal does not hold;
+/// * a row whose arrival door has written it but not yet journaled its
+///   `Append` — kept as it is, with its mailbox's state, so the `Append` that
+///   follows describes a served row;
+/// * each mailbox's counters, never lowered under the same UIDVALIDITY: a
+///   UID or modseq the target handed out (an arrival since expunged) is never
+///   handed out again.
+fn restate_mail_rows(
     tx: &rusqlite::Transaction<'_>,
     actor: &[u8; 32],
-    arm: KindArm,
-    kind: &'static str,
-) -> Result<(), MaterializeRefusal> {
-    let tables = arm.placement_tables();
-    let Some(placed) = tables.first() else {
-        return Ok(());
-    };
-    let filed: i64 = tx
-        .query_row(
-            &format!("SELECT COUNT(*) FROM {placed} WHERE actor_id = ?1"),
-            rusqlite::params![actor.as_slice()],
-            |r| r.get(0),
-        )
-        .with_context(|| format!("re-read the actor's {placed} rows at the write"))
-        .map_err(MaterializeRefusal::Integrity)?;
-    if filed > 0 {
-        return Err(MaterializeRefusal::PlacementNotFresh {
-            kind,
-            history: filed as u64,
-        });
-    }
-    for table in tables {
+    fold: &fauna_mail::segments::placement::MailPlacementManifest,
+) -> anyhow::Result<()> {
+    let mut stmt = tx.prepare(
+        "SELECT mailbox, uid_validity, uid_next, highestmodseq, pruned_modseq
+         FROM bridge_imap_mailbox_state WHERE actor_id = ?1",
+    )?;
+    let held_state = stmt
+        .query_map(rusqlite::params![actor.as_slice()], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .context("read the held mailbox state")?;
+    drop(stmt);
+    let mut stmt = tx.prepare(
+        "SELECT mailbox, uid, message_id, flags, modseq, internal_date, created_at,
+                from_norm, to_norm, cc_norm, subject_norm
+         FROM bridge_imap_messages WHERE actor_id = ?1",
+    )?;
+    let held_rows = stmt
+        .query_map(rusqlite::params![actor.as_slice()], |r| {
+            Ok(HeldMessageRow {
+                mailbox: r.get(0)?,
+                uid: r.get(1)?,
+                message_id: r.get(2)?,
+                flags: r.get(3)?,
+                modseq: r.get(4)?,
+                internal_date: r.get(5)?,
+                created_at: r.get(6)?,
+                from_norm: r.get(7)?,
+                to_norm: r.get(8)?,
+                cc_norm: r.get(9)?,
+                subject_norm: r.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .context("read the held placement rows")?;
+    drop(stmt);
+
+    for table in KindArm::Mail.placement_tables() {
         tx.execute(
             &format!("DELETE FROM {table} WHERE actor_id = ?1"),
             rusqlite::params![actor.as_slice()],
         )
-        .with_context(|| format!("clear the actor's {table} scaffolding"))
-        .map_err(MaterializeRefusal::Integrity)?;
+        .with_context(|| format!("clear the actor's {table} rows"))?;
+    }
+    crate::restore::mail::replay_mail_manifest_into_sqlite(tx, actor, fold)
+        .context("replay the adopted placement journal")?;
+
+    let placed: std::collections::HashSet<&[u8]> = fold
+        .placements
+        .iter()
+        .map(|p| p.content_record_id.as_slice())
+        .collect();
+    for row in &held_rows {
+        if placed.contains(row.message_id.as_slice()) {
+            tx.execute(
+                "UPDATE bridge_imap_messages
+                 SET created_at = ?3, from_norm = ?4, to_norm = ?5, cc_norm = ?6,
+                     subject_norm = ?7
+                 WHERE actor_id = ?1 AND message_id = ?2",
+                rusqlite::params![
+                    actor.as_slice(),
+                    row.message_id.as_slice(),
+                    row.created_at,
+                    &row.from_norm,
+                    &row.to_norm,
+                    &row.cc_norm,
+                    &row.subject_norm,
+                ],
+            )
+            .context("carry a re-stated message's search floor")?;
+            continue;
+        }
+        if let Some((_, validity, ..)) = held_state.iter().find(|s| s.0 == row.mailbox) {
+            tx.execute(
+                "INSERT OR IGNORE INTO bridge_imap_mailbox_state (actor_id, mailbox, uid_validity)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![actor.as_slice(), &row.mailbox, validity],
+            )
+            .context("keep a mid-door arrival's mailbox")?;
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO bridge_imap_messages
+                (actor_id, mailbox, uid, message_id, flags, modseq, internal_date,
+                 created_at, from_norm, to_norm, cc_norm, subject_norm)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                actor.as_slice(),
+                &row.mailbox,
+                row.uid,
+                row.message_id.as_slice(),
+                &row.flags,
+                row.modseq,
+                row.internal_date,
+                row.created_at,
+                &row.from_norm,
+                &row.to_norm,
+                &row.cc_norm,
+                &row.subject_norm,
+            ],
+        )
+        .context("keep a mid-door arrival's row")?;
+    }
+    for (mailbox, validity, uid_next, highestmodseq, pruned_modseq) in &held_state {
+        tx.execute(
+            "UPDATE bridge_imap_mailbox_state
+             SET uid_next = MAX(uid_next, ?4), highestmodseq = MAX(highestmodseq, ?5),
+                 pruned_modseq = MAX(pruned_modseq, ?6)
+             WHERE actor_id = ?1 AND mailbox = ?2 AND uid_validity = ?3",
+            rusqlite::params![
+                actor.as_slice(),
+                mailbox,
+                validity,
+                uid_next,
+                highestmodseq,
+                pruned_modseq
+            ],
+        )
+        .context("keep the mailbox counters the target handed out")?;
     }
     Ok(())
+}
+
+/// Write the corpus's calendars or address books into the target's container
+/// rows — the containers before the halves (`backup-destinations.md`
+/// § *the in-flight marker*, rule (2)), for a DAV kind.
+///
+/// Mail's [`write_corpus_mailboxes`] rule over a DAV kind's own counters: one
+/// small transaction, the corpus's metadata, and `highestmodseq`/`ctag` raised
+/// to the corpus's, never lowered — a retry over arrivals finds them already
+/// advanced past it. The prune floor is raised to the corpus's and never
+/// lowered either; the commit's re-statement carries it on. Both DAV put doors mint the next change number from this
+/// row (and refuse a PUT into a collection that has none), so from here on an
+/// arrival is numbered above every change the corpus holds.
+async fn write_corpus_collections(
+    state: &Arc<AppState>,
+    scope: &[u8; 32],
+    arm: KindArm,
+    fold: &DavFold,
+) -> anyhow::Result<()> {
+    let t = arm
+        .dav_tables()
+        .context("only a DAV kind has collections")?;
+    let now = now_epoch_secs();
+    let conn = state.db.conn().await;
+    let tx = conn
+        .unchecked_transaction()
+        .context("begin the corpus containers write")?;
+    for (id, c) in &fold.collections {
+        let counter = i64::try_from(c.highestmodseq).unwrap_or(i64::MAX);
+        let floor = i64::try_from(c.pruned_modseq).unwrap_or(i64::MAX);
+        tx.execute(
+            &format!(
+                "INSERT INTO {coll}
+                    (actor_id, {col}, encrypted_metadata, ctag, highestmodseq, created_at,
+                     pruned_modseq)
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)
+                 ON CONFLICT(actor_id, {col}) DO UPDATE SET
+                    encrypted_metadata = excluded.encrypted_metadata,
+                    ctag               = MAX(ctag, excluded.ctag),
+                    highestmodseq      = MAX(highestmodseq, excluded.highestmodseq),
+                    pruned_modseq      = MAX(pruned_modseq, excluded.pruned_modseq)",
+                coll = t.collections,
+                col = t.collection_id,
+            ),
+            rusqlite::params![
+                scope.as_slice(),
+                id.as_slice(),
+                &c.encrypted_metadata,
+                counter,
+                now,
+                floor
+            ],
+        )
+        .with_context(|| format!("write the corpus's {} row", t.collections))?;
+    }
+    tx.commit().context("commit the corpus containers write")?;
+    Ok(())
+}
+
+/// One live DAV arrival as its door wrote it, with its collection's row.
+struct DavArrival {
+    collection: [u8; 32],
+    id: [u8; 32],
+    uid_hash: [u8; 32],
+    etag: String,
+    modseq: u64,
+    ciphertext_size: u32,
+    /// Server receive time, epoch seconds — the clock collision (a) reads.
+    created_at: i64,
+    sidecar: Option<Vec<u8>>,
+    /// The collection row's metadata and counter, as the door left them.
+    collection_metadata: Option<Vec<u8>>,
+    collection_counter: u64,
+}
+
+fn blob32(bytes: Vec<u8>, what: &str) -> anyhow::Result<[u8; 32]> {
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("a {what} of {} bytes, not 32", bytes.len()))
+}
+
+/// Every live item of `arm`'s kind the arrival doors wrote, joined to a live
+/// mirror row in a segment outside the corpus's — what arrived since the
+/// gesture — oldest change first.
+async fn read_dav_arrivals(
+    state: &Arc<AppState>,
+    scope: &[u8; 32],
+    t: DavTables,
+    corpus_ids: &[u32],
+) -> anyhow::Result<Vec<DavArrival>> {
+    type Row = (
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+        String,
+        i64,
+        i64,
+        i64,
+        Option<Vec<u8>>,
+    );
+    let rows: Vec<(Row, Option<Vec<u8>>, i64, i64)> = {
+        let conn = state.db.conn().await;
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT e.{col}, e.{item}, e.uid_hash, e.etag, e.modseq, e.ciphertext_size,
+                        e.created_at, e.encrypted_fauna_ext,
+                        c.encrypted_metadata, COALESCE(c.highestmodseq, 0), sr.segment_id
+                 FROM {items} e
+                 JOIN segment_records sr
+                   ON sr.kind = ?2 AND sr.scope_id = e.actor_id
+                  AND sr.record_cid = e.record_cid AND sr.tombstoned = 0
+                 LEFT JOIN {coll} c
+                   ON c.actor_id = e.actor_id AND c.{col} = e.{col}
+                 WHERE e.actor_id = ?1
+                 ORDER BY e.modseq, e.{item}",
+                col = t.collection_id,
+                item = t.item_id,
+                items = t.items,
+                coll = t.collections,
+            ))
+            .context("prepare the DAV arrivals read")?;
+        stmt.query_map(rusqlite::params![scope.as_slice(), t.kind], |r| {
+            Ok((
+                (
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                ),
+                r.get(8)?,
+                r.get(9)?,
+                r.get(10)?,
+            ))
+        })
+        .context("read the DAV arrivals")?
+        .collect::<Result<Vec<_>, _>>()
+        .context("collect the DAV arrivals")?
+    };
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for ((col, id, uid, etag, modseq, size, created_at, sidecar), metadata, counter, seg) in rows {
+        if u32::try_from(seg).is_ok_and(|s| corpus_ids.contains(&s)) || !seen.insert(id.clone()) {
+            continue;
+        }
+        out.push(DavArrival {
+            collection: blob32(col, "collection id")?,
+            id: blob32(id, "content-record id")?,
+            uid_hash: blob32(uid, "uid hash")?,
+            etag,
+            modseq: modseq.max(0) as u64,
+            ciphertext_size: u32::try_from(size).context("an arrival's ciphertext size")?,
+            created_at,
+            sidecar,
+            collection_metadata: metadata,
+            collection_counter: counter.max(0) as u64,
+        });
+    }
+    Ok(out)
+}
+
+/// The server receive time of every record in the corpus's own content
+/// segments, by content-record id — read from the records' own floors, the
+/// clock collision (a) compares an arrival against.
+fn corpus_receive_times(
+    state: &Arc<AppState>,
+    scope: &[u8; 32],
+    arm: KindArm,
+    corpus_ids: &[u32],
+) -> anyhow::Result<HashMap<[u8; 32], i64>> {
+    let root = arm.segments(state).scope_dir(scope);
+    let walk = "walk the corpus's segments for their receive times";
+    Ok(match arm {
+        KindArm::Calendar => {
+            crate::filesync_handlers::walk_pinned_segments(&root, "calendar", corpus_ids, |b| {
+                fauna_calendar::segments::CalFloorMetadata::decode(b)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+            })
+            .context(walk)?
+            .0
+            .into_iter()
+            .map(|r| (r.floor.event_id, r.floor.created_at))
+            .collect()
+        }
+        KindArm::Card => {
+            crate::filesync_handlers::walk_pinned_segments(&root, "card", corpus_ids, |b| {
+                fauna_contacts::segments::CardFloorMetadata::decode(b)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+            })
+            .context(walk)?
+            .0
+            .into_iter()
+            .map(|r| (r.floor.card_id, r.floor.created_at))
+            .collect()
+        }
+        KindArm::Mail | KindArm::Post => anyhow::bail!("only a DAV kind has a DAV corpus"),
+    })
+}
+
+/// A collection's creation, as `arm`'s journal records it.
+fn dav_provision(arm: KindArm, id: [u8; 32], encrypted_metadata: Vec<u8>) -> DavRecord {
+    use fauna_calendar::segments::placement::CalPlacementRecord;
+    use fauna_contacts::segments::placement::CardPlacementRecord;
+    match arm {
+        KindArm::Calendar => DavRecord::Cal(CalPlacementRecord::ProvisionCalendar {
+            calendar_id: id,
+            encrypted_metadata,
+        }),
+        _ => DavRecord::Card(CardPlacementRecord::ProvisionAddressbook {
+            addressbook_id: id,
+            encrypted_metadata,
+        }),
+    }
+}
+
+/// A resource's version, as `arm`'s journal records it under `modseq` and
+/// `etag`.
+fn dav_version_record(
+    arm: KindArm,
+    (collection, uid_hash): ([u8; 32], [u8; 32]),
+    version: &DavVersion,
+    modseq: u64,
+    etag: String,
+) -> DavRecord {
+    use fauna_calendar::segments::placement::CalPlacementRecord;
+    use fauna_contacts::segments::placement::CardPlacementRecord;
+    match (arm, version.clone()) {
+        (
+            KindArm::Calendar,
+            DavVersion::Placed {
+                id,
+                sidecar,
+                ciphertext_size,
+                ..
+            },
+        ) => DavRecord::Cal(CalPlacementRecord::PutEvent {
+            calendar_id: collection,
+            uid_hash,
+            etag,
+            modseq,
+            ciphertext_size,
+            event_id: id,
+            encrypted_fauna_ext: sidecar,
+        }),
+        (KindArm::Calendar, DavVersion::Deleted { id, deleted_at, .. }) => {
+            DavRecord::Cal(CalPlacementRecord::DeleteEvent {
+                calendar_id: collection,
+                uid_hash,
+                modseq,
+                event_id: id,
+                deleted_at,
+            })
+        }
+        (
+            _,
+            DavVersion::Placed {
+                id,
+                sidecar,
+                ciphertext_size,
+                ..
+            },
+        ) => DavRecord::Card(CardPlacementRecord::PutCard {
+            addressbook_id: collection,
+            uid_hash,
+            etag,
+            modseq,
+            ciphertext_size,
+            card_id: id,
+            encrypted_fauna_ext: sidecar,
+        }),
+        (_, DavVersion::Deleted { id, deleted_at, .. }) => {
+            DavRecord::Card(CardPlacementRecord::DeleteCard {
+                addressbook_id: collection,
+                uid_hash,
+                modseq,
+                card_id: id,
+                deleted_at,
+            })
+        }
+    }
+}
+
+/// Raise the door's change counter for one collection to at least `floor`,
+/// so a number the re-filing takes is never minted again by a PUT.
+async fn floor_dav_counter(
+    state: &Arc<AppState>,
+    scope: &[u8; 32],
+    arm: KindArm,
+    collection: &[u8; 32],
+    floor: u64,
+) -> Result<(), MaterializeRefusal> {
+    let floor = i64::try_from(floor).unwrap_or(i64::MAX);
+    match arm {
+        KindArm::Calendar => {
+            state
+                .db
+                .floor_bridge_caldav_calendar_counter(scope, collection, floor)
+                .await
+        }
+        _ => {
+            state
+                .db
+                .floor_bridge_carddav_addressbook_counter(scope, collection, floor)
+                .await
+        }
+    }
+    .context("floor the collection's change counter")
+    .map_err(MaterializeRefusal::Integrity)
+}
+
+/// **Re-file the calendar or contacts items that arrived since the gesture
+/// into the adopted journal** (`backup-destinations.md` § *the in-flight
+/// marker*, rule (3), for a DAV kind) — [`refile_mail_arrivals`]' twin, read
+/// through recover's [`DavFold`] so the two DAV kinds are one path and the
+/// journal's version of a resource is judged exactly as recovery judges it.
+///
+/// What arrived is read from the rows the doors wrote, as mail's is, for
+/// mail's reason: only the commit removes them, so a crash anywhere between the
+/// superseding adoption and the commit leaves them for the retry. Each one
+/// becomes the current version of its `(collection, UID)` resource:
+///
+/// * **Already the journal's current version** (an earlier run re-filed it,
+///   or its door journaled it after the adoption) — nothing to do.
+/// * **The corpus also holds the resource — collision (a): the later write
+///   wins, by server receive time**, a tie going to the corpus, as in
+///   recovery ([`held_write_stands`]). The corpus's version's time is its
+///   record's floor (a placement) or its `deleted_at` (a deletion). When the
+///   corpus's version stands it must still be numbered above the change the
+///   arrival was served under — a client holding that sync token would
+///   otherwise never hear the resource changed — so it is journaled again under
+///   the collection's next change number, unless an earlier run already did.
+/// * **Otherwise the arrival files**, its collection created by id where the
+///   corpus lacks it (with the metadata the door's row holds), under the change
+///   number and ETag it was served with — or, for an arrival numbered before
+///   the containers landed, the collection's next number.
+///
+/// A number taken here raises the door's counter first, so no PUT mints it
+/// again. Tombstones a door wrote since the gesture are not re-filed, as mail's
+/// are not.
+async fn refile_dav_arrivals(
+    state: &Arc<AppState>,
+    scope: &[u8; 32],
+    arm: KindArm,
+    corpus_ids: &[u32],
+) -> Result<(), MaterializeRefusal> {
+    let integrity = MaterializeRefusal::Integrity;
+    let t = arm
+        .dav_tables()
+        .ok_or_else(|| integrity(anyhow::anyhow!("only a DAV kind re-files DAV arrivals")))?;
+    let arrivals = read_dav_arrivals(state, scope, t, corpus_ids)
+        .await
+        .map_err(integrity)?;
+    if arrivals.is_empty() {
+        return Ok(());
+    }
+    let received = corpus_receive_times(state, scope, arm, corpus_ids).map_err(integrity)?;
+
+    for a in arrivals {
+        let fold = current_fold(state, scope, arm).await?.dav_fold();
+        if fold.current().contains_key(&a.id) {
+            continue;
+        }
+        let resource = (a.collection, a.uid_hash);
+        let counter = fold
+            .collections
+            .get(&a.collection)
+            .map_or(1, |c| c.highestmodseq);
+        let next = counter.max(a.collection_counter) + 1;
+
+        if let Some(held) = fold.resources.get(&resource) {
+            let corpus_at = match held {
+                DavVersion::Placed { id, .. } => received.get(id).copied(),
+                DavVersion::Deleted { deleted_at, .. } => Some(*deleted_at),
+            };
+            let arrival_stands = match corpus_at {
+                Some(at) => held_write_stands(a.created_at, at),
+                // Not one of the corpus's records: a version this journal took
+                // on its own since the adoption, and the higher change number
+                // is the later write.
+                None => a.modseq > held.modseq(),
+            };
+            if !arrival_stands {
+                if held.modseq() <= a.modseq {
+                    floor_dav_counter(state, scope, arm, &a.collection, next).await?;
+                    let etag = crate::db::bridge_dav_common::format_etag(next as i64);
+                    dav_journal(
+                        state,
+                        scope,
+                        dav_version_record(arm, resource, held, next, etag),
+                    )
+                    .await?;
+                }
+                continue;
+            }
+        }
+
+        if !fold.collections.contains_key(&a.collection) {
+            let metadata = a.collection_metadata.clone().ok_or_else(|| {
+                integrity(anyhow::anyhow!(
+                    "an arrival sits in a {} the target holds no row for",
+                    t.collections
+                ))
+            })?;
+            dav_journal(state, scope, dav_provision(arm, a.collection, metadata)).await?;
+        }
+        let (modseq, etag) = if a.modseq > counter {
+            (a.modseq, a.etag)
+        } else {
+            floor_dav_counter(state, scope, arm, &a.collection, next).await?;
+            (next, crate::db::bridge_dav_common::format_etag(next as i64))
+        };
+        let version = DavVersion::Placed {
+            id: a.id,
+            modseq,
+            sidecar: a.sidecar,
+            ciphertext_size: a.ciphertext_size,
+        };
+        dav_journal(
+            state,
+            scope,
+            dav_version_record(arm, resource, &version, modseq, etag),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// One DAV item row as the target held it before the commit.
+struct HeldDavRow {
+    collection: [u8; 32],
+    id: [u8; 32],
+    uid_hash: [u8; 32],
+    encrypted_index_hint: Vec<u8>,
+    etag: String,
+    modseq: i64,
+    ciphertext_size: i64,
+    internal_date: i64,
+    created_at: i64,
+    sidecar: Option<Vec<u8>>,
+    record_cid: Option<Vec<u8>>,
+}
+
+/// One DAV collection row as the target held it before the commit.
+struct HeldDavCollection {
+    id: Vec<u8>,
+    encrypted_metadata: Vec<u8>,
+    ctag: i64,
+    highestmodseq: i64,
+    created_at: i64,
+    pruned_modseq: i64,
+}
+
+/// Re-state the actor's calendar or contacts rows from the adopted journal's
+/// fold, inside the commit transaction — [`restate_mail_rows`]' twin, and for
+/// its reason the three tables are replaced wholesale and still lose nothing.
+///
+/// The corpus's items are rebuilt through the snapshot restore's own rebuild
+/// ([`crate::filesync_handlers::rebuild_calendar_rows_from_disk`] and its card
+/// twin), from the corpus's segments. A post-gesture item's record is not in
+/// those segments, so the row its door wrote is carried instead, under the
+/// placement the fold gives it. Each held item row is decided by the fold,
+/// change number against change number:
+///
+/// * the fold places it → carried, re-stated with the fold's collection,
+///   change number, ETag and sidecar (the re-filing's decision);
+/// * the fold numbers its resource **above** it → dropped: a later version
+///   stands (collision (a) went to the corpus, which the re-filing re-numbered);
+/// * otherwise its door is between its row and its journal record → kept as it
+///   is, with its collection's row, so the record that follows describes a
+///   served row; the corpus's version of that resource, older, is not placed.
+///
+/// Each held collection's counters are carried, never lowered: a change number
+/// the target handed out is never handed out again. Its prune floor is carried
+/// the same way, since the expunge log is replaced by the fold's tombstones.
+fn restate_dav_rows(
+    tx: &rusqlite::Transaction<'_>,
+    state: &Arc<AppState>,
+    scope: &[u8; 32],
+    arm: KindArm,
+    ids: &[u32],
+    fold: &AdoptedFold,
+) -> anyhow::Result<u64> {
+    let t = arm
+        .dav_tables()
+        .context("only a DAV kind re-states DAV rows")?;
+    let dav = fold.dav_fold();
+    let current = dav.current();
+    let etags = fold.dav_etags();
+
+    let mut stmt = tx.prepare(&format!(
+        "SELECT {col}, {item}, uid_hash, encrypted_index_hint, etag, modseq,
+                ciphertext_size, internal_date, created_at, encrypted_fauna_ext, record_cid
+         FROM {items} WHERE actor_id = ?1",
+        col = t.collection_id,
+        item = t.item_id,
+        items = t.items,
+    ))?;
+    type Raw = (
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+        String,
+        i64,
+        i64,
+        i64,
+        i64,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+    );
+    let raw: Vec<Raw> = stmt
+        .query_map(rusqlite::params![scope.as_slice()], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+                r.get(10)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .context("read the held item rows")?;
+    drop(stmt);
+    let mut held_rows = Vec::with_capacity(raw.len());
+    for (col, id, uid, hint, etag, modseq, size, date, created, sidecar, cid) in raw {
+        held_rows.push(HeldDavRow {
+            collection: blob32(col, "collection id")?,
+            id: blob32(id, "content-record id")?,
+            uid_hash: blob32(uid, "uid hash")?,
+            encrypted_index_hint: hint,
+            etag,
+            modseq,
+            ciphertext_size: size,
+            internal_date: date,
+            created_at: created,
+            sidecar,
+            record_cid: cid,
+        });
+    }
+    let mut stmt = tx.prepare(&format!(
+        "SELECT {col}, encrypted_metadata, ctag, highestmodseq, created_at, pruned_modseq
+         FROM {coll} WHERE actor_id = ?1",
+        col = t.collection_id,
+        coll = t.collections,
+    ))?;
+    let held_collections = stmt
+        .query_map(rusqlite::params![scope.as_slice()], |r| {
+            Ok(HeldDavCollection {
+                id: r.get(0)?,
+                encrypted_metadata: r.get(1)?,
+                ctag: r.get(2)?,
+                highestmodseq: r.get(3)?,
+                created_at: r.get(4)?,
+                pruned_modseq: r.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .context("read the held collection rows")?;
+    drop(stmt);
+
+    // Decide every held row against the fold.
+    let mut carried: Vec<HeldDavRow> = Vec::new();
+    let mut mid_door: Vec<HeldDavRow> = Vec::new();
+    for mut row in held_rows {
+        if let Some(p) = current.get(&row.id) {
+            let resource = (p.collection, p.uid_hash);
+            let modseq = dav.resources.get(&resource).map_or(0, DavVersion::modseq);
+            row.collection = p.collection;
+            row.uid_hash = p.uid_hash;
+            row.modseq = i64::try_from(modseq).unwrap_or(i64::MAX);
+            row.etag = etags
+                .get(&row.id)
+                .cloned()
+                .unwrap_or_else(|| crate::db::bridge_dav_common::format_etag(row.modseq));
+            row.sidecar = p.sidecar.clone();
+            carried.push(row);
+            continue;
+        }
+        match dav.resources.get(&(row.collection, row.uid_hash)) {
+            Some(v) if i64::try_from(v.modseq()).unwrap_or(i64::MAX) > row.modseq => {}
+            _ => mid_door.push(row),
+        }
+    }
+    let carried_ids: HashSet<[u8; 32]> = carried.iter().map(|r| r.id).collect();
+    let mid_door_resources: HashSet<([u8; 32], [u8; 32])> = mid_door
+        .iter()
+        .map(|r| (r.collection, r.uid_hash))
+        .collect();
+
+    for table in arm.placement_tables() {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE actor_id = ?1"),
+            rusqlite::params![scope.as_slice()],
+        )
+        .with_context(|| format!("clear the actor's {table} rows"))?;
+    }
+    // The corpus's own items, rebuilt from its segments; what is carried or
+    // kept below is left out of the rebuild, whose records are not there.
+    let rebuilt = |collection: &[u8; 32], uid_hash: &[u8; 32], id: &[u8; 32]| {
+        !carried_ids.contains(id) && !mid_door_resources.contains(&(*collection, *uid_hash))
+    };
+    match fold {
+        AdoptedFold::Calendar(m) => {
+            let mut corpus = m.clone();
+            corpus
+                .events
+                .retain(|e| rebuilt(&e.calendar_id, &e.uid_hash, &e.event_id));
+            crate::filesync_handlers::rebuild_calendar_rows_from_disk(
+                tx, state, scope, ids, &corpus,
+            )
+            .context("rebuild the calendar rows from the materialized corpus")?;
+        }
+        AdoptedFold::Card(m) => {
+            let mut corpus = m.clone();
+            corpus
+                .cards
+                .retain(|c| rebuilt(&c.addressbook_id, &c.uid_hash, &c.card_id));
+            crate::filesync_handlers::rebuild_card_rows_from_disk(tx, state, scope, ids, &corpus)
+                .context("rebuild the card rows from the materialized corpus")?;
+        }
+        AdoptedFold::Mail(_) => anyhow::bail!("the adopted journal is not a DAV kind's"),
+    }
+
+    for row in carried.iter().chain(&mid_door) {
+        tx.execute(
+            &format!(
+                "INSERT INTO {items}
+                    (actor_id, {col}, {item}, uid_hash, encrypted_index_hint, etag, modseq,
+                     ciphertext_size, internal_date, created_at, encrypted_fauna_ext, record_cid)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                items = t.items,
+                col = t.collection_id,
+                item = t.item_id,
+            ),
+            rusqlite::params![
+                scope.as_slice(),
+                row.collection.as_slice(),
+                row.id.as_slice(),
+                row.uid_hash.as_slice(),
+                &row.encrypted_index_hint,
+                &row.etag,
+                row.modseq,
+                row.ciphertext_size,
+                row.internal_date,
+                row.created_at,
+                row.sidecar.as_deref(),
+                row.record_cid.as_deref(),
+            ],
+        )
+        .context("carry an arrival's row")?;
+    }
+    for c in &held_collections {
+        if mid_door
+            .iter()
+            .any(|r| r.collection.as_slice() == c.id.as_slice())
+        {
+            tx.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO {coll}
+                        (actor_id, {col}, encrypted_metadata, ctag, highestmodseq, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    coll = t.collections,
+                    col = t.collection_id,
+                ),
+                rusqlite::params![
+                    scope.as_slice(),
+                    &c.id,
+                    &c.encrypted_metadata,
+                    c.ctag,
+                    c.highestmodseq,
+                    c.created_at
+                ],
+            )
+            .context("keep a mid-door arrival's collection")?;
+        }
+        tx.execute(
+            &format!(
+                "UPDATE {coll}
+                 SET highestmodseq = MAX(highestmodseq, ?3), ctag = MAX(ctag, ?4),
+                     pruned_modseq = MAX(pruned_modseq, ?5)
+                 WHERE actor_id = ?1 AND {col} = ?2",
+                coll = t.collections,
+                col = t.collection_id,
+            ),
+            rusqlite::params![
+                scope.as_slice(),
+                &c.id,
+                c.highestmodseq,
+                c.ctag,
+                c.pruned_modseq
+            ],
+        )
+        .context("keep the change counters the target handed out")?;
+    }
+    let placed: i64 = tx.query_row(
+        &format!("SELECT COUNT(*) FROM {} WHERE actor_id = ?1", t.items),
+        rusqlite::params![scope.as_slice()],
+        |r| r.get(0),
+    )?;
+    Ok(placed.max(0) as u64)
 }
 
 /// Make the materialized corpus live, inside the caller's transaction: the
@@ -1314,10 +2662,7 @@ fn rebuild_rows(
                 // either.
                 return Ok(None);
             };
-            clear_placement_scaffolding(tx, scope, arm, kind)?;
-            crate::restore::mail::replay_mail_manifest_into_sqlite(tx, scope, fold)
-                .context("replay the adopted placement journal")
-                .map_err(integrity)?;
+            restate_mail_rows(tx, scope, fold).map_err(integrity)?;
             Ok(Some(fold.placements.len() as u64))
         }
         (KindArm::Post, None) => {
@@ -1328,19 +2673,10 @@ fn rebuild_rows(
         }
         // No journal and (as the caller already proved) no content either.
         (KindArm::Calendar | KindArm::Card, None) => Ok(None),
-        (KindArm::Calendar, Some(AdoptedFold::Calendar(fold))) => {
-            clear_placement_scaffolding(tx, scope, arm, kind)?;
-            crate::filesync_handlers::rebuild_calendar_rows_from_disk(tx, state, scope, ids, fold)
-                .context("rebuild the calendar rows from the materialized corpus")
-                .map_err(integrity)?;
-            Ok(Some(fold.events.len() as u64))
-        }
-        (KindArm::Card, Some(AdoptedFold::Card(fold))) => {
-            clear_placement_scaffolding(tx, scope, arm, kind)?;
-            crate::filesync_handlers::rebuild_card_rows_from_disk(tx, state, scope, ids, fold)
-                .context("rebuild the card rows from the materialized corpus")
-                .map_err(integrity)?;
-            Ok(Some(fold.cards.len() as u64))
+        (KindArm::Calendar, Some(fold @ AdoptedFold::Calendar(_)))
+        | (KindArm::Card, Some(fold @ AdoptedFold::Card(_))) => {
+            let placed = restate_dav_rows(tx, state, scope, arm, ids, fold).map_err(integrity)?;
+            Ok(Some(placed))
         }
         _ => Err(integrity(anyhow::anyhow!(
             "the adopted journal is not the `{kind}` kind's"

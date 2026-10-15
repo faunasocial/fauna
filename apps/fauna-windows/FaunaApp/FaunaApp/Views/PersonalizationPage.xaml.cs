@@ -178,6 +178,23 @@ public sealed partial class PersonalizationPage : Page
         LoadProgress.IsActive = false;
         LoadProgress.Visibility = Visibility.Collapsed;
         RenderPage();
+        // The shared store-change notice (account-runtime.md § A runtime's own
+        // pump is a source of the notice too): a topic trained on another device
+        // paints on this open page with no re-visit.
+        if (_trainedTopicsVm is not null)
+        {
+            _trainedTopicsVm.StoreResynced -= RenderPage;
+            _trainedTopicsVm.StoreResynced += RenderPage;
+            _trainedTopicsVm.WatchStore();
+        }
+    }
+
+    protected override void OnNavigatedFrom(NavigationEventArgs e)
+    {
+        base.OnNavigatedFrom(e);
+        if (_trainedTopicsVm is null) return;
+        _trainedTopicsVm.CleanupStoreChange();
+        _trainedTopicsVm.StoreResynced -= RenderPage;
     }
 
     /// <summary>Scroll <paramref name="panel"/> into the ScrollViewer's viewport once
@@ -217,6 +234,7 @@ public sealed partial class PersonalizationPage : Page
                 entry,
                 index,
                 showInspectSubscribe: false,
+                subscribeEnabled: false,
                 onInspect: _ => Task.CompletedTask,
                 onSubscribe: _ => Task.CompletedTask,
                 onUnsubscribe: i => _machine!.Unsubscribe(i));

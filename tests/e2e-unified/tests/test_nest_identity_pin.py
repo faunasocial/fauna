@@ -14,11 +14,11 @@ no-ops outside ``Offline{transient:true}`` anyway, so a Retry button here would 
 *dead*. The ``launch_identity_changed`` page carries no ``launch-retry-button`` on
 any client; that is asserted below.
 
-**One module, two arms — the arm is a property of the nest's TLS posture, not the
-client code.** The launch flow, the warning, the trust-recovery, and every UI
-assertion are IDENTICAL across clients (priority #1). The only per-app
-difference is what a stale pin *disagrees with*, which is fixed by which nest
-fixture the client can reach:
+**One module, one arm on every app — the Changed arm.** The launch flow, the
+warning, the trust-recovery, and every UI assertion are IDENTICAL across clients
+(priority #1). What differs per app is only *how* the live identity a stale pin
+disagrees with is proven, which is fixed by which nest fixture the client can
+reach:
 
 * **Native** (linux, tui, macos, ios) ride ``self_signed_nest`` — the one fixture
   that serves real (self-signed) HTTPS. It binds ``127.0.0.1``, so every native
@@ -31,16 +31,18 @@ fixture the client can reach:
   a seeded pin is only ever consulted over TLS. Against a genuine ``cert_binding``
   a disagreeing pin fails possession-verify as ``IdentityError::PinChanged`` — the
   **Changed** arm.
-* **Web** rides the plain-HTTP ``spa_url`` proxy (its nest origin). A plain-HTTP
-  nest serves no ``cert_binding`` at all, so a pre-seeded pin can never be
-  *confirmed* → the **Withdrawn** arm. (Web can't reach Changed: its e2e origin is
-  never TLS, so there is no binding to *disagree* with. The possession-verify
-  itself is unit-tested in ``fauna_client_core::nest_trust``.)
+* **Web** rides the plain-HTTP ``spa_url`` proxy (its nest origin). Its silent
+  challenge reads the nest's identity binding (``fauna.auth.nest_handshake``,
+  cert-optional, so plain HTTP serves it) before it signs anything
+  (``login.md`` § Binding the nest) — **possession-only**, since a browser reads
+  no received cert. A seeded pin therefore *disagrees* with a proven identity →
+  the **Changed** arm too. (Web reached the Withdrawn arm — no binding to confirm
+  the pin — until the login binding landed on 2026-09-23. Withdrawn is
+  unit-pinned in ``fauna_client_core::nest_trust``.)
 
-Both arms render the same warning and recover the same way; they differ only in
-what the re-TOFU leaves pinned — Changed re-pins the nest's genuine identity,
-Withdrawn has no binding to re-pin so the origin's pin is simply forgotten. That
-single divergence is data-driven off ``pin_env.arm``.
+Every app renders the same warning, recovers the same way, and leaves the same
+thing pinned: the re-TOFU re-pins the nest's genuine identity. The one per-app
+difference is the launch shape, ``pin_env.reaches_app_first`` (below).
 
 **Seeding the pin** goes through the shared E2E-bridge name
 ``set_nest_identity_pin_for_test`` (``onboarding.md`` § E2E bridge contract), which
@@ -67,6 +69,7 @@ from helpers.app_surface import (
     skip_unless_optimistic_launch_entry,
 )
 from common.launch_harness import make_launch_harness, reached_authenticated_app
+from helpers.app_launch import app_launch_config
 from conftest import _trust_seeder, get_available_apps
 from helpers.waiting import session_generation
 
@@ -126,23 +129,26 @@ def _require_credential_persistence(pin_client):
 
 
 class _PinEnv:
-    """The launch harness for one app plus the identity/nest it pins and the
-    arm that client's TLS posture reaches."""
+    """The launch harness for one app plus the identity/nest it pins and whether
+    its launch reaches the app before the pin is seeded."""
 
-    def __init__(self, *, harness, node_url, nest, secret_hex, arm):
+    def __init__(self, *, harness, node_url, nest, secret_hex, reaches_app_first):
         self.harness = harness
         self.node_url = node_url
         self.nest = nest  # the harness launch's `trust` (None on web, which reads no env)
         self.secret_hex = secret_hex
-        self.arm = arm  # "changed" (native/TLS) | "withdrawn" (web/plain-HTTP)
+        # True on native; False on web, where a cached session would bypass the
+        # pinned silent challenge on the relaunch (see the test body).
+        self.reaches_app_first = reaches_app_first
 
 
 @pytest.fixture
 def pin_env(request, pin_client, tmp_path):
     """Per-app launch harness + the identity/nest it pins.
 
-    Native rides ``self_signed_nest`` (real TLS) → the CHANGED arm; web rides the
-    plain-HTTP ``spa_url`` proxy → the WITHDRAWN arm. The nest fixtures are pulled
+    Native rides ``self_signed_nest`` (real TLS, SPKI-compared binding); web rides
+    the plain-HTTP ``spa_url`` proxy (possession-only identity binding) — both the
+    CHANGED arm. The nest fixtures are pulled
     lazily per client (``getfixturevalue``) so a web run never spins up the TLS
     nest and vice-versa."""
     if pin_client == "web":
@@ -154,32 +160,20 @@ def pin_env(request, pin_client, tmp_path):
             node_url=spa_url,
             nest=None,
             secret_hex=bytes(user["signing_key"]).hex(),
-            arm="withdrawn",
+            reaches_app_first=False,
         )
     else:
         nest = request.getfixturevalue("self_signed_nest")
-        if pin_client == "ios":
-            # No bare `ios_app_path` fixture exists — iOS's direct-launch fixture
-            # (`ios_setup`) returns `{"udid", "app_path"}` together, because
-            # `drivers/ios.py`'s `launch()` requires both. Same branch as
-            # `test_onboarding_launch_routing_smoke.py`'s `launch_harness`.
-            ios_setup = request.getfixturevalue("ios_setup")
-            harness = make_launch_harness(
-                "ios", tmp_path=tmp_path, app_path=ios_setup["app_path"],
-                udid=ios_setup["udid"], seed_trust=_trust_seeder(request),
-            )
-        else:
-            app_path = request.getfixturevalue(f"{pin_client}_app_path")
-            harness = make_launch_harness(
-                pin_client, tmp_path=tmp_path, app_path=app_path,
-                seed_trust=_trust_seeder(request),
-            )
+        harness = make_launch_harness(
+            pin_client, tmp_path=tmp_path, **app_launch_config(pin_client, request),
+            seed_trust=_trust_seeder(request),
+        )
         env = _PinEnv(
             harness=harness,
             node_url=nest["url"],
             nest=nest,
             secret_hex=bytes(nest["user"]["signing_key"]).hex(),
-            arm="changed",
+            reaches_app_first=True,
         )
     try:
         yield env
@@ -313,30 +307,28 @@ def test_changed_nest_identity_warns_then_recovers(pin_env):
     verdict (it reads the secret + nest_url off that state), so a button wired to a
     fresh machine silently does nothing and the user can never get in.
 
-    Native reaches this over ``self_signed_nest``'s real binding (the pin
-    *disagrees* → Changed); web reaches the same surface over its plain-HTTP origin
-    (the pin can't be *confirmed* → Withdrawn). Same warning, same recovery."""
+    Native reaches this over ``self_signed_nest``'s SPKI-compared binding; web over
+    its plain-HTTP origin's possession-only identity binding. Either way the pin
+    *disagrees* with a proven identity → Changed. Same warning, same recovery."""
     env = pin_env
 
-    # Bring up the client with the identity persisted. The two arms differ ONLY in
-    # how first contact treats the pin store, which is a property of the nest's TLS
-    # posture, not the client:
+    # Bring up the client with the identity persisted. The apps differ ONLY in
+    # whether the launch may reach the app before the pin is seeded:
     driver = env.harness.launch(
         secret_hex=env.secret_hex, node_url=env.node_url, trust=env.nest
     )
 
-    if env.arm == "changed":
-        # Native / TLS: first contact TOFU-pins the nest's REAL identity. Wait for
+    if env.reaches_app_first:
+        # Native: first contact TOFU-pins the nest's REAL identity. Wait for
         # that to settle (the online baseline) BEFORE overwriting it with the bogus
         # pin below, or the async TOFU races the seed and re-pins the real id. Fresh
         # web drivers compile wasm cold, so a generous ceiling — it returns the
         # instant the app is reached, so native is unaffected.
         reached_authenticated_app(driver, timeout=90)
-    # The Withdrawn / web arm deliberately does NOT reach an authenticated session
-    # first: its plain-HTTP first contact pins nothing (no binding to TOFU), and a
-    # cached session would bypass the pinned silent challenge on the relaunch, so
-    # the identity-changed surface would never render. Web stays on the reset launch
-    # surface until `relaunch()` runs its first (and only) pinned challenge.
+    # Web deliberately does NOT reach an authenticated session first: a cached
+    # session would bypass the pinned silent challenge on the relaunch, so the
+    # identity-changed surface would never render. Web stays on the reset launch
+    # surface until `relaunch()` runs its first pinned challenge.
 
     # Overwrite (native) / set (web) the pin with one no nest can ever prove.
     _seed_pin(driver, env.node_url, BOGUS_PIN)
@@ -378,20 +370,13 @@ def test_changed_nest_identity_warns_then_recovers(pin_env):
         "after re-trusting, the warning should be gone and the user in the app"
     )
 
-    # The stale pin was forgotten. Changed re-TOFU'd the nest's REAL identity over
-    # the live binding; Withdrawn has no binding to re-pin, so the origin's pin is
-    # simply cleared. Both must have dropped the bogus one.
+    # The stale pin was forgotten and the re-TOFU re-pinned the nest's REAL
+    # identity over the live binding.
     repinned = _read_pin(driver, env.node_url)
     assert repinned != BOGUS_PIN, (
         f"the stale pin should be forgotten and re-TOFU'd, still got {repinned!r}"
     )
-    if env.arm == "withdrawn":
-        assert repinned is None, (
-            "a plain-HTTP nest serves no binding, so the re-TOFU has nothing to "
-            f"re-pin — the origin's pin should be forgotten, got {repinned!r}"
-        )
-    else:
-        assert repinned is not None, (
-            "re-TOFU against a real TLS binding must re-pin the nest's genuine "
-            f"identity, got {repinned!r}"
-        )
+    assert repinned is not None, (
+        "re-TOFU against the nest's identity binding must re-pin its genuine "
+        f"identity, got {repinned!r}"
+    )

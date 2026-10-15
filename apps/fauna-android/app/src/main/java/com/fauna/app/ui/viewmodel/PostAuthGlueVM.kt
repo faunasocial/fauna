@@ -4,8 +4,10 @@ import androidx.lifecycle.ViewModel
 import com.fauna.app.core.ApiClient
 import com.fauna.app.core.OnboardingHost
 import com.fauna.app.core.ShellLog
+import com.fauna.app.core.SuccessionAftermathHost
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
+import uniffi.fauna_core.LocalizedText
 
 /**
  * The legs every flavor runs at the universal post-auth hook (the authed app
@@ -24,7 +26,36 @@ import javax.inject.Inject
 class PostAuthGlueVM @Inject constructor(
     private val api: ApiClient,
     private val host: OnboardingHost,
+    private val aftermath: SuccessionAftermathHost,
 ) : ViewModel() {
+
+    /**
+     * The post-succession aftermath (`succession-aftermath.md` § Re-key scope's
+     * `BackupKey` corpus row: "started at first successor sign-in, surfaced with
+     * progress, resumed until complete") at the universal post-auth hook.
+     *
+     * **Every authenticated start, not only one that just ran a ceremony:** the
+     * pass is resumable and answers `NotASuccessor` having done nothing for an
+     * identity that never succeeded, and a re-seal cut short by a lost
+     * connection is finished by the NEXT sign-in, which has no ceremony to
+     * notice. Best-effort and log-only, like the legs around it. No ceremony
+     * context is carried here: shared Rust parks it in the account registry and
+     * drains it inside the pass.
+     */
+    suspend fun runSuccessionAftermath() {
+        try {
+            // Logged unconditionally, `NotASuccessor` included: a pass that
+            // reports a healthy "nothing to do" is indistinguishable from one
+            // whose predecessor link is missing unless the line is there to
+            // check.
+            val outcome = api.runSuccessionAftermath(aftermath.sink())
+            ShellLog.i("fauna.recovery", "succession aftermath: $outcome")
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            ShellLog.w("fauna.recovery", "succession aftermath not run: ${e.message}")
+        }
+    }
 
     /**
      * onboarding.md § 3b-ter: the one-tap trust answer latched on the
@@ -84,6 +115,25 @@ class PostAuthGlueVM @Inject constructor(
     }
 
     /**
+     * Seal the DNS-provider credential the wizard verified at its `dns_config`
+     * step into the admin's account store (`onboarding-provisioning.md` § 4.
+     * DNS configuration, *Capture at onboarding, seal via the launched app*).
+     * The rule lives once in `fauna_client_dns` (reached through
+     * `ApiClient.sealCapturedDnsCredential`); this is the call site at the
+     * signed-in edge, as tui's `seal_captured_dns_credential` is. No-op when
+     * nothing was captured. Best-effort and log-only: the same credential is
+     * re-enterable from the admin DNS page, which is also where a failure shows.
+     */
+    suspend fun sealCapturedDnsCredential() {
+        val credential = host.consumePendingDnsCredential() ?: return
+        try {
+            api.sealCapturedDnsCredential(credential)
+        } catch (e: Exception) {
+            ShellLog.w("DnsSealGlue", "sealing the captured DNS credential failed: ${e.message}")
+        }
+    }
+
+    /**
      * Host-address acquisition glue (domains-and-tls-bootstrap.md § Host-address
      * acquisition). Fired at the universal post-auth hook, admin-gated — a
      * non-admin call is refused nest-side, so gating avoids a pointless failing
@@ -106,12 +156,6 @@ class PostAuthGlueVM @Inject constructor(
         }
     }
 
-    /** What [runDeploymentSeedCustodyLeg] surfaces: the `NOT_PROTECTED_*` cases warrant a
-     *  user-visible warning (the launch glue maps them to an [com.fauna.app.core.AppMessages]
-     *  warning banner); `OK` shows nothing (custody held or just captured, or not an
-     *  admin of this nest — nothing owed). */
-    enum class RecoveryCustodyOutcome { OK, NOT_PROTECTED_MISMATCH, NOT_PROTECTED_FAILED }
-
     /**
      * The deployment-seed **custody leg** at the universal post-auth hook
      * (`box-recovery.md` § The plane-era recovery floor, *(c) The writes*) — the
@@ -123,48 +167,19 @@ class PostAuthGlueVM @Inject constructor(
      * store yet is retried there and at the next connect.
      *
      * A run that ends with custody **unconfirmed for an admin** is USER-VISIBLE,
-     * never a silent log: the returned outcome drives the launch surface's
-     * recovery-custody warning banner (the android idiom of linux's toast).
-     * `NOT_ADMIN` and `ALREADY_CUSTODIED` show nothing.
+     * never a silent log: the answer is the shared warning
+     * (`fauna_client_config::custody_leg_warning`) as a [LocalizedText], which the
+     * launch surface renders through [com.fauna.app.ui.util.resolveLocalized] onto
+     * its warning banner (the android idiom of linux's toast). `null` — custody
+     * held or captured, or not an admin here — shows nothing. Which warning, and
+     * its wording, is decided in Rust, never here.
      */
-    suspend fun runDeploymentSeedCustodyLeg(): RecoveryCustodyOutcome =
-        try {
-            recoveryCustodyOutcomeOf(api.selfHealDeploymentSeedCustody())
-        } catch (e: Exception) {
-            // The bound nest id could not be resolved (or a bad secret) — custody
-            // could not even be attempted, so it is not confirmed.
-            ShellLog.w(
-                "DeploymentSeedGlue",
-                "deployment-seed custody leg failed: ${e.message}",
-            )
-            RecoveryCustodyOutcome.NOT_PROTECTED_FAILED
+    suspend fun runDeploymentSeedCustodyLeg(): LocalizedText? {
+        val warning = api.selfHealDeploymentSeedCustody()
+        if (warning != null) {
+            ShellLog.w("DeploymentSeedGlue", "custody leg: custody unconfirmed (${warning.key})")
         }
-
-    /** The custody leg's outcome projected onto the recovery-custody warning. */
-    private fun recoveryCustodyOutcomeOf(
-        outcome: com.fauna.ffi.FfiDeploymentSeedSelfHeal,
-    ): RecoveryCustodyOutcome {
-        ShellLog.i("DeploymentSeedGlue", "custody leg: $outcome")
-        return when (outcome) {
-            is com.fauna.ffi.FfiDeploymentSeedSelfHeal.AlreadyCustodied,
-            is com.fauna.ffi.FfiDeploymentSeedSelfHeal.NotAdmin -> RecoveryCustodyOutcome.OK
-            is com.fauna.ffi.FfiDeploymentSeedSelfHeal.HandoffUnavailable,
-            is com.fauna.ffi.FfiDeploymentSeedSelfHeal.NestHoldsNoSeed ->
-                RecoveryCustodyOutcome.NOT_PROTECTED_FAILED
-            is com.fauna.ffi.FfiDeploymentSeedSelfHeal.Captured -> when (outcome.v1) {
-                com.fauna.ffi.FfiDeploymentSeedCapture.REFUSED_MISMATCH -> {
-                    ShellLog.e(
-                        "DeploymentSeedGlue",
-                        "deployment-seed custody refused: seed does not derive to this nest (BR-2); recovery not protected",
-                    )
-                    RecoveryCustodyOutcome.NOT_PROTECTED_MISMATCH
-                }
-                com.fauna.ffi.FfiDeploymentSeedCapture.WROTE,
-                com.fauna.ffi.FfiDeploymentSeedCapture.ALREADY_HELD_SAME,
-                com.fauna.ffi.FfiDeploymentSeedCapture.REFUSED_DIFFERING ->
-                    RecoveryCustodyOutcome.OK
-            }
-        }
+        return warning
     }
 
     /**

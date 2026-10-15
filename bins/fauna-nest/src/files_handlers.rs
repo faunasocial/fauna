@@ -7,9 +7,11 @@
 //! GC-pinned. Two kinds:
 //!
 //! - `fauna.files.versions.list` —
-//!   `list_file_versions_in_sets(readable_set_ids, path_hash)`, oldest→newest;
-//!   `req.folder` narrows to one named readable set (unknown/unreadable name
-//!   → empty list, no set-name existence oracle).
+//!   `list_file_versions_in_sets(readable_set_ids, path_hash, scope)`,
+//!   oldest→newest; `req.folder` narrows to one named readable set
+//!   (unknown/unreadable name → empty list, no set-name existence oracle);
+//!   `include_pruned` is the recovery browse and `include_superseded` the
+//!   snapshot restore's licence read (`db::VersionScope`).
 //! - `fauna.files.versions.get` — `get_file_version_by_seq(path_hash,
 //!   version_num)`; missing OR outside the caller's readable sets →
 //!   `fauna.files.not_found` (no existence oracle).
@@ -65,8 +67,8 @@ fn path_hash_array(path_hash: &ByteBuf) -> Result<[u8; 32], RpcError> {
     crate::rpc_errors::require_bytes32("path_hash", path_hash.as_ref()).map_err(invalid_request)
 }
 
-/// DB projection row → wire metadata. `set_name` is resolved from the caller's
-/// readable-set list (the row's `folder_id` is nest-internal);
+/// DB projection row → wire metadata. The set's name, hash and row are read
+/// off the caller's readable-set row for the version (`set`);
 /// `author_handle` is the recorder's nest-resolved handle (empty folds to
 /// absent, so the client shows the id fallback rather than a blank).
 fn row_to_info(
@@ -86,6 +88,9 @@ fn row_to_info(
         created_at: r.created_at,
         folder: set.map(|fs| fs.name.clone()),
         folder_hash: set.and_then(|fs| fs.name_hash.clone()).map(ByteBuf::from),
+        // The set's row — what tells a same-named pair's versions apart
+        // (`media.md` § Encryption at rest → *A set is addressed by its row*).
+        folder_id: set.map(|fs| fs.id),
         content_key_version: r.content_key_version.map(|v| v as u64),
         // Nest-stamped attribution (multi-writer Phase 1) — the row's
         // recorder; the set owner on every pre-multi-writer row.
@@ -148,7 +153,9 @@ fn list_handler() -> RpcHandler {
             // yields the empty scope — the same absent-not-denied shape as a
             // path with no history (no set-name existence oracle). The named
             // set narrows hash-first (S5b): a present `name_hash` alone selects,
-            // so the scope survives the plaintext name blanking.
+            // so the scope survives the plaintext name blanking; a carried row
+            // narrows to that one row alone (`set-addressing.md` § The row
+            // form) — empty when it is not among the caller's audience sets.
             let name_hash = crate::routes::parse_name_hash(&req.name_hash, |m| invalid_request(m))?;
             let sets = crate::folder_authz::enumerate_readable_folders(&state.db, &actor_id)
                 .await
@@ -157,10 +164,11 @@ fn list_handler() -> RpcHandler {
                 .iter()
                 .filter(|(fs, grant)| {
                     grant.is_label_audience()
-                        && match (name_hash, req.folder.as_deref()) {
-                            (Some(h), _) => fs.name_hash.as_deref() == Some(&h[..]),
-                            (None, Some(name)) => fs.name == name,
-                            (None, None) => true,
+                        && match (req.folder_id, name_hash, req.folder.as_deref()) {
+                            (Some(id), _, _) => fs.id == id,
+                            (None, Some(h), _) => fs.name_hash.as_deref() == Some(&h[..]),
+                            (None, None, Some(name)) => fs.name == name,
+                            (None, None, None) => true,
                         }
                 })
                 .collect();
@@ -171,7 +179,15 @@ fn list_handler() -> RpcHandler {
                 .list_file_versions_in_sets(
                     &scope_ids,
                     &path_hash,
-                    req.include_pruned.unwrap_or(false),
+                    crate::db::VersionScope {
+                        include_pruned: req.include_pruned.unwrap_or(false),
+                        // The snapshot restore's licence read: a purged row's
+                        // signed statement, served so a plaintext snapshot
+                        // entry can be bound to the row that named it
+                        // (`backup-restore.md` § Security Properties →
+                        // Integrity).
+                        include_superseded: req.include_superseded.unwrap_or(false),
+                    },
                 )
                 .await
                 .map_err(internal)?;

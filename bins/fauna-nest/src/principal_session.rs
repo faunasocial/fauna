@@ -12,7 +12,8 @@
 //! - **the gate** ([`admit`]) — the issuer's resource-server gate applied to
 //!   the upgrade request, once, before the 101, in `/oauth/userinfo`'s order:
 //!   the token, then the proof, then at least one built Fauna-family scope,
-//!   then the principal row and the account's own standing;
+//!   then the token's grant family (its `sid`, live), the principal row and
+//!   the account's own standing;
 //! - **the registration** ([`register_principal_connection`]) — the principal
 //!   registry, never the account's subscription entry, with the one re-read
 //!   after joining that makes a racing revoke total;
@@ -20,8 +21,11 @@
 //!   the token's `exp`.
 //!
 //! Dispatch on the connection is `principal_handlers`'; the revocation doors
-//! are `WsState::disconnect_principal` (door (a), `fauna.principals.revoke`)
-//! and the per-actor teardown's principal sweep (door (b)).
+//! are `WsState::disconnect_principal` (door (a), `fauna.principals.revoke`),
+//! the per-actor teardown's principal sweep (door (b)), and a grant family's
+//! ending (door (c)) — `WsState::disconnect_grant_family` after the user's
+//! per-grant revoke, `end_oauth_session` and the reuse family-kill, and
+//! `WsState::disconnect_all_principals` after either forced rotation arm.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -151,7 +155,7 @@ pub fn rpc_error_response(err: &fauna_protocol::RpcError) -> Response {
         StatusCode::BAD_REQUEST
     } else if code.ends_with("stale_writer_seq") || code.ends_with("cas_mismatch") {
         StatusCode::CONFLICT
-    } else if code.ends_with("scope_full") {
+    } else if code.ends_with("scope_full") || code.ends_with("inbox_full") {
         StatusCode::INSUFFICIENT_STORAGE
     } else if code.ends_with("unavailable") {
         StatusCode::SERVICE_UNAVAILABLE
@@ -311,7 +315,14 @@ pub async fn admit_presentation(
     else {
         return Err(refuse(Refusal::InvalidToken));
     };
-    let standing = account_standing(state, &account, &claims.client_id).await;
+    // The grant family the token was minted under — door (c)'s handle. Every
+    // token this nest mints names one, so a token without one is not ours to
+    // honour; and an ended family admits nothing, for the same reason a
+    // revoked principal row admits nothing.
+    let Some(family_id) = claims.sid_bytes() else {
+        return Err(refuse(Refusal::InvalidToken));
+    };
+    let standing = account_standing(state, &account, &claims.client_id, &family_id).await;
     let principal_id = match standing {
         Ok(Some(principal_id)) => principal_id,
         Ok(None) => return Err(refuse(Refusal::InvalidToken)),
@@ -330,19 +341,21 @@ pub async fn admit_presentation(
             account,
             principal_id,
             token_scopes: split_scope(&claims.scope),
+            family_id: Some(family_id),
         },
         exp: claims.exp,
     })
 }
 
-/// Step (4)'s reads: the principal's id when the row exists and the account
-/// stands — `None` for a missing row, a missing, suspended or locked-out
-/// account, a superseded identity, and an account whose external-apps switch
-/// is OFF alike.
+/// Step (4)'s reads: the principal's id when the row exists, the token's grant
+/// family is live and the account stands — `None` for a missing row, an ended
+/// family, a missing, suspended or locked-out account, a superseded identity,
+/// and an account whose external-apps switch is OFF alike.
 async fn account_standing(
     state: &AppState,
     account: &[u8; 32],
     client_id: &str,
+    family_id: &[u8],
 ) -> anyhow::Result<Option<Vec<u8>>> {
     let Some(principal_id) = state
         .db
@@ -351,6 +364,9 @@ async fn account_standing(
     else {
         return Ok(None);
     };
+    if !state.db.is_oauth_session_live(account, family_id).await? {
+        return Ok(None);
+    }
     match state.db.actor_authority(&account[..]).await? {
         Some(authority) if !authority.is_revoked_at(crate::db::now_epoch_secs()) => {}
         _ => return Ok(None),
@@ -754,6 +770,7 @@ mod tests {
             account,
             principal_id: principal_id.to_vec(),
             token_scopes: vec!["fauna:feed:read".into()],
+            family_id: None,
         }
     }
 
@@ -839,8 +856,45 @@ mod tests {
             .expect("the consent minted the principal");
         (
             Arc::new(AppState::for_test(db)),
-            binding(ACCOUNT, &principal_id),
+            PrincipalBinding {
+                family_id: Some(b"family-1".to_vec()),
+                ..binding(ACCOUNT, &principal_id)
+            },
         )
+    }
+
+    /// A second grant family of the same principal — the client consented
+    /// again (another device, another sign-in) — and the binding its token
+    /// opens a session with.
+    async fn second_family(state: &AppState, first: &PrincipalBinding) -> PrincipalBinding {
+        state
+            .db
+            .record_atproto_oauth_grant(
+                &ACCOUNT,
+                b"family-2",
+                "https://app.example/client.json",
+                Some("Example App"),
+                "fauna:feed:read",
+                &[],
+                "jkt",
+                i64::MAX,
+                None,
+                crate::db::atproto_pds::OAUTH_GRANT_ISSUER_NEST,
+                &PrincipalAttestation {
+                    keys: AttestedKeys {
+                        holder_x25519: None,
+                        writer_ed25519: None,
+                    },
+                    execution_form: ExecutionForm::Device,
+                    manifest: None,
+                },
+            )
+            .await
+            .unwrap();
+        PrincipalBinding {
+            family_id: Some(b"family-2".to_vec()),
+            ..first.clone()
+        }
     }
 
     /// Door (a), through the real handler: `fauna.principals.revoke` closes the
@@ -940,12 +994,175 @@ mod tests {
             "an upgrade while OFF closes at registration"
         );
         assert_eq!(
-            account_standing(&state, &ACCOUNT, "https://app.example/client.json")
-                .await
-                .unwrap(),
+            account_standing(
+                &state,
+                &ACCOUNT,
+                "https://app.example/client.json",
+                b"family-1"
+            )
+            .await
+            .unwrap(),
             None,
             "the upgrade gate's standing read refuses while OFF"
         );
+    }
+
+    // ── Door (c): a grant family's ending ──
+
+    /// The registry half: the per-family sweep closes exactly the sessions
+    /// opened under that family — not a sibling family's of the same
+    /// principal, not another account's under a family id that happens to
+    /// match — and the forced arms' sweep closes every principal session.
+    #[test]
+    fn ending_one_grant_family_closes_only_its_sessions() {
+        let ws = crate::ws::WsState::new();
+        let fam = |account, family: &[u8]| PrincipalBinding {
+            family_id: Some(family.to_vec()),
+            ..binding(account, b"p1")
+        };
+        let (a, _r1) = ws.subscribe_principal(fam(ACCOUNT, b"f1"));
+        let (b, _r2) = ws.subscribe_principal(fam(ACCOUNT, b"f1"));
+        let (sibling, _r3) = ws.subscribe_principal(fam(ACCOUNT, b"f2"));
+        let (theirs, _r4) = ws.subscribe_principal(fam(OTHER, b"f1"));
+        let (own, _r5) = ws.subscribe(ACCOUNT);
+        assert_eq!(ws.disconnect_grant_family(&ACCOUNT, b"f1"), 2);
+        assert!(a.is_revoked() && b.is_revoked());
+        assert!(
+            !sibling.is_revoked(),
+            "a sibling family of the principal lives"
+        );
+        assert!(!theirs.is_revoked(), "another account's session lives");
+        assert!(!own.is_revoked(), "the account's own socket lives");
+
+        // Four: a closed session stays registered until its connection ends.
+        assert_eq!(ws.disconnect_all_principals("test"), 4);
+        assert!(sibling.is_revoked() && theirs.is_revoked());
+        assert!(!own.is_revoked(), "the forced arms close principals only");
+    }
+
+    /// Door (c), through the real handler: the user's per-grant revoke
+    /// (`fauna.bridges.atproto.revoke_session`) closes the live session that
+    /// family's token opened, after its commit — and a sibling family's
+    /// session of the same principal keeps serving.
+    #[tokio::test]
+    async fn the_users_grant_revoke_closes_that_familys_session_only() {
+        let (state, first) = consented().await;
+        let second = second_family(&state, &first).await;
+        let (one, _r1) = register_principal_connection(&state, first.clone()).await;
+        let (two, _r2) = register_principal_connection(&state, second.clone()).await;
+        assert!(
+            !one.is_revoked() && !two.is_revoked(),
+            "both families register"
+        );
+
+        let router = crate::build_rpc_router();
+        let meta = router
+            .kind_meta("fauna.bridges.atproto.revoke_session")
+            .unwrap();
+        let payload =
+            fauna_protocol::encode_canonical(&fauna_protocol::atproto_pds::RevokeSessionRequest {
+                session_id: b"family-1".to_vec(),
+                extra: Default::default(),
+            })
+            .unwrap();
+        (meta.handler)(Arc::clone(&state), ACCOUNT, payload)
+            .await
+            .expect("the revoke answers");
+        assert!(one.is_revoked(), "the revoked family's session closes 4401");
+        assert!(!two.is_revoked(), "the sibling family's session lives");
+        assert!(
+            crate::principal_handlers::resolve_principal(&state, &second)
+                .await
+                .unwrap()
+                .is_some(),
+            "and still dispatches"
+        );
+    }
+
+    /// The gate is the backstop: an ending whose sweep never reached a socket
+    /// still refuses the session's next call, the registration re-read closes
+    /// an upgrade that raced the ending, and the upgrade's own standing read
+    /// admits nothing under an ended family.
+    #[tokio::test]
+    async fn an_ended_family_refuses_the_next_call_with_no_sweep() {
+        let (state, binding) = consented().await;
+        assert!(
+            state
+                .db
+                .revoke_atproto_session(&ACCOUNT, b"family-1")
+                .await
+                .unwrap()
+        );
+        assert!(
+            crate::principal_handlers::resolve_principal(&state, &binding)
+                .await
+                .unwrap()
+                .is_none(),
+            "the per-call resolve reads the family"
+        );
+        let (conn, _rx) = register_principal_connection(&state, binding).await;
+        assert!(conn.is_revoked(), "the re-read after joining closes it");
+        assert_eq!(
+            account_standing(
+                &state,
+                &ACCOUNT,
+                "https://app.example/client.json",
+                b"family-1"
+            )
+            .await
+            .unwrap(),
+            None,
+            "the upgrade gate admits nothing under an ended family"
+        );
+        assert_eq!(
+            account_standing(
+                &state,
+                &ACCOUNT,
+                "https://app.example/client.json",
+                b"no-such-family"
+            )
+            .await
+            .unwrap(),
+            None,
+            "nor under a family the nest never minted"
+        );
+    }
+
+    /// `/oauth/revoke` and the bridge-class `end_session` share one owner,
+    /// `end_oauth_session`, and the sweep is in it.
+    #[tokio::test]
+    async fn ending_the_oauth_session_closes_its_familys_session() {
+        let (state, binding) = consented().await;
+        let (conn, _rx) = register_principal_connection(&state, binding).await;
+        assert!(
+            crate::bridge_atproto_handlers::end_oauth_session(&state, &ACCOUNT, b"family-1")
+                .await
+                .unwrap()
+        );
+        assert!(conn.is_revoked());
+    }
+
+    /// The reuse family-kill: a replayed refresh token is a theft signal, and
+    /// the session live under the killed family may be the thief's.
+    #[tokio::test]
+    async fn the_reuse_family_kill_closes_its_familys_session() {
+        let (state, binding) = consented().await;
+        let (conn, _rx) = register_principal_connection(&state, binding).await;
+        let status = crate::bridge_atproto_handlers::rotate_session(
+            &state,
+            &ACCOUNT,
+            b"family-1",
+            b"a-spent-refresh-jti",
+            b"next-jti",
+            i64::MAX,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            status,
+            fauna_protocol::atproto_pds::refresh_status::REUSE_DETECTED
+        );
+        assert!(conn.is_revoked(), "the family's session closes 4401");
     }
 
     /// The `exp` deadline closes the socket (revokes the connection) when it
@@ -957,6 +1174,7 @@ mod tests {
             account: [1; 32],
             principal_id: vec![2],
             token_scopes: vec![],
+            family_id: None,
         });
         let task = spawn_exp_deadline(Arc::clone(&conn), until_exp(NOW + 900, NOW));
         tokio::time::sleep(Duration::from_secs(899)).await;

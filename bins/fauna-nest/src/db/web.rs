@@ -877,6 +877,28 @@ impl CacheDb {
         .context("get web rendered sealed")
     }
 
+    /// The path of `actor_id`'s sealed rendered page for `post_id`, if the
+    /// post is web-published, gated and sealed — the web paywall return
+    /// door's direct `?token=` link for a claim whose tier sells exactly that
+    /// post (`monetization.md` § Pillar 2 → *Visitor entitlement doors* (2)).
+    pub async fn find_web_rendered_sealed_path_by_post(
+        &self,
+        actor_id: &[u8; 32],
+        post_id: &[u8; 32],
+    ) -> Result<Option<String>> {
+        let actor_id = *actor_id;
+        let post_id = *post_id;
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT path FROM web_rendered_sealed
+             WHERE actor_id = ?1 AND post_id = ?2 ORDER BY path LIMIT 1",
+            rusqlite::params![actor_id.as_slice(), post_id.as_slice()],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("find web rendered sealed path by post")
+    }
+
     // ---- web_render_owed (the revoke's durability) ----
 
     /// The marker's current nonce for `actor_id` — `None` when no render is

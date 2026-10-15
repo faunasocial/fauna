@@ -175,11 +175,21 @@ pub async fn run_one_emit_pass(
     poster: &dyn TlsrptHttpPoster,
     now: i64,
 ) {
-    // TODO(per-domain gate): smtp-server.md § TLSRPT outbound reporter makes
-    // reporting on-by-default with a per-domain mail-policy-config opt-out
-    // (`tlsrpt_send_reports`). Honouring the opt-out is wired with the rest of
-    // the outbound mail-policy write-path (separate deferred track); until
-    // then we emit for every recipient domain (the on-by-default behaviour).
+    // The admin's `mail.outbound.tlsrpt_send_reports` (`mail-policy-config.md`
+    // § Outbound delivery; on by default). Switched off, nothing is sent and
+    // the day's counts are dropped, so switching it back on never ships a
+    // report covering days the admin opted out of.
+    let send_reports = match state.db.get_outbound_policy().await {
+        Ok(p) => p.effective().tlsrpt_send_reports,
+        Err(e) => {
+            tracing::error!("TLSRPT emit: get_outbound_policy failed: {e}");
+            return;
+        }
+    };
+    if !send_reports {
+        state.email.tlsrpt_aggregator.lock().unwrap().clear();
+        return;
+    }
     let Some(reporting_mta) = resolve_reporting_mta(state).await else {
         return; // No mail domain configured / claimed → nothing to report from.
     };
@@ -335,6 +345,90 @@ mod tests {
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].original_sender, "tlsrpt@mta.test");
         assert_eq!(due[0].recipient, "tlsrpt@dest.test");
+    }
+
+    struct AlwaysRua;
+
+    #[async_trait::async_trait]
+    impl TlsrptPolicyFetcher for AlwaysRua {
+        async fn lookup(&self, _domain: &str) -> anyhow::Result<Option<Vec<String>>> {
+            Ok(Some(vec!["https://reports.dest.test/v1".to_string()]))
+        }
+    }
+
+    async fn state_with_recorded_attempt() -> Arc<AppState> {
+        let state = Arc::new(AppState::for_test(Arc::new(
+            CacheDb::open_in_memory().unwrap(),
+        )));
+        state
+            .db
+            .add_mail_domain("mta.test", true, "testing", "expand_primary", None, None)
+            .await
+            .unwrap();
+        state
+            .email
+            .tlsrpt_aggregator
+            .lock()
+            .unwrap()
+            .record(AttemptOutcome {
+                recipient_domain: "dest.test".into(),
+                policy: TlsrptPolicy {
+                    policy_type: "no-policy-found".into(),
+                    policy_string: vec![],
+                    policy_domain: "dest.test".into(),
+                },
+                failure_type: None,
+            });
+        state
+    }
+
+    #[tokio::test]
+    async fn emit_pass_sends_reports_by_default() {
+        let state = state_with_recorded_attempt().await;
+        run_one_emit_pass(&state, &AlwaysRua, &NullTlsrptHttpPoster, NOW).await;
+        assert_eq!(
+            state
+                .db
+                .fetch_tlsrpt_reports_for_test()
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_pass_sends_nothing_when_admin_switches_reports_off() {
+        // `mail.outbound.tlsrpt_send_reports` (`mail-policy-config.md` §
+        // Outbound delivery) switched off: no report leaves the nest, and the
+        // day's counts are dropped rather than carried into a later report.
+        let state = state_with_recorded_attempt().await;
+        state
+            .db
+            .put_outbound_policy(crate::db::mail_policy::OutboundPolicyOverrides {
+                tlsrpt_send_reports: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        run_one_emit_pass(&state, &AlwaysRua, &NullTlsrptHttpPoster, NOW).await;
+        assert!(
+            state
+                .db
+                .fetch_tlsrpt_reports_for_test()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            state
+                .email
+                .tlsrpt_aggregator
+                .lock()
+                .unwrap()
+                .recorded_domains()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

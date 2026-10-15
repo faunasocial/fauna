@@ -15,8 +15,9 @@
 //!   which applies the paint gate (§ The private overlay → *The paint gate*).
 //! - [`FfiOverlayEditor`] — the private section's staging for one person
 //!   (`fauna_core::contact_overlay::OverlayEditor`) and its Save
-//!   (`fauna_client_account_runtime::contact_overlays::save`, the one door
-//!   every app writes through).
+//!   (`fauna_client_account_runtime::contact_overlays::save_staged`, the one
+//!   answer the wasm face gives too, over the `save` door every app writes
+//!   through).
 //!
 //! **Build the face over the manager the app reads from now, every time.** An
 //! app may swap its manager at login (android does), and a face built before
@@ -34,11 +35,11 @@
 
 use std::sync::{Arc, Mutex};
 
+use fauna_client_account_runtime::contact_overlays::StagedSave;
 use fauna_conversations::ConversationsManager;
 use fauna_core::contact_overlay::{OverlayEditor, OverlayForm};
 use fauna_core::format::PeerLabel;
 use fauna_core::localized::LocalizedText;
-use fauna_sync_engine::contact_overlay_rows::{OverlayWrite, OverlayWriteOutcome};
 
 /// The overlay projection of one conversations manager.
 #[derive(uniffi::Object)]
@@ -219,51 +220,32 @@ impl FfiOverlayEditor {
     /// are written, and the projection reloads before this returns, so the
     /// saving device re-paints at once.
     pub async fn save(&self) -> FfiOverlaySave {
-        // Bound first: a guard taken in the `match` scrutinee would live for
-        // the whole match, and the `Ok(None)` arm locks the staging again.
+        // Bound first: a guard held across the await would block every read
+        // of the staging meanwhile.
         let staged = self.staging().changes();
-        let changes = match staged {
-            Ok(Some(changes)) => changes,
-            // Nothing staged, or staged back to where it started.
-            Ok(None) => {
-                self.staging().reset();
-                return FfiOverlaySave::Saved;
-            }
-            Err(text) => return FfiOverlaySave::Refused { text },
-        };
-        // The account store assembles off the login path; until it has,
-        // there is nowhere to write.
-        let Some(store) = crate::account_runtime::handle() else {
-            return FfiOverlaySave::NotReady {
-                text: LocalizedText::key("common.still_loading"),
-            };
-        };
-        let saved = fauna_client_account_runtime::contact_overlays::save(
-            &self.manager,
-            &store,
+        let store = crate::account_runtime::handle();
+        let answer = fauna_client_account_runtime::contact_overlays::save_staged(
+            Some(&self.manager),
+            store.as_ref(),
             &self.actor_id,
-            OverlayWrite::Changes(changes),
+            staged,
         )
         .await;
-        match saved {
-            Ok(OverlayWriteOutcome::Written(_) | OverlayWriteOutcome::Unchanged(_)) => {
-                self.staging().reset();
-                FfiOverlaySave::Saved
-            }
-            Ok(OverlayWriteOutcome::Refused(text)) => FfiOverlaySave::Refused { text },
-            Err(e) => failed(&e),
+        if answer == StagedSave::Saved {
+            self.staging().reset();
         }
+        answer.into()
     }
 }
 
-/// A Save error as the app shows it: the read gate's refusal names what the
-/// save waits for; anything else is the save failure with its cause.
-fn failed(e: &anyhow::Error) -> FfiOverlaySave {
-    match fauna_client_account_runtime::contact_overlays::not_ready_text(e) {
-        Some(text) => FfiOverlaySave::NotReady { text },
-        None => FfiOverlaySave::Failed {
-            text: LocalizedText::key_arg("profile.private_save_failed", "reason", format!("{e:#}")),
-        },
+impl From<StagedSave> for FfiOverlaySave {
+    fn from(answer: StagedSave) -> Self {
+        match answer {
+            StagedSave::Saved => Self::Saved,
+            StagedSave::Refused(text) => Self::Refused { text },
+            StagedSave::NotReady(text) => Self::NotReady { text },
+            StagedSave::Failed(text) => Self::Failed { text },
+        }
     }
 }
 
@@ -386,22 +368,5 @@ mod tests {
         assert!(editor.is_staged());
         assert_eq!(editor.save().await, FfiOverlaySave::Saved);
         assert!(!editor.is_staged(), "the staging is dropped");
-    }
-
-    /// A failure that is not the read gate's refusal is the save failure
-    /// with its cause — the read gate's own two reasons are pinned beside
-    /// `fauna_account_seams::contact_overlays::not_ready_text`.
-    #[test]
-    fn a_plain_save_error_is_the_save_failure_with_its_cause() {
-        assert_eq!(
-            failed(&anyhow::anyhow!("no generation tip")),
-            FfiOverlaySave::Failed {
-                text: LocalizedText::key_arg(
-                    "profile.private_save_failed",
-                    "reason",
-                    "no generation tip"
-                )
-            }
-        );
     }
 }

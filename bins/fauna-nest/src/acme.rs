@@ -292,10 +292,24 @@ pub fn attached_interface_addresses() -> Vec<std::net::IpAddr> {
 
 /// The IP bridge cert's **derived** enable (`tls-certificates.md` § B-IP): the
 /// addresses this nest should order a publicly-trusted short-lived certificate
-/// for, given the resolved NAT axis and the addresses attached to its interfaces.
+/// for, given the resolved NAT axis and the union of its two address sources.
 /// An empty result means "don't order" — there is no `enabled` knob of any kind,
 /// exactly as ACME's own enable is derived rather than configured (see
 /// [`build_acme_config`]'s trailing comment).
+///
+/// The two sources of § B-IP *When*: `attached`, this box's own interface table
+/// ([`attached_interface_addresses`]); and `host_published`, the set a
+/// deployment artifact publishes for a nest it runs in a container
+/// (`crate::host_maintenance::read_host_addresses` — a provisioned VPS's
+/// container sees only its bridge-network RFC 1918 address, so without this
+/// source the derive is empty on exactly the box the bridge exists for).
+///
+/// `test_ca` is true only under the `[acme] directory_url` override (§ B-IP
+/// *Testing*): then a **host-published** address that is not loopback,
+/// link-local, unspecified or multicast passes even when not global-unicast, so
+/// the tier_4 pebble harness — whose container address is RFC 1918 — can
+/// witness the file→order→serve flow. The override is what selects a test CA,
+/// so the widening can reach no public CA; the interface table is never widened.
 ///
 /// Two rules, both from § B-IP *When*:
 ///
@@ -318,14 +332,32 @@ pub fn attached_interface_addresses() -> Vec<std::net::IpAddr> {
 pub fn ip_bridge_addresses(
     node_mode: crate::config::NodeMode,
     attached: &[std::net::IpAddr],
+    host_published: &[std::net::IpAddr],
+    test_ca: bool,
 ) -> Vec<std::net::IpAddr> {
     if node_mode == crate::config::NodeMode::Private {
         return Vec::new();
     }
+    let test_ca_orderable = |ip: &std::net::IpAddr| {
+        test_ca
+            && !ip.is_loopback()
+            && !ip.is_unspecified()
+            && !ip.is_multicast()
+            && match ip {
+                std::net::IpAddr::V4(v4) => !v4.is_link_local(),
+                std::net::IpAddr::V6(v6) => !v6.is_unicast_link_local(),
+            }
+    };
     let mut out: Vec<std::net::IpAddr> = attached
         .iter()
         .copied()
         .filter(|ip| fauna_core::resolve::is_global_ip(*ip))
+        .chain(
+            host_published
+                .iter()
+                .copied()
+                .filter(|ip| fauna_core::resolve::is_global_ip(*ip) || test_ca_orderable(ip)),
+        )
         .collect();
     out.sort_by_key(|ip| match ip {
         std::net::IpAddr::V4(v4) => (0u8, v4.octets().to_vec()),
@@ -406,11 +438,12 @@ pub fn pem_validity_window(cert_pem: &[u8]) -> Option<(i64, i64)> {
     ))
 }
 
-/// Should this nest still be **carrying** an IP bridge cert at all
+/// Should this nest still be **ordering or renewing** an IP bridge cert
 /// (`tls-certificates.md` § B-IP *Lifetime* — "a bridge, not a permanent
 /// identity")? False once the deployment has a live trusted certificate for its
-/// primary domain: from then on the IP cert is left to lapse and IP dials fall
-/// back to the floor, because the IP was never the deployment's identity
+/// primary domain: from then on no order or renewal is placed and the installed
+/// cert is left to lapse — still served to its own `notAfter`, never dropped
+/// early — because the IP was never the deployment's identity
 /// (`domains-and-tls-bootstrap.md` § Goal).
 ///
 /// `has_orderable_address` folds in [`ip_bridge_addresses`]' emptiness, so this
@@ -665,7 +698,29 @@ impl MultiDomainCertResolver {
         // Unknown SNI (or no SNI, or no floor key wired) → the nest's own default
         // (apex) cert, or `None` while still pending (handshake fails cleanly,
         // same as ReloadableCertResolver).
-        self.default.load_full()
+        let default = self.default.load_full()?;
+        Some(self.floor_if_lapsed_trusted(default, sni))
+    }
+
+    /// The two-layer rule on the **default** path (`tls-certificates.md` § The
+    /// two-layer model): the nest's own apex and `mail.<apex>` ride the default
+    /// cert, never a per-domain entry, so without this an expired CA-issued
+    /// default would keep being served — and, read as `Expiring` rather than
+    /// on-floor, would keep the trusted-cert records published (§ D). A lapsed
+    /// trusted default is replaced by a floor naming `sni` when the default
+    /// covered it, else the default's own first DNS name — never a mint for a
+    /// name the nest does not serve, which keeps the floor cache bounded. A
+    /// self-signed default *is* the floor (its renew task keeps it fresh) and
+    /// is served as-is, as is everything when no floor key is wired.
+    fn floor_if_lapsed_trusted(
+        &self,
+        default: Arc<CertifiedKey>,
+        sni: Option<&str>,
+    ) -> Arc<CertifiedKey> {
+        let Some(name) = lapsed_trusted_floor_name(&default, sni) else {
+            return default;
+        };
+        self.floor_for_sni(&name).unwrap_or(default)
     }
 
     /// Install (or replace) the **IP bridge cert** served to no-SNI dials — see
@@ -675,9 +730,10 @@ impl MultiDomainCertResolver {
         self.ip_cert.store(Some(Arc::new(cert)));
     }
 
-    /// Drop the IP bridge cert, returning no-SNI dials to the floor/default. The
-    /// switch-back once the deployment's own domain cert is live (§ B-IP
-    /// *Lifetime* — the bridge is left to lapse, never renewed onward).
+    /// Drop the IP bridge cert, returning no-SNI dials to the floor/default. No
+    /// longer called by policy: the bridge is left to lapse at its own `notAfter`,
+    /// never dropped early (§ B-IP *Lifetime*). Kept for tests and an explicit
+    /// removal.
     pub fn clear_ip_cert(&self) {
         self.ip_cert.store(None);
     }
@@ -732,6 +788,15 @@ impl ResolvesServerCert for MultiDomainCertResolver {
 /// default). The cert carries only `name` as a SAN so a browser hitting that
 /// domain sees no name mismatch — just the expected untrusted-CA warning.
 fn mint_floor_cert(name: &str, floor_key_pem: &str) -> Option<CertifiedKey> {
+    let (cert_pem, key_pem) = mint_floor_pem(name, floor_key_pem)?;
+    load_certified_key_from_pem(cert_pem.as_bytes(), key_pem.as_bytes()).ok()
+}
+
+/// The PEM half of [`mint_floor_cert`]: `(cert_pem, key_pem)` for a floor with
+/// SAN = \[`name`\] on the stable floor key. The sealed ports
+/// (`storage::read_served_tls_pem`) hand the bridges and the relay PEM, not a
+/// `CertifiedKey`, so the one minter serves both.
+pub(crate) fn mint_floor_pem(name: &str, floor_key_pem: &str) -> Option<(String, String)> {
     let key = rcgen::KeyPair::from_pem(floor_key_pem).ok()?;
     let mut params = rcgen::CertificateParams::new(vec![name.to_string()]).ok()?;
     params.distinguished_name = rcgen::DistinguishedName::new();
@@ -739,7 +804,7 @@ fn mint_floor_cert(name: &str, floor_key_pem: &str) -> Option<CertifiedKey> {
         .distinguished_name
         .push(rcgen::DnType::CommonName, name.to_string());
     let cert = params.self_signed(&key).ok()?;
-    load_certified_key_from_pem(cert.pem().as_bytes(), key.serialize_pem().as_bytes()).ok()
+    Some((cert.pem(), key.serialize_pem()))
 }
 
 /// True iff `cert` is currently within its validity window (notBefore ≤ now <
@@ -774,6 +839,63 @@ fn within_validity_window(parsed: &x509_parser::certificate::X509Certificate<'_>
     let now = fauna_core::data::Timestamp::now_secs_or_zero();
     let validity = parsed.validity();
     now >= validity.not_before.timestamp() && now < validity.not_after.timestamp()
+}
+
+/// The name a floor must carry to stand in for `default`, or `None` when the
+/// default may be served as-is: it is self-signed (it is the floor), inside its
+/// validity window, or unparseable-with-no-name. See
+/// [`MultiDomainCertResolver::floor_if_lapsed_trusted`] and, for the sealed
+/// ports, `storage::read_served_tls_pem`.
+pub(crate) fn lapsed_trusted_floor_name(
+    default: &CertifiedKey,
+    sni: Option<&str>,
+) -> Option<String> {
+    let leaf = default.end_entity_cert().ok()?;
+    let (_, parsed) = x509_parser::parse_x509_certificate(leaf.as_ref()).ok()?;
+    if parsed.tbs_certificate.issuer == parsed.tbs_certificate.subject
+        || within_validity_window(&parsed)
+    {
+        return None;
+    }
+    let names: Vec<&str> = match parsed.subject_alternative_name() {
+        Ok(Some(san)) => san
+            .value
+            .general_names
+            .iter()
+            .filter_map(|gn| match gn {
+                x509_parser::extensions::GeneralName::DNSName(dns) => Some(*dns),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    // Exact names only: a wildcard SAN would let any sub-label an attacker
+    // sends mint (and cache) a floor of its own.
+    if let Some(sni) = sni
+        && names.iter().any(|n| n.eq_ignore_ascii_case(sni))
+    {
+        return Some(sni.to_ascii_lowercase());
+    }
+    names
+        .into_iter()
+        .find(|n| !n.starts_with("*."))
+        .map(str::to_ascii_lowercase)
+}
+
+/// Is the chain on disk under `acme_dir` a CA-issued one outside its validity
+/// window — the state in which every served port falls back to the floor
+/// (`tls-certificates.md` § The two-layer model)? `false` with no chain on
+/// disk, for a self-signed chain (it is the floor), or for one that won't
+/// parse. The edge `self_signed_cert::floor_renew_task` fans out on.
+pub(crate) fn on_disk_trusted_chain_lapsed(acme_dir: &std::path::Path) -> bool {
+    let (Ok(cert_pem), Ok(key_pem)) = (
+        std::fs::read(acme_dir.join(CERT_FILENAME)),
+        std::fs::read(acme_dir.join(KEY_FILENAME)),
+    ) else {
+        return false;
+    };
+    load_certified_key_from_pem(&cert_pem, &key_pem)
+        .is_ok_and(|chain| lapsed_trusted_floor_name(&chain, None).is_some())
 }
 
 /// Is this certificate inside its validity window? The IP-bridge-cert half of
@@ -1135,6 +1257,73 @@ mod tests {
             "expired trusted cert must fall through to the floor"
         );
         assert!(facts.covers, "the per-SNI floor still covers the name");
+    }
+
+    #[test]
+    fn expired_trusted_default_falls_through_to_the_floor() {
+        // The nest's own apex / `mail.<apex>` ride the DEFAULT cert, not a
+        // per-domain entry, so the § The two-layer model rule ("the trusted
+        // cert while valid, otherwise the floor") must hold on the default
+        // path too: an expired CA-issued default is never served. Named SNIs
+        // the default covers get a floor naming that SNI; a no-SNI dial gets a
+        // floor naming the default's own first name.
+        let resolver = MultiDomainCertResolver::new(gen_ca_issued_cert_for("nest.example", -1));
+        resolver.set_floor_key(floor_key_pem());
+
+        let named = resolver
+            .served_cert_facts("nest.example")
+            .expect("named facts");
+        assert!(
+            named.is_floor,
+            "an expired trusted default must fall through to the floor"
+        );
+        assert!(named.covers, "the floor names the requested SNI");
+        assert_eq!(
+            cert_health_state(Some(named), fauna_core::data::Timestamp::now_secs_or_zero()),
+            fauna_protocol::tls::CertHealthState::OnFloorRenewNeeded,
+            "an expired trusted cert reads as on-floor, so the floor-coupled records follow it"
+        );
+
+        let no_sni = resolver.cert_for_sni(None).expect("no-SNI cert");
+        assert!(
+            cert_is_currently_valid(&no_sni),
+            "a no-SNI dial is served a currently-valid floor, not the expired default"
+        );
+        let leaf = no_sni.end_entity_cert().expect("leaf");
+        let (_, parsed) = x509_parser::parse_x509_certificate(leaf.as_ref()).expect("parse");
+        assert_eq!(
+            parsed.tbs_certificate.issuer, parsed.tbs_certificate.subject,
+            "the no-SNI fallback is the self-signed floor"
+        );
+    }
+
+    #[test]
+    fn expired_trusted_default_never_mints_a_floor_for_a_foreign_sni() {
+        // The per-SNI floor cache is bounded by names the nest serves: an SNI
+        // the expired default never covered gets the floor for the default's
+        // own name, never a fresh mint for an attacker-chosen name.
+        let resolver = MultiDomainCertResolver::new(gen_ca_issued_cert_for("nest.example", -1));
+        resolver.set_floor_key(floor_key_pem());
+        let _ = resolver.cert_for_sni(Some("attacker-1.example"));
+        let _ = resolver.cert_for_sni(Some("attacker-2.example"));
+        assert_eq!(
+            resolver
+                .floor_certs
+                .load()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["nest.example".to_string()],
+            "only the default's own name is ever minted"
+        );
+    }
+
+    #[test]
+    fn valid_trusted_default_is_still_served() {
+        let resolver = MultiDomainCertResolver::new(gen_ca_issued_cert_for("nest.example", 90));
+        resolver.set_floor_key(floor_key_pem());
+        let facts = resolver.served_cert_facts("nest.example").expect("facts");
+        assert!(!facts.is_floor, "a valid trusted default is served as-is");
     }
 
     #[test]
@@ -1939,7 +2128,7 @@ domain = "nest.example.com"
     fn ip_bridge_orders_for_a_directly_attached_public_address() {
         let attached = [ip("93.184.216.34")];
         assert_eq!(
-            ip_bridge_addresses(crate::config::NodeMode::Public, &attached),
+            ip_bridge_addresses(crate::config::NodeMode::Public, &attached, &[], false),
             vec![ip("93.184.216.34")],
             "a public box with a global-unicast interface address is the whole point of § B-IP"
         );
@@ -1952,7 +2141,7 @@ domain = "nest.example.com"
         // validate from behind NAT even if it did.
         let attached = [ip("93.184.216.34"), ip("2606:4700:4700::1111")];
         assert!(
-            ip_bridge_addresses(crate::config::NodeMode::Private, &attached).is_empty(),
+            ip_bridge_addresses(crate::config::NodeMode::Private, &attached, &[], false).is_empty(),
             "a client-set-private nest must order no IP cert even with a routable address"
         );
     }
@@ -1970,7 +2159,7 @@ domain = "nest.example.com"
             ip("fd00::1"),       // IPv6 unique-local
         ];
         assert!(
-            ip_bridge_addresses(crate::config::NodeMode::Public, &attached).is_empty(),
+            ip_bridge_addresses(crate::config::NodeMode::Public, &attached, &[], false).is_empty(),
             "only an address the CA can route to may carry an `ip` identifier"
         );
     }
@@ -1988,13 +2177,87 @@ domain = "nest.example.com"
             ip("192.168.1.40"),
         ];
         assert_eq!(
-            ip_bridge_addresses(crate::config::NodeMode::Public, &attached),
+            ip_bridge_addresses(crate::config::NodeMode::Public, &attached, &[], false),
             vec![
                 ip("8.8.8.8"),
                 ip("93.184.216.34"),
                 ip("2606:4700:4700::1111")
             ],
             "stable v4-then-v6 numeric order, duplicates collapsed, private dropped"
+        );
+    }
+
+    // Source (2) of § B-IP *When*: the host-published `host-addresses` set a
+    // provisioned VPS's cloud-init writes, because the nest's own container
+    // interfaces carry only a bridge-network RFC 1918 address there.
+
+    #[test]
+    fn ip_bridge_orders_for_a_host_published_global_address() {
+        // The provisioned-VPS shape: the interface table is all private, the
+        // host published its public address.
+        let attached = [ip("172.18.0.2")];
+        let host = [ip("93.184.216.34")];
+        assert_eq!(
+            ip_bridge_addresses(crate::config::NodeMode::Public, &attached, &host, false),
+            vec![ip("93.184.216.34")],
+        );
+    }
+
+    #[test]
+    fn ip_bridge_orders_nothing_for_a_host_published_private_address() {
+        // The host file is a fact, not a request: the same global-unicast
+        // filter applies, so a private address in it orders nothing.
+        let host = [ip("10.0.0.2"), ip("192.168.1.5"), ip("fd00::1")];
+        assert!(ip_bridge_addresses(crate::config::NodeMode::Public, &[], &host, false).is_empty());
+    }
+
+    #[test]
+    fn ip_bridge_host_published_set_still_loses_to_the_private_axis() {
+        let host = [ip("93.184.216.34")];
+        assert!(
+            ip_bridge_addresses(crate::config::NodeMode::Private, &[], &host, false).is_empty()
+        );
+    }
+
+    #[test]
+    fn ip_bridge_both_sources_dedup_to_one_san_set() {
+        let attached = [ip("93.184.216.34"), ip("2606:4700:4700::1111")];
+        let host = [
+            ip("2606:4700:4700::1111"),
+            ip("93.184.216.34"),
+            ip("8.8.8.8"),
+        ];
+        assert_eq!(
+            ip_bridge_addresses(crate::config::NodeMode::Public, &attached, &host, false),
+            vec![
+                ip("8.8.8.8"),
+                ip("93.184.216.34"),
+                ip("2606:4700:4700::1111")
+            ],
+        );
+    }
+
+    #[test]
+    fn ip_bridge_test_ca_widening_admits_a_host_published_private_address() {
+        // § B-IP *Testing*: under the pebble directory override alone, a
+        // host-published non-loopback, non-link-local address passes — the
+        // harness container's RFC 1918 address. Loopback and link-local still
+        // never pass, and the interface table is never widened.
+        let host = [
+            ip("172.18.0.5"),
+            ip("127.0.0.1"),
+            ip("169.254.1.1"),
+            ip("fe80::1"),
+        ];
+        let attached = [ip("172.18.0.9")];
+        assert_eq!(
+            ip_bridge_addresses(crate::config::NodeMode::Public, &attached, &host, true),
+            vec![ip("172.18.0.5")],
+        );
+        assert!(
+            ip_bridge_addresses(crate::config::NodeMode::Public, &attached, &host, false)
+                .is_empty(),
+            "without the override the same file orders nothing"
         );
     }
 

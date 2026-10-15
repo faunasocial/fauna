@@ -19,12 +19,12 @@ use fauna_core::custody_policy::{
 
 use crate::backend::{RelayEvicted, ScopeDropCounts, SegmentStaging, StoreBackend};
 use crate::segments::{
-    SegmentAdmission, SegmentHalf, SegmentKey, SegmentKindMismatch, SegmentSidecarView,
-    SegmentSink, admit,
+    SegmentAdmission, SegmentBodyTooLarge, SegmentHalf, SegmentKey, SegmentKindMismatch,
+    SegmentSidecarView, SegmentSink, admit,
 };
 use crate::types::{
-    Hydration, HydrationPolicy, InsertOutcome, IssuedRetire, ItemRef, JournalOp, JournalRow,
-    NewOutboxIntent, OutboxIntent, RecordIndexEntry, RelayRow, StateEntry, WriterId,
+    CustodiedRecovery, Hydration, HydrationPolicy, InsertOutcome, IssuedRetire, ItemRef, JournalOp,
+    JournalRow, NewOutboxIntent, OutboxIntent, RecordIndexEntry, RelayRow, StateEntry, WriterId,
 };
 
 /// The engine-singleton election lock's filename, reserved beside the store DB
@@ -1272,8 +1272,8 @@ impl<B: StoreBackend> AccountStore<B> {
     }
 
     /// The **let-go** set: the dead generations the user let go on this
-    /// replica (`account-data-taxonomy.md` § The generation machinery →
-    /// *Fleet-scope reclamation*, clause (3)(j)). The let-go deletes each one's
+    /// replica (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (3)(j)). The let-go deletes each one's
     /// wraps at the bound nest itself; the secondary leg reads this set beside
     /// the shredded generations to delete them at every linked holder too,
     /// idempotently, run after run. Empty on a store that let nothing go.
@@ -1804,6 +1804,21 @@ impl<B: StoreBackend> AccountStore<B> {
         self.backend.issued_retires_clear_through(through).await
     }
 
+    /// The custodied owner's recovery material this store holds
+    /// ([`CustodiedRecovery`]; `identity-succession.md` § Seed escrow → *The
+    /// custodian copy*) — default when none is held. Never metered and never
+    /// served on the sync doors: only the custodian's escrow door reads it.
+    pub async fn custodied_recovery(&self) -> Result<CustodiedRecovery> {
+        self.backend.custodied_recovery().await
+    }
+
+    /// Replace the custodied recovery material whole, in one transaction. The
+    /// lifecycle (what replaces, what deletes) is the custody leg's
+    /// (`fauna_sync_engine::custody_recovery`); this only persists its answer.
+    pub async fn put_custodied_recovery(&self, material: &CustodiedRecovery) -> Result<()> {
+        self.backend.custodied_recovery_put(material).await
+    }
+
     /// Per writer, the highest `writer_seq` this store's relay plane holds in
     /// `scope` for `item_class` ([`StoreBackend::relay_high_waters`]) — what
     /// it has SEEN of each writer, where [`Self::frontier`] is what it has
@@ -2202,7 +2217,8 @@ impl<B: StoreBackend> AccountStore<B> {
             &meta,
             &expect_actor,
             expect_kind,
-        )?;
+        )
+        .await?;
         let key = SegmentKey {
             scope: scope.to_string(),
             kind: sidecar.kind.clone(),
@@ -2398,7 +2414,10 @@ impl<B: StoreBackend> AccountStore<B> {
     /// - every fetch is capped at what is left, so an undeclared or dishonest
     ///   size is refused mid-stream rather than staged whole;
     /// - a fetched pair whose `.dat` + `.meta` together overrun what is left is
-    ///   not adopted (`skipped_over_budget`).
+    ///   not adopted (`skipped_over_budget`);
+    /// - a fetch refused as over-bound ([`SegmentBodyTooLarge`], either half)
+    ///   is that offer's `skipped_over_budget` too, and the pass goes on to the
+    ///   next offer.
     ///
     /// Each adopted pair's bytes are subtracted from `budget`, so one pass
     /// never adopts past the cap: the custodian stops adopting new segments
@@ -2452,9 +2471,21 @@ impl<B: StoreBackend> AccountStore<B> {
             // un-adopted (an error, a refusal, the budget) takes its bytes
             // with it.
             let mut staged = self.backend.segment_stage().await?;
-            source
+            match source
                 .fetch_segment(scope, &offer, max_bytes, &mut staged)
-                .await?;
+                .await
+            {
+                Ok(()) => {}
+                // An over-bound body is this offer's refusal, not the scope's:
+                // propagating it would end the pass, and the same offer lists
+                // first again next pass, so no later segment would ever adopt.
+                // Any other fetch error still ends the pass.
+                Err(e) if e.downcast_ref::<SegmentBodyTooLarge>().is_some() => {
+                    report.skipped_over_budget += 1;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
             let pair_bytes = staged
                 .len(SegmentHalf::Dat)
                 .saturating_add(staged.len(SegmentHalf::Meta));

@@ -36,12 +36,12 @@ Stamped 2026-09-19 at 23b3189e2b.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+a1f84cc6 standalone |
-| linux | ✅ full | 0.1.2-dev+a1f84cc6 standalone |
+| web | ✅ full | 0.1.4-dev+52904896 standalone |
+| linux | ✅ full | 0.1.4-dev+52904896 standalone |
 | windows | ✅ full | 0.1.2-dev+f5c0a21a.dirty standalone |
-| macos | ✅ full | 0.1.2-dev+a1f84cc6 standalone |
-| ios | ✅ full | 0.1.2-dev+a1f84cc6 standalone |
-| android | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| macos | ✅ full | 0.1.4-dev+52904896 standalone |
+| ios | ✅ full | 0.1.4-dev+52904896 standalone |
+| android | ⚠ partial | 0.1.4-dev+52904896 standalone |
 | tui | ✅ full | 0.1.2-dev+831d48ef live |
 
 | Outcome | Surface | Witness | Newest outcome |

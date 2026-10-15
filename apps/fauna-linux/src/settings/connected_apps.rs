@@ -41,7 +41,8 @@ use adw::prelude::*;
 
 use fauna_client_connected_apps::{
     BlockedAppRow, ConnectedAppRow, ConnectedAppsMachine, ConnectedAppsObserver,
-    ConnectedAppsSnapshot, ConsentCardRow, class,
+    ConnectedAppsSnapshot, ConsentCardRow,
+    compose::{request_card_lines, roster_row_text},
 };
 use fauna_client_mail_settings::resolve_mua_username;
 use fauna_core::localized::LocalizedText;
@@ -75,6 +76,9 @@ enum Gesture {
     Block(String),
     Unblock(String),
     Revoke(String),
+    /// The same-device handoff's open — a visit's read when a `fauna://consent`
+    /// route brought the user here (`crate::routes`).
+    OpenHandoff(String),
 }
 
 impl Gesture {
@@ -89,6 +93,7 @@ impl Gesture {
             Self::Block(consent_id_hex) => machine.block_request(consent_id_hex).await,
             Self::Unblock(client_id) => machine.unblock(client_id).await,
             Self::Revoke(key) => machine.revoke(key).await,
+            Self::OpenHandoff(request_uri) => machine.open_handoff(request_uri).await,
         }
     }
 }
@@ -120,7 +125,36 @@ struct Ctx {
     /// never by index, so a roster that re-orders under a fresh snapshot cannot
     /// show one password's secret against another row.
     revealed: RefCell<HashMap<String, SecretString>>,
+    /// A consent route's request URI, waiting for the visit it navigated to,
+    /// and the caller to release once that visit's open has painted.
+    pending_handoff: RefCell<Option<(String, crate::routes::Then)>>,
     w: Widgets,
+}
+
+thread_local! {
+    /// The page the signed-in window built — the one a consent route lands on.
+    /// Each authenticated window's build replaces it.
+    static CURRENT: RefCell<std::rc::Weak<Ctx>> = const { RefCell::new(std::rc::Weak::new()) };
+}
+
+/// The consent route's landing (`apps/linux.md` § System integration → *In-app
+/// routes*): stage `request_uri` for the page's next visit, then `navigate`
+/// there. The visit runs the shared machine's `open_handoff` in place of its
+/// re-read — never both, so a stale roster read cannot paint over the card —
+/// and `then` runs once its snapshot has painted. Navigating to the page that
+/// is already showing re-fires its visit; should no visit fire at all, the
+/// staged open runs here.
+pub fn open_handoff(request_uri: String, then: crate::routes::Then, navigate: impl FnOnce()) {
+    let Some(ctx) = CURRENT.with(|c| c.borrow().upgrade()) else {
+        tracing::warn!(target: "fauna_linux::routes", "consent route: no connected-apps page in this session");
+        then();
+        return;
+    };
+    *ctx.pending_handoff.borrow_mut() = Some((request_uri, then));
+    navigate();
+    if ctx.pending_handoff.borrow().is_some() {
+        visit(&ctx);
+    }
 }
 
 fn resolve(text: &LocalizedText) -> String {
@@ -129,21 +163,6 @@ fn resolve(text: &LocalizedText) -> String {
 
 fn when(ms: i64) -> String {
     fauna_core::format::format_unix_local_ms(ms)
-}
-
-/// The class badge's words — the one per-app half of the grouping key, which
-/// the machine derives. An unknown class paints no badge rather than a guess.
-fn class_label(class: &str) -> Option<&'static str> {
-    Some(match class {
-        class::REMOTE => t::CLASS_REMOTE,
-        class::DEVICE => t::CLASS_DEVICE,
-        class::WASM => t::CLASS_WASM,
-        class::CONTAINER => t::CLASS_CONTAINER,
-        class::APP_PASSWORD => t::CLASS_APP_PASSWORD,
-        class::SIGNER => t::CLASS_SIGNER,
-        class::OAUTH => t::CLASS_OAUTH,
-        _ => return None,
-    })
 }
 
 /// Build the "Connected apps" preferences page. Constructs every static ui.yaml
@@ -260,8 +279,10 @@ fn wire(widgets: Widgets) -> Option<impl Fn()> {
         snapshot: RefCell::new(None),
         revoke_armed: RefCell::new(None),
         revealed: RefCell::new(HashMap::new()),
+        pending_handoff: RefCell::new(None),
         w: widgets,
     });
+    CURRENT.with(|c| *c.borrow_mut() = Rc::downgrade(&ctx));
 
     {
         let ctx_changed = Rc::clone(&ctx);
@@ -317,9 +338,10 @@ fn visit(ctx: &Rc<Ctx>) {
         // An approve of a records consent mints the app's grant; an
         // undecodable secret leaves it unwired, which refuses that approve.
         match fauna_core::identity::ActorKeypair::from_secret_hex(client.secret_hex()) {
-            Ok(keypair) => {
-                machine.set_consent_grant_seams(crate::mail_glue::consent_grant_seams(&keypair))
-            }
+            Ok(keypair) => machine.set_consent_grant_seams(crate::mail_glue::consent_grant_seams(
+                &keypair,
+                client.nest_rpc().clone(),
+            )),
             Err(e) => tracing::error!("[settings/connected-apps] decode secret_hex: {e}"),
         }
         *ctx.machine.borrow_mut() = Some(machine);
@@ -329,7 +351,12 @@ fn visit(ctx: &Rc<Ctx>) {
     ctx.revealed.borrow_mut().clear();
     ctx.snapshot.borrow_mut().take();
     paint(ctx);
-    run(ctx, Gesture::Refresh);
+    let handoff = ctx.pending_handoff.borrow_mut().take();
+    match handoff {
+        // The open re-reads the page itself.
+        Some((request_uri, then)) => run_then(ctx, Gesture::OpenHandoff(request_uri), then),
+        None => run(ctx, Gesture::Refresh),
+    }
 }
 
 fn submit_code(ctx: &Rc<Ctx>) {
@@ -343,7 +370,14 @@ fn submit_code(ctx: &Rc<Ctx>) {
 
 /// Run one gesture against the machine, then repaint from the fresh snapshot.
 fn run(ctx: &Rc<Ctx>, gesture: Gesture) {
+    run_then(ctx, gesture, Box::new(|| {}));
+}
+
+/// [`run`], then `then` once the repaint has landed (or at once, when the page
+/// has no machine to run against).
+fn run_then(ctx: &Rc<Ctx>, gesture: Gesture, then: crate::routes::Then) {
     let Some(machine) = ctx.machine.borrow().clone() else {
+        then();
         return;
     };
     let ctx = Rc::clone(ctx);
@@ -356,6 +390,7 @@ fn run(ctx: &Rc<Ctx>, gesture: Gesture) {
         move |snapshot| {
             *ctx.snapshot.borrow_mut() = Some(snapshot);
             paint(&ctx);
+            then();
         },
     );
 }
@@ -454,39 +489,13 @@ fn roster_row(ctx: &Rc<Ctx>, row: &ConnectedAppRow, handle: &str) -> gtk::Box {
     set_test_id(&item, ids::CONNECTED_APPS_ITEM);
 
     let name = resolve(&row.name);
-    let mut head = name.clone();
-    if let Some(badge) = class_label(&row.class) {
-        head = format!("{head} · {badge}");
-    }
-    let mut lines = vec![head.clone()];
-    let burned = row.mail.as_ref().is_some_and(|m| m.revoked);
-    // The burned state sits directly under the name and above everything a
-    // user might copy into a mail app: the login below it authenticates
-    // nothing any more (`mail-credentials.md` § Rotation and recovery →
-    // *Succession*).
-    if burned {
-        lines.push(mail_t::CREDENTIAL_REVOKED.to_string());
-    }
-    if let (Some(client_id), Some(domain)) = (&row.client_id, &row.publisher) {
-        lines.push(format!("{} — {client_id}", t::publisher(domain)));
-    }
-    for scope in &row.scope_descriptions {
-        lines.push(format!("  • {}", resolve(scope)));
-    }
-    let mut facts = Vec::new();
-    if !row.connected {
-        facts.push(t::NOT_CONNECTED.to_string());
-    }
-    facts.push(t::created(&when(row.created_at_millis)));
-    facts.push(match row.last_used_at_millis {
-        Some(ms) => t::last_used(&when(ms)),
-        None => t::NEVER_USED.to_string(),
-    });
-    facts.push(match row.lasts_until_millis {
-        Some(ms) => t::lasts_until(&when(ms)),
-        None => t::OPEN_ENDED.to_string(),
-    });
-    lines.push(facts.join(" · "));
+    let mail_burned = row.mail.as_ref().is_some_and(|m| m.revoked);
+    let burned = mail_burned || row.signer_burned;
+    // The lines — head, burned state, publisher, scopes, permission sets, oracle
+    // summary, facts — are the shared composition's
+    // (`fauna_client_connected_apps::compose`); this file only resolves them.
+    let lines = roster_row_text(row).resolve_lines(crate::i18n::strings::lookup);
+    let head = lines[0].clone();
     // The item's declared text is the joined description, as tui's single
     // label is: the cross-app observable is "it names the app AND what it may
     // reach".
@@ -495,6 +504,25 @@ fn roster_row(ctx: &Rc<Ctx>, row: &ConnectedAppRow, handle: &str) -> gtk::Box {
         // The burned state as a value a reader can count, beside the words.
         set_test_attr(&item, "revoked", "true");
     }
+    if let Some(oracle) = &row.oracle {
+        // The window's count as a value, beside the words — present exactly
+        // on a row the oracle served.
+        set_test_attr(&item, "oracle_ops", &oracle.ops_in_window.to_string());
+    }
+    // Every row reports whether it can act — `paused` (the account's
+    // external-apps switch is OFF), `connected`, or `not_connected` — as a
+    // value a reader can count, beside the words.
+    set_test_attr(
+        &item,
+        "status",
+        if row.paused {
+            "paused"
+        } else if row.connected {
+            "connected"
+        } else {
+            "not_connected"
+        },
+    );
 
     let heading = text_label(&head);
     heading.add_css_class("heading");
@@ -515,7 +543,10 @@ fn roster_row(ctx: &Rc<Ctx>, row: &ConnectedAppRow, handle: &str) -> gtk::Box {
             mail_t::COPY_USERNAME,
             ids::CONNECTED_APPS_ITEM_COPY_USERNAME,
         );
-        copy_username.connect_clicked(move |_| crate::clipboard::copy_text(&username));
+        // The funnel confirms the copy and publishes the `copied` attr — the exact
+        // login that reached the clipboard (the copy-button contract a test reads).
+        copy_username
+            .connect_clicked(move |btn| crate::clipboard::copy_and_confirm(btn, &username));
         item.append(&copy_username);
 
         // ⚠ The hidden secret's text MUST stay EMPTY. The cross-app driver
@@ -670,26 +701,13 @@ fn blocked_row(ctx: &Rc<Ctx>, blocked: &BlockedAppRow) -> gtk::Box {
     item
 }
 
-/// The consent card's permission-set section as flat lines — one heading per
-/// set (title + NSID, or the NSID alone when the publisher declared none), then
-/// its `details` when present, then one bulleted line per member. Empty for a
-/// request naming no set. Split out so the composition is pinnable without a
-/// GTK widget.
-fn consent_set_lines(consent: &ConsentCardRow) -> Vec<String> {
-    let mut lines = Vec::new();
-    for set in &consent.sets {
-        lines.push(match set.title.as_deref() {
-            Some(title) => card_t::consent_set_heading(title, &set.nsid),
-            None => card_t::consent_set_heading_unnamed(&set.nsid),
-        });
-        if let Some(details) = set.details.as_deref() {
-            lines.push(format!("  {details}"));
-        }
-        for member in &set.member_descriptions {
-            lines.push(format!("  • {member}"));
-        }
-    }
-    lines
+/// The card's full text as flat lines, from the shared composition — see
+/// [`request_card_lines`]. Split out so it is pinnable without a GTK widget.
+fn consent_card_lines(consent: &ConsentCardRow) -> Vec<String> {
+    request_card_lines(consent)
+        .iter()
+        .map(|line| line.resolve(crate::i18n::strings::lookup))
+        .collect()
 }
 
 /// One `connected-apps-request-card`: a third-party app is asking to act for
@@ -713,22 +731,7 @@ fn request_card(ctx: &Rc<Ctx>, consent: &ConsentCardRow) -> gtk::Box {
     let card = card_box();
     set_test_id(&card, ids::CONNECTED_APPS_REQUEST_CARD);
 
-    let who = match &consent.client_name {
-        Some(name) => card_t::consent_client(name, &consent.client_id),
-        None => card_t::consent_client_unnamed(&consent.client_id),
-    };
-    let asks: Vec<String> = consent
-        .scope_descriptions
-        .iter()
-        .map(|line| format!("  • {line}"))
-        .collect();
-    let mut lines = vec![
-        card_t::CONSENT_HEADING.to_string(),
-        who,
-        card_t::CONSENT_SCOPES_HEADING.to_string(),
-    ];
-    lines.extend(asks);
-    lines.extend(consent_set_lines(consent));
+    let lines = consent_card_lines(consent);
     set_test_text(&card, &lines.join("\n"));
 
     let heading = text_label(&lines[0]);
@@ -805,6 +808,53 @@ mod tests {
     use super::*;
 
     use crate::testid::widget_names;
+
+    fn card(ends: Option<&str>) -> ConsentCardRow {
+        ConsentCardRow {
+            consent_id_hex: "abcd".into(),
+            code: "ABC-DEF".into(),
+            client_id: "https://example.com/oauth".into(),
+            client_name: Some("Example App".into()),
+            scope_descriptions: vec!["Read your posts".into()],
+            sets: vec![],
+            ends: ends.map(fauna_core::localized::LocalizedText::key),
+            install: None,
+        }
+    }
+
+    /// A roster row names the permission set its scopes came from, in the
+    /// card's own words — the NSID verbatim beside the title, then every member.
+    #[test]
+    fn a_roster_row_set_renders_as_the_card_does() {
+        use fauna_client_connected_apps::ConsentSetRow;
+        let set = ConsentSetRow {
+            nsid: "com.example.calendar.appPerms".into(),
+            title: Some("Calendar sync".into()),
+            details: Some("Keeps your calendar in step.".into()),
+            member_descriptions: vec!["Read and write calendar events".into()],
+        };
+        let mut with_set = card(None);
+        with_set.sets = vec![set];
+        let joined = consent_card_lines(&with_set).join("\n");
+        assert!(joined.contains("com.example.calendar.appPerms"), "{joined}");
+        assert!(joined.contains("Calendar sync"), "{joined}");
+        assert!(
+            joined.contains("Read and write calendar events"),
+            "{joined}"
+        );
+    }
+
+    /// A key replacement's card says, last, what the approve ends; an ordinary
+    /// card says nothing of the kind.
+    #[test]
+    fn a_key_replacing_card_says_what_the_approve_ends() {
+        let holder = crate::i18n::strings::lookup("connected_apps.consent_ends_holder").unwrap();
+        let writer = crate::i18n::strings::lookup("connected_apps.consent_ends_writer").unwrap();
+        let lines = consent_card_lines(&card(Some("connected_apps.consent_ends_holder")));
+        assert_eq!(lines.last().map(String::as_str), Some(holder));
+        let plain = consent_card_lines(&card(None)).join("\n");
+        assert!(!plain.contains(holder) && !plain.contains(writer));
+    }
 
     /// The page exposes every static (page-level) ui.yaml ID with no registered
     /// client. The per-row IDs (`connected-apps-item` + children, the request

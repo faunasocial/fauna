@@ -125,3 +125,65 @@ def test_admin_aliases_forwarder_to_hosted_domain_rejected(admin_app, nest_insta
     assert f"sales@{_DOMAIN}" not in admin_app.admin.forwarder_addresses(), (
         "the rejected forwarder must not appear in the list"
     )
+
+
+def _wait_action_error(admin_app, budget_s: float = 12.0) -> str:
+    """Poll `admin-aliases-action-error` until it carries text (or the budget runs out)."""
+    deadline = time.time() + budget_s
+    err = ""
+    while time.time() < deadline:
+        err = admin_app.admin.forwarders_action_error_text()
+        if err:
+            break
+        time.sleep(0.5)  # sleep-ok: poll interval of a deadline loop
+    return err
+
+
+@pytest.mark.feature("admin-forwarders")
+def test_admin_aliases_forwarder_on_held_or_reserved_address_refused(admin_app, nest_instance):
+    """Creating a forwarder on an address a forwarder already holds, or on a
+    reserved name (``postmaster``), is refused on the page with the reason
+    (`admin.md` § Errors & edge cases; the nest's refusals are
+    ``conflicts_with_existing_alias`` and ``reserved_local_part``) — and the
+    refused address never joins the list."""
+    domain = f"fwd-held-{secrets.token_hex(4)}.test"
+    _seed_local_domain(nest_instance, domain)
+    admin_app.admin.navigate_aliases()
+
+    # --- held: the first create lands, the second on the same address is refused.
+    held = f"held@{domain}"
+    admin_app.admin.add_forwarder(domain, "held", _TARGET)
+    deadline = time.time() + 12.0
+    while time.time() < deadline and held not in admin_app.admin.forwarder_addresses():
+        time.sleep(0.5)  # sleep-ok: poll interval of a deadline loop
+    assert held in admin_app.admin.forwarder_addresses(), (
+        f"setup forwarder {held!r} never listed "
+        f"(action error: {admin_app.admin.forwarders_action_error_text()!r})"
+    )
+    admin_app.admin.add_forwarder(
+        domain, "held", f"other-{secrets.token_hex(3)}@elsewhere-example.test"
+    )
+    err = _wait_action_error(admin_app)
+    assert err, "a forwarder on an address already held must be refused on the page"
+    assert any(w in err.lower() for w in ("already", "exists", "conflict")), (
+        f"the refusal must say the address is already held, got {err!r}"
+    )
+    assert admin_app.admin.forwarder_addresses().count(held) == 1, (
+        f"the refused duplicate must not join the list: {admin_app.admin.forwarder_addresses()!r}"
+    )
+
+    # --- reserved: postmaster is on the reserved list.
+    admin_app.admin.add_forwarder(domain, "postmaster", _TARGET)
+    deadline = time.time() + 12.0
+    err = ""
+    while time.time() < deadline:
+        err = admin_app.admin.forwarders_action_error_text()
+        if "reserved" in err.lower():
+            break
+        time.sleep(0.5)  # sleep-ok: poll interval of a deadline loop
+    assert "reserved" in err.lower(), (
+        f"a forwarder on a reserved name must be refused with that reason, got {err!r}"
+    )
+    assert f"postmaster@{domain}" not in admin_app.admin.forwarder_addresses(), (
+        "the refused reserved-name forwarder must not appear in the list"
+    )

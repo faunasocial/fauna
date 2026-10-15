@@ -118,6 +118,10 @@ impl EngineHolderNudge for HolderPass {
         self.asked.fetch_add(1, Ordering::SeqCst);
         let _ = self.holder.reconcile_now().await;
     }
+
+    async fn walk_fleet_for_non_holder(&self) -> Result<(), String> {
+        self.holder.walk_fleet().await.map_err(|e| format!("{e:#}"))
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -200,4 +204,225 @@ async fn a_switch_in_the_holder_runs_its_own_pass_and_asks_no_one() {
     );
 
     holder.shutdown().await;
+}
+
+// ── The yield's edge (`account-runtime.md` § Multi-instance concurrency → *The
+// agent holds the role when present*, part 4) ─────────────────────────────
+//
+// An app runtime that hands the engine role to its arriving agent asks the
+// agent for its pass at once, through the same seat the switch above uses, so
+// the freed role is taken now rather than at the agent's backstop tick. The
+// watch every desktop host runs is `holder_yield::spawn_holder_yield_nudge`,
+// spawned by `resolve_and_start`; these drive it over a real runtime's role.
+
+/// A nudge that only counts — the agent on the far side of the socket, whose
+/// own pass is pinned in the agent's `reconcile_account_runtime_tests`.
+struct CountingNudge {
+    asked: Arc<AtomicUsize>,
+    asked_signal: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl EngineHolderNudge for CountingNudge {
+    async fn nudge_engine_holder(&self) {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        self.asked_signal.notify_waiters();
+    }
+
+    async fn walk_fleet_for_non_holder(&self) -> Result<(), String> {
+        Err("this test's nudge walks nothing".into())
+    }
+}
+
+fn counting_nudge() -> (
+    Arc<dyn EngineHolderNudge>,
+    Arc<AtomicUsize>,
+    Arc<tokio::sync::Notify>,
+) {
+    let asked = Arc::new(AtomicUsize::new(0));
+    let asked_signal = Arc::new(tokio::sync::Notify::new());
+    let nudge: Arc<dyn EngineHolderNudge> = Arc::new(CountingNudge {
+        asked: Arc::clone(&asked),
+        asked_signal: Arc::clone(&asked_signal),
+    });
+    (nudge, asked, asked_signal)
+}
+
+/// The agent's presence lock on this machine's store, as its mount takes it.
+fn agent_present(base: &Path) -> fauna_account_store::locks::AgentPresenceLock {
+    let p = params(base);
+    let store_dir = p
+        .store_root
+        .store_dir(&p.actor_id_hex)
+        .expect("the store dir");
+    match fauna_account_store::locks::AgentPresenceLock::acquire(&store_dir) {
+        fauna_account_store::locks::AgentPresenceLockOutcome::Held(lock) => lock,
+        other => panic!("the agent's lock: {other:?}"),
+    }
+}
+
+/// Long enough for a spawned watch to have reacted to an edge it saw — the
+/// negative cases wait this out before asserting nothing was asked.
+const SETTLE: Duration = Duration::from_millis(300);
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_yield_beside_a_seat_asks_the_agent_for_its_pass_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = AccountStoreRuntime::start(params(tmp.path()))
+        .await
+        .expect("the app's runtime");
+    app.reconcile_now().await.expect("the app's first pass");
+    assert!(app.is_engine_holder(), "alone, the app pumps");
+
+    let (nudge, asked, asked_signal) = counting_nudge();
+    let slot = EngineHolderNudgeSlot::default();
+    slot.publish(&nudge);
+    let watch = fauna_client_account_runtime::holder_yield::spawn_holder_yield_nudge(
+        app.subscribe_engine_role(),
+        slot,
+    );
+
+    let presence = agent_present(tmp.path());
+    let first_ask = asked_signal.notified();
+    app.reconcile_now().await.expect("the yielding command");
+    assert!(!app.is_engine_holder(), "the app yielded");
+    if asked.load(Ordering::SeqCst) == 0 {
+        tokio::time::timeout(Duration::from_secs(5), first_ask)
+            .await
+            .expect("the yield's edge asks the agent for its pass");
+    }
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "asked once on the edge");
+
+    // Present, the app stays a non-holder: no further edge, no further ask.
+    app.reconcile_now().await.expect("the role answer");
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "one edge, one ask");
+
+    drop(presence);
+    app.shutdown().await;
+    drop(app);
+    tokio::time::timeout(Duration::from_secs(5), watch)
+        .await
+        .expect("the watch ends with the runtime")
+        .expect("the watch task did not panic");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_yield_with_no_seat_asks_no_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = AccountStoreRuntime::start(params(tmp.path()))
+        .await
+        .expect("the app's runtime");
+    app.reconcile_now().await.expect("the app's first pass");
+    assert!(app.is_engine_holder());
+
+    // Published, then gone (a host whose agent is not provisioned, or a
+    // signed-out one): the slot reads absent.
+    let (nudge, asked, _) = counting_nudge();
+    let slot = EngineHolderNudgeSlot::default();
+    slot.publish(&nudge);
+    drop(nudge);
+    let _watch = fauna_client_account_runtime::holder_yield::spawn_holder_yield_nudge(
+        app.subscribe_engine_role(),
+        slot,
+    );
+
+    let presence = agent_present(tmp.path());
+    app.reconcile_now().await.expect("the yielding command");
+    assert!(!app.is_engine_holder(), "the app yielded");
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(asked.load(Ordering::SeqCst), 0, "nobody to ask");
+
+    drop(presence);
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn taking_the_role_asks_no_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    // The agent is present at the app's start: the app never contends.
+    let presence = agent_present(tmp.path());
+    let app = AccountStoreRuntime::start(params(tmp.path()))
+        .await
+        .expect("the app's runtime beside its agent");
+    assert!(!app.is_engine_holder(), "the agent is present");
+
+    let (nudge, asked, _) = counting_nudge();
+    let slot = EngineHolderNudgeSlot::default();
+    slot.publish(&nudge);
+    let _watch = fauna_client_account_runtime::holder_yield::spawn_holder_yield_nudge(
+        app.subscribe_engine_role(),
+        slot,
+    );
+
+    // The agent exits: the app's next re-read finds it gone and takes the role.
+    drop(presence);
+    app.reconcile_now().await.expect("the taking command");
+    assert!(app.is_engine_holder(), "the app took the freed role");
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        0,
+        "a non-holder→holder edge asks nothing"
+    );
+
+    drop(nudge);
+    app.shutdown().await;
+}
+
+// ── The seed pass's ask (`account-runtime.md` § Multi-instance concurrency →
+// *The seed-leg role*, part 4, *Escrow recovery*) ─────────────────────────
+//
+// A generation key the app's seed pass recovers beside its agent opens rows
+// only at the agent's next full reconcile, so the host asks the agent for that
+// pass on every move of the runtime's owed-pass watch. The runtime moving the
+// watch is pinned in `fauna_sync_engine::account_runtime`
+// (`a_machine_signed_out_and_in_beside_its_agent_keys_the_generation_without_a_command`);
+// these drive the watch every desktop host runs over the watch alone.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_owed_pass_beside_a_seat_asks_the_agent_once() {
+    let (tx, rx) = tokio::sync::watch::channel(0u64);
+    let (nudge, asked, asked_signal) = counting_nudge();
+    let slot = EngineHolderNudgeSlot::default();
+    slot.publish(&nudge);
+    let watch = fauna_client_account_runtime::holder_yield::spawn_holder_pass_owed_nudge(rx, slot);
+
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        0,
+        "the current count asks nothing"
+    );
+
+    for n in 1..=2 {
+        let ask = asked_signal.notified();
+        tx.send_modify(|owed| *owed += 1);
+        if asked.load(Ordering::SeqCst) < n {
+            tokio::time::timeout(Duration::from_secs(5), ask)
+                .await
+                .expect("an owed pass asks the agent for it");
+        }
+        assert_eq!(asked.load(Ordering::SeqCst), n, "one ask per owed pass");
+    }
+
+    drop(tx);
+    tokio::time::timeout(Duration::from_secs(5), watch)
+        .await
+        .expect("the watch ends with the runtime")
+        .expect("the watch task did not panic");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_owed_pass_with_no_seat_asks_no_one() {
+    let (tx, rx) = tokio::sync::watch::channel(0u64);
+    let (nudge, asked, _) = counting_nudge();
+    let slot = EngineHolderNudgeSlot::default();
+    slot.publish(&nudge);
+    drop(nudge);
+    let _watch = fauna_client_account_runtime::holder_yield::spawn_holder_pass_owed_nudge(rx, slot);
+
+    tx.send_modify(|owed| *owed += 1);
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(asked.load(Ordering::SeqCst), 0, "nobody to ask");
 }

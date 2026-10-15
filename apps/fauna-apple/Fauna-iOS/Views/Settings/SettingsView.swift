@@ -90,6 +90,7 @@ struct SettingsView: View {
                                 Label(L.settings.memberReviewPage.title, systemImage: "person.crop.circle.badge.questionmark")
                             }
                         }
+                        #if !FAUNA_KIDS
                         navRow {
                             NavigationLink {
                                 BridgesView()
@@ -159,6 +160,7 @@ struct SettingsView: View {
                             .accessibilityIdentifier(Ids.webSettingsLink)
                             .automationActivate(Ids.webSettingsLink) { appState.selectedSettingsPage = .web }
                         }
+                        #endif
                         // Consumer-side subscriptions ("my subscriptions across all
                         // creators"), a Settings sub-page sibling of mail/web
                         // (monetization.md § Pillar 1).
@@ -190,11 +192,13 @@ struct SettingsView: View {
                         // (connected-apps.md), rail-placed right after Task
                         // delegation per settings.md § Navigation model. ui.yaml
                         // mints no link id for it (the e2e navigates by nav id).
+                        #if !FAUNA_KIDS
                         navRow {
                             NavigationLink(value: SettingsPage.connectedApps) {
                                 Label(L.connectedApps.title, systemImage: SettingsPage.connectedApps.systemImage)
                             }
                         }
+                        #endif
                         navRow {
                             NavigationLink(value: SettingsPage.privacy) {
                                 Label(L.settings.privacy, systemImage: "lock.shield")
@@ -212,6 +216,7 @@ struct SettingsView: View {
                         // FaunaKit; content-moderation-and-ranking.md § Tier-3
                         // community models), right after Muted words per its
                         // ratified placement.
+                        #if !FAUNA_KIDS
                         navRow {
                             NavigationLink(value: SettingsPage.personalization) {
                                 Label(L.personalization.title, systemImage: "sparkles")
@@ -222,6 +227,7 @@ struct SettingsView: View {
                                 Label(L.labelerCatalog.title, systemImage: "shield.checkerboard")
                             }
                         }
+                        #endif
                         navRow {
                             NavigationLink(value: SettingsPage.encryption) {
                                 Label(L.settings.encryptionPage.title, systemImage: "key")
@@ -464,6 +470,7 @@ struct SettingsView: View {
             )
         case .privacy: PrivacySettingsView(onInboxModeChanged: { appState.inboxMode = $0 })
         case .mutedWords: MutedWordsView()
+        #if !FAUNA_KIDS
         case .personalization:
             PersonalizationView(
                 onNavigateFeed: {
@@ -474,10 +481,12 @@ struct SettingsView: View {
                 onNavigateCatalog: { appState.selectedSettingsPage = .labelerCatalog }
             )
         case .labelerCatalog: LabelerCatalogView()
+        #endif
         case .general: NotificationSettingsView()
         case .encryption: EncryptionSettingsView()
         case .devices: DevicesView(reloadToken: appState.navGeneration)  // roster (DevicesContent)
         case .folders: FoldersView(reloadToken: appState.navGeneration)  // control plane (FoldersContent)
+        #if !FAUNA_KIDS
         case .mail: MailSettingsView()
         case .mailAliases: MailAliasesView()
         case .mailSpam: MailSpamView()
@@ -504,13 +513,18 @@ struct SettingsView: View {
                 MailListMembersView()
             }
         case .web: WebSettingsView(webPublish: appState.webPublish, reloadToken: appState.navGeneration)
+        #endif
         case .subscriptions: SubscriptionSettingsView()  // consumer "my subscriptions" page (shared FaunaKit)
         case .linkedNests: LinkedNestsView(reloadToken: appState.navGeneration)
         case .taskDelegation: TaskDelegationView(reloadToken: appState.navGeneration)
+        #if !FAUNA_KIDS
         case .connectedApps: ConnectedAppsView(reloadToken: appState.navGeneration)  // shared FaunaKit roster (connected-apps.md)
+        #endif
         case .logs: LogsView(source: .clientRing, headingId: Ids.pageHeading)
+        #if !FAUNA_KIDS
         case .nostr: NostrSettingsView()  // shared FaunaKit standalone Nostr page
         case .atproto: AtprotoSettingsView()  // shared FaunaKit standalone AT Protocol page (ui/atproto.md)
+        #endif
         }
     }
 }

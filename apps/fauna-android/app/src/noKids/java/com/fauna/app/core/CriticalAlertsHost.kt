@@ -7,7 +7,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 import uniffi.fauna_client_alerts.CriticalAlertRow
 import uniffi.fauna_client_alerts.CriticalAlertsObserver
 import javax.inject.Inject
@@ -34,10 +33,10 @@ class CriticalAlertsHost @Inject constructor() {
     private val registry = criticalAlertsRegistry()
 
     // Process-wide, same shape as `ConversationsManagerHost.draftsScope` /
-    // `ApiClient.connectionScope`: the re-sweep loop (`startSweepLoop` below)
+    // `ApiClient.connectionScope`: the re-sweep loop (`startSweep` below)
     // must outlive whatever UI scope triggered it, since it only stops itself
     // on the identity-teardown boundary (`clearAll`), never earlier.
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val sweeps = CriticalAlertSweepDispatcher(CoroutineScope(SupervisorJob() + Dispatchers.IO))
 
     private val _active = MutableStateFlow<List<CriticalAlertRow>>(emptyList())
 
@@ -64,18 +63,27 @@ class CriticalAlertsHost @Inject constructor() {
      */
     fun clearAll() {
         registry.clearAll()
+        // The registry's teardown-epoch bump is the loop's own stop signal, so
+        // the dispatcher's record drops in the same breath: the two can never
+        // disagree, and the next sign-in starts a loop of its own.
+        sweeps.forget()
     }
 
     /**
-     * Start [sweep] (`ApiClient.runCriticalAlertSweepLoop`) on this
-     * singleton's own process-wide scope, not the caller's — the loop never
-     * returns under normal operation (it stops itself on the first wake after
-     * [clearAll] runs), so launching it from a UI-triggered scope (a
-     * `LaunchedEffect`/ViewModel scope, which dies with its own lifecycle
-     * rather than at identity teardown) would kill it early. Fire-and-forget,
-     * same posture as every other universal post-auth hook on this class.
+     * The post-auth hook's one entry point, the split every app makes
+     * ([CriticalAlertSweepDispatcher]): [loop] (`ApiClient.runCriticalAlertSweepLoop`)
+     * on a first or identity-changing sign-in, [onePass]
+     * (`ApiClient.runCriticalAlertSweep`) on a same-identity re-establish.
+     *
+     * Both run on this singleton's own process-wide scope, not the caller's —
+     * the loop never returns under normal operation (it stops itself on the
+     * first wake after [clearAll] runs), so launching it from a UI-triggered
+     * scope (a `LaunchedEffect`/ViewModel scope, which dies with its own
+     * lifecycle rather than at identity teardown) would kill it early.
+     * Fire-and-forget, same posture as every other universal post-auth hook on
+     * this class.
      */
-    fun startSweepLoop(sweep: suspend () -> Unit) {
-        scope.launch { sweep() }
+    fun startSweep(identityKey: String, loop: suspend () -> Unit, onePass: suspend () -> Unit) {
+        sweeps.start(identityKey, loop, onePass)
     }
 }

@@ -1,7 +1,7 @@
 """tier_3 (LOCAL): a Fauna app seals + writes an event → a CalDAV MUA must see
 it. The local, no-live-box reproduction of **GAP 2**.
 
-The live 3-client run ( example.com) proved the whole reconnect /
+The live 3-client run ( the live nest) proved the whole reconnect /
 discovery / bearer saga works, then failed at Case 1: an event the linux Events
 page created was **invisible** to a CalDAV MUA's REPORT. The cross-language path
 
@@ -47,6 +47,7 @@ import uuid
 import pytest
 
 from helpers.caldav_client import CalDAVClient
+from helpers.caldav_roundtrip import _form_local
 from helpers.mail_client_ui import deliver_inbound
 from helpers.waiting import wait_until
 
@@ -220,7 +221,7 @@ def test_client_sealed_event_visible_to_mua(app, dedicated_mail_nest, request):
     app.mail_settings.navigate()
     assert app.mail_settings.is_page_visible(), "mail-settings page must be reachable"
     app.mail_settings.enable_mail_plain(_PASSWORD)
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=15.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "enabling mail must mint the default credential; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
@@ -296,7 +297,7 @@ def _enable_mail_and_mua(app, handle, request):
     app.mail_settings.navigate()
     assert app.mail_settings.is_page_visible(), "mail-settings page must be reachable"
     app.mail_settings.enable_mail_plain(_PASSWORD)
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=15.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "enabling mail must mint the default credential; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
@@ -345,6 +346,7 @@ def _app_attendee_status(app, address: str) -> str | None:
     return None
 
 
+@pytest.mark.web
 @pytest.mark.feature("calendar-in-standard-apps")
 def test_interested_shows_as_tentative_and_a_calendar_apps_tentative_stays_tentative(
     app, dedicated_mail_nest, request
@@ -360,7 +362,9 @@ def test_interested_shows_as_tentative_and_a_calendar_apps_tentative_stays_tenta
     _wait_calendars_ready(app)
     app.events.select_calendar("Personal")
     summary = f"interested-{int(time.time())}"
-    app.events.create_event(summary, _utc(60), _utc(120))
+    # The app's composer takes the local `YYYY-MM-DDTHH:MM` form; web's native
+    # `datetime-local` refuses the compact UTC stamp `_utc` builds for the wire.
+    app.events.create_event(summary, _form_local(60), _form_local(120))
     app.events.rsvp_event(summary, "interested")
     assert app.events.event_rsvp_count(summary) >= 1, (
         f"the Interested reply must register an attendee; error={app.error_text()!r}"

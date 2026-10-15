@@ -29,6 +29,10 @@
 //! - [`Writer`] — incremental writer; `new` → `write_block`* → `finalize`.
 //! - [`Reader`] — random-access reader; `new` parses pragma + header + index,
 //!   `get(&cid)` does an O(log n) lookup, `iter()` walks in sorted order.
+//! - [`RangedReader`] — the same reader over an async [`ReadAt`] (a medium
+//!   read by range, such as a browser's OPFS file); `block_at(i)` walks in
+//!   sorted order, one record per fetch. [`SeekReadAt`] adapts any
+//!   `Read + Seek`.
 //! - [`Header`] — the 40-byte v2 header (encode/decode).
 //! - [`Pragma`] — the 11-byte v2 pragma constant.
 //! - [`Error`] — error type.
@@ -37,6 +41,7 @@ pub mod error;
 pub mod header;
 pub mod index;
 pub mod pragma;
+pub mod ranged;
 pub mod reader;
 pub mod v1;
 pub mod writer;
@@ -45,6 +50,7 @@ pub use error::Error;
 pub use header::Header;
 pub use index::{IndexEntry, MULTIHASH_BLAKE3_256, MULTIHASH_INDEX_SORTED_CODEC};
 pub use pragma::{Pragma, parse_pragma};
+pub use ranged::{RangedReader, ReadAt, SeekReadAt};
 pub use reader::{Iter, Reader};
 pub use writer::Writer;
 

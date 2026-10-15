@@ -27,6 +27,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use fauna_core::localized::LocalizedText;
 use fauna_protocol::MaybeSendSync;
 use fauna_protocol::bridge_routing::{DmarcMode, MailDomainRenameRow, MailDomainRow};
 use serde::{Deserialize, Serialize};
@@ -190,6 +191,75 @@ impl From<DmarcMode> for DomainDmarcPolicy {
             DmarcMode::None => DomainDmarcPolicy::Monitor,
         }
     }
+}
+
+impl DomainDmarcPolicy {
+    /// Every policy in the picker's paint order — the default first, then
+    /// softer.
+    pub const ORDER: [DomainDmarcPolicy; 3] = [
+        DomainDmarcPolicy::Reject,
+        DomainDmarcPolicy::Quarantine,
+        DomainDmarcPolicy::Monitor,
+    ];
+
+    /// The RFC 7489 tag (`reject` / `quarantine` / `none`) — the raw value
+    /// `admin-dns-domain-dmarc-policy-select` round-trips on every app, so a
+    /// driver names the same three strings everywhere and no rewording of the
+    /// option text can make the select undriveable.
+    pub fn as_tag(self) -> &'static str {
+        DmarcMode::from(self).as_tag()
+    }
+
+    /// The policy a picker's raw value names; `None` for anything else.
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Self::ORDER.into_iter().find(|p| p.as_tag() == tag)
+    }
+
+    /// The option text the picker paints for this policy.
+    pub fn label(self) -> LocalizedText {
+        LocalizedText::key(match self {
+            DomainDmarcPolicy::Reject => "admin.dns.dmarc_policy_reject",
+            DomainDmarcPolicy::Quarantine => "admin.dns.dmarc_policy_quarantine",
+            DomainDmarcPolicy::Monitor => "admin.dns.dmarc_policy_none",
+        })
+    }
+}
+
+/// One arm of `admin-dns-domain-dmarc-policy-select`: the RFC 7489 tag the
+/// picker round-trips and the text it paints for it.
+///
+/// The `fauna_core::format::publish_kind_options` shape: a raw-value picker
+/// whose option list lives here once, so seven apps cannot each hand-write
+/// (and drift) a three-item list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DmarcPolicyOption {
+    /// [`DomainDmarcPolicy::as_tag`] — never a per-app literal.
+    pub value: String,
+    /// [`DomainDmarcPolicy::label`].
+    pub label: LocalizedText,
+    /// The policy [`Self::value`] names — what `UpdateConfig` carries and what
+    /// [`LocalDomainView::dmarc_policy`] is compared against. Carried beside the
+    /// tag (the [`RoleAddressOption`] shape) so a UniFFI caller, which has no
+    /// [`DomainDmarcPolicy::from_tag`], hand-writes no tag ↔ policy map.
+    pub policy: DomainDmarcPolicy,
+}
+
+/// The `admin-dns-domain-dmarc-policy-select` option catalog, in paint order
+/// (`dmarc-reporting.md` § Multi-domain deployments): `reject` — the default,
+/// which clears the domain's override — then `quarantine`, then `none`.
+/// Exported over UniFFI so android/apple/windows paint this table instead of
+/// hand-writing the three options.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn dmarc_policy_options() -> Vec<DmarcPolicyOption> {
+    DomainDmarcPolicy::ORDER
+        .into_iter()
+        .map(|p| DmarcPolicyOption {
+            value: p.as_tag().to_string(),
+            label: p.label(),
+            policy: p,
+        })
+        .collect()
 }
 
 /// One domain row as the page renders it. Projected from the wire
@@ -1470,6 +1540,21 @@ mod tests {
         // Untouched knob unchanged.
         assert_eq!(snap.active[0].mta_sts_cert_mode, "expand_primary");
         assert_eq!(snap.active[0].dmarc_policy, DomainDmarcPolicy::Reject);
+    }
+
+    #[test]
+    fn dmarc_policy_options_are_the_rfc_tags_default_first_and_round_trip() {
+        let options = dmarc_policy_options();
+        let values: Vec<&str> = options.iter().map(|o| o.value.as_str()).collect();
+        assert_eq!(values, ["reject", "quarantine", "none"]);
+        for o in &options {
+            let p = DomainDmarcPolicy::from_tag(&o.value).expect("every option parses");
+            assert_eq!(o.label, p.label());
+            // The policy a FFI caller dispatches is the one the tag names.
+            assert_eq!(o.policy, p);
+        }
+        assert_eq!(options[0].value, DomainDmarcPolicy::default().as_tag());
+        assert_eq!(DomainDmarcPolicy::from_tag("p=reject"), None);
     }
 
     #[tokio::test]

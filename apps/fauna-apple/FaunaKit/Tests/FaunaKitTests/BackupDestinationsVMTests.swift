@@ -35,7 +35,8 @@ private func dest(_ id: String, _ url: String, _ name: String?) -> FfiBackupDest
 private func status(_ id: String, lastUpload: UInt64?, backlog: UInt32) -> FfiBackupDestinationStatus {
     FfiBackupDestinationStatus(
         destinationId: id, lastUploadTime: lastUpload, backlogCount: backlog,
-        heldBytes: nil, capState: nil, auditState: nil, lastAuditPassedAt: nil)
+        heldBytes: nil, capState: nil, auditState: nil, lastAuditPassedAt: nil,
+        writerState: nil)
 }
 
 @Test @MainActor func labelWiresThroughSharedFnNameElseHost() {
@@ -188,7 +189,8 @@ private func clientDest(_ id: String, deviceId: String?) -> FfiBackupDestination
 private func auditStatus(_ id: String, auditState: String?, lastAuditPassedAt: UInt64?) -> FfiBackupDestinationStatus {
     FfiBackupDestinationStatus(
         destinationId: id, lastUploadTime: nil, backlogCount: 0,
-        heldBytes: nil, capState: nil, auditState: auditState, lastAuditPassedAt: lastAuditPassedAt)
+        heldBytes: nil, capState: nil, auditState: auditState, lastAuditPassedAt: lastAuditPassedAt,
+        writerState: nil)
 }
 
 /// A custodian that has never self-audited renders ABSENCE, not a verdict —
@@ -653,7 +655,8 @@ private final class RecordingAPI: APIClient {
 
 private func auditRow(_ reasons: [BackupAuditAlertReason]) -> FfiDestinationAuditRow {
     FfiDestinationAuditRow(
-        destinationId: "d1", lastPassedAt: nil, alertReason: reasons.first, alertReasons: reasons)
+        destinationId: "d1", lastPassedAt: nil, alertReason: reasons.first, alertReasons: reasons,
+        recoverOffered: false)
 }
 
 private func alertLabel(_ reason: BackupAuditAlertReason) -> String {

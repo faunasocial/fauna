@@ -84,6 +84,7 @@ from clients._ws_rpc_core import RpcCallError
 from clients.ws_rpc_anon_client import WsRpcAnonClient
 from common.auth import create_actor_and_register
 from common.envelope import cid_from_link
+from helpers.set_names import audience_update
 
 from tests.api.test_web_paywall_folder import _actor_client, _post_bytes
 
@@ -135,7 +136,7 @@ def _publish(url: str, port: int, owner: dict, path: str, body: bytes) -> tuple[
 
 def _set_audience(url: str, owner: dict, audience: str) -> None:
     with _actor_client(url, owner) as ws:
-        ws.call("fauna.folders.update", {"name": FOLDER, "audience": audience})
+        ws.call("fauna.folders.update", audience_update(FOLDER, audience))
 
 
 def _fetch(ws, *, home_peer_url: str | None, **address) -> dict:

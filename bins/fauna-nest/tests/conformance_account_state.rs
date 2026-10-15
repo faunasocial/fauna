@@ -31,8 +31,9 @@ use fauna_protocol::{
     ByteBuf, RpcError,
     account_state::{
         ACCOUNT_STATE_FLEET_SCOPE, ACCOUNT_STATE_SCOPE, AccountStatePutReply,
-        AccountStatePutRequest, ItemClass, KIND_STATE_PUT, MAX_REPLACED_ROWS_PER_PUT,
-        MAX_STATE_ENTRY_BYTES, OP_STATE_PUT, OP_TOMBSTONE, ReplacedRow,
+        AccountStatePutRequest, AccountStateRetireRequest, ItemClass, KIND_STATE_PUT,
+        KIND_STATE_RETIRE, MAX_REPLACED_ROWS_PER_PUT, MAX_STATE_ENTRY_BYTES, OP_STATE_PUT,
+        OP_TOMBSTONE, ReplacedRow,
     },
     decode_strict as decode,
     folders::{FolderCreateReply, FolderCreateRequest},
@@ -1096,5 +1097,60 @@ async fn a_replaces_list_is_refused_on_the_fleet_scope_over_its_bound_and_malfor
         served_entries(&list_state(&router, &state, ACTOR, 0, None).await),
         vec![Some(b"a1".to_vec())],
         "no refused request wrote or superseded a row"
+    );
+}
+
+/// The retire handler's own half of the fleet-only guard (`no_rows_sealed_under`
+/// and `delete_escrow_wraps` with it are valid only on `state-fleet`):
+/// driven through the real dispatch, so reverting only the handler's check —
+/// with the DB-layer bail intact — surfaces here as `internal_error` instead of
+/// `invalid_request`. A row is written to the delegable `state` scope first: with
+/// the scope never written the handler answers `retired: false` before the DB
+/// layer runs, which would mask a reverted guard .
+#[tokio::test]
+async fn a_belted_retire_on_the_state_scope_is_refused_invalid_request_by_the_handler() {
+    let (router, state) = router_and_state().await;
+    put(&router, &state, ACTOR, &put_req(ITEM, WRITER_A, 1, b"a1"))
+        .await
+        .unwrap();
+
+    let belted = AccountStateRetireRequest {
+        scope: ACCOUNT_STATE_SCOPE.into(),
+        item_key: ByteBuf::from(id(ITEM).to_vec()),
+        writer_id: id_hex(WRITER_A),
+        writer_seq: 1,
+        no_rows_sealed_under: Some(ByteBuf::from(id(0x77).to_vec())),
+        ..Default::default()
+    };
+    let cases: Vec<(&str, AccountStateRetireRequest)> = vec![
+        ("a belt named on the state scope", belted.clone()),
+        (
+            "a belted escrow sweep on the state scope",
+            AccountStateRetireRequest {
+                delete_escrow_wraps: true,
+                ..belted
+            },
+        ),
+    ];
+    for (what, req) in cases {
+        let err = dispatch(
+            &router,
+            Arc::clone(&state),
+            id(ACTOR),
+            KIND_STATE_RETIRE,
+            encode(&req),
+        )
+        .await
+        .expect_err(&format!("{what} must be refused"));
+        assert_eq!(
+            err.code, "fauna.account.state.invalid_request",
+            "the refusal for {what}"
+        );
+    }
+
+    assert_eq!(
+        served_entries(&list_state(&router, &state, ACTOR, 0, None).await),
+        vec![Some(b"a1".to_vec())],
+        "no refused retire touched the row"
     );
 }

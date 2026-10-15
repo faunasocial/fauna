@@ -40,6 +40,7 @@ use crate::host_legs::{CustodyDialPass, CustodyNestPass, CustodyServePass, DialP
 use crate::principal_custody::PrincipalCustody;
 use crate::seen_set_producer::{SeenSetPassReport, auto_in_set_pass};
 
+use super::e2e_holds::{Prompt, fleet_walk_held, publish_held};
 use super::enrollment::{EnrollmentPass, ensure_enrollment_registered};
 use super::{HostLegs, LegsCtx, now_ms};
 
@@ -122,6 +123,10 @@ pub struct PumpReport {
     /// item. `None` on a plane handed no predecessor schedule, or with no
     /// completed reconcile.
     pub carry_retire: Option<crate::delegable_reclaim::CarryRetire>,
+    /// The same step on each `ext:<kind>` plane ([`Self::ext_walks`]'s), the
+    /// scope beside its result — only kinds whose plane held a predecessor
+    /// schedule and completed a reconcile.
+    pub ext_carry_retires: Vec<(String, crate::delegable_reclaim::CarryRetire)>,
     /// The delegable scope's cover step (`crate::delegable_reclaim::
     /// reclaim_below_cover`; `delegable-scope-reclamation.md` § Delegable-scope
     /// reclamation, parts (3) and (4)): the items handed over, and the rows
@@ -213,8 +218,8 @@ pub struct PumpReport {
     /// which is every pass but the rare one after an interrupted removal.
     pub fleet_removals: Option<crate::fleet_removal::FleetRemovalPass>,
     /// The removed members' grants revoked at the bound nest
-    /// (`crate::removed_grants` — `account-data-taxonomy.md` § Fleet-scope
-    /// reclamation, clause (4) → *The nest half follows merged state*), in
+    /// (`crate::removed_grants` — `fleet-scope-reclamation.md`
+    /// § Fleet-scope reclamation, clause (4) → *The nest half follows merged state*), in
     /// every full pass, whichever process pumps. All-default — nothing asked of
     /// the nest — until merged state reads another device removed; `None` when
     /// no full pass ran.
@@ -282,18 +287,27 @@ pub struct LinkedCustodyPass {
     pub leg: LinkedCustodyLeg,
 }
 
-/// Wall-clock time per pass step, for the steps whose cost scales with an
-/// account's history rather than its live size (`account-data-plane.md`
-/// § The client-side lifecycle → *Bounding the pass itself is not this
-/// rule's job*): the two scope walks, the device-endpoints step and the
-/// generation machinery's four steps, beside the whole pass. Zero
-/// for a step that did not run (a non-holder, a seedless host's escrow
-/// recovery, a pass cut by a sign-out before it). `log_pump` names the
-/// slowest of them on every pass that took a second or longer.
+/// Wall-clock time per pass step, beside the whole pass
+/// (`account-client-lifecycle.md` § The client-side lifecycle → *Bounding
+/// the pass itself is not this rule's job*). The steps PARTITION the pass:
+/// every stretch of it is in exactly one bucket, so [`Self::unaccounted`] is
+/// only the bookkeeping between them, and a long pass always names where its
+/// time went (a 2026-10-11 tui prologue logged 31 s against steps summing
+/// under one, when only the walks, the device-endpoints step and the
+/// generation machinery were timed). Zero for a step that did not run (a
+/// non-holder, a seedless host's escrow recovery, a pass cut by a sign-out
+/// or a device-limit refusal before it). `log_pump` names the slowest of them
+/// on every pass that took a second or longer.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct PassTimings {
     /// The whole pass, first step to last.
     pub total: Duration,
+    /// The departed-scope drop and the bind leg's replica check.
+    pub bind: Duration,
+    /// The enrollment ceremony's nest legs and the departed attestation.
+    pub enrollment: Duration,
+    /// The tail re-author, both own publishes and the outbox drain.
+    pub publish: Duration,
     /// The account-state scope walk (`walk`).
     pub walk: Duration,
     /// The fleet-only scope walk (`fleet_walk`).
@@ -310,8 +324,22 @@ pub struct PassTimings {
     pub unkeyable: Duration,
     /// The reclamation step.
     pub reclaim: Duration,
+    /// The capability sweep, its enumerate and its judge together.
+    pub capability_sweep: Duration,
+    /// The third-party kinds' step.
+    pub ext_kinds: Duration,
+    /// The host's legs (natively the peer and custody legs) and the endpoint
+    /// write-back behind them.
+    pub host_legs: Duration,
     /// The secondary leg, every linked nest together.
     pub linked: Duration,
+    /// The owed-list delivery at the bound nest, the staged removals'
+    /// reconcile and the removed grants' revoke — the secondary leg between
+    /// them excepted (`linked`).
+    pub removals: Duration,
+    /// Everything after: the group severance, the content walks, the seen
+    /// set, the listing record and the bind settle.
+    pub tail: Duration,
 }
 
 impl PassTimings {
@@ -319,20 +347,41 @@ impl PassTimings {
     /// no step ran.
     #[must_use]
     pub fn slowest(&self) -> Option<(&'static str, Duration)> {
+        self.steps()
+            .into_iter()
+            .filter(|(_, d)| !d.is_zero())
+            .max_by_key(|(_, d)| *d)
+    }
+
+    /// The pass's time no step holds: the whole pass less the sum of its
+    /// steps. Bookkeeping only, since the steps partition the pass.
+    #[must_use]
+    pub fn unaccounted(&self) -> Duration {
+        let itemized: Duration = self.steps().iter().map(|(_, d)| *d).sum();
+        self.total.saturating_sub(itemized)
+    }
+
+    /// Every step by name, in pass order.
+    fn steps(&self) -> [(&'static str, Duration); 17] {
         [
+            ("bind", self.bind),
+            ("enrollment", self.enrollment),
+            ("publish", self.publish),
             ("walk", self.walk),
             ("fleet_walk", self.fleet_walk),
-            ("device_endpoints", self.device_endpoints),
+            ("capability_sweep", self.capability_sweep),
+            ("ext_kinds", self.ext_kinds),
             ("escrow_recovery", self.escrow_recovery),
             ("reescrow", self.reescrow),
+            ("host_legs", self.host_legs),
+            ("device_endpoints", self.device_endpoints),
             ("topup", self.topup),
             ("unkeyable", self.unkeyable),
             ("reclaim", self.reclaim),
             ("linked", self.linked),
+            ("removals", self.removals),
+            ("tail", self.tail),
         ]
-        .into_iter()
-        .filter(|(_, d)| !d.is_zero())
-        .max_by_key(|(_, d)| *d)
     }
 }
 
@@ -563,6 +612,26 @@ pub(crate) struct PassInputs<'a> {
     /// succession ledger as; `None` when the account id did not decode (the
     /// sweep then judges nothing).
     pub(crate) ledger_actor: Option<ActorId>,
+    /// [`Prompt::Awaited`] only for the pass a caller waits on for its fleet
+    /// walk ([`super::AccountStoreHandle::walk_fleet`]) — the one pass an
+    /// e2e walk hold never keeps back ([`super::e2e_holds`]).
+    pub(crate) fleet_walk: Prompt,
+}
+
+/// The fleet plane's own publish as every step of this module runs it — the
+/// plane's ordered log, unless an e2e publish hold keeps an unprompted one
+/// back ([`super::e2e_holds`]; a no-op on a release build), which then
+/// publishes nothing.
+async fn publish_fleet<B, R>(fleet: &AccountStatePlane<'_, B, R>, prompt: Prompt) -> Result<usize>
+where
+    B: StoreBackend,
+    R: RpcRequester,
+    R::Error: RpcErrorClass,
+{
+    if publish_held(fleet, prompt).await {
+        return Ok(0);
+    }
+    fleet.publish_pending().await
 }
 
 /// The fleet-plane writer identity + trust + principal bundle, bundled for
@@ -587,6 +656,11 @@ pub(crate) struct FleetWriter<'a, R> {
     /// **named** row, the app's own derived id
     /// ([`AccountRuntimeParams::enrollment_target_device_id`]).
     pub(crate) enrollment_target: &'a str,
+    /// The predecessor fleets' device ids this device recorded at a ceremony
+    /// it ran (`AttestedPredecessors::departed_devices`) — what
+    /// [`attest_departed_step`] writes as departed. Empty on every device
+    /// but the ceremony's.
+    pub(crate) departed_devices: &'a [[u8; 32]],
     /// The identity seed, the attested predecessors' keypairs (the kept
     /// wrap's recovery — `super::SeedHolder`) and this worker's answered-set,
     /// for the escrow-recovery step — filled only for the **seed-leg role's holder**
@@ -638,8 +712,8 @@ impl<R> Copy for FleetWriter<'_, R> {}
 /// registration latch's row half — or, on an e2e build only, whatever
 /// `FAUNA_E2E_STATED_ROW` names. The override exists for ONE journey: a
 /// sibling seat playing the stolen device that mis-states its own row
-/// (`account-data-taxonomy.md` § The generation machinery → *Fleet-scope
-/// reclamation*, clause (4), *A disagreement is the user's to settle* —
+/// (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (4), *A disagreement is the user's to settle* —
 /// `test_device_member_removal.py`), a statement no honest code path produces
 /// and the harness cannot forge from outside (the entry is sealed under the
 /// generation key only a member holds). Compile-gated outer, env inner
@@ -686,6 +760,11 @@ where
         return Ok(());
     }
     if scope == ACCOUNT_STATE_FLEET_SCOPE {
+        // A nudge is never awaited: an e2e walk hold (a no-op on a release
+        // build) keeps it back whole.
+        if fleet_walk_held(planes.fleet, Prompt::Unprompted) {
+            return Ok(());
+        }
         planes
             .fleet
             .walk()
@@ -700,7 +779,7 @@ where
         // one this replica does not track yet.
         let overlay = crate::kind_manifest_rows::read_admitted_kinds(store).await?;
         if overlay.kinds.kinds().any(|k| *k == kind) {
-            let plane = planes.fleet.ext_plane(&kind, &overlay.kinds);
+            let plane = bound_ext_plane(planes, &kind, &overlay.kinds);
             plane
                 .walk()
                 .await
@@ -724,8 +803,10 @@ where
 /// ordered own publish of every unsent row — the delegable plane's, then the
 /// fleet plane's, each plane its own ordered log, as a full pass runs them:
 /// the network leg a local write used to run inline. Reported like a pass
-/// so the loop's stale-writer heal reads it the same way.
-pub(crate) async fn publish_step<B, R>(planes: Planes<'_, B, R>) -> PumpReport
+/// so the loop's stale-writer heal reads it the same way. `prompt` is
+/// [`Prompt::Awaited`] for the awaited publish (`Cmd::PublishOwn`), the one
+/// an e2e publish hold never keeps back.
+pub(crate) async fn publish_step<B, R>(planes: Planes<'_, B, R>, prompt: Prompt) -> PumpReport
 where
     B: StoreBackend,
     R: RpcRequester,
@@ -736,7 +817,7 @@ where
         Ok(n) => report.published = Some(n),
         Err(e) => push_step_error(&mut report, format!("publish_pending: {e:#}"), &e),
     }
-    match planes.fleet.publish_pending().await {
+    match publish_fleet(planes.fleet, prompt).await {
         Ok(n) => report.fleet_published = Some(n),
         Err(e) => push_step_error(&mut report, format!("publish_pending (fleet): {e:#}"), &e),
     }
@@ -786,9 +867,11 @@ where
         membership_answered,
         endpoint_facts,
         ledger_actor,
+        fleet_walk,
     } = *pass;
     let pass_started = now_ms();
     let mut report = PumpReport::default();
+    let step = now_ms();
     let departures = drop_departed_scopes(store, content_scopes, membership_answered).await;
     report.errors.extend(departures.errors.iter().cloned());
     report.departures = Some(departures);
@@ -800,16 +883,30 @@ where
     if fleet_writer.trust.trusted_holders.replace(pinned.clone()) {
         tracing::info!("escrow trust: the pinned holder moved — this pass trusts the new pin");
     }
+    // A key a co-located seed pass recovered from escrow rests in the shared
+    // slot; the fleet walk below opens the rows it keys only once this
+    // custody's view holds it (`PrincipalCustody::adopt_slot_generation_keys`).
+    let adopted = fleet_writer.slot.adopt_slot_generation_keys();
+    if adopted > 0 {
+        tracing::info!(
+            "account pump: adopted {adopted} generation key(s) another process of this \
+             machine recorded"
+        );
+    }
     // The bind leg's replica check, ahead of every leg that talks to the
     // nest (`account-sync-plane.md` § The bind leg, ruling 2).
     let bind = bind_check(store, fleet_writer, &pinned, &mut report).await;
+    report.timings.bind = since(step);
     // The enrollment ceremony's nest legs — early so a first pass on
     // a fresh machine registers the principal before anything else needs it;
     // after departures only because that step's first-place contract is
     // documented above (this step touches no scopes). On a bind verification
     // the latch is void: it was learned from another replica.
     let latch_void = bind.as_ref().is_some_and(|b| b.verify);
+    let step = now_ms();
     enrollment_step(store, fleet_writer, latch_void, &mut report).await;
+    attest_departed_step(store, planes.fleet, fleet_writer, &mut report).await;
+    report.timings.enrollment = since(step);
     // A cap-refused machine ends its pass here. The refusal means the
     // principal's grant is registered nowhere, so the data path it
     // authenticates (`fauna.auth.device_handshake`) cannot come up, and every
@@ -829,6 +926,7 @@ where
     // The succession tail re-author, before the publish
     // steps so a just-rotated machine's re-journaled tail ships on this same
     // pass. Marker-gated: a plain `meta_get` on every ordinary pass.
+    let step = now_ms();
     match crate::succession_tail::tail_reauthor_pass(store).await {
         Ok(p) => report.reauthor = p,
         Err(e) => push_step_error(&mut report, format!("tail re-author: {e:#}"), &e),
@@ -837,13 +935,14 @@ where
         Ok(n) => report.published = Some(n),
         Err(e) => push_step_error(&mut report, format!("publish_pending: {e:#}"), &e),
     }
-    match planes.fleet.publish_pending().await {
+    match publish_fleet(planes.fleet, Prompt::Unprompted).await {
         Ok(n) => report.fleet_published = Some(n),
         Err(e) => push_step_error(&mut report, format!("publish_pending (fleet): {e:#}"), &e),
     }
     let outbox = crate::outbox::drain_outbox(store, rpc).await;
     report.errors.extend(outbox.errors.iter().cloned());
     report.outbox = Some(outbox);
+    report.timings.publish = since(step);
     let step = now_ms();
     match planes.delegable.reconcile().await {
         Ok(w) => report.walk = Some(w),
@@ -872,11 +971,19 @@ where
     // row it names was deposited after its `Mint` reached the nest, so the walk
     // below serves this replica every event the judge needs
     // (`ui/nests.md` § Trust facet — grants → *Reconcile*).
-    let enumerated = super::capability_sweep::enumerate(rpc).await;
     let step = now_ms();
-    match planes.fleet.reconcile().await {
-        Ok(w) => report.fleet_walk = Some(w),
-        Err(e) => push_step_error(&mut report, format!("reconcile (fleet): {e:#}"), &e),
+    let enumerated = super::capability_sweep::enumerate(rpc).await;
+    report.timings.capability_sweep = since(step);
+    let step = now_ms();
+    // An e2e walk hold (a no-op on a release build) leaves `fleet_walk`
+    // unset: this pass walked nothing, which every step below reads as a
+    // walk that did not land.
+    let walk_held = fleet_walk_held(planes.fleet, fleet_walk);
+    if !walk_held {
+        match planes.fleet.reconcile().await {
+            Ok(w) => report.fleet_walk = Some(w),
+            Err(e) => push_step_error(&mut report, format!("reconcile (fleet): {e:#}"), &e),
+        }
     }
     match crate::publish_diff::publish_diff(
         store,
@@ -926,7 +1033,16 @@ where
     report.timings.fleet_walk = since(step);
     // The third-party kinds, behind the fleet walk that merged the manifest
     // rows admitting them.
-    ext_kinds_step(store, planes.fleet, &mut report).await;
+    let step = now_ms();
+    ext_kinds_step(
+        store,
+        planes,
+        fleet_writer.trust,
+        fleet_writer.key,
+        &mut report,
+    )
+    .await;
+    report.timings.ext_kinds = since(step);
     // Escrow recovery (charter § The generation machinery → *Escrow
     // recovery*), right after the fleet walk — every wrap the plane carries
     // has been tried first — and ahead of every writer this pass (the host's
@@ -947,10 +1063,12 @@ where
         // and the hand-over below work on the merged entries this same pass.
         // An error that still recovered some keys logs them and reports
         // nothing here; the next pass's standing reconcile covers that case.
-        if matches!(
-            report.generation_escrow_recovery,
-            Some(crate::generation_escrow_recover::EscrowRecoveryPass::Recovered(_))
-        ) {
+        if !walk_held
+            && matches!(
+                report.generation_escrow_recovery,
+                Some(crate::generation_escrow_recover::EscrowRecoveryPass::Recovered(_))
+            )
+        {
             match planes.fleet.reconcile().await {
                 Ok(w) => report.fleet_rewalk = Some(w),
                 Err(e) => push_step_error(
@@ -969,6 +1087,7 @@ where
         .fleet_rewalk
         .clone()
         .or_else(|| report.fleet_walk.clone());
+    let step = now_ms();
     let sweep = super::capability_sweep::judge_and_revoke(
         store,
         rpc,
@@ -978,6 +1097,7 @@ where
         &mut report.errors,
     )
     .await;
+    report.timings.capability_sweep += since(step);
     report.capability_sweep = Some(sweep);
     // The re-escrow pass — the succession rider (`generation_reescrow`
     // module docs): every live generation this device keys is escrowed under
@@ -1036,6 +1156,7 @@ where
     // leg reports into its own `PumpReport` slot). What the steps below need
     // from them comes back as [`LegsOutput`]: the bind's self-observed
     // transport facts, and every peer endpoint this pass observed.
+    let step = now_ms();
     let legs_out = legs
         .run(
             LegsCtx {
@@ -1087,6 +1208,7 @@ where
             tracing::debug!("custody endpoint refresh (held row): {e:#}");
         }
     }
+    report.timings.host_legs = since(step);
     // The T5 discovery feed's writer, after the fleet walk so a sibling's
     // mint merged this pass is already resolvable, and after the re-escrow so
     // the tip it seals under is the one this pass's pin trusts. The account's
@@ -1144,8 +1266,8 @@ where
         Err(e) => push_step_error(&mut report, format!("generation unkeyable: {e:#}"), &e),
     }
     report.timings.unkeyable = since(step);
-    // The reclamation pass (charter § The generation machinery → *Fleet-scope
-    // reclamation*), after the top-up and unkeyable passes so this pass's own
+    // The reclamation pass (`fleet-scope-reclamation.md`
+    // § *Fleet-scope reclamation*), after the top-up and unkeyable passes so this pass's own
     // heals and retractions are what its reach and its retires reflect.
     let step = now_ms();
     match crate::generation_reclaim::ensure_reclaimed(
@@ -1167,7 +1289,9 @@ where
     // pass sent stay in the store's record for the runtime that holds it.
     // The road's bound-nest step goes first: the owed list the successor is
     // served where it is bound.
+    let step = now_ms();
     deliver_owed_at(fleet_writer, fleet_writer.session_rpc, None, &mut report).await;
+    report.timings.removals = since(step);
     if let Some(connector) = fleet_writer.linked_nests {
         let step = now_ms();
         report.linked = Some(
@@ -1187,6 +1311,7 @@ where
     // rule*) — the boot-reconcile half of the two-leg removal. Costs nothing
     // on the ordinary pass: the roster is read only while an intent is staged.
     // The roster it reads is shared with the removed-grants step below.
+    let step = now_ms();
     let mut staged_roster = None;
     if !fleet_writer.slot.pending_fleet_removals().is_empty() {
         let read = crate::removed_grants::read_roster(fleet_writer.session_rpc).await;
@@ -1211,7 +1336,7 @@ where
         // served inside passes — `fleet_removal` module docs): this pass,
         // already past its own fleet publish, ships them itself.
         if removals.completed > 0 {
-            match planes.fleet.publish_pending().await {
+            match publish_fleet(planes.fleet, Prompt::Unprompted).await {
                 Ok(n) => *report.fleet_published.get_or_insert(0) += n,
                 Err(e) => push_step_error(
                     &mut report,
@@ -1249,6 +1374,8 @@ where
             .map(|e| format!("removed grants: {e}")),
     );
     report.removed_grants = Some(removed_grants);
+    report.timings.removals += since(step);
+    let step = now_ms();
     // The group plane's leg: the authority-device severance. Placed after the
     // fleet steps for symmetry, though nothing here reads their output: the
     // group plane is pull-only with no feed wired, so its rows arrive by
@@ -1311,25 +1438,55 @@ where
         report.bind = Some(b.pass(settled));
     }
     note_parked(planes, &mut report).await;
+    report.timings.tail = since(step);
     report.timings.total = since(pass_started);
     report
+}
+
+/// The bound nest's `ext:<kind>` plane for one admitted kind: derived from
+/// the bound fleet plane ([`AccountStatePlane::ext_plane`]) and handed the
+/// bound **delegable** plane's predecessor schedules, because an `ext.*` kind
+/// sits on the delegable rung and its rows cross a succession by the same
+/// carry (`succession-aftermath.md` § Re-key scope, the `ext:<kind>`
+/// sentence). The fleet plane holds no such schedule, so inheriting from the
+/// plane it is derived from would carry nothing. Every ext plane the driver
+/// walks comes from here — pinned by
+/// `every_driver_ext_plane_is_the_bound_one`; the peer and linked legs derive
+/// none (*Which walks carry*).
+fn bound_ext_plane<'p, B, R>(
+    planes: Planes<'p, B, R>,
+    kind: &fauna_protocol::ext_kind::ExtKind,
+    admitted: &'p fauna_protocol::merge_policy::AdmittedKinds,
+) -> AccountStatePlane<'p, B, R>
+where
+    B: StoreBackend,
+    R: RpcRequester,
+{
+    planes
+        .fleet
+        .ext_plane(kind, admitted)
+        .with_predecessor_schedules(planes.delegable.predecessor_schedules())
 }
 
 /// The `ext.*` kinds' step (`third-party-kinds.md` § The `ext` sub-scope):
 /// read the overlay off the merged `fauna.state.kind-manifest` rows —
 /// re-verified on every read, so a row that no longer verifies admits
-/// nothing — and run one `ext:<kind>` plane per admitted kind, derived from
-/// the bound fleet plane: publish its unsent rows, then reconcile. Read at
-/// every pass, so a kind admitted on a sibling device is walked here on the
-/// pass after the fleet walk merged its row. Each kind's failure is its own
-/// error; the rest still run.
+/// nothing — and run one `ext:<kind>` plane per admitted kind
+/// ([`bound_ext_plane`]): publish its unsent rows, reconcile, then retire
+/// behind the succession carry exactly as the delegable scope does
+/// (`crate::delegable_reclaim::retire_behind_carry`). Read at every pass, so
+/// a kind admitted on a sibling device is walked here on the pass after the
+/// fleet walk merged its row. Each kind's failure is its own error; the rest
+/// still run.
 async fn ext_kinds_step<B, R>(
     store: &AccountStore<B>,
-    fleet: &AccountStatePlane<'_, B, R>,
+    planes: Planes<'_, B, R>,
+    trust: &crate::generation_tip::GenerationTrust,
+    writer_key: &SigningKey,
     report: &mut PumpReport,
 ) where
     B: StoreBackend,
-    R: RpcRequester,
+    R: RpcRequester + Clone,
     R::Error: RpcErrorClass,
 {
     let overlay = match crate::kind_manifest_rows::read_admitted_kinds(store).await {
@@ -1343,7 +1500,7 @@ async fn ext_kinds_step<B, R>(
         tracing::warn!("account pump: the kind manifest of {client_id} admits nothing: {why}");
     }
     for kind in overlay.kinds.kinds() {
-        let plane = fleet.ext_plane(kind, &overlay.kinds);
+        let plane = bound_ext_plane(planes, kind, &overlay.kinds);
         let scope = plane.scope().to_owned();
         if let Err(e) = plane.publish_pending().await {
             push_step_error(report, format!("publish_pending ({scope}): {e:#}"), &e);
@@ -1351,6 +1508,12 @@ async fn ext_kinds_step<B, R>(
         match plane.reconcile().await {
             Ok(w) => report.ext_walks.push((scope.clone(), w)),
             Err(e) => push_step_error(report, format!("reconcile ({scope}): {e:#}"), &e),
+        }
+        match crate::delegable_reclaim::retire_behind_carry(store, &plane, trust, writer_key).await
+        {
+            Ok(Some(r)) => report.ext_carry_retires.push((scope.clone(), r)),
+            Ok(None) => {}
+            Err(e) => push_step_error(report, format!("carry retire ({scope}): {e:#}"), &e),
         }
         if let Err(e) = plane.pass_ended().await {
             push_step_error(
@@ -1490,6 +1653,45 @@ async fn enrollment_step<B, R>(
     }
 }
 
+/// The departed-device attestation, beside the enrollment step — the other
+/// act this device performs as itself on the fleet plane
+/// (`succession-aftermath.md` § Re-key scope → *Predecessor devices are
+/// departed devices*): one `Removed` row per predecessor-fleet id this device
+/// recorded at a ceremony it ran and merged state does not hold yet
+/// ([`crate::fleet_removal::attest_departed_predecessor_devices`]), local
+/// writes the pass's publish step ships. A full pass and a seed pass alike;
+/// a no-op on every device that ran no ceremony, and once the rows are held.
+/// A crash between the registry write and the first pass costs nothing: the
+/// next pass writes them.
+async fn attest_departed_step<B, R>(
+    store: &AccountStore<B>,
+    fleet: &AccountStatePlane<'_, B, R>,
+    fleet_writer: FleetWriter<'_, R>,
+    report: &mut PumpReport,
+) where
+    B: StoreBackend,
+    R: RpcRequester + Clone,
+    R::Error: RpcErrorClass,
+{
+    if fleet_writer.departed_devices.is_empty() {
+        return;
+    }
+    match crate::fleet_removal::attest_departed_predecessor_devices(
+        store,
+        fleet,
+        fleet_writer.key,
+        fleet_writer.departed_devices,
+    )
+    .await
+    {
+        Ok(0) => {}
+        Ok(written) => {
+            tracing::info!("succession: attested {written} predecessor device(s) as departed");
+        }
+        Err(e) => push_step_error(report, format!("departed-device attestation: {e:#}"), &e),
+    }
+}
+
 /// The seed pass's enrollment step (`account-runtime.md` § Multi-instance
 /// concurrency → *The seed-leg role*, part 4, *Enrollment*): beside an engine
 /// holder that cannot register — the seedless agent, whose own connection a
@@ -1561,8 +1763,10 @@ async fn seed_enrollment<B, R>(
 /// 2. **The enrollment registration** ([`seed_enrollment`]): the machine's
 ///    grant on the bound nest, registered over the owner session when the
 ///    nest is a replica other than the settled one or the device handshake
-///    voided the latch. A cap-refused machine ends its seed pass here, as it
-///    ends a full pass.
+///    voided the latch. Then the departed-device attestation
+///    ([`attest_departed_step`]), a local fleet-plane write the publish step
+///    ships. A cap-refused machine ends its seed pass here, as it ends a full
+///    pass.
 /// 3. **Escrow recovery.** The pass reads for itself the ancestry recovery
 ///    admits — the bind check that reads it in a full pass is the engine
 ///    holder's — once per assembly and again whenever the pin moved. A
@@ -1599,7 +1803,10 @@ where
         // The ancestry was proven to the old pin.
         fleet_writer.bind.set_ancestors(None);
     }
+    let step = now_ms();
     seed_enrollment(store, fleet_writer, &pinned, &mut report).await;
+    attest_departed_step(store, planes.fleet, fleet_writer, &mut report).await;
+    report.timings.enrollment = since(step);
     // As in a full pass: the refusal means the grant is registered nowhere,
     // so the legs below would wait out their deadlines on a connection that
     // cannot come.
@@ -1624,7 +1831,9 @@ where
         recover_from_escrow(store, planes.fleet, fleet_writer, &mut report).await;
         report.timings.escrow_recovery = since(step);
     }
+    let step = now_ms();
     deliver_owed_at(fleet_writer, fleet_writer.session_rpc, None, &mut report).await;
+    report.timings.removals = since(step);
     if let Some(connector) = fleet_writer.linked_nests {
         let step = now_ms();
         report.linked = Some(
@@ -1642,15 +1851,19 @@ where
     }
     // The pass's own publish step: no full pass of this runtime follows to
     // ship what the steps above journaled.
+    let step = now_ms();
     match planes.delegable.publish_pending().await {
         Ok(n) => report.published = Some(n),
         Err(e) => push_step_error(&mut report, format!("publish_pending: {e:#}"), &e),
     }
-    match planes.fleet.publish_pending().await {
+    match publish_fleet(planes.fleet, Prompt::Unprompted).await {
         Ok(n) => *report.fleet_published.get_or_insert(0) += n,
         Err(e) => push_step_error(&mut report, format!("publish_pending (fleet): {e:#}"), &e),
     }
+    report.timings.publish = since(step);
+    let step = now_ms();
     note_parked(planes, &mut report).await;
+    report.timings.tail = since(step);
     report.timings.total = since(pass_started);
     report
 }
@@ -1772,7 +1985,7 @@ where
                 // bound nest here and to this nest by the completion below.
                 let custody = linked_custody(store, bound_fleet, &target, &conn).await;
                 if custody_wrote(&custody.leg) {
-                    match bound_fleet.publish_pending().await {
+                    match publish_fleet(bound_fleet, Prompt::Unprompted).await {
                         Ok(n) => *report.fleet_published.get_or_insert(0) += n,
                         Err(e) => push_step_error(
                             report,
@@ -2151,14 +2364,24 @@ pub(crate) fn log_pump(label: &str, report: &PumpReport) {
     if t.total >= std::time::Duration::from_secs(1) {
         tracing::info!(
             total_ms = t.total.as_millis(),
+            bind_ms = t.bind.as_millis(),
+            enrollment_ms = t.enrollment.as_millis(),
+            publish_ms = t.publish.as_millis(),
             walk_ms = t.walk.as_millis(),
             fleet_walk_ms = t.fleet_walk.as_millis(),
-            device_endpoints_ms = t.device_endpoints.as_millis(),
+            capability_sweep_ms = t.capability_sweep.as_millis(),
+            ext_kinds_ms = t.ext_kinds.as_millis(),
             escrow_recovery_ms = t.escrow_recovery.as_millis(),
             reescrow_ms = t.reescrow.as_millis(),
+            host_legs_ms = t.host_legs.as_millis(),
+            device_endpoints_ms = t.device_endpoints.as_millis(),
             topup_ms = t.topup.as_millis(),
             unkeyable_ms = t.unkeyable.as_millis(),
             reclaim_ms = t.reclaim.as_millis(),
+            linked_ms = t.linked.as_millis(),
+            removals_ms = t.removals.as_millis(),
+            tail_ms = t.tail.as_millis(),
+            unaccounted_ms = t.unaccounted().as_millis(),
             slowest,
             slowest_ms,
             "account pump ({label}): step timings"
@@ -2170,5 +2393,90 @@ pub(crate) fn log_pump(label: &str, report: &PumpReport) {
             slowest_ms,
             "account pump ({label}): step timings"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::PassTimings;
+
+    /// The steps partition the pass: every awaited line of `pump` and
+    /// `seed_pass` sits inside a `let step = now_ms();` … `since(step)`
+    /// span, so a long pass's time is always named by a step
+    /// ([`PassTimings`]) — the 2026-10-11 tui prologue spent 30 of its 31 s
+    /// in steps nothing timed. If this trips, time the new step: give it a
+    /// bucket, or widen the neighbouring one that it belongs with.
+    #[test]
+    fn every_awaited_pass_step_is_timed() {
+        let src = include_str!("pass.rs");
+        for head in [
+            "pub(crate) async fn pump<",
+            "pub(crate) async fn seed_pass<",
+        ] {
+            let body = src.split(head).nth(1).expect("the pass fn exists");
+            let body = &body[..body.find("\n}\n").expect("the fn ends")];
+            let body = &body[body.find("let pass_started").expect("timed pass")..];
+            let mut open = false;
+            for line in body.lines() {
+                let l = line.trim();
+                if l == "let step = now_ms();" {
+                    open = true;
+                } else if l.contains("= since(step);") {
+                    open = false;
+                } else if l.contains(".await") {
+                    assert!(open, "{head}… awaits outside every timed step: `{l}`");
+                }
+            }
+        }
+    }
+
+    /// The remainder is the whole pass less every step, and the slowest step
+    /// may be any of them — `enrollment` here, which no step named before.
+    #[test]
+    fn unaccounted_is_the_total_less_every_step() {
+        let ms = Duration::from_millis;
+        let t = PassTimings {
+            total: ms(31_210),
+            enrollment: ms(30_000),
+            device_endpoints: ms(166),
+            linked: ms(40),
+            tail: ms(4),
+            ..PassTimings::default()
+        };
+        assert_eq!(t.unaccounted(), ms(1_000));
+        assert_eq!(t.slowest(), Some(("enrollment", ms(30_000))));
+        assert_eq!(PassTimings::default().slowest(), None);
+    }
+
+    /// Every `ext:<kind>` plane the driver walks is [`super::bound_ext_plane`]'s,
+    /// so none misses the delegable plane's predecessor schedules
+    /// (`succession-aftermath.md` § Re-key scope, the `ext:<kind>` sentence):
+    /// a plane derived straight off the fleet plane inherits nothing and
+    /// leaves the predecessor's `ext:<kind>` rows unopened. If this trips,
+    /// route the new derivation through `bound_ext_plane`.
+    #[test]
+    fn every_driver_ext_plane_is_the_bound_one() {
+        for (file, src) in [
+            ("capability_sweep.rs", include_str!("capability_sweep.rs")),
+            ("drive.rs", include_str!("drive.rs")),
+            ("e2e_readers.rs", include_str!("e2e_readers.rs")),
+            ("enrollment.rs", include_str!("enrollment.rs")),
+            ("handle.rs", include_str!("handle.rs")),
+            ("handle_source.rs", include_str!("handle_source.rs")),
+            ("host.rs", include_str!("host.rs")),
+            ("mod.rs", include_str!("mod.rs")),
+            ("pass.rs", include_str!("pass.rs")),
+            ("stop.rs", include_str!("stop.rs")),
+        ] {
+            let production = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+            let derived = production.matches(".ext_plane(").count();
+            let expected = usize::from(file == "pass.rs");
+            assert_eq!(
+                derived, expected,
+                "{file}: an `ext_plane` derivation outside `bound_ext_plane`"
+            );
+        }
     }
 }

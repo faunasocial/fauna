@@ -7,7 +7,40 @@
 //! is a single shared function, not per-app-generated), so nothing about the
 //! join was actually app-specific. Mirrors `fauna_client_backup::row_text`.
 
-use fauna_protocol::family::{FamilyAgeBandInfo, FamilyContentNotice};
+use fauna_protocol::family::{FamilyAgeBandInfo, FamilyApprovalEntry, FamilyContentNotice};
+
+/// The guardian's `family-approval-item` row text: who the item is from
+/// (`FamilyApprovalEntry::display_text`, or the localized no-sender label rather
+/// than a blank row beside live buttons) and, for a held mail, when it arrived
+/// ("stranger@example.com · 14:03") — envelope metadata only, never content
+/// (`family-safety.md` § Guardian policy — the enforcement split).
+///
+/// The time is the shared conversation bucket
+/// (`FamilyApprovalEntry::timestamp_display`); only the local offset and the
+/// older-than-a-week date (`absolute_date`, epoch ms in) are the shell's, as
+/// for a message timestamp.
+pub fn approval_item_text(
+    entry: &FamilyApprovalEntry,
+    now_ms: i64,
+    utc_offset_seconds: i32,
+    absolute_date: impl Fn(i64) -> String,
+) -> String {
+    let who = entry.display_text();
+    let who = who
+        .as_deref()
+        .unwrap_or(fauna_i18n::strings::family::APPROVAL_NO_SENDER);
+    let when = entry
+        .timestamp_display(now_ms, utc_offset_seconds)
+        .and_then(|d| {
+            d.clock
+                .or_else(|| d.localized.map(|l| l.resolve(fauna_i18n::strings::lookup)))
+                .or_else(|| d.absolute_epoch_ms.map(&absolute_date))
+        });
+    match when {
+        Some(when) => format!("{who} · {when}"),
+        None => who.to_owned(),
+    }
+}
 
 /// The guardian's per-ward `family-ward-content-notices` readout — one
 /// "{category}: {count}" line per Guardian Notify count (category + count
@@ -47,6 +80,48 @@ pub fn own_age_band_text(info: &FamilyAgeBandInfo) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_held_mail_row_shows_its_sender_and_time_other_rows_are_unchanged() {
+        let held_at = 1_700_000_000; // 22:13:20 UTC
+        let now_ms = held_at * 1_000 + 60_000;
+        let never = |_: i64| -> String { panic!("today needs no date") };
+        let hold = FamilyApprovalEntry {
+            kind: "mail_hold".into(),
+            peer_address: "stranger@example.com".into(),
+            created_at: held_at,
+            ..Default::default()
+        };
+        assert_eq!(
+            approval_item_text(&hold, now_ms, 0, never),
+            "stranger@example.com · 22:13"
+        );
+        let null_path = FamilyApprovalEntry {
+            peer_address: String::new(),
+            ..hold.clone()
+        };
+        assert_eq!(
+            approval_item_text(&null_path, now_ms, 0, never),
+            format!(
+                "{} · 22:13",
+                fauna_i18n::strings::family::APPROVAL_NO_SENDER
+            )
+        );
+        let old = approval_item_text(&hold, now_ms + 30 * 86_400_000, 0, |ms| {
+            format!("date:{ms}")
+        });
+        assert_eq!(
+            old,
+            format!("stranger@example.com · date:{}", held_at * 1_000)
+        );
+        let knock = FamilyApprovalEntry {
+            kind: "contact".into(),
+            summary: "hi from bob".into(),
+            created_at: held_at,
+            ..Default::default()
+        };
+        assert_eq!(approval_item_text(&knock, now_ms, 0, never), "hi from bob");
+    }
 
     #[test]
     fn age_band_readouts_resolve_nested_and_vanish_for_an_unnamed_band() {

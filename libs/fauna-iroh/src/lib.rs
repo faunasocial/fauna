@@ -46,7 +46,7 @@ mod transport;
 #[cfg(feature = "quic")]
 pub use transport::{
     DEFAULT_ALPN, IrohConn, IrohTransport, IrohTransportBuilder, ceremony_transport,
-    peer_leg_transport,
+    peer_leg_transport, peer_leg_transport_trusting,
 };
 
 /// Re-exported because it is [`IrohTransportBuilder::relay_url`]'s own

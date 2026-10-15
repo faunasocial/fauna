@@ -33,6 +33,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.rust_attr_scan import iter_attr_bounds, strip_strings_and_comments
 from helpers.swift_gating import debug_protected_lines as _debug_protected_lines
 from helpers.swift_gating import hand_written_swift
 from helpers.swift_gating import strip_comments as _strip_comments
@@ -42,30 +43,23 @@ pytestmark = pytest.mark.tier_1
 _REPO = Path(__file__).resolve().parents[3]
 _APPLE = _REPO / "apps" / "fauna-apple"
 
-# Seams whose names do NOT follow the `*_for_test` convention, so the derivation
-# below cannot see them. Convention 15's 2026-08-02 seam-witness ruling states
-# outright that the automated witnesses see only CONVENTIONALLY-NAMED seams, so
-# this short list is the acknowledged remainder — not a maintained inventory of
-# all seams. Add to it when a `test-helpers`-gated export is named unconventionally.
-_UNCONVENTIONAL_SEAMS = {
-    # `FfiChildAgentSpawner::spawn_agent()` execs a path read verbatim from
-    # `FAUNA_E2E_SYNC_AGENT_BIN` — a process-execution redirect. Gated in
-    # `libs/fauna-ffi/src/sync_agent_provisioning.rs` on 2026-08-02.
-    "FfiChildAgentSpawner",
-    # `FfiNestClient::device_set_state_json` — the fleet-removal convergence
-    # reader (`account-data-taxonomy.md` § The generation machinery →
-    # *Fleet-scope reclamation*, clause (4)): a plane-content read gated on
-    # `test-helpers` in `libs/fauna-ffi/src/nest_client.rs`, named like ordinary
-    # API rather than `*_for_test`. The production apple flavor's Swift bindings
-    # do not carry it, so an ungated call fails `-c release`.
-    "deviceSetStateJson",
-    # `FfiSyncAgentProvisioner::custodian_run_pass_now` — the custodian-pull
-    # causal-barrier poke, gated on `test-helpers` in
-    # `libs/fauna-ffi/src/sync_agent_provisioning.rs` and named like ordinary
-    # API. Same class as `deviceSetStateJson` above: absent from the production
-    # flavor's Swift bindings, so an ungated call site fails `-c release`.
-    "custodianRunPassNow",
-}
+# The one seam the export scan cannot see: a TYPE, not an exported method.
+# `FfiChildAgentSpawner::spawn_agent()` execs a path read verbatim from
+# `FAUNA_E2E_SYNC_AGENT_BIN` — a process-execution redirect. Gated in
+# `libs/fauna-ffi/src/sync_agent_provisioning.rs` on 2026-08-02. Swift reaches it
+# through the type name (its constructor), and constructors are deliberately left
+# out of the derived set (every export impl has a `new`, which would match 200+
+# ungated production lines), so the type name stays hand-listed. Every
+# `test-helpers`-gated export named like ordinary API (`deviceSetStateJson`,
+# `readMarkerStateJson`, `custodianRunPassNow`, …) is derived below, not listed.
+_UNCONVENTIONAL_SEAMS = {"FfiChildAgentSpawner"}
+
+_UNIFFI_EXPORT = re.compile(r"\b(?:uniffi|fauna_uniffi_async)\s*::\s*export\b")
+_UNIFFI_CONSTRUCTOR = re.compile(r"\buniffi\s*::\s*constructor\b")
+_TEST_HELPERS_GATE = re.compile(r'feature\s*=\s*"test-helpers"')
+_IMPL_HEAD = re.compile(r"\bimpl\b[^{};]*\{")
+_FN_NAME = re.compile(r"\bfn\s+(\w+)")
+_ITEM_QUALIFIERS = re.compile(r"(?:(?:pub(?:\([^)]*\))?|async|unsafe|const)\s+)*")
 
 
 def _forwarded_crates() -> list[str]:
@@ -81,9 +75,119 @@ def _snake_to_lower_camel(name: str) -> str:
     return head + "".join(p[:1].upper() + p[1:] for p in rest)
 
 
+def _attrs_above(
+    text: str, clean: str, bounds: list[tuple[int, int]], head: int
+) -> tuple[list[str], list[str]] | None:
+    """The attributes stacked directly above the item whose keyword sits at
+    `head`, as `(stripped, raw)` inner texts — `raw` read off the unstripped
+    `text`, because stripping blanks the `"test-helpers"` literal a gate match
+    needs. Everything between the previous item boundary and the item's
+    qualifiers (`pub`, `async`, …) must be attributes, else `None`: so
+    `-> impl Future {` in a signature is not an `impl` block."""
+    boundary = max(clean.rfind(c, 0, head) for c in ";{}") + 1
+    inside = [(s, e) for s, e in bounds if boundary <= s and e <= head]
+    region = clean[boundary:head]
+    for s, e in reversed(inside):
+        region = region[: s - boundary] + region[e - boundary :]
+    if not _ITEM_QUALIFIERS.fullmatch(region.strip() + " " if region.strip() else ""):
+        return None
+    return (
+        [clean[s + 2 : e - 1] for s, e in inside],
+        [text[s + 2 : e - 1] for s, e in inside],
+    )
+
+
+def _is_export(stripped: list[str]) -> bool:
+    """A UniFFI export in either macro spelling, also behind `cfg_attr(…)`."""
+    return any(_UNIFFI_EXPORT.search(a) for a in stripped)
+
+
+def _is_test_helpers_gated(stripped: list[str], raw: list[str]) -> bool:
+    """Compiled only with `test-helpers` on: a `cfg(…)` naming the feature, or a
+    `cfg_attr(<it>, …export)` making the export itself conditional on it. A
+    `not(…)` anywhere in the attribute disqualifies it (the inverse gate)."""
+    for a, r in zip(stripped, raw):
+        head = a.lstrip()
+        if head.startswith(("cfg(", "cfg_attr(")) and _TEST_HELPERS_GATE.search(r):
+            if "not(" not in r.replace(" ", ""):
+                return True
+    return False
+
+
+def _derive_gated_exports(path: Path) -> set[str]:
+    """Swift-facing names of the methods and functions in `path` that a
+    `test-helpers`-gated UniFFI export produces — the gate on an `impl` block
+    covers every method in it, a gate on one method only that one. Constructors
+    are skipped (their Swift face is `init`, not a name)."""
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    clean = strip_strings_and_comments(text)
+    bounds = iter_attr_bounds(clean)
+    names: set[str] = set()
+    impl_spans: list[tuple[int, int]] = []
+    for m in _IMPL_HEAD.finditer(clean):
+        got = _attrs_above(text, clean, bounds, m.start())
+        if got is None:
+            continue
+        depth, end = 1, m.end()
+        while depth and end < len(clean):
+            depth += {"{": 1, "}": -1}.get(clean[end], 0)
+            end += 1
+        impl_spans.append((m.end(), end))
+        block_export = _is_export(got[0])
+        block_gated = _is_test_helpers_gated(*got)
+        level = 0
+        for i in range(m.end(), end):
+            ch = clean[i]
+            if ch == "{":
+                level += 1
+            elif ch == "}":
+                level -= 1
+            elif ch == "f" and level == 0 and not (clean[i - 1].isalnum() or clean[i - 1] == "_"):
+                fm = _FN_NAME.match(clean, i)
+                fgot = _attrs_above(text, clean, bounds, i) if fm else None
+                if fm is None or fgot is None or fm.group(1) == "new":
+                    continue
+                if any(_UNIFFI_CONSTRUCTOR.search(a) for a in fgot[0]):
+                    continue
+                if (block_export or _is_export(fgot[0])) and (
+                    block_gated or _is_test_helpers_gated(*fgot)
+                ):
+                    names.add(_snake_to_lower_camel(fm.group(1)))
+    # Free `#[uniffi::export] pub fn`s outside any impl block.
+    for fm in _FN_NAME.finditer(clean):
+        if any(s <= fm.start() < e for s, e in impl_spans):
+            continue
+        got = _attrs_above(text, clean, bounds, fm.start())
+        if got is not None and _is_export(got[0]) and _is_test_helpers_gated(*got):
+            names.add(_snake_to_lower_camel(fm.group(1)))
+    return names
+
+
+# Derived names that also have a PRODUCTION twin under the same Swift name, so
+# deriving them would redden the witness on code that is not a seam call:
+# `FfiChildAgentSpawner::spawn_agent` (gated) vs the production
+# `SyncAgentSpawner.spawnAgent()` in `Fauna-macOS/Sync/SyncAgentSpawner.swift`, a
+# Swift-side DECLARATION of the same-named method on the app's own spawner. The
+# gated seam is still guarded through its type name, `FfiChildAgentSpawner`,
+# which is the only way Swift can reach it.
+_PRODUCTION_TWINS = {"spawnAgent"}
+
+
 def _seam_names() -> set[str]:
-    """Swift-facing names of every `*_for_test(s)` fn in the forwarded crates,
-    plus `libs/fauna-ffi` itself, plus the unconventional remainder above."""
+    """Swift-facing names of every seam in the forwarded crates plus
+    `libs/fauna-ffi` itself: the `*_for_test(s)` fns, every method or function a
+    `test-helpers`-gated UniFFI export carries under whatever name, and the
+    hand-listed remainder above.
+
+    **Why this source-side derivation is not the refused cfg-scan.**
+    `e2e-automation-surface-gating.md` refuses a cfg-scan over the Rust source as
+    the *binding-face* witness (the production flavor's generated Swift is diffed
+    by `check-ffi-seam-diff.py` instead) and carves out source-level call-site
+    coverage as a separate job. This is that job: the production flavor's Swift
+    bindings carry exactly what is exported, so the symbols an ungated call site
+    can break on ARE the `test-helpers`-gated exports, enumerable from the Rust.
+    It sees only exports; seams that are not exports (env reads, process spawn)
+    stay the 2026-08-02 ruling's acknowledged blind spot."""
     names: set[str] = set(_UNCONVENTIONAL_SEAMS)
     roots = [_REPO / "libs" / c / "src" for c in _forwarded_crates()]
     roots.append(_REPO / "libs" / "fauna-ffi" / "src")
@@ -95,7 +199,8 @@ def _seam_names() -> set[str]:
                 r"\bpub fn (\w+_for_tests?)\b", f.read_text(encoding="utf-8", errors="ignore")
             ):
                 names.add(_snake_to_lower_camel(rust_name))
-    return names
+            names |= _derive_gated_exports(f)
+    return names - _PRODUCTION_TWINS
 
 
 def _hand_written_swift() -> list[Path]:
@@ -112,10 +217,21 @@ def test_the_seam_set_derives_non_trivially():
         "derivation is probably broken, which would make the gating test below "
         f"vacuous. Got: {sorted(names)}"
     )
-    for expected in ("clearForTest", "installMockBackendsForTest", "setPhaseForTest"):
+    # The first three are the `*_for_test` convention; the last three are
+    # `test-helpers`-gated exports named like ordinary API, derived from the
+    # gated `#[fauna_uniffi_async::export]` blocks with no hand list behind them.
+    for expected in (
+        "clearForTest",
+        "installMockBackendsForTest",
+        "setPhaseForTest",
+        "deviceSetStateJson",
+        "readMarkerStateJson",
+        "custodianRunPassNow",
+    ):
         assert expected in names, (
             f"{expected!r} missing from the derived seam set — derivation is broken"
         )
+    assert "new" not in names, "constructors must stay out of the derived seam set"
 
 
 def test_no_apple_swift_reaches_a_seam_outside_if_debug():

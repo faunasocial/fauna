@@ -1,7 +1,7 @@
 //! UniFFI surface for the macOS/iOS **File Provider** on-demand host — the
 //! callback→engine primitives an `NSFileProviderReplicatedExtension` calls.
 //!
-//! `docs/goal/behavior/file-sync.md` § On-Demand Files → Apple File Provider
+//! `docs/goal/behavior/on-demand-files-apple.md` § On-Demand Files → Apple File Provider
 //! binding (ratified 2026-07-18) owns the callback→engine table + milestone chain.
 //! This is **M1**: the FFI surface that vends the shared, tier-1-tested
 //! [`fauna_sync_engine::provider_face`] serving cores. No Swift/appex changes in
@@ -55,7 +55,7 @@
 //! ## A reader's host
 //!
 //! A set shared with the account that it may only read builds **read-only**
-//! (`on-demand-files.md` § Shared sets on a capability host, decision 3): the
+//! (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 3): the
 //! host learns it from the set's own row at every build and edge — never from
 //! its caller — says so through [`FfiFileProviderHost::is_read_only`], and
 //! every write it is handed is refused by the shared cores with
@@ -74,7 +74,9 @@
 //! ([`on_demand_host`]), keyed by account and set: one host per set, one
 //! writer per set, reached by the platform's provider and by the plane alike.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -85,6 +87,7 @@ use fauna_nest_http::{ApiError, BearerSource};
 use fauna_sync_engine::engine_lifecycle::{BuiltEngine, EdgeVerdict, build_engine};
 use fauna_sync_engine::provider_face;
 use fauna_sync_engine::provider_face::owned_tree::{BodyRoot, OwnedTree};
+use fauna_sync_engine::relay_seat::ServedFolder;
 
 use crate::FfiError;
 use crate::crypto::bytes32;
@@ -94,7 +97,7 @@ use crate::sync_engine_host::{HostContext, file_provider_host_context, parse_fol
 /// reads the shared app-group Keychain the app writes at first domain creation (and
 /// rotates on refresh), so the **app-dead** extension always presents a
 /// currently-provisioned token without ever holding the identity seed
-/// (`file-sync.md` § Apple File Provider binding, *the extension hosts the
+/// (`on-demand-files-apple.md` § Apple File Provider binding, *the extension hosts the
 /// engines*). Sync — a Keychain read is a fast local call.
 #[uniffi::export(with_foreign)]
 pub trait FfiBearerProvider: Send + Sync {
@@ -164,7 +167,7 @@ pub trait FfiChangeSignerProvider: Send + Sync {
 }
 
 /// The **in-process** host's [`FfiChangeSignerProvider`] — android's SAF
-/// provider runs in the app's own process (`on-demand-files.md` § Android SAF
+/// provider runs in the app's own process (`on-demand-files-android.md` § Android SAF
 /// DocumentsProvider binding, *Control inversion, in the app's own process*),
 /// so its host reads the machine principal straight out of the app's principal
 /// slot — the T10 slot the app's account runtime enrolls at every seed-holding
@@ -306,7 +309,7 @@ pub async fn principal_slot_writes_after(seen: u64) -> u64 {
 
 // ── Plane custody: the throwaway fleet replica (decision 1′) ────────────────
 //
-// `on-demand-files.md` § Shared sets on a capability host, decision 1′: once
+// `on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 1′: once
 // `fauna.state.folder-keys` is plane-only, a capability host reads it through a
 // throwaway fleet-scope replica keyed as the enrolled device it is a process
 // of — the machine principal's wraps, else the custody below. One replica per
@@ -507,6 +510,17 @@ impl fauna_client_folders::FolderKeyReader for CapabilityHostFolderKeys {
                 .map_err(anyhow::Error::msg)?;
         reader.load().await
     }
+
+    /// The account's mail-custody MSEKs through the same replica — what the
+    /// host's refresh pass derives the owner's recipient key from to adopt
+    /// third-party deposits (`on-demand-files-apple.md` § Apple File Provider
+    /// binding → *Third-party deposit adoption on a capability host*).
+    async fn recipient_mseks(&self) -> anyhow::Result<Vec<fauna_core::secret::SecretArray32>> {
+        let reader =
+            capability_host_folder_keys(&self.auth, self.actor_id, &self.backup_key, &*self.signer)
+                .map_err(anyhow::Error::msg)?;
+        reader.recipient_mseks().await
+    }
 }
 
 /// What a replica was built from beside its account and nest: the machine
@@ -611,7 +625,7 @@ pub fn capability_host_folder_keys(
 /// Every set the account holds, as the shared presence plan takes it
 /// ([`crate::on_demand_presence_plan`]'s `sets`) — the account's own folders
 /// and the folders shared with it, on this nest or another
-/// (`on-demand-files.md` § Shared sets on a capability host, decision 3). The
+/// (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 3). The
 /// one mapping every set-level on-demand platform calls instead of building
 /// `PresenceSet`s itself; the rules are
 /// [`fauna_folders_machine::on_demand_presence::held_sets`]'s.
@@ -699,7 +713,7 @@ pub struct FfiFileProviderContent {
 
 /// Whether a local write reached the nest **and** stamped the row
 /// (`UploadOutcome::recorded`). The appex acks the OS **only** when `acked`, so the
-/// OS never discards an un-acked local copy (`file-sync.md` § Apple File Provider
+/// OS never discards an un-acked local copy (`on-demand-files-apple.md` § Apple File Provider
 /// binding, *recorded-head gate*).
 #[derive(uniffi::Record)]
 pub struct FfiFileProviderAck {
@@ -922,7 +936,6 @@ fn register_on_demand_host(actor_id: [u8; 32], folder_id: String, host: &Arc<Ffi
 }
 
 /// Every live registered host of `actor_id`, in set order.
-#[cfg(feature = "p2p-share")]
 fn on_demand_hosts_of(actor_id: [u8; 32]) -> Vec<Arc<FfiFileProviderHost>> {
     let hosts = ON_DEMAND_HOSTS.lock().unwrap_or_else(|e| e.into_inner());
     let mut live: Vec<(&String, Arc<FfiFileProviderHost>)> = hosts
@@ -960,7 +973,23 @@ pub fn on_demand_host(
 #[derive(uniffi::Object)]
 pub struct FfiFileProviderHost {
     requests: mpsc::Sender<Request>,
+    /// The relay seat's asks, answered beside the worker's request loop
+    /// ([`answer_relay_asks`]) — never queued behind a fetch, which may itself
+    /// be waiting on the very chunk the nest is asking this seat for.
+    relay_asks: mpsc::Sender<RelayAsk>,
+    /// The folder the resident engine serves while it is built, and the home
+    /// nest it is announced by — read by the relay seat without a round trip
+    /// to the worker.
+    serving: Arc<std::sync::Mutex<Option<ServedFolder>>>,
 }
+
+/// One relay ask handed to the worker, and the signal that it was answered
+/// (the seat's concurrency bound counts it until then).
+type RelayAsk = (fauna_sync_engine::relay_seat::ServeAsk, oneshot::Sender<()>);
+
+/// The resident engine as the worker publishes it to the relay answers beside
+/// its loop: `None` while none is built.
+type Published = Rc<RefCell<Option<Rc<BuiltEngine>>>>;
 
 impl FfiFileProviderHost {
     /// Rust-side constructor (the uniffi constructors call this). Spawns the
@@ -974,13 +1003,32 @@ impl FfiFileProviderHost {
         root_dir: PathBuf,
         cache_root: Option<PathBuf>,
     ) -> Arc<Self> {
+        let (relay_asks, relay_rx) =
+            mpsc::channel(fauna_sync_engine::relay_seat::SERVE_CONCURRENCY);
+        let serving = Arc::new(std::sync::Mutex::new(None));
+        let published_folder = Arc::clone(&serving);
         let requests = crate::worker_thread::spawn_worker_thread(
             "fauna-fp-host",
             "file-provider",
             32,
-            move |requests| engine_worker(ctx, signer, folder_ref, root_dir, cache_root, requests),
+            move |requests| {
+                engine_worker(
+                    ctx,
+                    signer,
+                    folder_ref,
+                    root_dir,
+                    cache_root,
+                    requests,
+                    relay_rx,
+                    published_folder,
+                )
+            },
         );
-        Arc::new(Self { requests })
+        Arc::new(Self {
+            requests,
+            relay_asks,
+            serving,
+        })
     }
 
     /// Send a request to the worker and await its reply, mapping a dead worker onto
@@ -1008,7 +1056,7 @@ impl FfiFileProviderHost {
 impl FfiFileProviderHost {
     /// Build the **app-dead** File Provider host for one folder — the
     /// per-domain, out-of-app hydration host an `NSFileProviderReplicatedExtension`
-    /// runs (`file-sync.md` § Apple File Provider binding, *the extension hosts the
+    /// runs (`on-demand-files-apple.md` § Apple File Provider binding, *the extension hosts the
     /// engines*). It is provisioned a pre-derived owner `BackupKey` + a Swift
     /// `bearer` provider (which reads the shared app-group Keychain) and **never the
     /// identity seed**; it builds its own bearer-authenticated nest connection and
@@ -1024,7 +1072,7 @@ impl FfiFileProviderHost {
     /// (`on-demand-files.md` § Hosting multiple on-demand folders). A
     /// `foreign:<channel>` ref — a set shared with the account from another nest
     /// — builds from the account's custody record alone, its byte plane at the
-    /// set's home nest (`on-demand-files.md` § Shared sets on a capability host →
+    /// set's home nest (`on-demand-files-shared-sets.md` § Shared sets on a capability host →
     /// *One mechanism*, question 2); whether a presence plan hands one over is
     /// the shared-with-me arm's call (decision 3), not this host's.
     ///
@@ -1039,7 +1087,7 @@ impl FfiFileProviderHost {
     /// and a set's nonce and a bound set's content keys load from this
     /// account's plane custody, read through the throwaway fleet replica
     /// [`capability_host_folder_keys`] keys by the machine principal `signer`
-    /// carries (`on-demand-files.md` § Shared sets on a capability host,
+    /// carries (`on-demand-files-shared-sets.md` § Shared sets on a capability host,
     /// decision 1′). A host with no principal yet reads no custody — a
     /// nonce'd set then lists nothing — and rebuilds at the first refresh or
     /// seal that finds one. Custody without the generation a body or the
@@ -1101,7 +1149,7 @@ impl FfiFileProviderHost {
     }
 
     /// Build the host for one set whose provider **owns its tree** — android's
-    /// SAF `DocumentsProvider` (`on-demand-files.md` § Android SAF
+    /// SAF `DocumentsProvider` (`on-demand-files-android.md` § Android SAF
     /// DocumentsProvider binding). The same capability construction as
     /// [`Self::app_dead`] (the owner `BackupKey` + a bearer source + a change
     /// signer source, never the identity seed — an in-process provider passes
@@ -1250,6 +1298,47 @@ impl fauna_sync_engine::share_glue::OnDemandReplicaHost for FfiFileProviderHost 
             storage_limited: outcome.storage_limited,
         })
     }
+}
+
+/// The relay seat's view of this host (`file-sync.md` § Relay serving →
+/// *Which seats hold*, the on-demand rows): the folder it serves while its
+/// engine is built, and the door its asks are answered through.
+#[async_trait]
+impl fauna_sync_engine::relay_seat::ServingHost for FfiFileProviderHost {
+    async fn serving_folder(&self) -> Option<ServedFolder> {
+        self.serving
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    async fn answer_serve_ask(&self, ask: fauna_sync_engine::relay_seat::ServeAsk) {
+        let (answered, done) = oneshot::channel();
+        if self.relay_asks.send((ask, answered)).await.is_ok() {
+            let _ = done.await;
+        }
+    }
+}
+
+/// One account's registered hosts as the relay seat tracks them — the same
+/// registry the share plane reads ([`on_demand_host`]).
+struct ActorServingHosts([u8; 32]);
+
+impl fauna_sync_engine::relay_seat::ServingHosts for ActorServingHosts {
+    fn hosts(&self) -> Vec<Arc<dyn fauna_sync_engine::relay_seat::ServingHost>> {
+        on_demand_hosts_of(self.0)
+            .into_iter()
+            .map(|host| host as Arc<dyn fauna_sync_engine::relay_seat::ServingHost>)
+            .collect()
+    }
+}
+
+/// The relay seat's hosts for `actor_id`: every on-demand host this process
+/// registered for the account, read afresh at every rescan.
+pub(crate) fn relay_hosts_for(
+    actor_id: [u8; 32],
+) -> Arc<dyn fauna_sync_engine::relay_seat::ServingHosts> {
+    Arc::new(ActorServingHosts(actor_id))
 }
 
 /// One account's registered hosts, read afresh at every pass of the plane.
@@ -1401,13 +1490,13 @@ impl FfiFileProviderHost {
     /// caller's access or the content-key floor moved (or the floor is still
     /// ahead of the generation held) it re-reads custody and rebuilds the engine
     /// over the same state DB — how a rotation reaches an app-dead host
-    /// (`on-demand-files.md` § Shared sets on a capability host, decision 2).
+    /// (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 2).
     pub async fn refresh(&self) -> Result<bool, FfiError> {
         self.call(|reply| Request::Refresh { reply }).await
     }
 
     /// Whether this host serves its set read-only — the account holds it as a
-    /// reader (`on-demand-files.md` § Shared sets on a capability host,
+    /// reader (`on-demand-files-shared-sets.md` § Shared sets on a capability host,
     /// decision 3). The platform advertises no write, create, delete or rename
     /// capability on such a set's items; a write that reaches the host anyway
     /// is refused before anything is sealed or moved. Read from the engine the
@@ -1529,7 +1618,7 @@ impl FfiFileProviderHost {
 ///
 /// A resident engine's keys are final at build, and an app-dead host has no app
 /// to rebuild it, so the host re-resolves on its own evidence at three edges
-/// (`on-demand-files.md` § Shared sets on a capability host, decision 2): at
+/// (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 2): at
 /// **build** (the custody load itself, `build_engine`); at every **refresh**,
 /// when the set's row says the binding, the caller's access or the content-key
 /// floor moved, or the floor is still ahead of the generation held; and
@@ -1548,8 +1637,17 @@ struct Resident {
     built_signed: bool,
     folder_ref: FolderRef,
     root_dir: PathBuf,
+    /// The owned tree's kept and cache roots — the serve's body source
+    /// ([`Self::arm_serve_body`]); `None` for a host that owns no tree.
+    serve_roots: Option<(PathBuf, PathBuf)>,
     /// `None` = the binding refused (fail closed): every request reports it.
-    built: Option<BuiltEngine>,
+    /// Shared (an `Rc`) with the relay answers in flight beside the loop.
+    built: Option<Rc<BuiltEngine>>,
+    /// Where the relay answers read the resident engine.
+    published: Published,
+    /// The folder the host serves while an engine is built
+    /// ([`FfiFileProviderHost::serving`]).
+    serving: Arc<std::sync::Mutex<Option<ServedFolder>>>,
     /// Set by every (re)build, taken by the worker loop — a new engine is a new
     /// binding, which re-arms the pre-bind re-seal pass.
     rebuilt: bool,
@@ -1560,6 +1658,7 @@ impl Resident {
     /// `SyncDb` connection — is dropped before the new one opens the DB.
     async fn build(&mut self) {
         self.built = None;
+        self.publish();
         let mut params = self
             .ctx
             .params(self.root_dir.clone(), self.folder_ref, None);
@@ -1573,8 +1672,48 @@ impl Resident {
             }
         };
         self.built_signed = params.change_signer.is_some();
-        self.built = build_engine(params).await;
+        self.built = build_engine(params).await.map(Rc::new);
+        if let Some(built) = &self.built {
+            self.arm_serve_body(built);
+        }
+        self.publish();
         self.rebuilt = true;
+    }
+
+    /// Hand the current engine (or its absence) to the relay answers and the
+    /// seat's folder reading.
+    fn publish(&self) {
+        *self.published.borrow_mut() = self.built.clone();
+        *self.serving.lock().unwrap_or_else(|e| e.into_inner()) =
+            self.built.as_ref().map(|built| ServedFolder {
+                folder: self.folder_ref,
+                home_nest_url: built.serve_home_nest_url(),
+            });
+    }
+
+    /// An owned tree keeps its bodies in a kept root and a cache root, so the
+    /// engine serves through the owned tree's lookup rather than its own root
+    /// alone (`p2p-shared-set-build.md` § *Phone peers — design*, decision 1)
+    /// — read on a connection of its own, so a serve never waits on the
+    /// worker's. A DB that will not open leaves the kept root serving alone.
+    fn arm_serve_body(&self, built: &BuiltEngine) {
+        let Some((kept, cache)) = &self.serve_roots else {
+            return;
+        };
+        let db_path = self.folder_ref.state_db_path(self.ctx.state_dir());
+        match fauna_sync_engine::db::SyncDb::open(&db_path) {
+            Ok(db) => built.engine.set_serve_body(Arc::new(
+                fauna_sync_engine::share_body::OnDemandBodySource::new(
+                    kept.clone(),
+                    cache.clone(),
+                    db,
+                ),
+            )),
+            Err(e) => tracing::warn!(
+                "file-provider host: the serve's read connection will not open \
+                 ({e}); only kept-root bodies serve"
+            ),
+        }
     }
 
     /// Put the currently provisioned signer on the resident engine — in place,
@@ -1675,6 +1814,15 @@ impl Resident {
                     "file-provider host ({folder}): populated {} placeholder row(s)",
                     fold.recorded
                 );
+                // The fold leaves its remote deletes to the host: here the OS keeps
+                // whatever bytes a file holds, so a cloud-only row going is the
+                // whole delete.
+                if let Err(e) = b.engine.drop_cloud_only_deletes(&fold) {
+                    tracing::warn!(
+                        "file-provider host ({folder}): dropping remotely deleted \
+                         placeholder rows failed (the next refresh retries): {e}"
+                    );
+                }
                 fold.overlay
             }
             Err(e) => {
@@ -1725,19 +1873,92 @@ fn settle_peer_bodies(
     }
 }
 
+/// One third-party deposit adoption pass at a refresh (`on-demand-files-apple.md`
+/// § Apple File Provider binding → *Third-party deposit adoption on a
+/// capability host*), the row left honest about what this device holds: an
+/// owned tree keeps the recorded body in its cache root, and under the apple
+/// face — whose `watch_dir` is the extension's staging root, not the OS's
+/// tree — the row becomes a placeholder and the staging copy goes. Whether
+/// anything landed, which the appex signals the enumerator on.
+async fn adopt_deposits(
+    engine: &fauna_sync_engine::engine::SyncEngine,
+    owned: Option<&OwnedTree>,
+    staging_root: &std::path::Path,
+    folder: &str,
+) -> bool {
+    let landed = fauna_sync_engine::always_resident::adopt_parked_deposits(engine, folder).await;
+    let settled = match owned {
+        Some(tree) => tree.settle_adopted(engine, &landed),
+        None => landed.iter().try_for_each(|rel| {
+            provider_face::settle_adopted_in_staging(engine, staging_root, rel)
+        }),
+    };
+    if let Err(e) = settled {
+        tracing::warn!("file-provider host ({folder}): settling adopted deposits failed: {e:#}");
+    }
+    !landed.is_empty()
+}
+
 /// The worker: builds the resident engine on the caller's current-thread
 /// runtime, serves provider-face primitives against it, and re-resolves it at
 /// the refresh and pre-seal edges ([`Resident`]). A failed content-key binding
 /// (fail-closed) leaves no engine, so every request reports it rather than
 /// touching plaintext.
+#[allow(clippy::too_many_arguments)]
 async fn engine_worker(
     ctx: HostContext,
     signer: ForeignSigner,
     folder_ref: FolderRef,
     root_dir: PathBuf,
     cache_root: Option<PathBuf>,
-    mut requests: mpsc::Receiver<Request>,
+    requests: mpsc::Receiver<Request>,
+    relay_asks: mpsc::Receiver<RelayAsk>,
+    serving: Arc<std::sync::Mutex<Option<ServedFolder>>>,
 ) {
+    // The relay answers run beside the request loop on this thread
+    // (`fauna_sync_engine::relay_seat`: beside the loop, never inside it).
+    let published: Published = Rc::new(RefCell::new(None));
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            tokio::task::spawn_local(answer_relay_asks(relay_asks, Rc::clone(&published)));
+            serve_requests(
+                ctx, signer, folder_ref, root_dir, cache_root, requests, published, serving,
+            )
+            .await;
+        })
+        .await;
+}
+
+/// Answer each relay ask through the resident engine as it arrives — the one
+/// serve core, `SyncEngine::answer_serve_ask` — on a task of its own, so an
+/// ask never waits on the request in flight. The seat bounds how many are
+/// open at once. An ask that finds no engine (a rebuild in progress) goes
+/// unanswered, which the relay reads as a silent seat.
+async fn answer_relay_asks(mut asks: mpsc::Receiver<RelayAsk>, published: Published) {
+    while let Some((ask, answered)) = asks.recv().await {
+        let built = published.borrow().clone();
+        tokio::task::spawn_local(async move {
+            if let Some(built) = built {
+                built.engine.answer_serve_ask(ask).await;
+            }
+            let _ = answered.send(());
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_requests(
+    ctx: HostContext,
+    signer: ForeignSigner,
+    folder_ref: FolderRef,
+    root_dir: PathBuf,
+    cache_root: Option<PathBuf>,
+    mut requests: mpsc::Receiver<Request>,
+    published: Published,
+    serving: Arc<std::sync::Mutex<Option<ServedFolder>>>,
+) {
+    let serve_roots = cache_root.clone().map(|cache| (root_dir.clone(), cache));
     let owned = cache_root.map(|cache| OwnedTree::new(root_dir.clone(), cache));
     // The set's identity, as every log line names it.
     let folder = folder_ref.to_wire();
@@ -1755,7 +1976,10 @@ async fn engine_worker(
         built_signed: false,
         folder_ref,
         root_dir,
+        serve_roots,
         built: None,
+        published,
+        serving,
         rebuilt: false,
     };
     resident.build().await;
@@ -1773,14 +1997,14 @@ async fn engine_worker(
     // in-session [`FfiFileProviderHost::refresh`] tick on the constant
     // reconcile cadence (`DEFAULT_RESCAN_INTERVAL` — phase 5's de-knob) +
     // `NSFileProviderManager.signalEnumerator` so a remote change appears
-    // without a reconstruction (`file-sync.md` § Apple File Provider
+    // without a reconstruction (`on-demand-files-apple.md` § Apple File Provider
     // binding).
     let reconciled = resident.populate(&folder).await;
     if let Some(b) = resident.built.as_ref() {
         settle_peer_bodies(owned.as_ref(), &b.engine, &reconciled, &folder);
     }
 
-    // An owned tree's start sweep (`on-demand-files.md` § Android SAF
+    // An owned tree's start sweep (`on-demand-files-android.md` § Android SAF
     // DocumentsProvider binding): a body a dead process left in the kept root
     // IS its write intent, so it is ingested before the first request — after
     // the populate, so a kept body over a row the nest's head moved under takes
@@ -1869,22 +2093,47 @@ async fn engine_worker(
         if request.seals() && resident.read_only() {
             resident.refresh_edge().await;
         }
-        if request.seals() && !resident.read_only() {
-            if let Err(msg) = resident.seal_edge(&folder).await {
-                tracing::warn!("file-provider host: {msg}");
-                // A held close still ends its writer: the body stays in the
-                // kept root, and only a released writer lets the next sweep
-                // re-drive it.
-                if let (Request::ClosedWrite { rel, .. }, Some(tree)) = (&request, owned.as_ref()) {
-                    tree.release_writer(rel);
-                }
-                request.fail(msg);
-                continue;
+        if request.seals()
+            && !resident.read_only()
+            && let Err(msg) = resident.seal_edge(&folder).await
+        {
+            tracing::warn!("file-provider host: {msg}");
+            // A held close still ends its writer: the body stays in the
+            // kept root, and only a released writer lets the next sweep
+            // re-drive it.
+            if let (Request::ClosedWrite { rel, .. }, Some(tree)) = (&request, owned.as_ref()) {
+                tree.release_writer(rel);
             }
-        } else if refresh {
-            resident.refresh_edge().await;
+            request.fail(msg);
+            continue;
         }
-        serve(resident.built.as_ref(), owned.as_ref(), &folder, request).await;
+        // A refresh also adopts the set's parked third-party deposits, and an
+        // adoption records — a seal — so the refresh passes the pre-seal edge a
+        // write does. A held edge (no signer yet, a floor that cannot be
+        // checked) skips the pass; the refresh itself runs regardless. A
+        // reader's host adopts nothing (its engine holds no inbox).
+        let mut adopt = false;
+        if refresh {
+            if resident.read_only() {
+                resident.refresh_edge().await;
+            } else {
+                match resident.seal_edge(&folder).await {
+                    Ok(()) => adopt = true,
+                    Err(msg) => {
+                        tracing::debug!("file-provider host: deposit adoption held: {msg}");
+                    }
+                }
+            }
+        }
+        let adopt_into = adopt.then_some(resident.root_dir.as_path());
+        serve(
+            resident.built.as_deref(),
+            owned.as_ref(),
+            adopt_into,
+            &folder,
+            request,
+        )
+        .await;
         if refresh {
             prebind = PrebindDrive::armed();
         }
@@ -1953,9 +2202,12 @@ impl PrebindDrive {
 /// Dispatch one request to the shared serving cores, or report the fail-closed
 /// binding. `built` is checked once up front so a `None` (indeterminate content-key
 /// binding) reports through the request's reply channel rather than serving.
+/// `adopt_into` is the engine's `watch_dir` when a refresh may adopt the set's
+/// parked deposits (it passed the pre-seal edge), `None` otherwise.
 async fn serve(
     built: Option<&BuiltEngine>,
     owned: Option<&OwnedTree>,
+    adopt_into: Option<&std::path::Path>,
     folder: &str,
     request: Request,
 ) {
@@ -2061,14 +2313,19 @@ async fn serve(
             let _ = reply.send(Ok(engine.is_read_only()));
         }
         Request::Refresh { reply } => {
-            let out = engine
-                .refresh_from_nest_reconciling()
-                .await
-                .map(|(changed, reconciled)| {
+            let out = match engine.refresh_from_nest_reconciling().await {
+                Ok((changed, reconciled)) => {
                     settle_peer_bodies(owned, engine, &reconciled, folder);
-                    changed
-                })
-                .map_err(|e| e.to_string());
+                    let adopted = match adopt_into {
+                        Some(staging_root) => {
+                            adopt_deposits(engine, owned, staging_root, folder).await
+                        }
+                        None => false,
+                    };
+                    Ok(changed || adopted)
+                }
+                Err(e) => Err(e.to_string()),
+            };
             let _ = reply.send(out);
         }
         owned_request => serve_owned(engine, owned, folder, owned_request).await,
@@ -2160,10 +2417,12 @@ async fn serve_owned(
             root,
             reply,
         } => {
-            let out = tree
-                .land_body(engine, &rel, std::path::Path::new(&src_path), root.into())
-                .map(path);
-            let _ = reply.send(out.map_err(|e| format!("{e:#}")));
+            let out = tree.land_body(engine, &rel, std::path::Path::new(&src_path), root.into());
+            // A landed body is one this seat holds: index it for the serve.
+            if out.is_ok() {
+                engine.index_recorded_body(&rel).await;
+            }
+            let _ = reply.send(out.map(path).map_err(|e| format!("{e:#}")));
         }
         Request::RecordPlaceholder { rel, reply } => {
             let out = tree.record_placeholder(engine, &rel);
@@ -2311,7 +2570,7 @@ impl Request {
 }
 
 // The per-actor state-dir derivation the sync processes resolve — app,
-// extension and agent alike (`file-sync.md` § Apple File Provider binding,
+// extension and agent alike (`on-demand-files-apple.md` § Apple File Provider binding,
 // Multi-account × File Provider consequence 3) — is NOT duplicated here: it is
 // the same `<base>/<actor-id-hex>/` rule every account-scoped store takes, so
 // there is one exported name for it, `account_state_dir`
@@ -2320,7 +2579,7 @@ impl Request {
 
 /// The rels in one folder's state DB whose local content lacks a proven
 /// record — the app-side gate behind the iOS File Provider domain-removal
-/// refusal (`file-sync.md` § Multi-account × File Provider, consequence 2: iOS
+/// refusal (`on-demand-files-apple.md` § Multi-account × File Provider, consequence 2: iOS
 /// has no preserve mode, so removal refuses while any such row exists and the
 /// OS's pending-change retry drains it). A cross-process WAL read of the
 /// extension's DB, same sanctioned pattern as the Media-badge `file_states`

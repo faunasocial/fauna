@@ -197,6 +197,46 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
             handler();
     }
 
+    // ── store-change notice ─────────────────────────────────────────────
+    /// <inheritdoc />
+    public event Action? StoreChanged;
+
+    /// <summary>The process's one store-change listener (<c>store_change.rs</c>:
+    /// the Rust slot keeps the registration across sign-out and account switch,
+    /// and the relay behind it ends with each account runtime), so it is created
+    /// once per client and never cleared at sign-out. Called on a Rust runtime
+    /// thread — it only marshals onto the UI thread.</summary>
+    internal sealed class StoreChangeRelay(NestRpcClient owner) : FfiStoreChangeListener
+    {
+        public void StoreChanged() => owner.RaiseStoreChangedOnUi();
+    }
+
+    private FfiStoreChangeListener? _storeChangeListener;
+
+    /// <summary>Register the shared store-change watch's listener with the Rust
+    /// slot (idempotent — registering the same relay again replaces itself). Runs
+    /// just before the account runtime starts, so the first notice a runtime
+    /// raises already has somewhere to go; a notice with no listener is dropped,
+    /// and the next visit's own load reads fresh state anyway.</summary>
+    internal void RegisterStoreChangeListener()
+    {
+        _storeChangeListener ??= new StoreChangeRelay(this);
+        FaunaFfiMethods.SetStoreChangeListener(_storeChangeListener);
+    }
+
+    /// <summary>Raise <see cref="StoreChanged"/> on the UI thread — the surface
+    /// VMs that subscribe mutate XAML-bound state. Internal so the unit tests
+    /// drive it without the native runtime.</summary>
+    internal void RaiseStoreChangedOnUi()
+    {
+        var handler = StoreChanged;
+        if (handler is null) return;
+        if (_uiContext is not null)
+            _uiContext.Post(_ => handler(), null);
+        else
+            handler();
+    }
+
     // ── connection-state indicator ──────────────────────────────────────
     /// <inheritdoc />
     public event Action<FfiConnectionState>? ConnectionStateChanged;
@@ -349,6 +389,8 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     /// <inheritdoc />
     public event Action<string, string>? AddressBookPushChanged;
     /// <inheritdoc />
+    public event Action? MailSpamPushChanged;
+    /// <inheritdoc />
     public event Action<string>? FolderChangedPushed;
     private Task? _pushPump;
 
@@ -491,9 +533,15 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
                 if (stale.media)
                     RaiseFolderChangedOnUi(syncChanged.folder);
                 return NudgeSyncAgentAsync(syncChanged.folder, syncChanged.folderHash);
-            case FfiPushEvent.AccountUpdated:
             case FfiPushEvent.Other:
-                // Not modelled on windows yet — no surface acts on these.
+                // The spam model changed on another device (an undo or reset —
+                // mail-spam.md § Implementation status today, item 5). Only the
+                // classifier's flag decides; the open Spam panel re-hydrates.
+                if (stale.mailSpam)
+                    RaiseMailSpamPushChangedOnUi();
+                return Task.CompletedTask;
+            case FfiPushEvent.AccountUpdated:
+                // Not modelled on windows yet — no surface acts on this.
                 return Task.CompletedTask;
             default:
                 return Task.CompletedTask;
@@ -543,6 +591,16 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
             _uiContext.Post(_ => handler(actorId, addressbookId), null);
         else
             handler(actorId, addressbookId);
+    }
+
+    private void RaiseMailSpamPushChangedOnUi()
+    {
+        var handler = MailSpamPushChanged;
+        if (handler is null) return;
+        if (_uiContext is not null)
+            _uiContext.Post(_ => handler(), null);
+        else
+            handler();
     }
 
     private void RaiseFolderChangedOnUi(string folder)
@@ -695,7 +753,7 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         // § Coordination primitive → *The `index` kind under the lease*), so the
         // Task-delegation row names this box as builder-of-record instead of reading
         // Waiting-while-running. The id is app-owned state the FFI factory cannot
-        // derive — the caller passes `ISessionAccount.DeviceId`, the same
+        // derive — the caller passes `ISessionAccount.ResolveDeviceId()`, the same
         // plumbing `TaskDelegationListAsync` uses. Null (a caller with no id yet)
         // is a supported wiring, not a stub: the builder still indexes everything,
         // it just does not coordinate. Shared Rust gates the seat on the same
@@ -718,10 +776,24 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
             predecessorBackupKeys = Array.Empty<byte[]>();
         }
 
+        // The registry itself, beside the keys: shared Rust resolves this
+        // session's attested predecessor ids off it once and hands them to the
+        // content-index reader and the launch resume, so a row a retired
+        // identity signed is admitted with no succession lookup (writer-signed
+        // change records, ruling (8)(b) source (ii)).
         return nest.ConversationsSessionOverManager(
             manager, selfAddress, _crypto.SecretBytes, mlsDbPath, IndexLeaseDevice(deviceIdHex),
-            predecessorBackupKeys);
+            predecessorBackupKeys, recordingDevice: RecordingDevice(deviceIdHex), accounts: ResolveAccountRegistry());
     }
+
+    /// <summary>
+    /// The app's recording device as the FFI faces want it (a hex string), or
+    /// <c>null</c> when there is no usable id — screened like
+    /// <see cref="IndexLeaseDevice"/> so a malformed stored id costs the
+    /// served-set walk, never the call or the session.
+    /// </summary>
+    private static string? RecordingDevice(string? deviceIdHex)
+        => IndexLeaseDevice(deviceIdHex) is null ? null : deviceIdHex;
 
     /// <summary>
     /// This device's `index`-lease seat, as the FFI factory wants it: the raw 32
@@ -798,6 +870,24 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     // ── W3 (account-data-plane.md § Workstreams) account-store runtime (account-data-plane.md § The account store) ──
 
     /// <summary>
+    /// The injected account registry, or <c>null</c> in unit tests and when it is
+    /// unavailable — a registry the seat cannot read attests nothing (fail-safe:
+    /// the walk proves a retired identity's link by the statement walk instead).
+    /// </summary>
+    private FfiAccountRegistry? ResolveAccountRegistry()
+    {
+        try
+        {
+            return _accountRegistry?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("NestRpcClient", $"[account-registry] unavailable (no predecessors attested): {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Host the W3 account-store runtime in this process (`account-data-plane.md`
     /// § The account store → *The client-side lifecycle*). Windows hosts no account store of its own — its preference
     /// surfaces ride the blob rail and its own scopes are walked by the
@@ -856,17 +946,20 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
             // The registry itself: shared Rust resolves this session's attested
             // predecessors off it — the ids and the schedules their preference
             // rows are carried under. Null (unit tests) attests nothing.
-            FfiAccountRegistry? accounts;
+            var accounts = ResolveAccountRegistry();
+            var nest = await ConnectedAsync().ConfigureAwait(false);
+            // Before the runtime starts, so its first notice has a listener.
+            // A registration fault costs the live re-read only — never the runtime.
             try
             {
-                accounts = _accountRegistry?.Invoke();
+                RegisterStoreChangeListener();
             }
             catch (Exception ex)
             {
-                ShellLog.Warn("NestRpcClient", $"[account-runtime] account registry unavailable (no predecessors attested): {ex.Message}");
-                accounts = null;
+                ShellLog.Warn("NestRpcClient",
+                    $"[account-runtime] store-change listener not registered; open "
+                    + $"store-backed pages repaint on the next visit: {ex.Message}");
             }
-            var nest = await ConnectedAsync().ConfigureAwait(false);
             await nest.StartAccountRuntime(appDataDir, storeContainer: null, IndexLeaseDevice(deviceIdHex), accounts)
                 .ConfigureAwait(false);
         }
@@ -1016,8 +1109,8 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     /// The <c>device_set_state</c> e2e reader as raw JSON — whether
     /// <paramref name="deviceIdHex"/>'s <c>fauna.state.device-set</c> row reads
     /// Removed/Enrolled from this app's own account runtime
-    /// (<c>account-data-taxonomy.md</c> § The generation machinery →
-    /// <i>Fleet-scope reclamation</i>, clause (4)). <c>null</c> when this app has
+    /// (<c>fleet-scope-reclamation.md</c>
+    /// § <i>Fleet-scope reclamation</i>, clause (4)). <c>null</c> when this app has
     /// no connected client yet (pre-auth): never forces a connect, like
     /// <see cref="AccountPumpNowAsync"/>. The caller turns that into a
     /// <c>{"found":false}</c> report, because <c>null</c> is the wire signal for
@@ -1035,6 +1128,22 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     {
         if (_nest is null) return null;
         return await _nest.DeviceSetStateJson(deviceIdHex).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The <c>read_marker_state</c> e2e reader as raw JSON — the read-state
+    /// relaunch witness's durability barrier: <paramref name="channelIdHex"/>'s
+    /// account-store read marker (<c>conversation-read-state.md</c>
+    /// § <i>The read-marker record</i>), <c>{"found":true,"through":N}</c> or
+    /// <c>{"found":false}</c>. Same contract and <b>Debug-only</b> gating as
+    /// <see cref="DeviceSetStateJsonAsync"/> (a <c>test-helpers</c> UniFFI seam);
+    /// <c>null</c> only when no client is connected yet. Its only caller is
+    /// <c>Testing.TestAgent</c>, via <c>App.ReadMarkerStateForTest</c>.
+    /// </summary>
+    public async Task<string?> ReadMarkerStateJsonAsync(string channelIdHex)
+    {
+        if (_nest is null) return null;
+        return await _nest.ReadMarkerStateJson(channelIdHex).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1196,6 +1305,22 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         await nest.Caldav().CreateCalendar(name).ConfigureAwait(false);
     }
 
+    /// <summary><c>import_calendar_ics</c> — import the VEVENTs of
+    /// <paramref name="icsText"/> into calendar <paramref name="calendarIdHex"/>.</summary>
+    public async Task<FfiIcsImportResult> CaldavImportCalendarIcsAsync(string calendarIdHex, string icsText)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Caldav().ImportCalendarIcs(calendarIdHex, icsText).ConfigureAwait(false);
+    }
+
+    /// <summary><c>export_calendar_ics</c> — calendar
+    /// <paramref name="calendarIdHex"/> as one <c>.ics</c> text.</summary>
+    public async Task<string> CaldavExportCalendarIcsAsync(string calendarIdHex)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Caldav().ExportCalendarIcs(calendarIdHex).ConfigureAwait(false);
+    }
+
     /// <summary><c>query_events</c> — events in calendar
     /// <paramref name="calendarIdHex"/>.</summary>
     public async Task<IReadOnlyList<FfiCalEvent>> CaldavQueryEventsAsync(string calendarIdHex)
@@ -1285,25 +1410,6 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     // shared FfiFeedManager in the 2026-06 feed-snapshot lift (feed.md § State &
     // data shape); only posts.interact stays client glue (like/reply/repost).
 
-    /// <summary><c>fauna.posts.get</c> → the post's extracted body text (the source of a
-    /// moderation server-row spam train on the sealed client-write path). Mirrors linux
-    /// <c>train_moderation_flow</c> (<c>posts_get</c> → <c>DecodePostFull().body</c>);
-    /// tolerates a missing / undecodable post → <c>null</c> so the caller degrades to the
-    /// server-side train.</summary>
-    public async Task<string?> PostBodyTextAsync(string contentId)
-    {
-        try
-        {
-            var nest = await ConnectedAsync().ConfigureAwait(false);
-            var bytes = await nest.Posts().PostsGet(contentId).ConfigureAwait(false);
-            return FaunaFfiMethods.DecodePostFull(bytes).@body;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
     // ── fauna.account.* / fauna.quota.get ───────────────────────────────
 
     /// <summary><c>fauna.account.get</c> → the app's <see cref="IdentityInfo"/>
@@ -1349,6 +1455,13 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
         return await nest.Features().Rows().ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<FfiNodeLeg> StatusNodeAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Status().Node().ConfigureAwait(false);
     }
 
     public async Task<bool> AmIAdminAsync()
@@ -1665,14 +1778,16 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
             Convert.FromHexString(recipientActorId),
             nodeUrl);
 
-    public async Task SendKnockAsync(string actorId)
+    public async Task SendKnockAsync(string actorId, string? recipientNestUrl = null)
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
         var payload = BuildKnockPayload(_crypto, actorId, _nestUrl);
         // recipient_nest_url null ⇒ same-nest local delivery, faithful to the retired
         // POST /api/v1/inbox/{actor} twin (which only reached same-nest recipients).
-        // Cross-nest (Some(peer)) awaits client-side peer discovery (federation.md).
-        await nest.Inbox().Send(actorId, null, payload).ConfigureAwait(false);
+        // The profile page's knock passes the route the shared KnockRecipientNestUrl
+        // answered over the profile it fetched (profile.md § Where logic lives →
+        // Request contact routing).
+        await nest.Inbox().Send(actorId, recipientNestUrl, payload).ConfigureAwait(false);
     }
 
     /// <summary><c>fauna.contacts.list</c> → <see cref="ContactInfo"/> rows. The
@@ -1788,16 +1903,14 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
 
     // ── fauna.admin.* ────────────────────────────────────────────────────
 
-    public async Task<FfiAdminStats> AdminStatsAsync()
+    /// <summary>The dashboard's card set via the shared
+    /// <c>admin_dashboard_snapshot</c> — a free FFI function over the connected
+    /// client, the native twin of android's <c>adminDashboardSnapshot()</c>
+    /// wrapper.</summary>
+    public async Task<FfiAdminDashboardSnapshot> AdminDashboardSnapshotAsync()
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
-        return await nest.Admin().Stats().ConfigureAwait(false);
-    }
-
-    public async Task<FfiAdminStatus> AdminStatusAsync()
-    {
-        var nest = await ConnectedAsync().ConfigureAwait(false);
-        return await nest.Admin().Status().ConfigureAwait(false);
+        return await FaunaFfiMethods.AdminDashboardSnapshot(nest).ConfigureAwait(false);
     }
 
     public async Task<FfiAdminUsersListReply> AdminUsersListAsync(long? limit, long offset)
@@ -1869,6 +1982,15 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
             .ConfigureAwait(false);
     }
 
+    public async Task AdminTiersCreateAsync(
+        string name, long maxInboxBytes, long maxStorageBytes, long maxDevices, long maxBlobSize, long maxFeeds)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        await nest.Admin()
+            .TiersCreate(name, maxInboxBytes, maxStorageBytes, maxDevices, maxBlobSize, maxFeeds)
+            .ConfigureAwait(false);
+    }
+
     public async Task AdminSetRegistrationModeAsync(FfiRegistrationMode mode, ulong? maxFreeUsers)
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
@@ -1884,7 +2006,7 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     public async Task AdminUsersCreateAsync(byte[] actorId, string tier, string? handle)
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
-        await nest.Admin().UsersCreate(actorId, tier, handle).ConfigureAwait(false);
+        await nest.Admin().UsersCreate(actorId, tier, handle, null, null).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -1950,6 +2072,25 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         await nest.Admin().InviteRequestsDeny(id, reason).ConfigureAwait(false);
     }
 
+    public async Task<IReadOnlyList<FfiAdminPendingAction>> AdminPendingActionsListAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        var rows = await nest.Admin().PendingActionsList().ConfigureAwait(false);
+        return rows.Where(r => r.isPending).ToList();
+    }
+
+    public async Task AdminPendingActionApproveAsync(long id)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        await nest.Admin().PendingActionApprove(id).ConfigureAwait(false);
+    }
+
+    public async Task AdminPendingActionCancelAsync(long id)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        await nest.Admin().PendingActionCancel(id).ConfigureAwait(false);
+    }
+
     public async Task<FfiAdminServiceFlags> AdminServicesListAsync()
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
@@ -2001,6 +2142,23 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         await FaunaFfiMethods.AdminSetRegion(nest, region).ConfigureAwait(false);
     }
 
+    /// <summary><c>fauna.admin.web_app_origin.get</c> via the shared
+    /// <c>fauna_client_admin::admin_web_app_origin_view</c> fold — a free FFI
+    /// function, the twin of <see cref="AdminRegionStatusAsync"/>.</summary>
+    public async Task<FfiAdminWebAppOriginView> AdminWebAppOriginStatusAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.AdminWebAppOriginStatus(nest).ConfigureAwait(false);
+    }
+
+    /// <summary><c>fauna.admin.web_app_origin.set</c> — answers the view the
+    /// get folds.</summary>
+    public async Task<FfiAdminWebAppOriginView> SetWebAppOriginAsync(FfiWebAppOrigin mode)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.AdminSetWebAppOrigin(nest, mode).ConfigureAwait(false);
+    }
+
     public async Task<IReadOnlyList<LogEntry>> AdminLogsAsync()
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
@@ -2040,7 +2198,7 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     }
 
     /// <inheritdoc />
-    public async Task<FfiDeploymentSeedSelfHeal> SelfHealDeploymentSeedCustodyAsync()
+    public async Task<uniffi.fauna_core.LocalizedText?> SelfHealDeploymentSeedCustodyAsync()
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
         return await FaunaFfiMethods.SelfHealDeploymentSeedCustody(nest, _crypto.SecretBytes, BackupPaths.DataDir).ConfigureAwait(false);
@@ -2125,12 +2283,6 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         return await nest.Moderation().Actions().ConfigureAwait(false);
     }
 
-    public async Task ModerationTrainAsync(string contentId, string verdict)
-    {
-        var nest = await ConnectedAsync().ConfigureAwait(false);
-        await nest.Moderation().Train(contentId, verdict).ConfigureAwait(false);
-    }
-
     public async Task<bool> ModerationReportShareSetAsync(bool share)
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
@@ -2200,6 +2352,30 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         return await FaunaFfiMethods.SpamThresholdOverrideSet(nest, value).ConfigureAwait(false);
     }
 
+    public async Task<string?> ForwardAllToGetAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.ForwardAllToGet(nest).ConfigureAwait(false);
+    }
+
+    public async Task<string?> ForwardAllToSetAsync(string? address)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.ForwardAllToSet(nest, address).ConfigureAwait(false);
+    }
+
+    public async Task<ForwardPerHour> ForwardPerHourGetAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.ForwardPerHourGet(nest).ConfigureAwait(false);
+    }
+
+    public async Task<ForwardPerHour> ForwardPerHourSetAsync(uint value)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.ForwardPerHourSet(nest, value).ConfigureAwait(false);
+    }
+
     // ── fauna.family.* (Family page) ────────────────────────────────────
 
     public async Task<FfiFamilyStatus> FamilyStatusAsync()
@@ -2213,6 +2389,9 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         // effort: no account registry wired (unit tests, some minimal e2e paths)
         // degrades to a silent no-op rather than failing the status read itself.
         _accountRegistry?.Invoke().PersistSupervisionSnapshot(_crypto.ActorIdHex, status);
+        // The ward's own pending asks ride the same reply; every successful read
+        // refreshes them (android's ApiClient.familyStatus does the same fold).
+        FamilyStatusHandler.ApplyWardAsks(status);
         return status;
     }
 
@@ -2254,6 +2433,36 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
         await nest.Family().ContactAdd(supervisedActorId, peerActorId).ConfigureAwait(false);
+    }
+
+    public async Task FamilyContactRequestAsync(string peerActorIdHex)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        await nest.Family().ContactRequest(Convert.FromHexString(peerActorIdHex)).ConfigureAwait(false);
+        await RereadWardAsksAsync().ConfigureAwait(false);
+    }
+
+    public async Task FamilyFeedSourceRequestAsync(string bridgeId, string operation, string target, string label)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        await nest.Family().FeedSourceRequest(bridgeId, operation, target, label).ConfigureAwait(false);
+        await RereadWardAsksAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>Re-read the ward's own asks after one landed, so what paints is what the
+    /// nest holds. A failed re-read is NOT a failed ask — the guardian has been rung —
+    /// so it is swallowed and <see cref="WardAsksCache"/> keeps what it held (the status
+    /// fold only runs on a SUCCESSFUL read).</summary>
+    private async Task RereadWardAsksAsync()
+    {
+        try { await FamilyStatusAsync().ConfigureAwait(false); }
+        catch (Exception) { /* keep the held asks; the caller's just-asked flag renders */ }
+    }
+
+    public async Task FamilyAllowBlockedPeerAsync(byte[] supervisedActorId, FfiFamilyBlockedPeer peer)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        await nest.Family().AllowBlockedPeer(supervisedActorId, peer).ConfigureAwait(false);
     }
 
     public async Task FamilyGraduateAsync(byte[] supervisedActorId)
@@ -2368,10 +2577,14 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         return await FaunaFfiMethods.FoldersRemoveMember(nest, session, _crypto.SecretBytes, name, channelId, memberId).ConfigureAwait(false);
     }
 
-    public async Task<uint> FoldersServeSetAsync(ConversationsSession session, string name, string? mlsGroupIdHex, bool enable)
+    public async Task<uint> FoldersServeSetAsync(ConversationsSession session, string name, string? mlsGroupIdHex, bool enable, string? deviceIdHex = null)
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
-        return await FaunaFfiMethods.FoldersServeSet(nest, session, _crypto.SecretBytes, name, mlsGroupIdHex, enable).ConfigureAwait(false);
+        // `deviceId` is the app's recording device: with it the face re-seals an
+        // unshared set's pre-serve files onto the served key before answering
+        // (webdav-server.md § Key model (c)). `accounts` hands Rust the registry
+        // for that walk's attested predecessor ids.
+        return await FaunaFfiMethods.FoldersServeSet(nest, session, _crypto.SecretBytes, name, mlsGroupIdHex, enable, deviceId: RecordingDevice(deviceIdHex), accounts: ResolveAccountRegistry()).ConfigureAwait(false);
     }
 
     public async Task<bool> FoldersCanServeWebdavAsync()
@@ -2453,6 +2666,15 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
         return await FaunaFfiMethods.OfflineShareBindSeat(nest, _crypto.SecretBytes).ConfigureAwait(false);
+    }
+
+    public async Task StartSharePlaneAsync(
+        FfiSyncAgentProvisioner provisioner, string spoolDir, FfiSharePlaneListener listener)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        await nest.StartSharePlane(
+            _crypto.SecretBytes, FaunaFfiMethods.AgentReplicaAccess(provisioner), spoolDir, listener)
+            .ConfigureAwait(false);
     }
 
     public Task<CeremonyStatus> OfflineShareInitiateAsync(FfiCeremonySeat seat, string peerCodeInput) =>
@@ -2735,12 +2957,25 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
 
     /// <inheritdoc />
     public async Task<IReadOnlyList<FfiDestinationAuditRow>> BackupAuditRunPassAsync(
-        string statePath, string? syncStateDir)
+        string statePath, string? syncStateDir, FfiOwnCustodianStore? ownCustodian = null)
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
         return await FaunaFfiMethods.BackupAuditRunPass(
-            nest, _crypto.SecretBytes, statePath, syncStateDir).ConfigureAwait(false);
+            nest, _crypto.SecretBytes, statePath, syncStateDir, ownCustodian).ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<FfiRecoveryResult> BackupRecoverFromDestinationAsync(
+        string deviceIdHex, string destinationId, string statePath)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.BackupRecoverFromDestination(
+            nest, _crypto.SecretBytes, deviceIdHex, destinationId, statePath).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public Task<FfiRecoveryResult> RecoverOwnCustodianStoreAsync(IFfiSyncAgentProvisioner agent)
+        => agent.RecoverCustodianStore(_crypto.SecretBytes);
 
     /// <inheritdoc />
     public bool BackupAuditObserve(string statePath, long lastActivityMs)
@@ -3568,7 +3803,7 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         var machine = FaunaFfiMethods.BuildConnectedAppsMachine(nest, observer, mail);
         // Best-effort, like apple: without the account runtime an approve naming a
         // `fauna:records:` scope is refused by the machine, never resolved keyless.
-        try { FaunaFfiMethods.WireConnectedAppsConsentGrant(machine, _crypto.SecretBytes); }
+        try { FaunaFfiMethods.WireConnectedAppsConsentGrant(machine, nest, _crypto.SecretBytes); }
         catch (Exception) { /* a build without the account runtime refuses it */ }
         return machine;
     }
@@ -3694,6 +3929,17 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     }
 
     /// <inheritdoc />
+    public async Task<string> RecoveryKitDisplayUriAsync(string kitSecretHex)
+    {
+        // The handle is the authenticated account's own (empty-tolerated: the
+        // builder omits it); the export qualifies a bare local part with the
+        // nest URL's host.
+        var identity = await GetIdentityAsync().ConfigureAwait(false);
+        return FaunaFfiMethods.RecoveryKitDisplayUri(
+            kitSecretHex, _crypto.SecretBytes, identity?.Handle ?? "", _nestUrl);
+    }
+
+    /// <inheritdoc />
     public async Task<FfiMintedKit> RecoveryRequestSeedAloneReplacementAsync()
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
@@ -3720,6 +3966,18 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
             .RecoveryResealEscrowWithHeldKit(nest, _crypto.SecretBytes, registry, heldKitInput)
             .ConfigureAwait(false);
     }
+
+    // The let-go's two calls take no nest and no secret: both ride this process's
+    // account runtime (StartAccountRuntimeAsync), which knows its own identity —
+    // libs/fauna-ffi/src/generation_let_go.rs.
+
+    /// <inheritdoc />
+    public async Task<FfiDeadGenerations> RecoveryDeadGenerationsAsync() =>
+        await FaunaFfiMethods.RecoveryDeadGenerations().ConfigureAwait(false);
+
+    /// <inheritdoc />
+    public async Task<FfiLetGoOutcome> RecoveryLetGoAsync(byte[][] generationIds) =>
+        await FaunaFfiMethods.RecoveryLetGo(generationIds).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<FfiStolenOutcome> SuccessionSucceedWithHeldKitAsync(string kitInput)
@@ -3811,6 +4069,10 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
             .CustodyRevoke(nest, _crypto.SecretBytes, grantId, holder)
             .ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<string>?> CustodyEscrowHoldersAsync()
+        => await FaunaFfiMethods.CustodyEscrowHolders().ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task CustodyDriveAsync(ConversationsSession session)

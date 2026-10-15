@@ -192,7 +192,7 @@ async fn failed_submit_leaves_seed_authoritative() {
 // `set_caldav_enabled(true)`, `set_carddav_enabled(true)`,
 // `set_webdav_enabled(true)`) against a box the admin had already configured.
 //
-// Found 2026-08-16 against the live example.com box:
+// Found 2026-08-16 against the live nest:
 // the writes were observed being issued on a sign-in, and failed only because
 // that run's WS-RPC channel was down for an unrelated reason.
 

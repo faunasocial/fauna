@@ -35,7 +35,7 @@
 //! verdict another device recorded must not be re-asked.
 
 use fauna_ui_ids as ids;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -103,12 +103,24 @@ impl Roster {
     }
 }
 
+/// A painted roster: each review with the handle its row resolved.
+type PaintedRoster = Vec<(MemberReview, Option<String>)>;
+
 /// Widget handles the render + event closures need.
 struct Widgets {
     error_label: gtk::Label,
     list: gtk::Box,
     placeholder: gtk::Label,
     rows: RefCell<Vec<gtk::Box>>,
+    /// The roster (with each row's resolved handle) the rows were last built
+    /// from. A re-read answering the same rebuilds nothing — the store-change
+    /// notice re-drives the read while the page is open (a level, not an
+    /// event).
+    painted: RefCell<Option<PaintedRoster>>,
+    /// Whether `error_label` holds a failed READ, the one message a later
+    /// successful read retires. A Keep/Remove outcome stays until the next
+    /// gesture: a re-read must never erase "how far the Remove got".
+    read_error_shown: Cell<bool>,
 }
 
 /// Everything the handlers + render need.
@@ -178,6 +190,8 @@ fn build_page_widgets() -> (gtk::Box, Widgets) {
         list,
         placeholder,
         rows: RefCell::new(Vec::new()),
+        painted: RefCell::new(None),
+        read_error_shown: Cell::new(false),
     };
     (outer, widgets)
 }
@@ -232,19 +246,34 @@ fn refresh(ctx: &Rc<Ctx>) {
             // lifecycle step 3's note).
             hydrate_with_retry(load_reviews).await
         },
-        move |result| match result {
-            Ok(reviews) => {
-                ctx_render.w.error_label.set_visible(false);
-                render_rows(&ctx_render, &reviews);
-            }
-            Err(e) => {
-                // A failed read leaves the cached roster on screen alone rather
-                // than blanking it — an empty page is indistinguishable from
-                // "you are done", and this one must never say that by accident.
-                super::render_error_label(&ctx_render.w.error_label, Some(&e));
-            }
-        },
+        move |result| apply_read(&ctx_render, result),
     );
+}
+
+/// Paint one roster read. A failed read leaves the cached roster on screen
+/// alone rather than blanking it — an empty page is indistinguishable from
+/// "you are done", and this one must never say that by accident. A successful
+/// one retires only a read error, never a verdict's outcome message.
+fn apply_read(ctx: &Rc<Ctx>, result: Result<Vec<MemberReview>, String>) {
+    match result {
+        Ok(reviews) => {
+            if ctx.w.read_error_shown.replace(false) {
+                super::render_error_label(&ctx.w.error_label, None);
+            }
+            render_rows(ctx, &reviews);
+        }
+        Err(e) => {
+            super::render_error_label(&ctx.w.error_label, Some(&e));
+            ctx.w.read_error_shown.set(true);
+        }
+    }
+}
+
+/// Show a Keep/Remove outcome (or clear it) — a gesture's own message, which
+/// later re-reads leave alone.
+fn show_verdict_message(ctx: &Rc<Ctx>, msg: Option<&str>) {
+    super::render_error_label(&ctx.w.error_label, msg);
+    ctx.w.read_error_shown.set(false);
 }
 
 /// Record the owner's **Keep** verdict, then re-read the roster (the answered
@@ -346,8 +375,17 @@ fn remove_result_message(outcome: &RemoveOutcome) -> Option<String> {
 }
 
 /// Rebuild the row list from the roster. Mutually exclusive with
-/// `member-review-empty`.
+/// `member-review-empty`. A roster (and resolved handles) equal to the one
+/// already painted rebuilds nothing.
 fn render_rows(ctx: &Rc<Ctx>, reviews: &[MemberReview]) {
+    let painted: Vec<_> = reviews
+        .iter()
+        .map(|r| (r.clone(), ctx.manager.handle_for_person(&r.person)))
+        .collect();
+    if ctx.w.painted.borrow().as_ref() == Some(&painted) {
+        return;
+    }
+    *ctx.w.painted.borrow_mut() = Some(painted);
     let mut rows = ctx.w.rows.borrow_mut();
     for row in rows.drain(..) {
         ctx.w.list.remove(&row);
@@ -426,7 +464,7 @@ fn dispatch_keep(ctx: &Rc<Ctx>, person: ActorId) {
                 refresh(&ctx_render);
                 (ctx_render.refresh_roster)();
             }
-            Err(e) => super::render_error_label(&ctx_render.w.error_label, Some(&e)),
+            Err(e) => show_verdict_message(&ctx_render, Some(&e)),
         },
     );
 }
@@ -439,16 +477,13 @@ fn dispatch_remove(ctx: &Rc<Ctx>, person: ActorId) {
         move || async move { remove_person(manager, person).await },
         move |result| match result {
             Ok(outcome) => {
-                super::render_error_label(
-                    &ctx_render.w.error_label,
-                    remove_result_message(&outcome).as_deref(),
-                );
+                show_verdict_message(&ctx_render, remove_result_message(&outcome).as_deref());
                 // Re-read regardless: a full eviction drops the row, a partial
                 // one is re-rendered from the same (unchanged) ledger state.
                 refresh(&ctx_render);
                 (ctx_render.refresh_roster)();
             }
-            Err(e) => super::render_error_label(&ctx_render.w.error_label, Some(&e)),
+            Err(e) => show_verdict_message(&ctx_render, Some(&e)),
         },
     );
 }
@@ -609,6 +644,57 @@ mod tests {
                     .count(),
                 2
             );
+        });
+    }
+
+    /// The store-change notice re-drives the read while the page is open, so
+    /// a read answering what is painted rebuilds no row and never erases a
+    /// Remove's "how far it got" message; it retires only a read error.
+    #[test]
+    fn an_unchanged_reread_paints_nothing() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+
+            let (_page, widgets) = build_page_widgets();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("build a throwaway runtime");
+            let ctx = Rc::new(Ctx {
+                rt: rt.handle().clone(),
+                manager: crate::conversations::manager(),
+                refresh_roster: Box::new(|| {}),
+                w: widgets,
+            });
+            apply_read(&ctx, Ok(vec![open_review(1)]));
+            let first = ctx.w.rows.borrow()[0].clone();
+
+            show_verdict_message(&ctx, Some("removed from 1 of 2 groups"));
+            apply_read(&ctx, Ok(vec![open_review(1)]));
+            assert_eq!(
+                ctx.w.rows.borrow()[0],
+                first,
+                "an equal roster rebuilt its row"
+            );
+            assert!(
+                ctx.w.error_label.is_visible(),
+                "a re-read erased the Remove outcome"
+            );
+
+            apply_read(&ctx, Err("read failed".into()));
+            assert_eq!(
+                ctx.w.rows.borrow().len(),
+                1,
+                "a failed read blanked the roster"
+            );
+            apply_read(&ctx, Ok(vec![open_review(1)]));
+            assert!(
+                !ctx.w.error_label.is_visible(),
+                "a good read left the read error up"
+            );
+
+            apply_read(&ctx, Ok(vec![]));
+            assert!(ctx.w.rows.borrow().is_empty());
+            assert!(ctx.w.placeholder.is_visible());
         });
     }
 }

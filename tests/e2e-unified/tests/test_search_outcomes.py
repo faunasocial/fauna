@@ -285,6 +285,7 @@ def test_a_failed_search_says_so_and_keeps_what_it_found(logged_in_app, nest_ins
 
 
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.real_conversations
 @pytest.mark.feature("search")
 def test_a_failed_search_on_a_phone_keeps_the_draft_a_desktop_seat_indexed(

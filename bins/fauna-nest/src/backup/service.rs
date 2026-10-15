@@ -19,7 +19,7 @@ pub struct BackupRecord {
 
 /// How many hot-copy (`sqlite`) DB backups to retain. Older ones are pruned —
 /// blob + manifest + row — after each new backup. Bounds the nest self-backup
-/// store; without this the scheduler filled the disk (the example.com outage). See `docs/goal/behavior/backup-restore.md` § Self-backup retention.
+/// store; without this the scheduler filled the disk (the live-nest outage). See `docs/goal/behavior/backup-restore.md` § Self-backup retention.
 pub const KEEP_SQLITE_BACKUPS: usize = 24;
 /// How many logical-dump backups to retain (daily cadence ⇒ ~1 week).
 pub const KEEP_LOGICAL_BACKUPS: usize = 7;
@@ -309,7 +309,7 @@ mod tests {
     }
 
     /// keep-last-N retention prunes the oldest backups beyond N — deleting the
-    /// row, the blob, and the manifest. Regression guard for the example.com
+    /// row, the blob, and the manifest. Regression guard for the live-nest
     /// disk-fill (unbounded 60s DB hot-copies).
     #[tokio::test]
     async fn prune_keeps_last_n_deletes_old_blobs_and_manifests() {
@@ -734,9 +734,10 @@ mod tests {
         ),
         (
             "segment_backup.rs",
-            "run_folder_once",
+            "run_folder",
             Use::Scoped(
-                "mirrors the owner's folder to the destination the owner configured; \
+                "the pass `run_folder_once` wraps: mirrors the owner's folder to the \
+                 destination the owner configured; \
                  digests come from that folder's own file rows. Consults the withhold \
                  all the same (path 3 of the owner-scoped ruling): the destination's \
                  own `/api/v1/chunks/{hash}` door holds no flag and would serve a \

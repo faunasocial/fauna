@@ -191,36 +191,44 @@ impl CacheDb {
         .context("look up state scope folder")
     }
 
-    /// The actor's `ext:<kind>` scopes whose feed advanced past `cursor`, each
-    /// with its head — the nest-log `seq` of its newest row — in head order,
-    /// at most `limit` of them. What the events poll answers from
-    /// (`transport.md` § Push events → *Third-party event doors*): `seq` is
+    /// The actor's scopes a principal may be nudged about — every `ext:<kind>`
+    /// scope and the delegable `state` scope, never `state-fleet` — whose
+    /// feed advanced past `cursor`, each with its head — the nest-log `seq` of
+    /// its newest row — in head order, at most `limit` of them. What the
+    /// events doors answer from (`transport.md` § Push events → *Third-party
+    /// event doors*), the session's filter applied by the caller: `seq` is
     /// one nest-wide order, so a single scalar is a cursor over every scope,
     /// and a capped page loses nothing — every scope left out has its head
     /// above the last one returned.
-    pub async fn ext_scope_heads_since(
+    pub async fn event_scope_heads_since(
         &self,
         actor_id: &[u8; 32],
         cursor: i64,
         limit: u32,
     ) -> anyhow::Result<Vec<(String, i64)>> {
         let actor_id = *actor_id;
+        let state_folder = format!(
+            "__{}",
+            reserved_kind_for_scope(fauna_protocol::account_state::ACCOUNT_STATE_SCOPE)
+        );
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare_cached(
             "SELECT f.name, MAX(c.seq) AS head
                FROM sync_changes c JOIN folders f ON f.id = c.folder_id
-              WHERE f.actor_id = ?1 AND f.name LIKE '\\_\\_ext:%' ESCAPE '\\'
+              WHERE f.actor_id = ?1
+                AND (f.name LIKE '\\_\\_ext:%' ESCAPE '\\' OR f.name = ?4)
                 AND c.seq > ?2
               GROUP BY f.id
               ORDER BY head
               LIMIT ?3",
         )?;
         let rows = stmt
-            .query_map(rusqlite::params![actor_id.as_slice(), cursor, limit], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-            })?
+            .query_map(
+                rusqlite::params![actor_id.as_slice(), cursor, limit, state_folder],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            )?
             .collect::<Result<Vec<_>, _>>()
-            .context("read ext scope heads")?;
+            .context("read event scope heads")?;
         Ok(rows
             .into_iter()
             .filter_map(|(name, head)| Some((name.strip_prefix("__")?.to_string(), head)))
@@ -448,8 +456,8 @@ impl CacheDb {
     /// refuses nothing, and the feed says nothing either. Served on the
     /// class-2 feed reply as `retirable_through_seq` so a replica withholds
     /// the retires the gate would refuse instead of asking one at a time
-    /// (`account-data-taxonomy.md` § The generation machinery → *Fleet-scope
-    /// reclamation*, clause (1) → *the gate's watermark*).
+    /// (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (1) → *the gate's watermark*).
     pub async fn retirable_through_seq(
         &self,
         scope_folder_id: i64,
@@ -472,8 +480,8 @@ impl CacheDb {
 
     /// Mark the live class-2 row at exactly `(item_key, writer, writer_seq)`
     /// superseded **without inserting anything** — `fauna.account.state.retire`
-    /// (`account-data-taxonomy.md` § The generation machinery → *Fleet-scope
-    /// reclamation*, clause (1)). The row and its coordinate stay, so the
+    /// (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (1)). The row and its coordinate stay, so the
     /// seq-reuse memory behind [`StateEntryError::SeqReused`] is intact and a
     /// replay of the retired row is refused as before.
     ///
@@ -682,8 +690,8 @@ impl CacheDb {
     ///
     /// `sealed_under` narrows the serve to rows whose form-v2 cleartext header
     /// names that generation (the reclamation pass's "is anything still
-    /// sealed under G" question — `account-data-taxonomy.md` § The generation
-    /// machinery → *Fleet-scope reclamation*, clause (3e)); the tip is still
+    /// sealed under G" question — `fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (3e)); the tip is still
     /// taken over every live row, so the echo stays a claim about the whole
     /// log.
     pub async fn get_account_state_changes(

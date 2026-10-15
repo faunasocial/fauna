@@ -17,31 +17,55 @@ import time
 
 import requests
 
-# ── The token's two homes ──────────────────────────────────────────────────
-#: The fleet's documented per-machine home for the Hetzner Cloud R/W token —
-#: the same file the deploy-verify cloud-firewall check reads, in the same
-#: order (env first, then this). Until 2026-09-02 the live gate read the env
-#: ONLY, so a box that already carried the token in this file skipped the whole
-#: suite and a session halted on a `NEEDS FROM USER:` for a secret sitting on
-#: its own disk (measured on Windows, 2026-09-01). Never print or log its value.
-HETZNER_TOKEN_FILE = "~/.hetzner-token"
+# ── The token: one resolver, per box ───────────────────────────────────────
+#: The box→cloud-project map and the per-project token files live in
+#: ``scripts/_cloud_project.py``, shared with the fleet's cloud scripts, so the
+#: live suite and the firewall gate can never disagree about which token a box
+#: takes (``deployment-threat-model.md`` § Concern 2, path 5). Never print or
+#: log a token's value.
+def _load_cloud_project():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[3] / "scripts" / "_cloud_project.py"
+    spec = importlib.util.spec_from_file_location("_cloud_project", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
-def hetzner_token() -> str:
-    """The live suite's Cloud R/W token: ``HETZNER_API_TOKEN`` when set and
-    non-blank, else the stripped contents of :data:`HETZNER_TOKEN_FILE`, else
-    ``""`` — an honest empty string the gate turns into a skip, never an error.
+cloud_project = _load_cloud_project()
 
-    tier_1 proofs: ``tests/test_live_token_resolution.py``.
+
+def live_target_host() -> str | None:
+    """The box (or zone) this live run speaks to the provider about, from the
+    live suite's env contract: the kept box being provisioned
+    (``FAUNA_E2E_STAGING_BOX``), else the zone throwaway boxes go under
+    (``FAUNA_E2E_ZONE``), else the live nest under test
+    (``FAUNA_LIVE_NEST_URL``), else None — the default project, where the
+    throwaway boxes are made."""
+    for var in ("FAUNA_E2E_STAGING_BOX", "FAUNA_E2E_ZONE", "FAUNA_LIVE_NEST_URL"):
+        v = os.environ.get(var, "").strip()
+        if v:
+            return v
+    return None
+
+
+def hetzner_token(host: str | None = None) -> str:
+    """The live suite's Cloud R/W token for ``host`` (default
+    :func:`live_target_host`): ``HETZNER_API_TOKEN`` when set and non-blank,
+    else the box's project token file — ``cloud_project.token_for`` — else
+    ``""``, an honest empty string the gate turns into a skip, never an error.
+
+    tier_1 proofs: ``tests/test_live_token_resolution.py``,
+    ``tests/test_cloud_project.py``.
     """
-    tok = os.environ.get("HETZNER_API_TOKEN", "").strip()
-    if tok:
-        return tok
-    try:
-        with open(os.path.expanduser(HETZNER_TOKEN_FILE), encoding="utf-8") as f:
-            return f.read().strip()
-    except OSError:
-        return ""
+    return cloud_project.token_for(host if host is not None else live_target_host())
+
+
+def hetzner_token_hint(host: str | None = None) -> str:
+    """Where :func:`hetzner_token` looks, for a skip message."""
+    return cloud_project.where_to_put(host if host is not None else live_target_host())
 
 
 # Hetzner curated offer + region. cx23 = 2 vCPU / 4 GB (the entry curated_offer;
@@ -199,7 +223,7 @@ def skip_unless_live_drive_app(driver, *, surface: str) -> None:
 #: Deliberately NOT folded into `LIVE_DRIVE_APPS`: that tuple answers "can this
 #: app drive the machine bridge", which web can and does. A test targeting an
 #: ALREADY-CLAIMED box with a real cert (the live DNS-01 renewal against
-#: example.com) needs only that one, so collapsing the two would over-gate web on
+#: the live nest) needs only that one, so collapsing the two would over-gate web on
 #: a test it can actually run.
 #:
 #: macos and ios join on the cfg gate, not on app identity: the

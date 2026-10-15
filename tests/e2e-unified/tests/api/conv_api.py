@@ -253,8 +253,11 @@ def keypackage_count(
     """``fauna.conversations.keypackage.count`` — non-destructive count.
 
     Replacement for ``GET /api/v1/keypackage/{actor_id}/count``, which
-    returned ``{"count": N}``. ``actor`` is the (User-class) caller; the count
-    is for ``target_actor_id_hex``.
+    returned ``{"count": N}``. **Owner-only:** ``target_actor_id_hex`` must be
+    ``actor``'s own id — the nest refuses any other target with
+    ``fauna.conversations.permission_denied`` (``federation.md`` § Key packages
+    — privacy & exhaustion). Another account's readiness is
+    :func:`actor_addressable`'s boolean.
 
     ``scheme``: pass ``"https"`` for a ``serve_tls=True`` ``port`` (see ``channel_send``).
     """
@@ -264,6 +267,26 @@ def keypackage_count(
         {"actor_id": target_actor_id_hex},
     )
     return reply["count"]
+
+
+def actor_addressable(
+    port: int, actor: dict, target_actor_id_hex: str, *, scheme: str | None = None
+) -> bool:
+    """``fauna.conversations.keypackage.addressable`` — whether ``target`` can be reached.
+
+    ``True`` while the target holds ≥1 usable key package, one-time **or**
+    last-resort (the same predicate as ``fauna.actor.by_handle``'s
+    ``addressable`` bit). A pure read: consumes nothing, discloses no count.
+    ``actor`` is the (User-class) caller.
+
+    ``scheme``: pass ``"https"`` for a ``serve_tls=True`` ``port`` (see ``channel_send``).
+    """
+    client = _client_for(_base_url(port, scheme), actor)
+    reply = client.call(
+        "fauna.conversations.keypackage.addressable",
+        {"actor_id": target_actor_id_hex},
+    )
+    return bool(reply["addressable"])
 
 
 def keypackage_fetch(
@@ -444,7 +467,7 @@ def _ensure_keypkg_bin() -> Path:
     global _KEYPKG_BIN
     if _KEYPKG_BIN is not None:
         return _KEYPKG_BIN
-    from common.nest import _cargo_cmd, get_repo_root
+    from common.nest import _build_slot_cmd, _cargo_cmd, get_repo_root
     repo_root = get_repo_root()
     cargo_target = os.environ.get("CARGO_TARGET_DIR")
     # `.exe` on Windows — without it the built binary is never found and the
@@ -467,8 +490,16 @@ def _ensure_keypkg_bin() -> Path:
     # Cargo no-ops when fresh. `_cargo_cmd` routes through
     # `scripts/cargo-win.cmd` on Windows, where a bare `cargo` picks up Git Bash's
     # `/usr/bin/link.exe` instead of the MSVC linker.
+    # Slot-wrapped like every other e2e cargo build (`_build_slot_cmd`; a warm
+    # build takes the slot for a no-op, an externally held slot runs directly).
+    # It stays in-test, not in `_prebuild_binaries`: it is a helper call whose
+    # cold cost is one small `fauna-mls` bin, and the slot wait is the bounded,
+    # loud kind (the collection-time hoist covers the 74-minute
+    # `recovery_fixture` case, `_ensure_recovery_fixture_built`).
     subprocess.run(
-        _cargo_cmd(repo_root) + ["build", "-p", "fauna-mls", "--bin", "mls-keypackage-gen"],
+        _build_slot_cmd(repo_root)
+        + _cargo_cmd(repo_root)
+        + ["build", "-p", "fauna-mls", "--bin", "mls-keypackage-gen"],
         cwd=repo_root,
         check=True,
     )
@@ -510,7 +541,7 @@ def _ensure_group_gen_bin() -> Path:
     global _GROUP_GEN_BIN
     if _GROUP_GEN_BIN is not None:
         return _GROUP_GEN_BIN
-    from common.nest import _cargo_cmd, get_repo_root
+    from common.nest import _build_slot_cmd, _cargo_cmd, get_repo_root
     repo_root = get_repo_root()
     cargo_target = os.environ.get("CARGO_TARGET_DIR")
     # `.exe` on Windows — without it the built binary is never found and the
@@ -530,8 +561,16 @@ def _ensure_group_gen_bin() -> Path:
     # `_cargo_cmd` routes through `scripts/cargo-win.cmd` on Windows, where a bare
     # `cargo` picks up Git Bash's `/usr/bin/link.exe` instead of the MSVC
     # linker.
+    # Slot-wrapped; in-test by the same reasoning as `_ensure_keypkg_bin`.
+    # `test-helpers` compiles in the `--future-body` mode (``FUTURE_BODY``):
+    # its raw sealer exists only in that feature's builds.
     subprocess.run(
-        _cargo_cmd(repo_root) + ["build", "-p", "fauna-mls", "--bin", "mls-group-gen"],
+        _build_slot_cmd(repo_root)
+        + _cargo_cmd(repo_root)
+        + [
+            "build", "-p", "fauna-mls", "--bin", "mls-group-gen",
+            "--features", "test-helpers",
+        ],
         cwd=repo_root,
         check=True,
     )
@@ -592,6 +631,12 @@ def mint_group_welcome_with_message(
     return channel_id_hex, welcome_bytes, envelope
 
 
+#: A ``bodies`` entry for :func:`mint_group_welcome_with_messages` that seals,
+#: at its place in the stream, a message of a kind a LATER build sends (a
+#: ``ChannelMessageBody`` variant this build has no arm for) instead of text.
+FUTURE_BODY = "--future-body"
+
+
 def mint_group_welcome_with_messages(
     sender_secret_bytes: bytes, recipient_keypackage_bytes: bytes, bodies: list[str]
 ) -> tuple[str, bytes, list[bytes]]:
@@ -601,7 +646,8 @@ def mint_group_welcome_with_messages(
     application envelope per body, in stream order, so a proof can post them at
     different moments (the read-state relaunch witness posts the second while
     the recipient's app is closed). Each is a distinct ``channel_send``; the
-    nest assigns their channel ``seq`` in post order.
+    nest assigns their channel ``seq`` in post order. A body equal to
+    :data:`FUTURE_BODY` is sealed as a later build's unknown message kind.
     """
     out = subprocess.run(
         [
@@ -697,10 +743,10 @@ def folder_share(
     ``scheme``: pass ``"https"`` for a ``serve_tls=True`` ``port`` (see ``channel_send``).
     """
     client = _client_for(_base_url(port, scheme), actor)
-    return client.call(
-        "fauna.folders.share",
-        {"name": name, "group_id": group_id_hex},
-    )
+    # By hash, so an app-created (sealed) set is found too (schema 114).
+    from helpers.set_names import addressed
+
+    return client.call("fauna.folders.share", addressed(name, group_id=group_id_hex))
 
 
 def folder_set_access(
@@ -718,7 +764,10 @@ def folder_set_access(
     ``scheme``: pass ``"https"`` for a ``serve_tls=True`` ``port`` (see ``channel_send``).
     """
     client = _client_for(_base_url(port, scheme), actor)
-    payload = {"name": name, "actor_id": member_actor_id_hex, "access": access}
+    # By hash, so an app-created (sealed) set is found too (schema 114).
+    from helpers.set_names import addressed
+
+    payload = addressed(name, actor_id=member_actor_id_hex, access=access)
     if byte_cap is not None:
         payload["byte_cap"] = byte_cap
     return client.call("fauna.folders.members.set_access", payload)
@@ -763,6 +812,41 @@ def folder_group_id_hex(
 
     row = find_set(reply.get("folders", []), name)
     return row.get("mls_group_id") if row else None
+
+
+def folder_row_id(port: int, actor: dict, name: str, *, scheme: str | None = None) -> int | None:
+    """The control-plane row id of ``actor``'s own set ``name``, off
+    ``fauna.folders.list`` — ``None`` while no such set exists. The identity a
+    member's Media page addresses that set by (``local:<id>``, ``media.md``
+    § Encryption at rest → *The filter and the upload target address the
+    row*); read here as the stored fact, never derived."""
+    client = _client_for(_base_url(port, scheme), actor)
+    reply = client.call("fauna.folders.list", {})
+    from helpers.set_names import find_set
+
+    row = find_set(reply.get("folders", []), name)
+    return int(row["id"]) if row and row.get("id") is not None else None
+
+
+def folder_rows(port: int, actor: dict, *, scheme: str | None = None) -> list[dict]:
+    """``actor``'s ``fauna.folders.list`` rows WITH the member-visible
+    projection (``include_shared_with_me``), each cut to the fields a red needs
+    to read: id, role, access, owner handle, whether a name and a group id
+    are present. A diagnosis read — the stored facts, never a stand-in for the
+    app's own view."""
+    client = _client_for(_base_url(port, scheme), actor)
+    reply = client.call("fauna.folders.list", {"include_shared_with_me": True})
+    return [
+        {
+            "id": r.get("id"),
+            "role": r.get("role"),
+            "access": r.get("access"),
+            "owner_handle": r.get("owner_handle"),
+            "name": r.get("name") or ("<sealed>" if r.get("name_sealed") else ""),
+            "grouped": bool(r.get("mls_group_id")),
+        }
+        for r in reply.get("folders", [])
+    ]
 
 
 # ── inbox (Welcome delivery observation) ─────────────────────────────────────

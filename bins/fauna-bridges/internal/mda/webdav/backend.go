@@ -534,6 +534,13 @@ func (b *Backend) Open(ctx context.Context, name string) (io.ReadCloser, error) 
 	return readSeekCloser{bytes.NewReader(data)}, nil
 }
 
+// errNoGeneration is the one answer for a row listed with no content-key
+// generation, whether a GET would open it or a COPY/MOVE would re-record it: a
+// 503, since the served re-seal walk may yet stamp it.
+func errNoGeneration(file *wsrpc.WebdavFile) error {
+	return webdav.NewHTTPError(http.StatusServiceUnavailable, fmt.Errorf("webdav: file %q has no content-key generation", file.Path))
+}
+
 // readFileBytes fetches a file's manifest + ciphertext chunks by store key and
 // opens them through the apps' SHARED walk (`WebdavOpenFile` →
 // `fauna_core::file_download::download_file_bytes_by_manifest`): generation
@@ -545,7 +552,7 @@ func (b *Backend) Open(ctx context.Context, name string) (io.ReadCloser, error) 
 // its compression frame bytes.
 func (b *Backend) readFileBytes(ctx context.Context, served faunaFfi.FfiServedSetKeys, file *wsrpc.WebdavFile) ([]byte, error) {
 	if file.ContentKeyVersion == nil {
-		return nil, webdav.NewHTTPError(http.StatusServiceUnavailable, fmt.Errorf("webdav: file %q has no content-key generation", file.Path))
+		return nil, errNoGeneration(file)
 	}
 
 	manifestBytes, err := b.bytes.DownloadManifest(ctx, file.ManifestHash)
@@ -827,14 +834,6 @@ func (b *Backend) copyOrMove(ctx context.Context, name, dest string, isMove bool
 		return false, webdav.NewHTTPError(http.StatusForbidden, errors.New("webdav: cross-set COPY/MOVE is not supported (v1)"))
 	}
 
-	served, ok, err := b.writableSet(ctx, sess, dst.set)
-	if err != nil {
-		return false, err
-	}
-	if !ok {
-		return false, webdav.NewHTTPError(http.StatusForbidden, fmt.Errorf("webdav: set %q is read-only", dst.set))
-	}
-
 	files, err := b.listFiles(ctx, sess, src.set)
 	if err != nil {
 		return false, mapErr(err)
@@ -843,21 +842,32 @@ func (b *Backend) copyOrMove(ctx context.Context, name, dest string, isMove bool
 	if !ok {
 		return false, webdav.NewHTTPError(http.StatusNotFound, fmt.Errorf("webdav: %q not found", src.rel))
 	}
+	// A row listed with no generation rests under the owner root until the
+	// served re-seal walk re-seals it (`writer-signed-change-records.md` ruling
+	// (7)(b)(i), rule (3)): refused as GET refuses it, before the keys are even
+	// unsealed. Stamping the copy with the current generation would name one
+	// its bytes were never sealed under, and a MOVE would then tombstone the
+	// only readable copy.
+	if file.ContentKeyVersion == nil {
+		return false, errNoGeneration(file)
+	}
+
+	served, ok, err := b.writableSet(ctx, sess, dst.set)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, webdav.NewHTTPError(http.StatusForbidden, fmt.Errorf("webdav: set %q is read-only", dst.set))
+	}
 	_, destExisted := findFile(files, dst.rel)
 
 	changeType := "create"
 	if destExisted {
 		changeType = "modify"
 	}
-	version := served.Keys.Current.Version
 	mh := file.ManifestHash
-	var cv *uint64
-	if file.ContentKeyVersion != nil {
-		cv = file.ContentKeyVersion // preserve the source generation for the copy
-	} else {
-		cv = &version
-	}
-	// Sealed under `current` even though `cv` may preserve the source
+	cv := file.ContentKeyVersion // the copy keeps the source's generation
+	// Sealed under `current` even though `cv` preserves the source
 	// generation — see sealRecordedPath on why the two are independent.
 	pathSealed, err := sealRecordedPath(served, dst.rel)
 	if err != nil {

@@ -48,6 +48,8 @@ pub enum FirstContactOutcome {
 
 pub struct AnonymousNestClient {
     dispatcher: Arc<RpcDispatcher>,
+    /// How the nest closed the connection, read when a request fails.
+    close: crate::ws::CloseSignal,
     kind_registry: Arc<KindRegistry>,
     /// What the capturing TLS verifier observed about the nest's leaf cert
     /// during the handshake (SPKI + WebPKI validity). Read after the auth
@@ -124,6 +126,7 @@ impl AnonymousNestClient {
         resolve: Option<std::net::SocketAddr>,
     ) -> Result<Self, AnonClientError> {
         let (adapter, captured) = crate::ws::connect_anonymous(nest_url, resolve).await?;
+        let close = adapter.close_signal();
         let (dispatcher, driver) = RpcDispatcher::new(adapter);
         // The wire `replay_forbidden` hint comes off this registry; a fresh
         // dispatcher has none attached, so without this every request would
@@ -132,6 +135,7 @@ impl AnonymousNestClient {
         let driver = tokio::spawn(driver);
         Ok(Self {
             dispatcher: Arc::new(dispatcher),
+            close,
             kind_registry,
             captured,
             driver,
@@ -404,7 +408,14 @@ impl AnonymousNestClient {
         // The shared fixed-dispatcher core (one copy across the anonymous +
         // one-shot authed clients — the native mirror of `fauna-rpc-wasm`'s
         // `dispatch_typed`).
-        crate::dispatch::request_typed(&self.dispatcher, &self.kind_registry, kind, payload).await
+        crate::dispatch::request_typed(
+            &self.dispatcher,
+            &self.close,
+            &self.kind_registry,
+            kind,
+            payload,
+        )
+        .await
     }
 }
 

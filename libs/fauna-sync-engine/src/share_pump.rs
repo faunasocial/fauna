@@ -81,11 +81,14 @@ pub trait ShareStoreDoors {
     /// cache's advertised endpoints re-bound through the shared hygiene
     /// (`fauna_peer_sync::discovery::share_dial_targets_from_rows`; `node_id`
     /// is the member's ACTOR key). The pump's per-set read. A local read —
-    /// never a network call.
+    /// never a network call. `own_relay_url` is the relay this seat was bound
+    /// with: a target's relay is attached only when the member advertises the
+    /// same one (`fauna_peer_sync::discovery::share_relay_attaches`).
     fn share_dial_targets(
         &self,
         channel_id: [u8; 32],
         lan_ips: Vec<std::net::Ipv4Addr>,
+        own_relay_url: Option<String>,
     ) -> impl std::future::Future<Output = anyhow::Result<Vec<fauna_peer_sync::discovery::PeerDialTarget>>>;
 }
 
@@ -108,15 +111,23 @@ impl ShareStoreDoors for AccountStoreHandle {
         &self,
         channel_id: [u8; 32],
         lan_ips: Vec<std::net::Ipv4Addr>,
+        own_relay_url: Option<String>,
     ) -> anyhow::Result<Vec<fauna_peer_sync::discovery::PeerDialTarget>> {
         let rows = self
             .states_of_kind(fauna_protocol::merge_policy::KIND_SHARE_ENDPOINTS)
             .await?;
-        fauna_peer_sync::discovery::share_dial_targets_from_rows(&rows, &channel_id, &lan_ips)
+        fauna_peer_sync::discovery::share_dial_targets_from_rows(
+            &rows,
+            &channel_id,
+            &lan_ips,
+            own_relay_url.as_deref(),
+        )
     }
 }
 use crate::db::SyncDb;
-use crate::peer_share_store::{ShareServeSource, spool_chunk_path, spool_manifest_path};
+use crate::peer_share_store::{
+    ShareServeSource, spool_capped_path, spool_chunk_path, spool_manifest_path,
+};
 use crate::share_body::BodySource;
 use crate::share_landing::{Landing, body_is_wanted, free_space, landing_fits};
 
@@ -291,6 +302,14 @@ pub struct SetPullOutcome {
     /// Their rows are walked and stay placeholders; the nest path, or a later
     /// pass on a direct path, lands the bytes — deferred, never failed.
     pub relay_deferred: u32,
+    /// `Some` when the per-operation cap kept at least one file's body out of
+    /// this pull — priced over the cap on the row's claimed size, or stopped
+    /// on arrival. Unlike [`Self::refusal`] it never stops the page: the file's
+    /// row lands without its body (a spool miss) and the cursor advances, so
+    /// one oversized file cannot hold back the files behind it (`p2p.md`
+    /// § Wormability walk, rule 8 — the per-operation rule). The first such
+    /// verdict, for the surface's "limited by …" reading.
+    pub capped: Option<fauna_core::feature_gate::FeatureVerdict>,
 }
 
 /// One full pull pass: every spec × every cached dial target. Per-target
@@ -324,7 +343,11 @@ pub async fn pull_pass(
     let mut out = Vec::new();
     for spec in specs {
         let targets = match account
-            .share_dial_targets(spec.set_id, lan_ips.to_vec())
+            .share_dial_targets(
+                spec.set_id,
+                lan_ips.to_vec(),
+                node.relay_url().map(str::to_owned),
+            )
             .await
         {
             Ok(t) => t,
@@ -542,15 +565,23 @@ pub async fn pull_set_from_peer(
         } else {
             plan
         };
+        let PricedPlan {
+            fetches: plan,
+            verdict,
+            capped,
+            capped_out,
+        } = price_plan(policy, ledger, today, &peer_hex, plan);
+        if let Some(capped) = capped {
+            tracing::warn!(
+                folder = %fauna_core::log_redact::log_folder_name(&spec.folder),
+                peer = %&peer_hex[..16],
+                tier = ?capped.binding_tier(),
+                verdict = ?capped,
+                "share pump: a planned file is over the per-operation cap; its row lands without the body"
+            );
+            outcome.capped.get_or_insert(capped);
+        }
         let planned_volume: u64 = plan.iter().map(|p| p.size).fold(0, u64::saturating_add);
-        let verdict = transfer_verdict(
-            policy,
-            ledger,
-            today,
-            &peer_hex,
-            plan.len() as u64,
-            planned_volume,
-        );
         if !verdict.is_allowed() {
             // The surface renders the reason and the next window retries —
             // but only the app's surface does, and a headless run (the e2e
@@ -573,7 +604,22 @@ pub async fn pull_set_from_peer(
             &hex::encode(spec.set_id)[..16],
             &peer_hex[..16]
         ));
-        let spent = spool_planned(&fetcher, &plan, &spool).await?;
+        let spent = spool_planned(&fetcher, &plan, &spool, policy.per_operation_max).await?;
+        // A file the plan's cap dropped is a PERMANENT miss for the ingest,
+        // or it would hold the cursor below the row and every later pass
+        // would re-list the page the cap refuses again (`spool_capped_path`).
+        for manifest_hash in &capped_out {
+            mark_spool_capped(&spool, manifest_hash).await?;
+        }
+        if let Some(capped) = spent.capped {
+            tracing::warn!(
+                folder = %fauna_core::log_redact::log_folder_name(&spec.folder),
+                peer = %&peer_hex[..16],
+                verdict = ?capped,
+                "share pump: a body passed the per-operation cap on arrival; stopped and metered, its row lands without it"
+            );
+            outcome.capped.get_or_insert(capped);
+        }
 
         let rows_encoded: Vec<Vec<u8>> = page
             .accepted
@@ -758,6 +804,10 @@ pub struct SpoolSpend {
     /// twice by one manifest is counted per reference - over-counting against
     /// the counterparty is the sanctioned direction.
     pub bytes: u64,
+    /// The first body the per-operation cap stopped on arrival, as the
+    /// verdict naming the cap and the bytes seen when it tripped. Its bytes
+    /// are in [`Self::bytes`]; it is not in [`Self::files`] (no body landed).
+    pub capped: Option<fauna_core::feature_gate::FeatureVerdict>,
 }
 
 /// Pre-fetch the planned manifest + chunk bodies into `spool`, returning what
@@ -781,6 +831,7 @@ async fn spool_planned(
     fetcher: &dyn fauna_core::file_download::BlobFetcher,
     plan: &[PlannedFetch],
     spool: &Path,
+    cap: Option<fauna_core::feature_gate::BoundSource>,
 ) -> Result<SpoolSpend> {
     tokio::fs::create_dir_all(spool.join("manifests")).await?;
     tokio::fs::create_dir_all(spool.join("chunks")).await?;
@@ -819,7 +870,30 @@ async fn spool_planned(
             continue;
         };
         let store_keys = manifest.store_keys();
-        let bodies = match fetcher.fetch_chunks(&store_keys, &entry.context).await {
+        let bodies = match cap {
+            None => fetcher.fetch_chunks(&store_keys, &entry.context).await,
+            Some(cap) => {
+                match fetch_within_cap(
+                    fetcher,
+                    &store_keys,
+                    entry,
+                    manifest_bytes.len() as u64,
+                    manifest.total_size,
+                    cap,
+                    &mut spent,
+                )
+                .await
+                {
+                    Some(fetched) => fetched,
+                    None => {
+                        // Stopped by the cap; its bytes are already metered.
+                        mark_spool_capped(spool, &entry.manifest_hash).await?;
+                        continue;
+                    }
+                }
+            }
+        };
+        let bodies = match bodies {
             Ok(b) => b,
             Err(e) => {
                 // A failed pull still moved bytes, and a peer that fails every
@@ -832,9 +906,12 @@ async fn spool_planned(
                 continue;
             }
         };
-        spent.bytes = bodies
-            .iter()
-            .fold(spent.bytes, |acc, b| acc.saturating_add(b.len() as u64));
+        if cap.is_none() {
+            // The capped path meters each body as it arrives.
+            spent.bytes = bodies
+                .iter()
+                .fold(spent.bytes, |acc, b| acc.saturating_add(b.len() as u64));
+        }
         spent.files = spent.files.saturating_add(1);
         tokio::fs::write(&manifest_path, &manifest_bytes).await?;
         for (key, body) in store_keys.iter().zip(bodies) {
@@ -842,6 +919,88 @@ async fn spool_planned(
         }
     }
     Ok(spent)
+}
+
+/// Mark `manifest_hash` capped in `spool`: the ingest's
+/// [`crate::peer_share_store::SpoolFetcher`] then answers it with a permanent
+/// miss, so its row lands without the body and the cursor passes it
+/// (`p2p.md` § Cross-user shared-set transfer, the metering paragraph).
+async fn mark_spool_capped(spool: &Path, manifest_hash: &ContentHash) -> Result<()> {
+    let marker = spool_capped_path(spool, manifest_hash);
+    if let Some(dir) = marker.parent() {
+        tokio::fs::create_dir_all(dir).await?;
+    }
+    tokio::fs::write(&marker, b"").await?;
+    Ok(())
+}
+
+/// One planned file's chunk pull under a per-operation cap: refused before any
+/// chunk when the manifest itself claims more than the cap, otherwise pulled
+/// one chunk at a time and stopped at the first body that takes the bytes
+/// seen for this file (manifest included - the meter's own unit) over the cap.
+/// Every arrived body is metered into `spent` as it lands. `None` = the cap
+/// stopped the file (recorded in [`SpoolSpend::capped`]; nothing is spooled);
+/// `Some` = the pull's result, as [`BlobFetcher::fetch_chunks`] would give it.
+///
+/// One chunk at a time is what makes the stop land mid-file rather than after
+/// it: the overshoot is at most one chunk body. Taken only while a cap is set
+/// - the uncapped path keeps the fetcher's own batching.
+///
+/// [`BlobFetcher::fetch_chunks`]: fauna_core::file_download::BlobFetcher::fetch_chunks
+async fn fetch_within_cap(
+    fetcher: &dyn fauna_core::file_download::BlobFetcher,
+    store_keys: &[ContentHash],
+    entry: &PlannedFetch,
+    manifest_len: u64,
+    claimed_total: u64,
+    cap: fauna_core::feature_gate::BoundSource,
+    spent: &mut SpoolSpend,
+) -> Option<Result<Vec<Vec<u8>>>> {
+    let mut seen = manifest_len;
+    let stop = |seen: u64, spent: &mut SpoolSpend| {
+        tracing::debug!(
+            path = %fauna_core::log_redact::log_path(&entry.context),
+            seen,
+            cap = cap.limit,
+            "spool: body over the per-operation cap; stopped"
+        );
+        spent.capped.get_or_insert(per_operation_refusal(cap, seen));
+    };
+    // The manifest's own claim is the second the peer makes, after the row's;
+    // an honest one over the cap costs no chunk.
+    if claimed_total > cap.limit || seen > cap.limit {
+        stop(seen.max(claimed_total), spent);
+        return None;
+    }
+    let mut bodies = Vec::with_capacity(store_keys.len());
+    for key in store_keys {
+        let mut one = match fetcher
+            .fetch_chunks(std::slice::from_ref(key), &entry.context)
+            .await
+        {
+            Ok(one) => one,
+            // The caller's failure arm charges what the failed pull moved.
+            Err(e) => return Some(Err(e)),
+        };
+        let arrived = one
+            .iter()
+            .map(|b| b.len() as u64)
+            .fold(0, u64::saturating_add);
+        spent.bytes = spent.bytes.saturating_add(arrived);
+        seen = seen.saturating_add(arrived);
+        if seen > cap.limit {
+            stop(seen, spent);
+            return None;
+        }
+        if one.len() != 1 {
+            return Some(Err(anyhow::anyhow!(
+                "the fetcher answered one chunk with {} bodies",
+                one.len()
+            )));
+        }
+        bodies.push(one.remove(0));
+    }
+    Some(Ok(bodies))
 }
 
 pub(crate) fn parse_hash(hex_str: &str) -> Option<ContentHash> {
@@ -954,6 +1113,89 @@ impl TransferUsageLedger {
     }
 }
 
+/// A page's fetch plan after the transfer gate has priced it.
+pub struct PricedPlan {
+    /// The fetches the page may make: every planned file within the
+    /// per-operation cap.
+    pub fetches: Vec<PlannedFetch>,
+    /// The page verdict over [`Self::fetches`]; a refusal stops the page.
+    pub verdict: fauna_core::feature_gate::FeatureVerdict,
+    /// The first planned file whose claimed size is over the per-operation
+    /// cap, as the verdict naming it. Such a file is dropped from the plan,
+    /// never the page ([`SetPullOutcome::capped`]).
+    pub capped: Option<fauna_core::feature_gate::FeatureVerdict>,
+    /// Every manifest dropped for being over the cap — the pump marks each
+    /// capped in the page's spool, so the ingest skips its row for good
+    /// instead of holding the cursor for it.
+    pub capped_out: Vec<ContentHash>,
+}
+
+/// Price one page's plan at the transfer gate, before any byte moves.
+///
+/// One operation is one file, so the per-operation cap is put to each planned
+/// file on its own: a file whose claimed size is over the cap leaves the plan
+/// (its row lands without the body, as on any spool miss, and the cursor
+/// advances), and the page is priced over the files that remain - their sum
+/// against the windows, their largest against the cap. The claimed sizes are
+/// the counterparty's assertion, so this only pre-authorises: the cap is
+/// enforced again on arrival ([`spool_planned`]).
+pub fn price_plan(
+    policy: &fauna_core::feature_gate::EffectivePolicy,
+    ledger: &TransferUsageLedger,
+    today: i64,
+    peer_hex: &str,
+    plan: Vec<PlannedFetch>,
+) -> PricedPlan {
+    let mut capped = None;
+    let mut capped_out = Vec::new();
+    let fetches: Vec<PlannedFetch> = match policy.per_operation_max {
+        None => plan,
+        Some(cap) => plan
+            .into_iter()
+            .filter(|p| {
+                if p.size <= cap.limit {
+                    return true;
+                }
+                capped.get_or_insert(per_operation_refusal(cap, p.size));
+                capped_out.push(p.manifest_hash);
+                false
+            })
+            .collect(),
+    };
+    let volume: u64 = fetches.iter().map(|p| p.size).fold(0, u64::saturating_add);
+    let largest = fetches.iter().map(|p| p.size).max().unwrap_or(0);
+    let verdict = transfer_verdict(
+        policy,
+        ledger,
+        today,
+        peer_hex,
+        fetches.len() as u64,
+        volume,
+        largest,
+    );
+    PricedPlan {
+        fetches,
+        verdict,
+        capped,
+        capped_out,
+    }
+}
+
+/// The verdict for one file the per-operation cap stops - the shape
+/// [`fauna_core::feature_gate::feature_verdict`] gives the cap's own refusal.
+fn per_operation_refusal(
+    cap: fauna_core::feature_gate::BoundSource,
+    observed: u64,
+) -> fauna_core::feature_gate::FeatureVerdict {
+    fauna_core::feature_gate::FeatureVerdict::OverQuota {
+        dimension: fauna_core::feature_gate::QuotaDimension::Volume,
+        window: None,
+        limit: cap.limit,
+        observed,
+        tier: cap.tier,
+    }
+}
+
 /// The transfer gate's verdict for one prospective page: the ONE shared
 /// verdict function over the effective policy (nest-served when reachable;
 /// the caller falls back to the artifact's tier-1 constants offline —
@@ -965,6 +1207,7 @@ pub fn transfer_verdict(
     peer_hex: &str,
     files: u64,
     volume: u64,
+    largest: u64,
 ) -> fauna_core::feature_gate::FeatureVerdict {
     use fauna_core::feature_gate::{GateOp, GatedFeature, entry, feature_verdict};
     // One operation = one file transfer (the ruling this composition makes:
@@ -974,11 +1217,22 @@ pub fn transfer_verdict(
     // so the whole page either fits or names the bound it trips. A page
     // moving nothing (all-deletes) still consults availability — a Deny
     // stops the plane, not just its bytes.
+    //
+    // Volume folds the same way, and for the same reason the per-operation
+    // cap needs it to: the op evaluated is the page's LARGEST file, so its
+    // magnitude is what the cap is put to, and the rest of the page's volume
+    // rides the observed counters - every window still sees the whole sum,
+    // the cap sees one file (`p2p.md` § Wormability walk, rule 8).
     let mut scratch = ledger.usage_counters(today);
     let extra_ops = files.saturating_sub(1);
     scratch.operations.day = scratch.operations.day.saturating_add(extra_ops);
     scratch.operations.week = scratch.operations.week.saturating_add(extra_ops);
     scratch.operations.month = scratch.operations.month.saturating_add(extra_ops);
+    let largest = largest.min(volume);
+    let extra_volume = volume - largest;
+    scratch.volume.day = scratch.volume.day.saturating_add(extra_volume);
+    scratch.volume.week = scratch.volume.week.saturating_add(extra_volume);
+    scratch.volume.month = scratch.volume.month.saturating_add(extra_volume);
     let op = GateOp {
         feature: GatedFeature::P2pShare,
         surface: fauna_core::feature_gate::SURFACE_P2P_SHARE_TRANSFER,
@@ -987,7 +1241,7 @@ pub fn transfer_verdict(
         } else {
             0
         },
-        magnitude: volume,
+        magnitude: largest,
     };
     feature_verdict(entry(GatedFeature::P2pShare), policy, &scratch, &op)
 }
@@ -1016,13 +1270,21 @@ pub const ADVERTISE_FLOOR_SECS: u64 = 3600;
 /// must exercise the floor's HEAL without waiting production's hour), else
 /// [`ADVERTISE_FLOOR_SECS`]. The floor is the only re-send an advertisement
 /// lost in flight ever gets (best-effort by design), so the e2e knob is what
-/// makes single-shot loss a latency, never a test verdict.
+/// makes single-shot loss a latency, never a test verdict. Compile-gated outer,
+/// env inner (convention 15, the `always_resident::rescan_interval` pair): a
+/// production release build never reads the var.
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
 pub fn advertise_floor_secs() -> u64 {
     std::env::var("FAUNA_SHARE_ADVERTISE_FLOOR_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|&secs| secs > 0)
         .unwrap_or(ADVERTISE_FLOOR_SECS)
+}
+
+#[cfg(not(any(debug_assertions, feature = "e2e-agent")))]
+pub fn advertise_floor_secs() -> u64 {
+    ADVERTISE_FLOOR_SECS
 }
 
 /// The publish decision + build, per pass: which sets are due (endpoints
@@ -1128,7 +1390,7 @@ mod transfer_gate_tests {
     #[test]
     fn spend_accumulates_and_a_peer_counts_once() {
         let mut ledger = TransferUsageLedger::default();
-        assert!(transfer_verdict(&tier1(), &ledger, TODAY, PEER, 3, 9_000).is_allowed());
+        assert!(transfer_verdict(&tier1(), &ledger, TODAY, PEER, 3, 9_000, 9_000).is_allowed());
 
         ledger.record(TODAY, PEER, 3, 9_000);
         let usage = ledger.usage_counters(TODAY);
@@ -1164,7 +1426,7 @@ mod transfer_gate_tests {
         let mut ledger = TransferUsageLedger::default();
         ledger.record(TODAY, PEER, ops_day, 1);
 
-        match transfer_verdict(&tier1(), &ledger, TODAY, PEER, 1, 1) {
+        match transfer_verdict(&tier1(), &ledger, TODAY, PEER, 1, 1, 1) {
             FeatureVerdict::OverQuota {
                 dimension,
                 window,
@@ -1178,7 +1440,7 @@ mod transfer_gate_tests {
             other => panic!("a spent day quota must refuse, got {other:?}"),
         }
         assert!(
-            transfer_verdict(&tier1(), &ledger, TODAY + 1, PEER, 1, 1).is_allowed(),
+            transfer_verdict(&tier1(), &ledger, TODAY + 1, PEER, 1, 1, 1).is_allowed(),
             "the next day's bucket has headroom again"
         );
     }
@@ -1193,8 +1455,93 @@ mod transfer_gate_tests {
             .per_day
             .unwrap();
         let ledger = TransferUsageLedger::default();
-        assert!(!transfer_verdict(&tier1(), &ledger, TODAY, PEER, ops_day + 1, 1).is_allowed());
-        assert!(transfer_verdict(&tier1(), &ledger, TODAY, PEER, ops_day, 1).is_allowed());
+        assert!(!transfer_verdict(&tier1(), &ledger, TODAY, PEER, ops_day + 1, 1, 1).is_allowed());
+        assert!(transfer_verdict(&tier1(), &ledger, TODAY, PEER, ops_day, 1, 1).is_allowed());
+    }
+
+    /// Tier 1 with a rule-setter's per-operation cap of `limit` bytes.
+    fn capped_at(limit: u64) -> fauna_core::feature_gate::EffectivePolicy {
+        fauna_core::feature_gate::EffectivePolicy {
+            per_operation_max: Some(fauna_core::feature_gate::BoundSource {
+                limit,
+                tier: fauna_core::feature_gate::RuleTier::Admin,
+            }),
+            ..tier1()
+        }
+    }
+
+    fn planned(size: u64, n: u8) -> PlannedFetch {
+        PlannedFetch {
+            manifest_hash: ContentHash::from_digest_raw([n; 32]),
+            size,
+            context: format!("file-{n}"),
+        }
+    }
+
+    /// ⚠ one operation is one file, so the per-operation cap is put
+    /// to each file, never to the page's sum. A page of five honest files
+    /// each well under the cap, together over it, is admitted whole — the old
+    /// form refused it, and since a refusal leaves the cursor where it was,
+    /// refused it again on every later pass.
+    #[test]
+    fn an_honest_page_of_files_under_the_cap_is_admitted_whatever_its_sum() {
+        let ledger = TransferUsageLedger::default();
+        let plan: Vec<PlannedFetch> = (0..5).map(|n| planned(400, n)).collect();
+        let priced = price_plan(&capped_at(1_000), &ledger, TODAY, PEER, plan);
+        assert!(
+            priced.verdict.is_allowed(),
+            "five 400-byte files under a 1000-byte cap: {:?}",
+            priced.verdict
+        );
+        assert_eq!(priced.fetches.len(), 5, "every file stays planned");
+        assert_eq!(priced.capped, None, "no file is over the cap");
+    }
+
+    /// A file whose claimed size is over the cap leaves the plan and the rest
+    /// of the page goes on: the page is not refused (the cursor still
+    /// advances), and the dropped file is named for the surface.
+    #[test]
+    fn a_file_over_the_cap_leaves_the_plan_never_the_page() {
+        let ledger = TransferUsageLedger::default();
+        let plan = vec![planned(400, 1), planned(5_000, 2), planned(400, 3)];
+        let priced = price_plan(&capped_at(1_000), &ledger, TODAY, PEER, plan);
+        assert!(priced.verdict.is_allowed(), "{:?}", priced.verdict);
+        let kept: Vec<&str> = priced.fetches.iter().map(|p| p.context.as_str()).collect();
+        assert_eq!(kept, ["file-1", "file-3"]);
+        assert_eq!(
+            priced.capped_out,
+            [planned(5_000, 2).manifest_hash],
+            "the dropped manifest is named for the spool's capped marker"
+        );
+        match priced.capped {
+            Some(FeatureVerdict::OverQuota {
+                dimension: QuotaDimension::Volume,
+                window: None,
+                limit: 1_000,
+                observed: 5_000,
+                ..
+            }) => {}
+            other => panic!("the over-cap file must be named, got {other:?}"),
+        }
+    }
+
+    /// The window bounds still see the whole page: folding the per-file
+    /// magnitude must not let a page's sum slip past a volume window.
+    #[test]
+    fn the_volume_windows_still_price_the_whole_page() {
+        let volume_day = entry(GatedFeature::P2pShare).tier1.volume.per_day.unwrap();
+        let ledger = TransferUsageLedger::default();
+        let half = volume_day / 2 + 1;
+        let plan = vec![planned(half, 1), planned(half, 2)];
+        let priced = price_plan(&tier1(), &ledger, TODAY, PEER, plan);
+        match priced.verdict {
+            FeatureVerdict::OverQuota {
+                dimension: QuotaDimension::Volume,
+                window: Some(Window::Day),
+                ..
+            } => {}
+            other => panic!("two halves over the day bound must refuse, got {other:?}"),
+        }
     }
 
     /// Buckets and seen-peers prune past the largest window — the ledger
@@ -1296,7 +1643,7 @@ mod spool_spend_tests {
             context: "some/file".to_string(),
         }];
 
-        let spent = spool_planned(&peer, &plan, dir.path())
+        let spent = spool_planned(&peer, &plan, dir.path(), None)
             .await
             .expect("spool the plan");
 
@@ -1357,7 +1704,7 @@ mod spool_spend_tests {
             context: "some/file".to_string(),
         }];
 
-        let spent = spool_planned(&peer, &plan, dir.path())
+        let spent = spool_planned(&peer, &plan, dir.path(), None)
             .await
             .expect("a failed entry skips, never fails the page");
 
@@ -1372,6 +1719,141 @@ mod spool_spend_tests {
             "manifest bytes plus the failed pull's arrived bytes"
         );
         assert_eq!(spent.files, 0, "no body completed");
+    }
+
+    /// A peer serving one file in `chunks` bodies of `chunk_len` bytes behind
+    /// a manifest that also lies — it declares one byte per chunk — so only
+    /// counting what arrives can tell the file's size. Counts the chunk bodies
+    /// it is asked for.
+    struct ManyChunkLiar {
+        manifest: Vec<u8>,
+        manifest_hash: ContentHash,
+        bodies: HashMap<ContentHash, Vec<u8>>,
+        served: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ManyChunkLiar {
+        fn new(chunks: u8, chunk_len: usize) -> Self {
+            let bodies: Vec<Vec<u8>> = (0..chunks).map(|i| vec![i; chunk_len]).collect();
+            let hashes: Vec<ContentHash> = bodies.iter().map(|b| ContentHash::of_raw(b)).collect();
+            let manifest = fauna_core::chunk::ChunkManifest {
+                file_hash: hashes[0],
+                total_size: u64::from(chunks),
+                chunk_hashes: hashes.clone(),
+                chunk_sizes: vec![1; usize::from(chunks)],
+                stored_hashes: None,
+                sealed_hashes: None,
+                min_reader: None,
+            };
+            let manifest = fauna_core::encoding::canonical_encode(&manifest)
+                .expect("encode manifest")
+                .to_vec();
+            Self {
+                manifest_hash: ContentHash::of_raw(&manifest),
+                manifest,
+                bodies: hashes.into_iter().zip(bodies).collect(),
+                served: Default::default(),
+            }
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl fauna_core::file_download::BlobFetcher for ManyChunkLiar {
+        async fn fetch_manifest(&self, _hash: &ContentHash) -> Result<Vec<u8>> {
+            Ok(self.manifest.clone())
+        }
+
+        async fn fetch_chunks(
+            &self,
+            store_keys: &[ContentHash],
+            _relative_path: &str,
+        ) -> Result<Vec<Vec<u8>>> {
+            self.served
+                .fetch_add(store_keys.len(), std::sync::atomic::Ordering::SeqCst);
+            Ok(store_keys.iter().map(|k| self.bodies[k].clone()).collect())
+        }
+    }
+
+    /// ⚠ the per-operation cap is enforced on what ARRIVES, not
+    /// only on what the peer claimed. A peer stamping `size_bytes: 0` on the
+    /// row (and one byte per chunk in its manifest) passes every pre-check; the
+    /// spool must stop the body once the bytes seen pass the cap, pull no
+    /// further chunk, land nothing, and still meter every byte that moved.
+    #[tokio::test]
+    async fn a_lying_peer_over_the_cap_is_stopped_on_arrival_and_metered() {
+        let chunk = 8 * 1024;
+        let peer = ManyChunkLiar::new(4, chunk);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan = vec![PlannedFetch {
+            manifest_hash: peer.manifest_hash,
+            size: 0, // the lie on the row
+            context: "big/file".to_string(),
+        }];
+        let cap = fauna_core::feature_gate::BoundSource {
+            limit: 12 * 1024,
+            tier: fauna_core::feature_gate::RuleTier::Admin,
+        };
+
+        let spent = spool_planned(&peer, &plan, dir.path(), Some(cap))
+            .await
+            .expect("a capped entry skips, never fails the page");
+
+        assert_eq!(spent.files, 0, "no body may land past the cap");
+        assert_eq!(
+            peer.served.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the pull stops at the first chunk that takes it over the cap"
+        );
+        assert_eq!(
+            spent.bytes,
+            peer.manifest.len() as u64 + 2 * chunk as u64,
+            "every byte that moved is metered, the stopped body's included"
+        );
+        match spent.capped {
+            Some(fauna_core::feature_gate::FeatureVerdict::OverQuota {
+                window: None,
+                limit,
+                observed,
+                ..
+            }) => {
+                assert_eq!(limit, cap.limit);
+                assert!(observed > cap.limit, "observed {observed}");
+            }
+            other => panic!("the stop must name the cap, got {other:?}"),
+        }
+        assert!(
+            !spool_manifest_path(dir.path(), &peer.manifest_hash).exists(),
+            "a stopped body leaves nothing in the spool for the ingest to land"
+        );
+        // ...and marks the miss capped, so the ingest skips the row for good.
+        let ingest_side = crate::peer_share_store::SpoolFetcher::new(dir.path().to_path_buf());
+        let miss = fauna_core::file_download::BlobFetcher::fetch_manifest(
+            &ingest_side,
+            &peer.manifest_hash,
+        )
+        .await
+        .expect_err("a capped body is a spool miss");
+        assert_eq!(
+            fauna_core::apply_failure::permanent_reason(&miss),
+            Some(fauna_core::apply_failure::PermanentApplyFailure::PER_OPERATION_CAP.reason),
+            "a capped miss is permanent: {miss:#}"
+        );
+
+        // Without a cap the same peer's file spools whole (the cap is the
+        // only thing that stopped it).
+        let open = ManyChunkLiar::new(4, chunk);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan = vec![PlannedFetch {
+            manifest_hash: open.manifest_hash,
+            size: 0,
+            context: "big/file".to_string(),
+        }];
+        let spent = spool_planned(&open, &plan, dir.path(), None)
+            .await
+            .expect("spool");
+        assert_eq!(spent.files, 1);
+        assert_eq!(spent.capped, None);
     }
 
     fn row(path: &str) -> PeerShareChange {

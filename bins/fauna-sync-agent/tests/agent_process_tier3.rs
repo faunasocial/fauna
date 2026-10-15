@@ -797,6 +797,174 @@ async fn a_refused_device_leg_ends_the_credential_while_the_app_bearer_still_wor
     agent.kill_uncleanly();
 }
 
+/// **A refused agent recovers when the user signs in again — the evidence
+/// probe's own mint, against the real binary and a real nest**
+/// (`sync-agent-credentials.md` § Credential model → *A refused renewal is
+/// terminal*, its sub-bullets *A refused agent asks the nest again in exactly
+/// two cases* and *Recovery is the user signing in again on the machine*).
+///
+/// `renewal::tests` pins the decision and each arm's effect apart; this is the
+/// whole recovery, read off the agent's own report (`needs_reenrollment`):
+/// the machine is refused; an app's pushed bearer re-arms the slot but leaves
+/// the report standing (the sticky report); the app's enrollment pass then
+/// re-enrolls the machine, and the next `RefreshBearer` wakes the loop, which
+/// reads the changed evidence from the credential slot, probes, mints and
+/// clears the report.
+///
+/// The clearing budget sits far below the bearer's renewal lead (an hour-long
+/// bearer), so the ordinary schedule cannot satisfy it — only the probe can.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_agent_clears_its_report_once_the_machine_is_enrolled_again() {
+    /// Far below the bearer's renewal lead, so only the leg's report (on the
+    /// way in) and the evidence probe (on the way out) can satisfy it.
+    const REFUSAL_BUDGET: Duration = Duration::from_secs(90);
+
+    let nest = start_test_nest(OWNER_SECRET).await;
+    let (nest_url, bearer) = (nest.base_url.clone(), nest.http_token.clone());
+    let world = AgentWorld::new("fauna-agent-t3-");
+    let socket = world.socket_path();
+    let keypair = ActorKeypair::from_secret(OWNER_SECRET);
+    let actor_hex = hex::encode(keypair.actor_id().0);
+    let named_row = hex::encode(DEVICE_ID);
+    let report = |socket: &std::path::Path| match expect_ok(socket, RequestMethod::GetServiceStatus)
+    {
+        ResponsePayload::ServiceStatus(status) => status,
+        other => panic!("GetServiceStatus answered {other:?}"),
+    };
+
+    // ── 1: enrolled, provisioned with the app's session an hour from expiry,
+    // the store principal advertised — and not refused.
+    common::enroll_as_w5_app(
+        OWNER_SECRET,
+        &world,
+        &nest_url,
+        &actor_hex,
+        Some((&named_row, "test machine")),
+        named_row.clone(),
+    )
+    .await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut agent = world.spawn_agent();
+    await_agent(&socket);
+    expect_ok(
+        &socket,
+        RequestMethod::ProvisionCapability(SyncCapability::new(
+            vec![0x11; 32],
+            keypair.actor_id().0.to_vec(),
+            nest_url.clone(),
+            named_row.clone(),
+            BearerToken::new(bearer.clone(), now + 3600),
+        )),
+    );
+    let deadline = Instant::now() + MOUNT_BUDGET;
+    loop {
+        let status = report(&socket);
+        if status.store_principal_actor.as_deref() == Some(actor_hex.as_str()) {
+            assert!(
+                !status.needs_reenrollment,
+                "an enrolled machine must not read refused before the gesture"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the agent never advertised the store principal within {MOUNT_BUDGET:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let refused_principal = fauna_sync_engine::principal_bundle::load_writer_key(
+        &world.shared_credentials(),
+        &actor_hex,
+    )
+    .expect("the enrollment left this machine's writer key in the T10 slot")
+    .verifying_key()
+    .to_bytes();
+
+    // ── 2: the machine's row deleted from "another device" — the agent
+    // reports it.
+    let app_client =
+        fauna_client::NestClient::new(nest_url.clone(), ActorKeypair::from_secret(OWNER_SECRET));
+    app_client.connect().await.expect("the app's nest connect");
+    let sync = fauna_client_sync::SyncClient::new(app_client.as_ref());
+    assert!(
+        sync.devices_delete(named_row.clone())
+            .await
+            .expect("devices.delete")
+            .deleted
+    );
+    let deadline = Instant::now() + REFUSAL_BUDGET;
+    while !report(&socket).needs_reenrollment {
+        assert!(
+            Instant::now() < deadline,
+            "the agent never reported the refusal within {REFUSAL_BUDGET:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    // ── 3: an app pushes its still-valid session — the slot re-arms, the
+    // report stands (the handler answers only after it re-armed and woke the
+    // loop).
+    expect_ok(
+        &socket,
+        RequestMethod::RefreshBearer(BearerToken::new(bearer.clone(), now + 3600)),
+    );
+    assert!(
+        report(&socket).needs_reenrollment,
+        "a pushed bearer must never clear the report — only a mint under the \
+         machine's own principal does"
+    );
+
+    // ── 4: the user signs in again: the app's enrollment pass re-enrolls the
+    // machine, and the app's next push is the wake.
+    common::enroll_as_w5_app(
+        OWNER_SECRET,
+        &world,
+        &nest_url,
+        &actor_hex,
+        None,
+        named_row.clone(),
+    )
+    .await;
+    let enrolled_principal = fauna_sync_engine::principal_bundle::load_writer_key(
+        &world.shared_credentials(),
+        &actor_hex,
+    )
+    .expect("the re-enrollment leaves a writer key in the T10 slot");
+    fauna_anon_client::mint_bearer_over_device_handshake(
+        &nest_url,
+        keypair.actor_id().0,
+        &enrolled_principal,
+    )
+    .await
+    .expect("the re-enrollment must leave a principal the nest mints for");
+    assert_ne!(
+        enrolled_principal.verifying_key().to_bytes(),
+        refused_principal,
+        "re-enrolling a deleted machine mints a successor principal"
+    );
+    expect_ok(
+        &socket,
+        RequestMethod::RefreshBearer(BearerToken::new(bearer.clone(), now + 3600)),
+    );
+
+    // ── 5: the probe mints under the successor and the report clears.
+    let deadline = Instant::now() + REFUSAL_BUDGET;
+    while report(&socket).needs_reenrollment {
+        assert!(
+            Instant::now() < deadline,
+            "the machine was enrolled again but the agent still reports \
+             needs_reenrollment after {REFUSAL_BUDGET:?} — the evidence probe \
+             never minted under the new principal"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    agent.kill_uncleanly();
+}
+
 /// **A10's tier_3 proof — the onboarding-surface signed-out reconcile, against
 /// the REAL spawned agent** (`sync-agent.md` § Credential model → *The
 /// signed-out reconcile*, and § Sync agent → A10, whose "Owed" line names this

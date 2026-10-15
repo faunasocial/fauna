@@ -101,10 +101,28 @@ def _functions_reaching_rebind() -> set[str]:
     """Every function anywhere under tests/ or helpers/ that itself calls the
     rebind — so a consumer delegating to a shared preamble counts as covered."""
     covering: set[str] = set()
+    callers: dict[str, set[str]] = {}
     for path in sorted(_TESTS_DIR.glob("*.py")) + sorted(_HELPERS_DIR.glob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text())):
-            if isinstance(node, ast.FunctionDef) and _REBIND in ast.dump(node):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if _REBIND in ast.dump(node):
                 covering.add(node.name)
+            callers.setdefault(node.name, set()).update(
+                getattr(c.func, "id", None) or getattr(c.func, "attr", None)
+                for c in ast.walk(node)
+                if isinstance(c, ast.Call)
+            )
+    # Transitive: a module-private preamble (`_connect_journey`) that calls a
+    # covering function covers the tests that delegate to it — "reaching", not
+    # "containing".
+    grew = True
+    while grew:
+        grew = False
+        for name, called in callers.items():
+            if name not in covering and called & covering:
+                covering.add(name)
+                grew = True
     return covering
 
 

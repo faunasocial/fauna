@@ -37,6 +37,7 @@ from common.auth import register_user
 from common.nest import start_nest_in_place, stop_nest
 from helpers import registry_audit
 from helpers.app_surface import skip_unbuilt
+from helpers.backup_destinations import DestinationEnrollment
 from helpers.budgets import UI_SETTLE_S
 
 # NOT `standalone_only` any more (2026-08-29), for the same reason as
@@ -124,7 +125,7 @@ def _wait_until_disabled(app, element_id: str, timeout: float = GATE_WAIT_S) -> 
     return False
 
 
-def _enroll_one_destination(app, second_nest, test_user):
+def _enroll_one_destination(app, request, nest_instance, second_nest, test_user):
     """Give the page a destination to act on, WHILE the nest is still up.
 
     Enrolling is itself online-only, so it has to happen before the outage this
@@ -142,14 +143,13 @@ def _enroll_one_destination(app, second_nest, test_user):
         )
     except Exception:
         pass
-    app.backups.navigate()
-    # `nest_instance`/`test_user` are session-scoped, so a sibling test in this
-    # file may already have enrolled one — any destination will do, this file
-    # never asserts on their contents. Adding unconditionally would race the
-    # row-count wait against a set that started non-empty.
-    if app.backups.destination_count() == 0:
-        app.backups.add_destination(second_nest["url"], name="Gate-proof")
-        app.backups.wait_for_destination_count(1)
+    # `nest_instance`/`test_user` are session-scoped, so earlier modules (and
+    # sibling tests here) may have left destinations on the user. Enroll exactly
+    # one, alone on the page, and remove it at teardown (registered first, so it
+    # runs after the remove modal's dismissal).
+    dest = DestinationEnrollment(app, nest_instance, test_user)
+    request.addfinalizer(dest.leave_none)
+    dest.add_destination(second_nest["url"], "Gate-proof")
 
 
 def _dismiss_remove_modal(app):
@@ -248,7 +248,7 @@ def test_online_only_control_desensitizes_with_no_nest_and_says_why(
         "should be connected after login"
     )
 
-    _enroll_one_destination(app, second_nest, test_user)
+    _enroll_one_destination(app, request, nest_instance, second_nest, test_user)
     _open_remove_modal(app)
     request.addfinalizer(lambda: _dismiss_remove_modal(app))
     assert app.driver.is_enabled("backup-destination-remove-confirm-button"), (
@@ -503,6 +503,11 @@ def test_a_user_facing_page_desensitizes_with_no_nest(logged_in_app, nest_instan
 # stays live because the gate never reaches it. That makes this the case that
 # would catch a windows gate written as a blanket page-level disable.
 @pytest.mark.windows
+# android joined: BackupDestinationsSection.kt gates the remove
+# modal's confirm (`confirmGate.enabled`) while the cancel button declares no gate,
+# the same pairing as tui/windows; the backups destination surface is built on
+# android (`require_destination_management_supported` never skips there).
+@pytest.mark.android
 @pytest.mark.feature("offline-aware-controls")
 def test_an_offline_capable_sibling_stays_live_beside_the_gated_one(
     logged_in_app, nest_instance, second_nest, test_user, request
@@ -518,7 +523,7 @@ def test_an_offline_capable_sibling_stays_live_beside_the_gated_one(
     _require_connection_status(app)
 
     assert _wait_for_status(app, connected=True, timeout=CONNECT_WAIT_S) == CONNECTED
-    _enroll_one_destination(app, second_nest, test_user)
+    _enroll_one_destination(app, request, nest_instance, second_nest, test_user)
     _open_remove_modal(app)
     request.addfinalizer(lambda: _dismiss_remove_modal(app))
 

@@ -206,6 +206,26 @@ pub async fn subscriptions_subscribe_publishing_ek(
         .try_into()
 }
 
+/// Publish the account's **subscriber encapsulation-key registry entry**
+/// (`post-quantum.md` § surface B): the identity-seed-derived ML-KEM-768 key an
+/// author wraps hybrid `KeyBlob` entries to. Call at every session start (the
+/// post-auth edge that refreshes the mail epoch schedule): idempotent, every
+/// device derives the same bytes, best-effort. The native twin of
+/// [`fauna_client_subscriptions::SubscriptionsClient::publish_encaps_key`] (the
+/// web SPA's twin is `fauna-wasm`'s `subscriptionsPublishEncapsKey`).
+/// `subscriber_secret` is the caller's own 32-byte identity seed.
+#[fauna_uniffi_async::export]
+pub async fn subscriptions_publish_encaps_key(
+    nest: Arc<FfiNestClient>,
+    subscriber_secret: Vec<u8>,
+) -> Result<(), FfiError> {
+    let subscriber = keypair_from_bytes(&subscriber_secret)?;
+    SubscriptionsClient::new(nest.nest_arc())
+        .publish_encaps_key(&subscriber)
+        .await
+        .map_err(general_err)
+}
+
 /// Re-drive every staged subscriber-removal whose upload was interrupted by a
 /// crash ([`SubscriptionsAuthor::resume_pending_removals`]). Call on client
 /// startup (and after a config sync that may have merged a peer device's

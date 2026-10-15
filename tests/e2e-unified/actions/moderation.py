@@ -79,6 +79,24 @@ class ModerationActions:
         self.driver.click("train-correction-button", index=index)
         time.sleep(1)
 
+    # ── A row's three facts (moderation.md § Element IDs → *Queue row facts*):
+    #    its category is the `content-label-badge` text, and the badge carries
+    #    the confidence and the action the row paints as `confidence` /
+    #    `action` attributes — the row's other text has no id of its own. ──
+
+    def row_category(self, index: int = 0) -> str:
+        """The category label the row at `index` paints on its badge."""
+        return self.driver.get_text("content-label-badge", index=index)
+
+    def row_confidence(self, index: int = 0) -> str | None:
+        """The confidence the row at `index` shows (e.g. ``"100%"``)."""
+        return self.driver.get_attr("content-label-badge", "confidence", index=index)
+
+    def row_action(self, index: int = 0) -> str | None:
+        """The action label the row at `index` shows, or ``None`` when the row
+        carries no action (a local detection)."""
+        return self.driver.get_attr("content-label-badge", "action", index=index)
+
     # ── Appeal (moderation.md § Legal takedown — the transparency triple's
     #    second leg). `appeal-button` is per-row and FLAT-indexed like
     #    `train-correction-button`; the form's ids are unindexed because only

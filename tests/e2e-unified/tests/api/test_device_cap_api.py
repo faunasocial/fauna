@@ -48,7 +48,7 @@ def _roster(ws) -> set[str]:
     return {d["device_id"] for d in ws.call("fauna.sync.devices.list", {}).get("devices", [])}
 
 
-@pytest.mark.feature("devices")
+@pytest.mark.feature("devices", "admin-tiers")
 def test_a_new_device_past_the_tier_cap_is_refused_and_a_held_one_re_registers(nest_instance):
     url = nest_instance["url"]
     port = nest_instance["port"]

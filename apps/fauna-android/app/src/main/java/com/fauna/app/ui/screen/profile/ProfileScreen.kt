@@ -94,6 +94,7 @@ fun ProfileScreen(
     val followWorking by vm.followWorking.collectAsState()
     val blocked by vm.blocked.collectAsState()
     val blockWorking by vm.blockWorking.collectAsState()
+    val blockKnown by vm.blockKnown.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
     val appMessages = LocalAppMessages.current
     // OTHER: the knock + the ward's guardian-ask pair; the durable asks are
@@ -200,6 +201,7 @@ fun ProfileScreen(
             ProfileSecondaryActionsRow(
                 blocked = blocked,
                 blockWorking = blockWorking,
+                blockKnown = blockKnown,
                 onStartDm = {
                     // Pure nav glue: seed the shared Conversations new-thread
                     // composer with the viewed actor and open it (mirrors the
@@ -311,6 +313,9 @@ fun ProfileScreen(
 fun ProfileSecondaryActionsRow(
     blocked: Boolean,
     blockWorking: Boolean,
+    // False until the open-time edge read lands: the toggle is disabled meanwhile
+    // (a press on the not-blocked default would re-send `knocks_block`).
+    blockKnown: Boolean = true,
     onStartDm: () -> Unit,
     onToggleBlock: () -> Unit,
     // The Block ⇄ Unblock wording comes from the shared `contact_toggle_block_label`
@@ -344,7 +349,7 @@ fun ProfileSecondaryActionsRow(
 
             OutlinedButton(
                 onClick = onToggleBlock,
-                enabled = !blockWorking,
+                enabled = blockKnown && !blockWorking,
                 modifier = Modifier.testTag(Ids.PROFILE_BLOCK_BUTTON),
             ) {
                 Text(blockLabel(blocked))

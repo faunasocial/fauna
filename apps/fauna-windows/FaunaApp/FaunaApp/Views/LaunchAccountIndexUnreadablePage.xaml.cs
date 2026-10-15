@@ -86,17 +86,22 @@ public sealed partial class LaunchAccountIndexUnreadablePage : Page
         // Concurrent instances → *An erase refuses while a sibling serves the
         // account*): OnConfirmStartOver's own first call,
         // App.ClearCredentialNamespace, releases actor-scoped state before it
-        // erases, so the gate has to sit here, at the confirm click. No new
-        // element — the refusal paints on this page's own verdict text (mirrors
-        // linux's launch screen, which paints the same refusal onto its
-        // per-phase warning label rather than a separate error-message).
+        // erases, so the gate has to sit here, at the confirm click. The refusal
+        // paints on the page's `error-message` (convention 2), as tui, linux and
+        // macOS do, and the verdict text and the confirm stay exactly as they
+        // were — closing the other window and confirming again is the remedy.
         using var registry = Services.CredentialStore.Registry();
         var blocked = FaunaFfiMethods.StartOverBlocked(registry, AccountStateDir.Base, null, null);
         if (blocked is not null)
         {
-            MessageText.Text = S.Resolve(blocked.line);
+            var line = S.Resolve(blocked.line);
+            ErrorText.Text = line;
+            ErrorText.Visibility = Visibility.Visible;
+            App.CurrentErrorMessage = line;
             return;
         }
+        ErrorText.Visibility = Visibility.Collapsed;
+        App.CurrentErrorMessage = null;
         _context?.OnConfirmStartOver();
     }
 }

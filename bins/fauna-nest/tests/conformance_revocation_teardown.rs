@@ -1504,6 +1504,32 @@ fn every_token_revocation_site_also_closes_the_live_sockets() {
             &["disconnect_principal"],
             1,
         ),
+        // Door (c), the grant-family twin: one family ending closes the
+        // principal sessions its tokens opened. The per-family endings — the
+        // user's per-grant revoke and `end_oauth_session` (behind
+        // `/oauth/revoke` and the bridge-class `end_session`) — and the reuse
+        // family-kill, keyed by its match arm because the kill itself is a
+        // storage-layer write with no `WsState` in reach.
+        (".revoke_atproto_session(", &["disconnect_grant_family"], 2),
+        (
+            "RefreshOutcome::ReuseDetected =>",
+            &["disconnect_grant_family"],
+            1,
+        ),
+        // The two forced arms close every principal session. The issuer-key
+        // arm is keyed by its module path: a bare `force_rotate(` matches the
+        // session-secret arm's `oauth_session_secret::force_rotate(` too,
+        // whose sweep is `end_nest_minted_oauth_grants`'s, one owner over.
+        (
+            ".end_nest_minted_oauth_grants(",
+            &["disconnect_all_principals"],
+            1,
+        ),
+        (
+            "oauth_issuer_key::force_rotate(",
+            &["disconnect_all_principals"],
+            1,
+        ),
     ];
 
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -1558,12 +1584,40 @@ fn every_token_revocation_site_also_closes_the_live_sockets() {
         .map(|p| (p, std::fs::read_to_string(p).expect("read source")))
         .collect();
 
+    // An out-of-line test module — `#[cfg(test)] mod tests;` in `x.rs`, its
+    // body in `x/tests.rs` — is test-only as a whole file, but nothing in that
+    // file says so, so the brace mask above reads it as production. Named
+    // here by its parent's own declaration (the attribute on the line before
+    // `mod tests;`), never by the file name alone: a `tests.rs` the parent
+    // declares without `#[cfg(test)]` stays guarded.
+    let test_only: std::collections::HashSet<std::path::PathBuf> = sources
+        .iter()
+        .filter(|(_, text)| {
+            let lines: Vec<&str> = text.lines().map(str::trim).collect();
+            lines
+                .windows(2)
+                .any(|w| w[0] == "#[cfg(test)]" && w[1] == "mod tests;")
+        })
+        .map(|(path, _)| {
+            let dir = path.parent().expect("a source file has a directory");
+            match path.file_stem().and_then(|s| s.to_str()) {
+                Some("mod" | "lib" | "main") => dir.join("tests.rs"),
+                Some(stem) => dir.join(stem).join("tests.rs"),
+                None => unreachable!("a `.rs` file has a stem"),
+            }
+        })
+        .collect();
+
     for (method, pairs_with, floor) in WATCHED {
         let mut sites = 0usize;
         let mut unpaired = Vec::new();
         for (path, text) in &sources {
             let lines: Vec<&str> = text.lines().collect();
-            let production = production_mask(&lines);
+            let production = if test_only.contains(*path) {
+                vec![false; lines.len()]
+            } else {
+                production_mask(&lines)
+            };
             for (i, line) in lines.iter().enumerate() {
                 // The `TokenStore` method itself, not the shared `AppState`
                 // helper that does both halves by construction, and not its

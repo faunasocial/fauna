@@ -42,6 +42,15 @@ use crate::pages::Page;
 /// sequence — leaving the driver's positional `index=i` addressing a *different*
 /// bridge than the pubkey-hex it matched. Every optional card field goes through
 /// here so each card contributes exactly one element per id.
+/// An epoch-millis audit timestamp in the shared fixed local form; unset (0)
+/// formats empty, for [`or_placeholder`].
+fn audit_time(epoch_millis: u64) -> String {
+    if epoch_millis == 0 {
+        return String::new();
+    }
+    fauna_core::format::format_unix_local_ms(epoch_millis as i64)
+}
+
 fn or_placeholder(text: String) -> String {
     if text.is_empty() {
         t::bridges_pending::SOURCE_IP_UNKNOWN.to_string()
@@ -118,15 +127,15 @@ pub(super) fn bridges_elements(state: &AdminState) -> Vec<Element> {
         els.push(
             Element::label(
                 ids::ADMIN_BRIDGES_PENDING_FIRST_SEEN_AT,
-                // `first_seen_at` is epoch-**millis** on the wire; the shared
-                // relative-time bucketing takes micros. An unset timestamp
-                // formats empty, and an empty element never registers — which
-                // would silently shift this id's row indexes out of step with
-                // the pubkey-hex ones the driver addresses cards by. The
-                // placeholder keeps one element per card, always.
-                or_placeholder(crate::format::format_epoch_us(
-                    bridge.first_seen_at as i64 * 1_000,
-                )),
+                // `first_seen_at` is epoch-**millis** on the wire, an audit
+                // timestamp rendered in the shared fixed local form
+                // (`value-formatting.md` § Absolute local timestamp display),
+                // as linux and windows do. An unset timestamp formats empty,
+                // and an empty element never registers — which would silently
+                // shift this id's row indexes out of step with the pubkey-hex
+                // ones the driver addresses cards by. The placeholder keeps
+                // one element per card, always.
+                or_placeholder(audit_time(bridge.first_seen_at)),
             )
             .labelled(t::bridges_pending::FIRST_SEEN),
         );
@@ -183,12 +192,7 @@ pub(super) fn bridges_elements(state: &AdminState) -> Vec<Element> {
                 ids::ADMIN_BRIDGES_APPROVED_APPROVED_AT,
                 // `None` on a non-conforming reply (only approve stamps it) — placeheld
                 // for the same index-alignment reason as `-first-seen-at` above.
-                or_placeholder(
-                    bridge
-                        .approved_at
-                        .map(|ms| crate::format::format_epoch_us(ms as i64 * 1_000))
-                        .unwrap_or_default(),
-                ),
+                or_placeholder(bridge.approved_at.map(audit_time).unwrap_or_default()),
             )
             .labelled(t::bridges_pending::APPROVED_AT),
         );

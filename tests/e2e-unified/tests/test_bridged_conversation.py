@@ -47,16 +47,14 @@ Two more journeys ride the same page:
   declared identity (the bolt glyph, "Nostr").
 """
 
-import json
 import os
-import urllib.parse
 
 import pytest
-import websocket
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 
 import fauna_ffi
+from helpers import nostr_relay
 from helpers.app_surface import skip_unbuilt
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from helpers.atproto_consent import (  # noqa: F401 — consent_nest/consent_bridge/consent_spa_url are pytest fixtures adopted by import
@@ -67,6 +65,7 @@ from helpers.atproto_consent import (  # noqa: F401 — consent_nest/consent_bri
     consent_spa_url,
 )
 from helpers.budgets import RECEIVE_CYCLE_S, RPC_ROUNDTRIP_S
+from helpers.family_wire import DEFAULT_WARD_POLICY, admit_adult_directly, admit_ward
 from helpers.client_metadata_server import (
     DOCUMENT_PATH,
     ClientMetadataServer,
@@ -77,10 +76,12 @@ from helpers.client_metadata_server import (
 from helpers.oauth_client import OAuthClient
 from helpers.waiting import wait_until
 from tests.api.test_bridged_conversation_kinds import _approve, _ok
-from tests.api.test_third_party_session import _alice, _Session, _upgrade
-from tests.test_family import _DEFAULT_WARD_POLICY, _admit_adult_directly, _admit_ward
+from helpers.principal_session import alice_client, PrincipalSession, upgrade
 
-pytestmark = pytest.mark.tier_3
+# `real_conversations`: windows (like macOS/iOS/android) registers the real receive
+# loop only behind the launch-time FAUNA_E2E_REAL_CONVERSATIONS gate this marker
+# sets; without it the app runs the mock manager and a bridged deposit never lands.
+pytestmark = [pytest.mark.tier_3, pytest.mark.real_conversations]
 
 PUBLISHER = "example.com"
 SCOPE = "fauna:conversations:bridge"
@@ -139,7 +140,7 @@ def consent_nest_env(metadata_server):
 def _bridged_built(driver) -> bool:
     """Whether this app registers the bridged rail and paints it — the apps
     the lift (``conversations.md`` § Implementation status today) has reached."""
-    return driver.is_tui() or driver.is_web() or driver.is_linux()
+    return driver.is_tui() or driver.is_web() or driver.is_linux() or driver.is_windows()
 
 
 @pytest.fixture
@@ -177,7 +178,7 @@ def _page_error(app) -> str:
 
 
 def _rooms(nest) -> list[dict]:
-    with _alice(nest) as ws:
+    with alice_client(nest) as ws:
         return ws.call("fauna.bridges.conversation.rooms.list", {})["rooms"]
 
 
@@ -201,7 +202,7 @@ def _consented_bridge(nest, metadata_server):
         client_id_url=metadata_server.client_id(),
     )
     tokens = _approve(nest, client)
-    session = _Session(_upgrade(nest, client, tokens["access_token"]))
+    session = PrincipalSession(upgrade(nest, client, tokens["access_token"]))
     key = _ok(
         session,
         "fauna.bridges.fetch_recipient_mls_pubkey",
@@ -260,6 +261,7 @@ def _await_text(app, body):
 @pytest.mark.tui
 @pytest.mark.web
 @pytest.mark.linux
+@pytest.mark.windows
 def test_a_bridged_room_renders_and_a_reply_reaches_only_the_bridge(
     bridged_app, consent_nest, metadata_server
 ):
@@ -360,16 +362,17 @@ def held_ward(consent_nest):
     unknown peers — arranged over the wire, as ``test_family.py``'s fixtures
     arrange theirs (fixture setup, convention 8's exemption: the admission and
     the knob are ``test_family.py``'s own subjects). One anonymous invite-request
-    submit per use; this module spends no other.
+    submit per use — two tests use it; this module spends no other. Carries the
+    guardian's identity as ``ward["guardian"]`` for the test that Approves.
 
     The ward is taken to ``hosted_full`` exactly as ``consent_nest`` takes its
     own user, for the same reason: the consent ceremony the bridge rides
     completes as an identity."""
     nest = consent_nest
     tail = os.urandom(3).hex()
-    guardian = _admit_adult_directly(nest, f"guardian-{tail}")
+    guardian = admit_adult_directly(nest, f"guardian-{tail}")
     handle = f"ward-{tail}"
-    ward = _admit_ward(nest, guardian, handle)
+    ward = admit_ward(nest, guardian, handle)
     ward["actor_id_bytes"] = bytes.fromhex(ward["actor_id_hex"])
     ward["handle"] = handle
     with WsRpcAdminClient(
@@ -379,10 +382,10 @@ def held_ward(consent_nest):
             "fauna.family.policy.update",
             {
                 "supervised_actor_id": ward["actor_id_bytes"],
-                "policy": {**_DEFAULT_WARD_POLICY, "unknown_peer_dm": "hold"},
+                "policy": {**DEFAULT_WARD_POLICY, "unknown_peer_dm": "hold"},
             },
         )
-    with _alice(_as_user(nest, ward)) as ward_ws:
+    with alice_client(_as_user(nest, ward)) as ward_ws:
         ward_ws.call(
             "fauna.bridges.atproto.set_integration_level",
             {
@@ -392,6 +395,7 @@ def held_ward(consent_nest):
                 "history_backfill": False,
             },
         )
+    ward["guardian"] = guardian
     return ward
 
 
@@ -399,6 +403,7 @@ def held_ward(consent_nest):
 @pytest.mark.tui
 @pytest.mark.web
 @pytest.mark.linux
+@pytest.mark.windows
 def test_a_cold_peers_bridged_room_is_marked_held_for_a_ward_and_stays_readable(
     request, app, consent_nest, consent_bridge, metadata_server, held_ward
 ):
@@ -477,32 +482,157 @@ def test_a_cold_peers_bridged_room_is_marked_held_for_a_ward_and_stays_readable(
     )
 
 
+RELEASED_PEER = "@newfriend:example.org"
+FIRST_BODY = "hi, we met at the climbing wall"
+LATER_BODY = "see you there on saturday"
+
+
+@pytest.mark.feature("family-safety")
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.windows
+def test_a_guardian_lets_a_held_bridged_conversation_through_and_later_messages_arrive(
+    request, app, consent_nest, consent_bridge, metadata_server, held_ward
+):
+    """`family-safety.md` § The bridge-DM gate → *Queue*: "**Approve** = verdict
+    `allow`: the conversation releases and future DMs deliver."
+
+    A cold peer's bridged conversation lands held for the ward (the sibling
+    test above proves the marker), the guardian Approves its `dm_hold` row on
+    their own Family page — the real queue gesture — and the peer writes again:
+    the ward's thread now carries no guardian marker, and both the first and
+    the later message are on screen.
+
+    The nest's own answer is read at each step (convention 5) — held before,
+    released after the Approve — so a marker the app still paints names the
+    app, not the gate.
+    """
+    if not _bridged_built(app.driver):
+        skip_unbuilt(
+            app.driver,
+            surface="bridged rooms on the unified Conversations page",
+            detail="no BridgedBackend is registered on this app yet",
+            tracked="docs/goal/ui/conversations.md § Implementation status today",
+        )
+    from conftest import _login_app_as
+
+    ward_nest = _as_user(consent_nest, held_ward)
+    guardian = held_ward["guardian"]
+    conv = app.conversations
+
+    def _sign_in(nest, identity) -> None:
+        app.driver.reset()
+        _login_app_as(
+            app, request, nest, identity, spa_url_fixture="consent_spa_url", verify_live_actor=True
+        )
+
+    def _room_state(far_room: str):
+        room = next((r for r in _rooms(ward_nest) if r["far_room_id"] == far_room), None)
+        assert room is not None, f"the nest lists no room {far_room!r} for the ward"
+        return room.get("guardian_state")
+
+    # ── The ward's app holds the recipient key; a peer no verdict row knows writes ──
+    _sign_in(ward_nest, held_ward)
+    app.mail_settings.navigate()
+    app.mail_settings.ensure_mail_enabled()
+    session, _holder_secret, key = _consented_bridge(ward_nest, metadata_server)
+    far_room = f"!release-{os.urandom(3).hex()}:example.org"
+    _deposit(
+        session,
+        key,
+        far_room_id=far_room,
+        far_message_id="$release-1",
+        sender=RELEASED_PEER,
+        body=FIRST_BODY,
+    )
+    assert _room_state(far_room) == "held", "precondition: the cold peer's room must be held"
+
+    # ── The guardian lets the conversation through, on their Family page ──
+    _sign_in(_as_user(consent_nest, guardian), guardian)
+    app.family.navigate()
+
+    def _queue_row() -> list[int] | None:
+        for i in range(app.family.approval_count()):
+            if RELEASED_PEER in (app.family.approval_text(i) or ""):
+                return [i]
+        app.family.reload()
+        return None
+
+    (row,) = wait_until(
+        _queue_row,
+        RPC_ROUNDTRIP_S,
+        interval=1.0,
+        diagnose=lambda: (
+            f"no dm_hold row naming {RELEASED_PEER} in the guardian's queue; rows: "
+            f"{[app.family.approval_text(i) for i in range(app.family.approval_count())]!r}, "
+            f"error: {_page_error(app)!r}"
+        ),
+    )
+    app.family.approve(row)
+    wait_until(
+        lambda: _room_state(far_room) is None,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            f"after the guardian's Approve the nest still reports the room as "
+            f"{_room_state(far_room)!r}; error: {_page_error(app)!r}"
+        ),
+    )
+
+    # ── The peer writes again ──
+    _deposit(
+        session,
+        key,
+        far_room_id=far_room,
+        far_message_id="$release-2",
+        sender=RELEASED_PEER,
+        body=LATER_BODY,
+    )
+    session.ws.close()
+    assert _room_state(far_room) is None, "a later message must not re-hold an approved peer"
+
+    # ── The ward's conversation is open: no marker, both messages there ──
+    _sign_in(ward_nest, held_ward)
+    conv.navigate()
+
+    def _row():
+        for t in conv.list_threads():
+            if RELEASED_PEER in (t.label or ""):
+                return t
+        return None
+
+    thread = wait_until(
+        _row,
+        RECEIVE_CYCLE_S,
+        diagnose=lambda: (
+            f"no thread for {RELEASED_PEER}; threads={_threads(conv)!r}, "
+            f"error: {_page_error(app)!r}"
+        ),
+    )
+    conv.open_thread_by_id(thread.thread_id)
+    _await_text(app, LATER_BODY)
+    _await_text(app, FIRST_BODY)
+    states = app.driver.get_attrs("conversation-guardian-state", "state")
+    assert not states, (
+        f"a conversation the guardian let through must carry no guardian marker: {states!r}"
+    )
+
+
 # ── Nostr ────────────────────────────────────────────────────────────────
 
 
 def _post_to_relay(nest, event: dict) -> None:
     """Publish ``event`` to the nest's own ``/nostr`` relay as an anonymous
     client does (NIP-01 ``EVENT`` → ``OK``)."""
-    parsed = urllib.parse.urlparse(nest["url"])
-    scheme = "wss" if parsed.scheme == "https" else "ws"
-    ws = websocket.create_connection(
-        f"{scheme}://{parsed.netloc}/nostr", timeout=RPC_ROUNDTRIP_S
-    )
-    try:
-        ws.send(json.dumps(["EVENT", event]))
-        while True:
-            frame = json.loads(ws.recv())
-            if frame[0] == "OK" and frame[1] == event["id"]:
-                assert frame[2] is True, f"the relay refused the gift wrap: {frame!r}"
-                return
-    finally:
-        ws.close()
+    accepted, message = nostr_relay.publish(nostr_relay.nest_relay_url(nest), event)
+    assert accepted, f"the relay refused the gift wrap: {message!r}"
 
 
 @pytest.mark.feature("nostr")
 @pytest.mark.tui
 @pytest.mark.web
 @pytest.mark.linux
+@pytest.mark.windows
 def test_a_nostr_gift_wrap_arrives_as_a_nostr_bridged_room(bridged_app, consent_nest):
     app = bridged_app
     nest = consent_nest
@@ -514,7 +644,7 @@ def test_a_nostr_gift_wrap_arrives_as_a_nostr_bridged_room(bridged_app, consent_
     assert app.nostr.ensure_linked(), (
         f"could not link a generated Nostr key: {app.nostr.page_error_text()!r}"
     )
-    with _alice(nest) as ws:
+    with alice_client(nest) as ws:
         bridges = ws.call("fauna.bridges.list", {})["bridges"]
     nostr = next(b for b in bridges if b["id"] == "nostr")
     assert nostr["linked"] and nostr.get("identity"), nostr

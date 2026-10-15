@@ -185,6 +185,7 @@ mod tests {
             token: token.to_string(),
             token_id: token_id.to_string(),
             expires_at: now_secs().expect("system clock is before Unix epoch") + ttl_secs,
+            identity: None,
         }
     }
 
@@ -308,6 +309,7 @@ mod tests {
             token: "t".to_string(),
             token_id: "id-t".to_string(),
             expires_at: 1_756_000_000,
+            identity: None,
         };
         assert!(!TokenCache::fresh_enough_at(&c, None));
     }
@@ -318,6 +320,7 @@ mod tests {
             token: "t".to_string(),
             token_id: "id-t".to_string(),
             expires_at: 1_000_000_100,
+            identity: None,
         };
         // Comfortably past the 60s buffer.
         assert!(TokenCache::fresh_enough_at(&c, Some(1_000_000_000)));
@@ -327,6 +330,7 @@ mod tests {
                 token: "t".to_string(),
                 token_id: "id-t".to_string(),
                 expires_at: 1_000_000_050,
+                identity: None,
             },
             Some(1_000_000_000)
         ));

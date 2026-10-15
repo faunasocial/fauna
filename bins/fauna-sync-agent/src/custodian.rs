@@ -216,12 +216,10 @@ pub async fn run(state: Arc<SyncServiceState>, mut shutdown: tokio::sync::watch:
         Duration::from_secs(READ_BACKOFF_MAX_SECS),
     );
     loop {
-        // A running re-seed is this store's writer for now: host nothing until
-        // it ends (the `reseed_job` slot's one-writer rule).
-        let reseeding = matches!(
-            *state.reseed_job.lock().await,
-            fauna_ipc::sync::CustodianReseedState::Running
-        );
+        // A running store ceremony — re-seed or recovery — is this store's
+        // writer for now: host nothing until it ends (the store-job slot's
+        // one-writer rule).
+        let reseeding = state.store_job_running().await;
         let delay = match host_inputs(&state).await {
             _ if reseeding => Duration::from_secs(1),
             None => Duration::from_secs(IDLE_RECHECK_SECS),
@@ -596,6 +594,73 @@ pub(crate) async fn run_reseed(
     fauna_client_sync::reseed_wire::state_from_driver(outcome)
 }
 
+/// The recovery job: recover the owner's nest from this device's store after
+/// an accepted source regression (`segment-backup-protocol.md` § Client-device
+/// custodian (pull) → *Restore* → *Recovery from this device's own store*).
+///
+/// The one composition is shared
+/// (`fauna_sync_engine::recovery::recover_from_own_store`: the sets the store's
+/// own record stands for, the grant, the store end of the leg, the
+/// store-backed duties); what this adds is only the agent's own connections —
+/// the WS control plane and the bearer byte plane a stint and the re-seed
+/// already use. The caller has stopped any stint and holds the store-job slot
+/// at `Running`, so this is the store's only writer; the key lives in the
+/// caller's `Zeroizing` copy and is dropped with the job.
+pub(crate) async fn run_recover(
+    state: &Arc<SyncServiceState>,
+    nest_key: &[u8; 32],
+) -> fauna_ipc::sync::CustodianRecoverState {
+    use fauna_core::crypto::NestBackupKey;
+    use fauna_ipc::sync::CustodianRecoverState;
+    use fauna_sync_engine::recovery::{OwnStoreRecovery, recover_from_own_store};
+
+    let failed = |phase: &str, detail: String| CustodianRecoverState::Failed {
+        phase: phase.into(),
+        detail,
+    };
+    let Some(inputs) = host_inputs(state).await else {
+        return failed(
+            "store",
+            "this agent is not signed in to a nest yet; nothing was sent".into(),
+        );
+    };
+    let root =
+        match custodian_store_root(&state.paths.flat_base_dir(), &hex::encode(inputs.actor_id)) {
+            Ok(root) => root,
+            Err(e) => return failed("store", format!("resolve the backup store: {e}")),
+        };
+    // `at`, never `ensure_root`: a recovery reads and tombstones in a store
+    // this device holds, and must not create one where it never held a copy.
+    let store = CustodianStore::at(root);
+
+    let nest = match state.nest_rpc_client().await {
+        Ok(nest) => nest,
+        Err(e) => return failed("grant", format!("connect to the nest: {e}")),
+    };
+    let auth = crate::bearer::bearer_only_auth_client(
+        Arc::clone(&state.capability),
+        inputs.nest_url.clone(),
+        inputs.actor_id,
+    );
+    let sync_client =
+        fauna_sync_engine::nest_client::SyncClient::new(auth, &inputs.device_id_bytes);
+    let nest_backup_key = NestBackupKey::from_bytes(*nest_key);
+
+    tracing::info!("custodian: recovering the provisioned nest from this device's copy");
+    let outcome = recover_from_own_store(OwnStoreRecovery {
+        store: &store,
+        source: nest.as_ref(),
+        bytes: &sync_client,
+        scope_id: inputs.actor_id,
+        device_id: inputs.device_id.clone(),
+        local: OwnerSealKey::Client(BackupKey::from_bytes(inputs.backup_key)),
+        nest_key: &nest_backup_key,
+        now: fauna_core::data::Timestamp::now_secs_or_zero(),
+    })
+    .await;
+    fauna_client_sync::recover_wire::state_from_driver(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,6 +676,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_refused_renewal_dials_nothing_until_an_app_re_arms_it() {
         let (url, dials) = refusing_nest().await;
+        let tmp = tempfile::tempdir().expect("temp dir");
         let state = {
             let (shutdown_tx, _rx) = tokio::sync::watch::channel(false);
             let (event_tx, _) = tokio::sync::broadcast::channel(16);
@@ -618,7 +684,7 @@ mod tests {
                 crate::config::SyncConfig::default(),
                 shutdown_tx,
                 event_tx,
-                crate::config::SyncPaths::new(None),
+                crate::config::SyncPaths::at(tmp.path().to_path_buf()),
             )
         };
         *state.capability.write().await = Some(fauna_ipc::sync::SyncCapability::new(
@@ -647,12 +713,19 @@ mod tests {
             "{after} dials in the thirty minutes after the nest refused renewal for good"
         );
 
-        // Re-armed by an app's bearer: dialling resumes on the curve.
+        // Re-armed by an app's bearer: the next once-a-minute read dials again.
+        // A `not_registered` refusal stops the retained client's supervisor for
+        // good (`ClientChannel::connect_error_is_terminal`, case 5), so it is
+        // the custodian loop's read that rebuilds the client over the fresh
+        // bearer — never the stopped supervisor's own curve.
         if let Some(cap) = state.capability.write().await.as_mut() {
             cap.bearer = fauna_ipc::sync::BearerToken::new("fresh".into(), u64::MAX);
         }
         let before = dials.load(std::sync::atomic::Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_secs(120)).await;
+        for _ in 0..2 {
+            let _ = read_assignment(&state, "dev").await;
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }
         assert!(
             dials.load(std::sync::atomic::Ordering::SeqCst) > before,
             "an app-pushed bearer must re-arm the connection"
@@ -671,6 +744,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_dead_credential_is_dialled_on_one_ladder_not_one_per_failed_read() {
         let (url, dials) = refusing_nest().await;
+        let tmp = tempfile::tempdir().expect("temp dir");
         let state = {
             let (shutdown_tx, _rx) = tokio::sync::watch::channel(false);
             let (event_tx, _) = tokio::sync::broadcast::channel(16);
@@ -678,7 +752,7 @@ mod tests {
                 crate::config::SyncConfig::default(),
                 shutdown_tx,
                 event_tx,
-                crate::config::SyncPaths::new(None),
+                crate::config::SyncPaths::at(tmp.path().to_path_buf()),
             )
         };
         *state.capability.write().await = Some(fauna_ipc::sync::SyncCapability::new(
@@ -835,7 +909,8 @@ mod tests {
                 {
                     let root = fauna_core::platform_ids::apple_user_domain_home(Some(
                         std::path::PathBuf::from("/Users/u"),
-                    ));
+                    ))
+                    .expect("an absolute home resolves");
                     let tail = root
                         .strip_prefix("/Users/u/")
                         .expect("resolver hangs off the passed home")

@@ -3,7 +3,7 @@ pre-existing ``/data`` — the deploy gate for the outage class.
 
 Migration-safety Layer 3 (tracked internally;
 ``docs/goal/architecture/nest/common.md`` § Database — *Upgrade safety*). The
- example.com outage was a column added to a ``CREATE TABLE`` block with
+ live-nest outage was a column added to a ``CREATE TABLE`` block with
 no paired ``ALTER`` — a no-op on the long-lived ``/data``, so the column never
 appeared and ``list_active_mail_domains``'s ``SELECT`` failed *"no such column"*,
 crash-looping the mail bridge (no mail ports) while nest still reported

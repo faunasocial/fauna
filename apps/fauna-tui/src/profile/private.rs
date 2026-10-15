@@ -7,12 +7,12 @@
 //! form as the user opened it), the changed-register diff, the bounds
 //! validation and its refusals are `fauna_core::contact_overlay`
 //! (`OverlayEditor`); the Save is
-//! `fauna_client_account_runtime::contact_overlays::save`, the one door every
-//! app writes through. This file owns the text buffers and nothing else.
+//! `fauna_client_account_runtime::contact_overlays::save_staged`, the one
+//! answer every app gives. This file owns the text buffers and nothing else.
 
+use fauna_client_account_runtime::contact_overlays::{StagedSave, save_staged};
 use fauna_core::contact_overlay::OverlayForm;
 use fauna_i18n::strings::profile as t;
-use fauna_sync_engine::contact_overlay_rows::{OverlayWrite, OverlayWriteOutcome};
 use fauna_ui_ids as ids;
 
 use super::{Action, Op, Outcome, ProfileField, ProfileState};
@@ -116,7 +116,9 @@ pub(super) fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 // there is nowhere to write — the staged edits stay on screen.
                 app.errors.insert(
                     Page::Profile,
-                    fauna_i18n::strings::common::STILL_LOADING.to_string(),
+                    crate::wizard::localized(&fauna_core::localized::LocalizedText::key(
+                        "common.still_loading",
+                    )),
                 );
                 return None;
             };
@@ -124,44 +126,27 @@ pub(super) fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 manager,
                 store,
                 actor,
-                write: OverlayWrite::Changes(changes),
+                changes,
             })
         }
         _ => unreachable!("only the private-section actions are routed here"),
     }
 }
 
-/// `Op::SavePrivate`'s body.
+/// `Op::SavePrivate`'s body: the shared Save answer
+/// (`contact_overlays::save_staged`) folded onto the page's outcome — every
+/// non-success arm is already a finished text, the staged edits stay on screen.
 pub(super) async fn save(
     manager: std::sync::Arc<fauna_conversations::ConversationsManager>,
     store: fauna_sync_engine::account_runtime::AccountStoreHandle,
     actor: String,
-    write: OverlayWrite,
+    changes: fauna_core::contact_overlay::OverlayChanges,
 ) -> Outcome {
-    match fauna_client_account_runtime::contact_overlays::save(&manager, &store, &actor, write)
-        .await
-    {
-        Ok(OverlayWriteOutcome::Written(_) | OverlayWriteOutcome::Unchanged(_)) => {
-            Outcome::PrivateSaved { actor }
+    match save_staged(Some(&manager), Some(&store), &actor, Ok(Some(changes))).await {
+        StagedSave::Saved => Outcome::PrivateSaved { actor },
+        StagedSave::Refused(text) | StagedSave::NotReady(text) | StagedSave::Failed(text) => {
+            Outcome::Failed(crate::wizard::localized(&text))
         }
-        Ok(OverlayWriteOutcome::Refused(refusal)) => {
-            Outcome::Failed(crate::wizard::localized(&refusal))
-        }
-        Err(e) => Outcome::Failed(
-            match fauna_client_account_runtime::contact_overlays::not_ready_reason(&e) {
-                // A replica that is not ready — it has never listed the
-                // account's records, or holds them under a generation it may
-                // still be keyed for — refuses the save at the read gate; it
-                // can be retried once what it waits for has come, and the
-                // page says what that is.
-                Some(reason) => reason.to_string(),
-                // The plane refuses to seal while no generation tip resolves
-                // for this device (`account-data-taxonomy.md` → *The
-                // contact-overlay rung*); the staged edits stay on screen
-                // either way.
-                None => t::PRIVATE_SAVE_FAILED.replace("{reason}", &format!("{e:#}")),
-            },
-        ),
     }
 }
 

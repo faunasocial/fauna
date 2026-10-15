@@ -6,27 +6,20 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import com.fauna.app.core.AppMessages
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.ffi.FfiAccountEntry
-import com.fauna.ffi.FfiFeatureRow
 import com.fauna.ffi.FfiPendingActionSummary
-import com.fauna.ffi.FfiQuotaDeviceUsage
-import com.fauna.ffi.FfiQuotaFeatures
-import com.fauna.ffi.FfiQuotaGetReply
-import com.fauna.ffi.FfiUsageBytes
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import org.robolectric.annotation.Config
-import uniffi.fauna_core.LocalizedText
 
 /**
  * Compose-level coverage for the stateless [AccountSettingsContent] — the
  * whole-page split owed (`apps/android.md:160`:
  * "Screen composables are stateless"). No Hilt, no VM, no Activity, no FFI:
- * every native-touching value ([shortId], [quotaFraction], [quotaPercent],
- * [byteSize]) is injected FFI-free, the idiom every other Content composable
- * uses. (Android E2E `--client android` is host-emulator-gated like every
+ * every native-touching value ([shortId]) is injected FFI-free, the idiom every
+ * other Content composable uses. (Android E2E `--client android` is host-emulator-gated like every
  * other android leg.)
  */
 @RunWith(FaunaRobolectricTestRunner::class)
@@ -44,35 +37,6 @@ class AccountSettingsContentTest {
             tier = "free",
             requireConfirmToActivate = requireConfirm,
         )
-
-    private fun quota(
-        storageUsed: Long = 100,
-        storageMax: Long = 1000,
-        inboxUsed: Long = 10,
-        inboxMax: Long = 100,
-        devicesUsed: Long = 1,
-        devicesMax: Long = 5,
-    ) = FfiQuotaGetReply(
-        tier = "free",
-        inbox = FfiUsageBytes(usedBytes = inboxUsed, maxBytes = inboxMax),
-        storage = FfiUsageBytes(usedBytes = storageUsed, maxBytes = storageMax),
-        devices = FfiQuotaDeviceUsage(used = devicesUsed, max = devicesMax),
-        features = FfiQuotaFeatures(versionedBackup = false, bridges = false, maxFeeds = 1),
-    )
-
-    private fun featureRow(feature: String, affordance: String = "available") = FfiFeatureRow(
-        feature = feature,
-        name = LocalizedText("features.$feature.name", emptyMap()),
-        availability = if (affordance == "available") "allow" else "deny",
-        deniedBy = null,
-        cells = emptyList(),
-        perOperationMax = null,
-        perOperationMaxTier = null,
-        unit = "bytes",
-        affordance = affordance,
-        restriction = null,
-        status = LocalizedText("features.status.$affordance", emptyMap()),
-    )
 
     private fun pendingAction(
         id: Long = 1L,
@@ -98,8 +62,6 @@ class AccountSettingsContentTest {
         deviceId: String? = "bb".repeat(32),
         secretHex: String? = "cc".repeat(32),
         handle: String? = "alice",
-        quotaData: FfiQuotaGetReply? = quota(),
-        featuresData: List<FfiFeatureRow>? = listOf(featureRow("payments")),
         pendingActions: List<FfiPendingActionSummary>? = null,
         newHandle: String = "",
         changingHandle: Boolean = false,
@@ -133,8 +95,6 @@ class AccountSettingsContentTest {
                 deviceId = deviceId,
                 secretHex = secretHex,
                 handle = handle,
-                quotaData = quotaData,
-                featuresData = featuresData,
                 pendingActions = pendingActions,
                 newHandle = newHandle,
                 changingHandle = changingHandle,
@@ -159,9 +119,6 @@ class AccountSettingsContentTest {
                 onConfirmSignOut = onConfirmSignOut,
                 // FFI-free stubs — the real screen injects com.fauna.ffi.* directly.
                 shortId = { it.take(8) },
-                quotaFraction = { used, max -> if (max <= 0) 0.0 else (used.toDouble() / max).coerceIn(0.0, 1.0) },
-                quotaPercent = { used, max -> if (max <= 0) 0u else ((used * 100 / max).coerceIn(0, 100)).toUInt() },
-                byteSize = { LocalizedText("common.byte_size_raw", mapOf("n" to it.toString())) },
                 describePendingAction = { actionType, target ->
                     if (actionType == "handle.change" && target != null) "Change handle to $target" else actionType
                 },
@@ -247,41 +204,12 @@ class AccountSettingsContentTest {
         composeTestRule.onNodeWithTag("account-actor-id", useUnmergedTree = true).assertTextEquals("Unknown")
     }
 
+    // Quota and Feature limits live on the Status sub-page, not here:
+    // their tests are `StatusLimitsSectionsTest`'s.
     @Test
-    fun quotaSectionRendersWhenPresent() {
-        render(quotaData = quota())
-        composeTestRule.onNodeWithTag("quota-section").assertExists()
-        composeTestRule.onNodeWithTag("settings-storage-bar").assertExists()
-        composeTestRule.onNodeWithTag("settings-storage-text").assertExists()
-        composeTestRule.onNodeWithTag("quota-inbox").assertExists()
-        composeTestRule.onNodeWithTag("quota-storage").assertExists()
-        composeTestRule.onNodeWithTag("quota-devices").assertExists()
-    }
-
-    @Test
-    fun quotaSectionAbsentWhenNull() {
-        render(quotaData = null)
+    fun accountPageCarriesNeitherQuotaNorFeatureLimits() {
+        render()
         composeTestRule.onNodeWithTag("quota-section").assertDoesNotExist()
-    }
-
-    @Test
-    fun featureLimitsSectionRendersRows() {
-        render(featuresData = listOf(featureRow("payments"), featureRow("zaps")))
-        composeTestRule.onNodeWithTag("feature-limits-section").assertExists()
-        assertEquals(2, composeTestRule.onAllNodesWithTag("feature-limits-row").fetchSemanticsNodes().size)
-    }
-
-    @Test
-    fun featureLimitsSectionShowsEmptyStateWhenEveryRowIsHidden() {
-        render(featuresData = listOf(featureRow("payments", affordance = "hidden")))
-        composeTestRule.onNodeWithTag("feature-limits-section").assertExists()
-        composeTestRule.onNodeWithTag("feature-limits-empty").assertExists()
-        composeTestRule.onNodeWithTag("feature-limits-row").assertDoesNotExist()
-    }
-
-    @Test
-    fun featureLimitsSectionAbsentWhenNull() {
-        render(featuresData = null)
         composeTestRule.onNodeWithTag("feature-limits-section").assertDoesNotExist()
     }
 

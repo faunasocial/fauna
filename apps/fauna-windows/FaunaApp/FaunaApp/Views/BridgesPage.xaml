@@ -28,7 +28,8 @@
             <ListView.ItemTemplate>
                 <DataTemplate x:DataType="models:BridgeInfo">
                     <controls:BridgeCard Bridge="{x:Bind}" ActionClick="BridgeAction_Click"
-                                         SettingChanged="BridgeSetting_Changed" />
+                                         SettingChanged="BridgeSetting_Changed"
+                                         SourceAskClick="BridgeSourceAsk_Click" />
                 </DataTemplate>
             </ListView.ItemTemplate>
         </ListView>

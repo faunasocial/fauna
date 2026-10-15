@@ -60,17 +60,38 @@ where
 /// then `None`. Shared by every door over a seat's runtime whose write can
 /// arrive before the runtime has assembled (this one's toggle and one-tap
 /// trust; [`crate::period_keys`]' custody writes).
+///
+/// The wait logs on its edges — when it starts, when the handle arrives
+/// after a wait, and when it gives up: a write parked here is otherwise
+/// invisible for up to the whole bound, and a seat whose slot is filled on
+/// an edge the waiting caller itself blocks (tui's automation agent awaits a
+/// click's op on the UI queue) waits it out in silence.
 pub(crate) async fn wait_for_handle<S>(source: &S) -> Option<AccountStoreHandle>
 where
     S: Fn() -> Option<AccountStoreHandle>,
 {
-    for _ in 0..WRITE_WAIT_POLLS {
+    if let Some(handle) = source() {
+        return Some(handle);
+    }
+    tracing::info!(
+        "account runtime: a write is waiting for the seat's runtime to assemble \
+         (up to {WRITE_WAIT_POLLS} × {WRITE_WAIT_POLL:?})"
+    );
+    for polls in 1..=WRITE_WAIT_POLLS {
+        fauna_sleep::sleep(WRITE_WAIT_POLL).await;
         if let Some(handle) = source() {
+            tracing::info!(
+                "account runtime: the waiting write found the runtime after {:?}",
+                WRITE_WAIT_POLL * polls
+            );
             return Some(handle);
         }
-        fauna_sleep::sleep(WRITE_WAIT_POLL).await;
     }
-    source()
+    tracing::warn!(
+        "account runtime: a write waited {:?} and no runtime arrived — refusing it",
+        WRITE_WAIT_POLL * WRITE_WAIT_POLLS
+    );
+    None
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]

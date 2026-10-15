@@ -655,7 +655,7 @@ public sealed partial class MediaPage : Page
         RestoreConfirmSheet.Visibility = Visibility.Collapsed;
         _restoreTarget = null;
 
-        var deviceId = _account?.DeviceId;
+        var deviceId = _account?.ResolveDeviceId();
         if (string.IsNullOrEmpty(deviceId))
         {
             // Client-glue failure (no sync device id) — surface it on the sheet, the
@@ -771,7 +771,7 @@ public sealed partial class MediaPage : Page
 
         DeleteConfirmSheet.Visibility = Visibility.Collapsed;
 
-        var deviceId = _account?.DeviceId;
+        var deviceId = _account?.ResolveDeviceId();
         if (string.IsNullOrEmpty(deviceId))
         {
             // Client-glue failure (no sync device id) — surface it on the sheet's
@@ -841,6 +841,9 @@ public sealed partial class MediaPage : Page
         ShareCreateSheet.Visibility = Visibility.Visible;
         ShareCreateTitle.Text = S.Format("share_link/create_title", create.name);
         RebuildExpiryCombo(snap.shareExpiryOptions, create.expiry);
+        // A sealed file's link carries its key: the notice exists only then, off
+        // the shared snapshot's bit (absent on a public file).
+        ShareKeyNotice.Visibility = create.keyInFragment ? Visibility.Visible : Visibility.Collapsed;
 
         // Step 4 of the create flow: the URL (and its Copy) exist only once the
         // registration succeeded; until then the expiry and Create show. A busy
@@ -1049,7 +1052,7 @@ public sealed partial class MediaPage : Page
         byte[] rawBytes;
         string memberPath;
         byte[] backupKey;
-        var deviceId = _account?.DeviceId;
+        var deviceId = _account?.ResolveDeviceId();
         try
         {
             rawBytes = System.IO.File.ReadAllBytes(picked);

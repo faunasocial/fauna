@@ -60,11 +60,11 @@ Stamped 2026-09-19 at f62a5e4e1c.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+27a1b955 standalone |
-| linux | ⚠ partial | 0.1.2-dev+78e73031 standalone |
-| windows | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| macos | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| ios | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| web | ⚠ partial | 0.1.4-dev+cb3799f4.dirty standalone |
+| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
 | android |  no run recorded | |
 | tui | ⚠ partial | 0.1.2-dev+831d48ef live |
 

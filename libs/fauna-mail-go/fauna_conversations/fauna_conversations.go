@@ -406,7 +406,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_func_try_parse_typed_address()
 		})
-		if checksum != 64056 {
+		if checksum != 24402 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_conversations: uniffi_fauna_conversations_checksum_func_try_parse_typed_address: UniFFI API checksum mismatch")
 		}
@@ -719,6 +719,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_func_keypackages_low()
+		})
+		if checksum != 11118 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_func_keypackages_low: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_func_next_sort_order()
 		})
 		if checksum != 19490 {
@@ -760,6 +769,15 @@ func uniffiCheckChecksums() {
 		if checksum != 40067 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_accept_room_invitation: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_accept_suggestion()
+		})
+		if checksum != 27196 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_accept_suggestion: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1007,6 +1025,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_engine_state_needs_newer_app()
+		})
+		if checksum != 45610 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_engine_state_needs_newer_app: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_ensure_keypackages()
 		})
 		if checksum != 57595 {
@@ -1124,6 +1151,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_refresh_list_send()
+		})
+		if checksum != 20817 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_refresh_list_send: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_remove_attachment()
 		})
 		if checksum != 17150 {
@@ -1147,6 +1183,15 @@ func uniffiCheckChecksums() {
 		if checksum != 51815 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_remove_participant: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_remove_recipient_chip()
+		})
+		if checksum != 60831 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_remove_recipient_chip: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1318,6 +1363,15 @@ func uniffiCheckChecksums() {
 		if checksum != 12105 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_set_engine_served_elsewhere: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_set_engine_state_needs_newer_app()
+		})
+		if checksum != 4268 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_set_engine_state_needs_newer_app: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1959,6 +2013,17 @@ type ConversationsManagerInterface interface {
 	// standing or the accept was refused — the refusal on the page's
 	// `error-message`.
 	AcceptRoomInvitation(id int64) *ThreadId
+	// `recipient-picker-suggestion[i]` — accept the active picker's `index`th
+	// suggestion. **The click is the Enter path, not a shortcut past it**
+	// (`conversations.md` § Where logic lives → *Recipient suggestions*): the
+	// suggestion's spelling ([`suggestion_spelling`]) is written into the
+	// picker as typing would write it, the ordinary probe runs
+	// ([`Self::resolve_recipient`]), and the chip commits through
+	// [`Self::accept_current_recipient_chip`] — so a person whose key
+	// packages ran out, or whose nest stopped answering, reads `not-found` /
+	// `error` and commits nothing. Returns whether a chip was pushed; an
+	// index past the list is a no-op `false`.
+	AcceptSuggestion(index uint32) bool
 	// Stage `bytes` as an attachment on `id`'s compose draft. Returns the
 	// `blob_hash` the bytes were cached under (the handle the client renders /
 	// the wire message references). Capability gating (`supports_attachments`)
@@ -2157,6 +2222,11 @@ type ConversationsManagerInterface interface {
 	// `error-message` projection with top precedence — a standing condition
 	// that must never be masked by an unrelated gesture's `page_error`.
 	EngineServedElsewhere() bool
+	// See [`Self::set_engine_state_needs_newer_app`]. Read by each app's
+	// `error-message` projection at top precedence beside
+	// [`Self::engine_served_elsewhere`] — a standing condition no gesture
+	// clears.
+	EngineStateNeedsNewerApp() bool
 	// Top up the local actor's one-time key-package pool on the nest to
 	// `target`. Thin FFI-facing wrapper over the FaunaMls rail backend's
 	// [`RailBackend::ensure_keypackages`](crate::backend::RailBackend::ensure_keypackages)
@@ -2418,6 +2488,14 @@ type ConversationsManagerInterface interface {
 	// Lock-free, so a page render can never panic on a lock the dead pass
 	// poisoned.
 	ReceiveStopped() bool
+	// Re-derive [`ComposeState::list_send`] for a compose — the thread `id`'s,
+	// or the new-thread compose's when `None` — from the nest's current
+	// figures (`mail-mass-mailing.md` § Composing a list message): set when
+	// its one mail recipient is one of the account's own lists, cleared
+	// otherwise. Apps call it when a recipient chip commits and when a thread
+	// opens; [`Self::send`] calls it after every send. The rail answers
+	// ([`RailBackend::list_send_view`]); only SMTP has lists.
+	RefreshListSend(id *ThreadId)
 	// Remove the staged attachment at `index` from `id`'s compose draft (the
 	// `dm-attachment-*` remove affordance on the compose bar). The cached bytes
 	// are left in the store — harmless (in-memory, cleared on next login) and
@@ -2431,6 +2509,11 @@ type ConversationsManagerInterface interface {
 	// removed member can't follow forward (no Welcome). Non-FaunaMls rails are
 	// snapshot-only.
 	RemoveParticipant(id ThreadId, addr TypedAddress)
+	// `recipient-picker-chip[i]`'s × — drop the active picker's `index`th
+	// chip (the add-participant overlay first, as
+	// [`Self::accept_current_recipient_chip`]). An index past the chips is a
+	// no-op.
+	RemoveRecipientChip(index uint32)
 	// Remove `addr` from the editable reply To line
 	// (`dm-reply-recipient-remove`). Drops the recipient from *this reply
 	// only* — thread participants and history are untouched.
@@ -2653,6 +2736,12 @@ type ConversationsManagerInterface interface {
 	// the value is unchanged, mirroring [`Self::clear_page_error`]'s
 	// no-op-when-unset optimization.
 	SetEngineServedElsewhere(served bool)
+	// Record whether this account's MLS store needs a newer app
+	// (`MlsError::SchemaIncompatible` at engine construction). Called by the
+	// app's engine-construction site on every attempt — success clears it,
+	// `SchemaIncompatible` sets it, any other failure leaves it cleared. A
+	// no-op (no `notify`) when the value is unchanged.
+	SetEngineStateNeedsNewerApp(needs bool)
 	SetNewThreadBody(body string)
 	// `recipient-picker-home-nest-toggle` — whether the room about to be
 	// created seats the user's home nest, which makes it a **community** room
@@ -2855,6 +2944,45 @@ func (_self *ConversationsManager) AcceptRoomInvitation(id int64) *ThreadId {
 		// freeFn
 		func(handle C.uint64_t) {
 			C.ffi_fauna_conversations_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	return res
+}
+
+// `recipient-picker-suggestion[i]` — accept the active picker's `index`th
+// suggestion. **The click is the Enter path, not a shortcut past it**
+// (`conversations.md` § Where logic lives → *Recipient suggestions*): the
+// suggestion's spelling ([`suggestion_spelling`]) is written into the
+// picker as typing would write it, the ordinary probe runs
+// ([`Self::resolve_recipient`]), and the chip commits through
+// [`Self::accept_current_recipient_chip`] — so a person whose key
+// packages ran out, or whose nest stopped answering, reads `not-found` /
+// `error` and commits nothing. Returns whether a chip was pushed; an
+// index past the list is a no-op `false`.
+func (_self *ConversationsManager) AcceptSuggestion(index uint32) bool {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
+	defer _self.ffiObject.decrementPointer()
+	res, _ := uniffiRustCallAsync[error](
+		nil,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) C.int8_t {
+			res := C.ffi_fauna_conversations_rust_future_complete_i8(handle, status)
+			return res
+		},
+		// liftFn
+		func(ffi C.int8_t) bool {
+			return FfiConverterBoolINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_conversations_fn_method_conversationsmanager_accept_suggestion(
+			_pointer, FfiConverterUint32INSTANCE.Lower(index)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_poll_i8(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_free_i8(handle)
 		},
 	)
 
@@ -3413,6 +3541,19 @@ func (_self *ConversationsManager) EngineServedElsewhere() bool {
 	}))
 }
 
+// See [`Self::set_engine_state_needs_newer_app`]. Read by each app's
+// `error-message` projection at top precedence beside
+// [`Self::engine_served_elsewhere`] — a standing condition no gesture
+// clears.
+func (_self *ConversationsManager) EngineStateNeedsNewerApp() bool {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_conversations_fn_method_conversationsmanager_engine_state_needs_newer_app(
+			_pointer, _uniffiStatus)
+	}))
+}
+
 // Top up the local actor's one-time key-package pool on the nest to
 // `target`. Thin FFI-facing wrapper over the FaunaMls rail backend's
 // [`RailBackend::ensure_keypackages`](crate::backend::RailBackend::ensure_keypackages)
@@ -3873,6 +4014,39 @@ func (_self *ConversationsManager) ReceiveStopped() bool {
 	}))
 }
 
+// Re-derive [`ComposeState::list_send`] for a compose — the thread `id`'s,
+// or the new-thread compose's when `None` — from the nest's current
+// figures (`mail-mass-mailing.md` § Composing a list message): set when
+// its one mail recipient is one of the account's own lists, cleared
+// otherwise. Apps call it when a recipient chip commits and when a thread
+// opens; [`Self::send`] calls it after every send. The rail answers
+// ([`RailBackend::list_send_view`]); only SMTP has lists.
+func (_self *ConversationsManager) RefreshListSend(id *ThreadId) {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
+	defer _self.ffiObject.decrementPointer()
+	uniffiRustCallAsync[error](
+		nil,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_fauna_conversations_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_fauna_conversations_fn_method_conversationsmanager_refresh_list_send(
+			_pointer, FfiConverterOptionalTypeThreadIdINSTANCE.Lower(id)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_free_void(handle)
+		},
+	)
+
+}
+
 // Remove the staged attachment at `index` from `id`'s compose draft (the
 // `dm-attachment-*` remove affordance on the compose bar). The cached bytes
 // are left in the store — harmless (in-memory, cleared on next login) and
@@ -3927,6 +4101,20 @@ func (_self *ConversationsManager) RemoveParticipant(id ThreadId, addr TypedAddr
 		},
 	)
 
+}
+
+// `recipient-picker-chip[i]`'s × — drop the active picker's `index`th
+// chip (the add-participant overlay first, as
+// [`Self::accept_current_recipient_chip`]). An index past the chips is a
+// no-op.
+func (_self *ConversationsManager) RemoveRecipientChip(index uint32) {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_fauna_conversations_fn_method_conversationsmanager_remove_recipient_chip(
+			_pointer, FfiConverterUint32INSTANCE.Lower(index), _uniffiStatus)
+		return false
+	})
 }
 
 // Remove `addr` from the editable reply To line
@@ -4445,6 +4633,21 @@ func (_self *ConversationsManager) SetEngineServedElsewhere(served bool) {
 	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_fauna_conversations_fn_method_conversationsmanager_set_engine_served_elsewhere(
 			_pointer, FfiConverterBoolINSTANCE.Lower(served), _uniffiStatus)
+		return false
+	})
+}
+
+// Record whether this account's MLS store needs a newer app
+// (`MlsError::SchemaIncompatible` at engine construction). Called by the
+// app's engine-construction site on every attempt — success clears it,
+// `SchemaIncompatible` sets it, any other failure leaves it cleared. A
+// no-op (no `notify`) when the value is unchanged.
+func (_self *ConversationsManager) SetEngineStateNeedsNewerApp(needs bool) {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_fauna_conversations_fn_method_conversationsmanager_set_engine_state_needs_newer_app(
+			_pointer, FfiConverterBoolINSTANCE.Lower(needs), _uniffiStatus)
 		return false
 	})
 }
@@ -6677,10 +6880,21 @@ func (_ FfiDestroyerReactionGroup) Destroy(value ReactionGroup) {
 }
 
 type RecipientPickerState struct {
-	RawInput     string
-	Chips        []TypedAddress
-	Suggestions  []TypedAddress
-	ResolveState ResolveState
+	RawInput string
+	Chips    []TypedAddress
+	// `recipient-picker-suggestion[i]` — a completion over people this
+	// account already knows (correspondents and contacts), derived by the
+	// manager on every snapshot and never stored
+	// (`docs/goal/ui/conversations.md` § Where logic lives → *Recipient
+	// suggestions*). The click is `ConversationsManager::accept_suggestion(i)`.
+	Suggestions []TypedAddress
+	// The finished label each suggestion row paints, index-parallel with
+	// [`Self::suggestions`] (the `participants` / `participant_displays`
+	// shape): a contact's nickname-or-public-name, a correspondent's member
+	// chip name. The row shows the address spelling beside it when the two
+	// differ; apps never resolve a name themselves.
+	SuggestionDisplays []string
+	ResolveState       ResolveState
 	// The address the async backend probe (`ConversationsManager::resolve_recipient`)
 	// resolved `raw_input` to, when `resolve_state == Resolved`. Carries the
 	// *resolved* rail/identity — e.g. a 64-hex actor id promoted to
@@ -6702,6 +6916,7 @@ func (r *RecipientPickerState) Destroy() {
 	FfiDestroyerString{}.Destroy(r.RawInput)
 	FfiDestroyerSequenceTypedAddress{}.Destroy(r.Chips)
 	FfiDestroyerSequenceTypedAddress{}.Destroy(r.Suggestions)
+	FfiDestroyerSequenceString{}.Destroy(r.SuggestionDisplays)
 	FfiDestroyerResolveState{}.Destroy(r.ResolveState)
 	FfiDestroyerOptionalTypedAddress{}.Destroy(r.Resolved)
 	FfiDestroyerBool{}.Destroy(r.IncludeHomeNest)
@@ -6720,6 +6935,7 @@ func (c FfiConverterRecipientPickerState) Read(reader io.Reader) RecipientPicker
 		FfiConverterStringINSTANCE.Read(reader),
 		FfiConverterSequenceTypedAddressINSTANCE.Read(reader),
 		FfiConverterSequenceTypedAddressINSTANCE.Read(reader),
+		FfiConverterSequenceStringINSTANCE.Read(reader),
 		FfiConverterResolveStateINSTANCE.Read(reader),
 		FfiConverterOptionalTypedAddressINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
@@ -6738,6 +6954,7 @@ func (c FfiConverterRecipientPickerState) Write(writer io.Writer, value Recipien
 	FfiConverterStringINSTANCE.Write(writer, value.RawInput)
 	FfiConverterSequenceTypedAddressINSTANCE.Write(writer, value.Chips)
 	FfiConverterSequenceTypedAddressINSTANCE.Write(writer, value.Suggestions)
+	FfiConverterSequenceStringINSTANCE.Write(writer, value.SuggestionDisplays)
 	FfiConverterResolveStateINSTANCE.Write(writer, value.ResolveState)
 	FfiConverterOptionalTypedAddressINSTANCE.Write(writer, value.Resolved)
 	FfiConverterBoolINSTANCE.Write(writer, value.IncludeHomeNest)
@@ -11439,9 +11656,9 @@ func RailParse(s string) Rail {
 // spelling belongs to is the nest's answer, matched against each bridge's
 // declared grammar (`ui/conversations.md` § Where logic lives → *The
 // `Bridged` adapter*, ruling 2 (d)), so no app parses one. A `did:`, a
-// two-`@` Fediverse handle or an `npub1…` — the shapes the retired Bluesky,
-// ActivityPub and Nostr rails claimed here — is therefore not recognised,
-// and neither is read as an email address.
+// two-`@` Fediverse handle, an `@`-led Bluesky handle or an `npub1…` — the
+// shapes the retired Bluesky, ActivityPub and Nostr rails claimed here — is
+// therefore not recognised, and neither is read as an email address.
 //
 // FFI-exported so the native apps (windows/macos/ios/android) consume this
 // one recognizer for the `dm-reply-recipient-add` field + recipient picker
@@ -11774,6 +11991,16 @@ func RoomSettingsToggleTransfer(draft RoomSettingsDraft, participants []TypedAdd
 func RoomSettingsTransferStagedAt(draft RoomSettingsDraft, participants []TypedAddress, index uint32) bool {
 	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
 		return C.uniffi_fauna_conversations_fn_func_room_settings_transfer_staged_at(FfiConverterRoomSettingsDraftINSTANCE.Lower(draft), FfiConverterSequenceTypedAddressINSTANCE.Lower(participants), FfiConverterUint32INSTANCE.Lower(index), _uniffiStatus)
+	}))
+}
+
+// Whether `count` available key packages is low enough for the Encryption
+// page's read-only warning ([`KEYPACKAGE_LOW_THRESHOLD`]). Exported to the
+// native apps over UniFFI and to the web SPA as `fauna-wasm`'s
+// `keypackagesLow`.
+func KeypackagesLow(count uint64) bool {
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_conversations_fn_func_keypackages_low(FfiConverterUint64INSTANCE.Lower(count), _uniffiStatus)
 	}))
 }
 

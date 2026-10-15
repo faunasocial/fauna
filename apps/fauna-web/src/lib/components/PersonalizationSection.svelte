@@ -42,6 +42,7 @@
     type PublishNgram,
   } from '$lib/rpc';
   import { getFeedManager } from '$lib/feed';
+  import { onStoreChange } from '$lib/store-change';
   import { IDS } from '$lib/generated/uiIds';
 
   // The page-level error surface is the Settings shell's shared MessageBanner
@@ -64,6 +65,16 @@
   // `fauna_client_personalization::TrainedTopics` lifecycle — the registry↔model
   // pairing is not re-coded here (priority #2). Each returns the fresh rows.
   let topics = $state<TrainedTopicRow[]>([]);
+  /** Bumped by every gesture that writes `topics`: the mount-time list read
+   *  applies only when no gesture landed while it was in flight. The input is
+   *  live before that read returns (`ready` flips first), so a create made in
+   *  the gap had its fresh rows overwritten by the older, pre-create list —
+   *  the new topic never painted. */
+  let topicGestures = 0;
+  function commitTopics(rows: TrainedTopicRow[]): void {
+    topicGestures += 1;
+    topics = rows;
+  }
   let topicName = $state('');
   /** The hex id of the row the name-input is retargeted at, or null = create. */
   let renamingId = $state<string | null>(null);
@@ -78,17 +89,53 @@
     if (err?.code === 'cap' && err.max != null) {
       return t.personalization.trained_factor_cap({ max: String(err.max) });
     }
+    if (err?.code === 'blank_name') return t.personalization.trained_factor_blank_name;
     if (err?.message) return err.message;
     return e instanceof Error ? e.message : String(e);
   }
 
+  /** The text of the failure `loadTopics` put up, so the store-change re-read
+   *  below retires only its OWN message — a gesture's, or the publish sheet's,
+   *  stays. */
+  let topicsReadError = '';
+
   async function loadTopics(secretHex: string): Promise<void> {
     try {
-      topics = await trainedTopicsList(secretHex);
+      const before = topicGestures;
+      const rows = await trainedTopicsList(secretHex);
+      if (before === topicGestures) topics = rows;
     } catch (e: unknown) {
-      error = topicsError(e);
+      topicsReadError = topicsError(e);
+      error = topicsReadError;
     }
   }
+
+  // The open page's re-read on a store-change notice (`$lib/store-change`):
+  // the topic registry rests in the account store, so another device's
+  // create, rename or delete walking in repaints it. Level-shaped, tui's
+  // `TrainedTopicsListed` rule: skipped while a gesture is in flight, and a
+  // read a gesture overtook applies nothing; it replaces `topics` only when
+  // the answer differs — never the name input, the rename target (an id, so a
+  // retargeted input survives the list being replaced) or `busy`; a failed
+  // read replaces nothing and writes no error, so the publish sheet's
+  // precedence (`clearErrorUnlessPublishOpen`) is never crossed; and a good
+  // read retires only the error the visit's own read put up.
+  async function rereadTopics(): Promise<void> {
+    const id = $identity;
+    if (!id || !ready || busy) return;
+    const before = topicGestures;
+    let rows: TrainedTopicRow[];
+    try {
+      rows = await trainedTopicsList(id.secretHex);
+    } catch {
+      return;
+    }
+    if (busy || before !== topicGestures) return;
+    if (topicsReadError && error === topicsReadError) error = '';
+    topicsReadError = '';
+    if (JSON.stringify(rows) !== JSON.stringify(topics)) topics = rows;
+  }
+  onDestroy(onStoreChange(() => void rereadTopics()));
 
   /** Clear the page error after an unrelated gesture's success — unless the
    *  publish sheet is open, whose still-relevant error the gesture must not
@@ -101,16 +148,24 @@
     if (!publishTarget) error = '';
   }
 
-  /** Commit the name-input: a rename when a row retargeted it, else a create. */
+  /** Commit the name-input: a rename when a row retargeted it, else a create.
+   *  A blank buffer is refused here, before the round trip, with the shared
+   *  `trained_factor_blank_name` sentence the other apps paint — never a
+   *  silent no-op that leaves the user wondering why nothing was created. */
   async function submitTopic(): Promise<void> {
     const id = $identity;
     const name = topicName.trim();
-    if (!id || !name || busy) return;
+    if (!id || busy) return;
+    if (!name) {
+      error = t.personalization.trained_factor_blank_name;
+      return;
+    }
     busy = true;
     try {
-      topics = renamingId
+      const rows = renamingId
         ? await trainedTopicsRename(id.secretHex, renamingId, name)
         : await trainedTopicsCreate(id.secretHex, name);
+      commitTopics(rows);
       // Any successful commit resets the input to create mode.
       renamingId = null;
       topicName = '';
@@ -132,7 +187,7 @@
     if (!id || busy) return;
     busy = true;
     try {
-      topics = await trainedTopicsDelete(id.secretHex, row.id);
+      commitTopics(await trainedTopicsDelete(id.secretHex, row.id));
       // A delete of the row currently being renamed strands the input.
       if (renamingId === row.id) {
         renamingId = null;
@@ -153,7 +208,7 @@
     if (!id || busy) return;
     busy = true;
     try {
-      topics = await trainedTopicsSetLearnFromEngagement(id.secretHex, row.id, !row.learn_from_engagement);
+      commitTopics(await trainedTopicsSetLearnFromEngagement(id.secretHex, row.id, !row.learn_from_engagement));
       clearErrorUnlessPublishOpen();
     } catch (e: unknown) {
       error = topicsError(e);

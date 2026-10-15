@@ -52,7 +52,7 @@ fn local_storage() -> Option<web_sys::Storage> {
 /// The per-actor `localStorage` key holding this device's audit state as JSON.
 /// `actor_hex` is the lowercase hex actor id — the browser twin of linux's
 /// `<account dir>/audit-state.json`.
-fn storage_key(actor_hex: &str) -> String {
+pub(crate) fn storage_key(actor_hex: &str) -> String {
     format!("fauna_backup_audit_{actor_hex}")
 }
 

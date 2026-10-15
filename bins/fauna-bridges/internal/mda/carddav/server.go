@@ -120,8 +120,11 @@ func NewServer(cfg ServerConfig, client wsrpc.Caller) *Server {
 
 	// Middleware chain (outermost → innermost):
 	//   accessLogMiddleware — one structured line per request.
-	//   w1Mitigations       — body cap / XML depth / PROPFIND depth gates.
 	//   davauth.NewMiddleware — HTTP Basic → AEAD-unwrap → Session in ctx.
+	//                       Outside w1Mitigations on purpose: an
+	//                       anonymous peer is refused 401 before any body byte
+	//                       is read, so the 16 MiB buffer is authenticated-only.
+	//   w1Mitigations       — body cap / XML depth / PROPFIND depth gates.
 	//   ifMatchMiddleware   — stash If-Match header for the DELETE handler.
 	//   newPropPatchInterceptor — handle PROPPATCH (emersion 501s it — see
 	//                       props.go): collection path → unseal/mutate/re-seal/
@@ -137,17 +140,15 @@ func NewServer(cfg ServerConfig, client wsrpc.Caller) *Server {
 	// plaintext-storage plumbing (seal-always). PUT continues to receive If-Match
 	// through `opts.IfMatch` per emersion's existing plumbing.
 	chain := accessLogMiddleware(
-		w1Mitigations(
-			davauth.NewMiddleware(
-				carddavRealm,
-				reportBodyMiddleware(ifMatchMiddleware(
-					newPropPatchInterceptor(
-						newSyncCollectionInterceptor(dav.QuotaBody(handler), logger),
-						logger,
-					),
-				)),
-				client, logger, lockout, primaryDomain,
-			),
+		davauth.NewMiddleware(
+			carddavRealm,
+			w1Mitigations(reportBodyMiddleware(ifMatchMiddleware(
+				newPropPatchInterceptor(
+					newSyncCollectionInterceptor(dav.QuotaBody(handler), logger),
+					logger,
+				),
+			))),
+			client, logger, lockout, primaryDomain,
 		),
 		logger,
 	)

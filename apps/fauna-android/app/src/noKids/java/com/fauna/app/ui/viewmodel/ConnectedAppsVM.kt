@@ -3,6 +3,7 @@ package com.fauna.app.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.ApiClient
+import com.fauna.app.core.ConsentHandoff
 import com.fauna.app.core.SessionAccount
 import com.fauna.app.core.ShellLog
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -38,6 +39,10 @@ import javax.inject.Inject
  * paints neither rows nor the empty state until its own read has returned —
  * never the previous visit's list while the fresh one is in flight — and takes
  * every revealed secret off the screen.
+ *
+ * **The same-device handoff lands here.** A `fauna://consent` route staged in
+ * [ConsentHandoff] is opened by the visit once its machine has read the roster
+ * (`openStagedHandoff`), so the route's card appears in the requests tray.
  */
 @HiltViewModel
 class ConnectedAppsVM @Inject constructor(
@@ -65,6 +70,9 @@ class ConnectedAppsVM @Inject constructor(
 
     private var machine: ConnectedAppsMachine? = null
 
+    /** Bumped by every [visit]; a visit's late work checks it is still current. */
+    private var visitGeneration = 0
+
     private val observer = object : ConnectedAppsObserver {
         override fun onChanged() {
             machine?.let { snapshot.value = it.snapshot() }
@@ -83,6 +91,7 @@ class ConnectedAppsVM @Inject constructor(
         revealed.value = emptyMap()
         snapshot.value = null
         machine = null
+        val generation = ++visitGeneration
         viewModelScope.launch {
             repeat(HYDRATE_ATTEMPTS) {
                 val mail = api.buildMailSettingsMachine()
@@ -94,15 +103,34 @@ class ConnectedAppsVM @Inject constructor(
                 }
                 val m = api.buildConnectedAppsMachine(observer, mail)
                 if (m != null) {
+                    if (generation != visitGeneration) return@launch
                     machine = m
                     snapshot.value = m.snapshot()
                     m.refresh()
                     snapshot.value = m.snapshot()
+                    openStagedHandoff(m, generation)
                     return@launch
                 }
                 delay(HYDRATE_RETRY_MS)
             }
         }
+    }
+
+    /**
+     * Open the staged `fauna://consent/<request_uri>` route, if any, through the
+     * shared machine ([ConsentHandoff]; `android.md` § Navigation → *In-app
+     * routes*), and clear it only after the open has returned — a waiter (the e2e
+     * `open_route` command) then knows the card is painted. A miss is the
+     * machine's own `connected_apps.error_handoff_expired` message. A newer
+     * visit owns the page once it starts: the request then stays staged, so ITS
+     * open (a fresh machine) reveals the card and clears it.
+     */
+    private suspend fun openStagedHandoff(m: ConnectedAppsMachine, generation: Int) {
+        val requestUri = ConsentHandoff.shared.pending.value ?: return
+        m.openHandoff(requestUri)
+        if (generation != visitGeneration) return
+        snapshot.value = m.snapshot()
+        ConsentHandoff.shared.finishOpen(requestUri)
     }
 
     /** The bare handle `resolve_mua_username` substitutes into a mail row's login. */

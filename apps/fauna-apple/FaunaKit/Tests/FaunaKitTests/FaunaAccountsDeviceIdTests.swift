@@ -66,6 +66,48 @@ struct FaunaAccountsDeviceIdTests {
         #expect(idA != idB)
     }
 
+    private static func isSyncShaped(_ id: String?) -> Bool {
+        guard let id, id.count == 64 else { return false }
+        return id.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+    }
+
+    /// The launch reader (`sessionDeviceId`) — what both shells' stored-identity
+    /// launch hands `FaunaClient` — never serves a non-sync slot verbatim: the e2e
+    /// harness's free-form placeholder resolves to a derived 32-byte-hex id and is
+    /// persisted, so `startAccountRuntime` has an enrollment target. (Windows twin:
+    /// `SessionDeviceIdTests`.)
+    @Test func aSlotThatIsNotASyncIdResolvesToADerivedSyncIdAndPersistsIt() throws {
+        let keychain = makeHermetic()
+        defer { release(keychain) }
+        let registry = FaunaAccounts.registry(keychain: keychain)
+        let actorId = try registry.addAccount(
+            secretHex: Self.secretA, nestUrl: "https://a.example", deviceId: "smoke-e2e-device")
+
+        let id = FaunaAccounts.sessionDeviceId(forActorId: actorId, keychain: keychain)
+
+        #expect(Self.isSyncShaped(id), "expected a 32-byte-hex sync id, got \(String(describing: id))")
+        #expect(registry.sessionMaterial(actorId: actorId)?.deviceId == id)
+    }
+
+    @Test func aStoredSyncIdIsServedVerbatim() throws {
+        let keychain = makeHermetic()
+        defer { release(keychain) }
+        let syncId = String(repeating: "ab", count: 32)
+        let registry = FaunaAccounts.registry(keychain: keychain)
+        let actorId = try registry.addAccount(
+            secretHex: Self.secretA, nestUrl: nil, deviceId: syncId)
+
+        #expect(FaunaAccounts.sessionDeviceId(forActorId: actorId, keychain: keychain) == syncId)
+    }
+
+    @Test func anActorTheRegistryDoesNotHoldHasNoDeviceId() throws {
+        let keychain = makeHermetic()
+        defer { release(keychain) }
+        let actorId = try actor_id_from_secret(Self.secretB)
+
+        #expect(FaunaAccounts.sessionDeviceId(forActorId: actorId, keychain: keychain) == nil)
+    }
+
     /// The contrast that makes the first test meaningful: unlike sign-out's
     /// scoped `clearAll()`, a factory reset's wholesale `KeychainStore
     /// .deleteAll()` (what both `resetToFactory` implementations call) DOES

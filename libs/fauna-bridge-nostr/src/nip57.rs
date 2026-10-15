@@ -3,6 +3,9 @@ use crate::types::Event;
 /// The Nostr event kind for zap receipts (NIP-57).
 pub const ZAP_RECEIPT_KIND: u64 = 9735;
 
+/// The Nostr event kind for zap requests (NIP-57), embedded in a receipt's `description`.
+pub const ZAP_REQUEST_KIND: u64 = 9734;
+
 /// A parsed NIP-57 zap receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZapReceipt {
@@ -10,7 +13,8 @@ pub struct ZapReceipt {
     pub target_event_id: Option<String>,
     /// Public key of the zap recipient.
     pub target_pubkey: String,
-    /// Public key of the sender, extracted from the zap request description.
+    /// Public key of the sender, taken from the zap request description only when
+    /// that embedded kind-9734 request is validly signed by it; otherwise `None`.
     pub sender_pubkey: Option<String>,
     /// Amount in millisatoshis, parsed from the bolt11 invoice.
     pub amount_msats: Option<u64>,
@@ -281,13 +285,21 @@ fn parse_recipient_pubkey_from_description(description: &str) -> Option<String> 
         .map(|s| s.to_string())
 }
 
-/// Extract the `pubkey` field from a zap request JSON string.
+/// The sender of a zap request — its `pubkey` — **only if that pubkey signed it**.
+///
+/// The `description` tag is plain JSON the receipt's signer attached; its
+/// `pubkey` field is a claim, not a fact, until the embedded kind-9734 event's
+/// own id and Schnorr signature check out against that same pubkey (the check is
+/// self-certifying and costs nothing). An unsigned, wrongly-signed, wrong-kind
+/// or unparseable request yields `None`: the sender is dropped and the receipt's
+/// verdict is otherwise untouched (`description` is optional in the wild).
+/// Gating the parsed field here — not at any one reader — is what makes the
+/// tips read, the purchase leg's buyer binding and the counterparty-standing
+/// check all inherit it (`monetization.md` § Zap receipts — the sender conjunct).
 fn parse_sender_pubkey_from_description(description: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(description).ok()?;
-    value
-        .get("pubkey")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+    let request: Event = serde_json::from_str(description).ok()?;
+    (request.kind == ZAP_REQUEST_KIND && crate::signing::verify_event(&request))
+        .then(|| request.pubkey.to_ascii_lowercase())
 }
 
 /// Parse the amount in millisatoshis from a BOLT-11 invoice.
@@ -447,20 +459,119 @@ mod tests {
 
     // ── parse_zap_receipt — zap request / sender pubkey ─────────────────────
 
+    /// A genuine kind-9734 zap request naming `recipient`, signed by `sender`.
+    fn signed_zap_request(sender: &crate::signing::Keypair, recipient: &str) -> Event {
+        sender.sign_event(crate::types::UnsignedEvent {
+            pubkey: sender.public_key_bytes(),
+            created_at: 1_700_000_000,
+            kind: ZAP_REQUEST_KIND,
+            tags: vec![Tag::new(vec!["p".into(), recipient.into()])],
+            content: String::new(),
+        })
+    }
+
+    fn receipt_embedding(request_json: String) -> Event {
+        make_zap_receipt(vec![
+            Tag::new(vec!["p".into(), "d".repeat(64)]),
+            Tag::new(vec!["description".into(), request_json]),
+        ])
+    }
+
     #[test]
     fn parse_zap_receipt_extracts_sender_from_description() {
-        let sender_pk = "f".repeat(64);
-        let zap_req_json = format!(
-            r#"{{"pubkey":"{}","kind":9734,"tags":[],"content":""}}"#,
-            sender_pk
-        );
-        let event = make_zap_receipt(vec![
-            Tag::new(vec!["p".into(), "d".repeat(64)]),
-            Tag::new(vec!["description".into(), zap_req_json.clone()]),
-        ]);
+        let sender = crate::signing::Keypair::generate();
+        let zap_req_json =
+            serde_json::to_string(&signed_zap_request(&sender, &"d".repeat(64))).unwrap();
+        let event = receipt_embedding(zap_req_json.clone());
         let receipt = parse_zap_receipt(&event).unwrap();
-        assert_eq!(receipt.sender_pubkey.as_deref(), Some(sender_pk.as_str()));
+        assert_eq!(
+            receipt.sender_pubkey.as_deref(),
+            Some(sender.public_key_hex().as_str())
+        );
         assert_eq!(receipt.zap_request.as_deref(), Some(zap_req_json.as_str()));
+    }
+
+    // The sender conjunct: the request's `pubkey` is a claim until the request's
+    // own signature backs it. Every way of failing that drops the sender and
+    // leaves the rest of the receipt alone.
+
+    #[test]
+    fn a_zap_request_with_a_bad_signature_names_no_sender() {
+        let victim = crate::signing::Keypair::generate();
+        let mut request = signed_zap_request(&victim, &"d".repeat(64));
+        request.sig = "0".repeat(128);
+        let receipt =
+            parse_zap_receipt(&receipt_embedding(serde_json::to_string(&request).unwrap()))
+                .unwrap();
+        assert!(receipt.sender_pubkey.is_none());
+        assert_eq!(receipt.target_pubkey, "d".repeat(64));
+    }
+
+    #[test]
+    fn a_zap_request_claiming_anothers_pubkey_names_no_sender() {
+        // Signed by the attacker, but the `pubkey` field says the victim: the id
+        // (computed over the claimed pubkey) no longer matches and the signature
+        // does not verify under the victim's key.
+        let attacker = crate::signing::Keypair::generate();
+        let victim = crate::signing::Keypair::generate();
+        let mut request = signed_zap_request(&attacker, &"d".repeat(64));
+        request.pubkey = victim.public_key_hex();
+        let receipt =
+            parse_zap_receipt(&receipt_embedding(serde_json::to_string(&request).unwrap()))
+                .unwrap();
+        assert!(receipt.sender_pubkey.is_none());
+    }
+
+    #[test]
+    fn an_unsigned_zap_request_names_no_sender() {
+        // The shape the old parser believed: a bare `pubkey` and no `id`/`sig`.
+        let json = format!(
+            r#"{{"pubkey":"{}","kind":9734,"tags":[],"content":""}}"#,
+            "f".repeat(64)
+        );
+        let receipt = parse_zap_receipt(&receipt_embedding(json)).unwrap();
+        assert!(receipt.sender_pubkey.is_none());
+    }
+
+    #[test]
+    fn a_validly_signed_event_of_the_wrong_kind_names_no_sender() {
+        let sender = crate::signing::Keypair::generate();
+        let mut note = sender.sign_event(crate::types::UnsignedEvent {
+            pubkey: sender.public_key_bytes(),
+            created_at: 1_700_000_000,
+            kind: 1,
+            tags: vec![],
+            content: "hi".into(),
+        });
+        assert!(crate::signing::verify_event(&note));
+        let receipt =
+            parse_zap_receipt(&receipt_embedding(serde_json::to_string(&note).unwrap())).unwrap();
+        assert!(receipt.sender_pubkey.is_none());
+        note.kind = ZAP_REQUEST_KIND; // kind changed after signing: id no longer matches
+        let receipt =
+            parse_zap_receipt(&receipt_embedding(serde_json::to_string(&note).unwrap())).unwrap();
+        assert!(receipt.sender_pubkey.is_none());
+    }
+
+    #[test]
+    fn an_unverifiable_sender_leaves_the_receipts_verdict_unchanged() {
+        // Parallel to conjunct (ii): `description` is optional in the wild, so a
+        // request that cannot vouch for its sender only costs the attribution.
+        let event = receipt_from(
+            LNURL_SIGNER,
+            PAYEE,
+            vec![Tag::new(vec![
+                "description".into(),
+                format!(
+                    r#"{{"pubkey":"{}","kind":9734,"tags":[["p","{}"]],"content":""}}"#,
+                    STRANGER, PAYEE
+                ),
+            ])],
+        );
+        match classify(&event, &[LNURL_SIGNER.to_string()], None) {
+            ZapVerdict::Trusted(z) => assert!(z.receipt().sender_pubkey.is_none()),
+            other => panic!("expected Trusted, got {other:?}"),
+        }
     }
 
     #[test]
@@ -565,8 +676,9 @@ mod tests {
     fn parse_zap_receipt_full() {
         let target_pk = "d".repeat(64);
         let target_eid = "e".repeat(64);
-        let sender_pk = "f".repeat(64);
-        let zap_req = format!(r#"{{"pubkey":"{}","kind":9734}}"#, sender_pk);
+        let sender = crate::signing::Keypair::generate();
+        let sender_pk = sender.public_key_hex();
+        let zap_req = serde_json::to_string(&signed_zap_request(&sender, &target_pk)).unwrap();
 
         let event = make_zap_receipt(vec![
             Tag::new(vec!["p".into(), target_pk.clone()]),

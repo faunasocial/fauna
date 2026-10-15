@@ -80,23 +80,16 @@ pub fn refresh_due(last_refresh: Option<u64>, now: u64) -> bool {
 }
 
 /// The module input for an item the app holds as rendered parts rather than as
-/// a `Post` — a feed card or a conversation bubble, post-decrypt. The same
-/// fields `LabelerPostInput::from_post` maps, so a `wasm` scorer reads a card
-/// exactly as it reads the post behind it.
+/// a `Post` — a feed card or a conversation bubble, post-decrypt: the shared
+/// card mapping, [`LabelerPostInput::from_card`], which a subscribed labeler in
+/// the feed seam reads through too.
 pub fn scorer_input(
     author: fauna_core::identity::ActorId,
     text: &str,
     hashtags: &[String],
     has_media: bool,
 ) -> LabelerPostInput {
-    LabelerPostInput {
-        text: (!text.is_empty()).then(|| text.to_string()),
-        hashtags: hashtags.to_vec(),
-        has_media,
-        media_type: None,
-        duration_ms: None,
-        author,
-    }
+    LabelerPostInput::from_card(author, text, hashtags, has_media)
 }
 
 #[cfg(test)]

@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The user-facing **mail-export** wizard page (`docs/goal/behavior/mail-export.md`),
@@ -184,6 +187,10 @@ public struct MailExportView: View {
     private var confirmSection: some View {
         groupedSection(title: L.mailExport.confirmTitle) {
             automationText(Ids.mailExportConfirmSummary, confirmSummary)
+            // The archive's size and wall-clock time have no source to estimate from.
+            Text(L.mailExport.confirmEstimateUnavailable)
+                .font(.caption)
+                .foregroundStyle(.secondary)
             HStack {
                 backButton
                 Button(L.mailExport.startButton) { Task { await vm.dispatch(.start) } }
@@ -326,20 +333,33 @@ public struct MailExportView: View {
     // MARK: - Derived text
 
     private var confirmSummary: String {
-        guard let snap = vm.snapshot else { return L.mailExport.confirmPending }
+        guard let snap = vm.snapshot else { return "" }
         // Through the same echo the rows render from, so the Confirm step never
         // disagrees with the checkboxes the user just left behind.
-        let selected = snap.mailboxes.filter { isSelected($0) }.count
-        return L.mailExport.confirmSummaryFmt(
+        let selected = snap.mailboxes.filter { isSelected($0) }
+        let messages = selected.reduce(UInt64(0)) { $0 + UInt64($1.messageCount) }
+        return L.mailExport.confirmSummaryCountFmt(
             format: renderLocalizedText(exportFormatLabel(format: snap.format)),
-            mailboxes: String(selected))
+            mailboxes: String(selected.count), messages: String(messages))
+    }
+
+    /// The shared elapsed time / time left of this session (`mail-export.md`
+    /// § Wizard steps steps 4–5), at the device's clock.
+    private func timing(_ snap: MailExportSnapshot) -> TransferTiming {
+        MailTransferText.timing(
+            startedAt: snap.startedAt, lastProgressAt: snap.lastProgressAt,
+            running: snap.sessionState == .running,
+            processed: UInt64(snap.exportedCount) + UInt64(snap.skippedCount) + UInt64(snap.erroredCount),
+            total: UInt64(snap.totalCount))
     }
 
     private var progressSummary: String {
         guard let snap = vm.snapshot else { return "" }
-        return L.mailExport.progressSummaryFmt(
-            exported: String(snap.exportedCount), total: String(snap.totalCount),
-            skipped: String(snap.skippedCount), errored: String(snap.erroredCount))
+        return MailTransferText.exportProgress(
+            summary: L.mailExport.progressSummaryFmt(
+                exported: String(snap.exportedCount), total: String(snap.totalCount),
+                skipped: String(snap.skippedCount), errored: String(snap.erroredCount)),
+            timing: timing(snap))
     }
 
     private var progressFraction: Double {
@@ -353,11 +373,9 @@ public struct MailExportView: View {
         if let bytes = snap.blobBytes {
             // Once the archive is on disk the summary says WHERE — the visible
             // answer to the Download press (tui's and linux's shape).
-            if !snap.savedArchivePath.isEmpty {
-                return L.mailExport.savedSummaryFmt(
-                    format: format, bytes: String(bytes), path: snap.savedArchivePath)
-            }
-            return L.mailExport.doneSummaryFmt(format: format, bytes: String(bytes))
+            return MailTransferText.exportDone(
+                exported: UInt64(snap.exportedCount), format: format, bytes: bytes,
+                savedPath: snap.savedArchivePath, timing: timing(snap))
         }
         return format
     }
@@ -365,3 +383,4 @@ public struct MailExportView: View {
 
 // `groupedSection` (`GroupedSection.swift`) is the shared eager-container
 // replacement for `Form`'s `Section` this file's wizard steps use.
+#endif // !FAUNA_KIDS

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Threading.Tasks;
 using FaunaApp.Core.Models;
@@ -40,20 +41,33 @@ public class SubscriptionsSettingsViewModel : ViewModelBase
         ErrorMessage = null;
         try
         {
-            var mine = await _nest.SubscriptionMineListAsync();
-            Subscriptions.Clear();
-            foreach (var s in mine)
-                Subscriptions.Add(new SubscriptionMineRow(
-                    s.authorId,
-                    s.authorDisplay,
-                    s.tier,
-                    s.status,
-                    s.since));
+            _mine = await _nest.SubscriptionMineListAsync();
+            RepaintNames();
         }
         catch (Exception ex)
         {
             ShowError(ex);
         }
+    }
+
+    private IReadOnlyList<FfiMineSubscription> _mine = Array.Empty<FfiMineSubscription>();
+
+    /// <summary>Rebuild the rows from the last read, asking the shared overlay face
+    /// what each creator is called now (<c>subscription_author_label</c>: the viewer's
+    /// nickname, else the handle the nest resolved, else the hex actor id; contacts.md
+    /// § The private overlay). The page calls it again when the overlay projection
+    /// moves, so a rename shows without a nest round trip.</summary>
+    public void RepaintNames()
+    {
+        using var names = ContactOverlayNames.Open();
+        Subscriptions.Clear();
+        foreach (var s in _mine)
+            Subscriptions.Add(new SubscriptionMineRow(
+                s.authorId,
+                names.SubscriptionAuthorLabel(s.handle, s.authorId),
+                s.tier,
+                s.status,
+                s.since));
     }
 
     /// <summary>Unsubscribe from <paramref name="authorId"/> then re-read (plaintext

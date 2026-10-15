@@ -38,8 +38,8 @@ use fauna_nest::routes::AppState;
 use fauna_nest::rpc_router::RpcRouter;
 use fauna_protocol::bridge_routing::{StoreFlagsOp, StoreFlagsRequest};
 use fauna_protocol::email::{
-    ApplySpamDispositionRequest, FlagChangesReply, FlagChangesRequest, InboxFetchReply,
-    InboxFetchRequest, MarkSeenReply, MarkSeenRequest,
+    ApplySpamDispositionReply, ApplySpamDispositionRequest, FlagChangesReply, FlagChangesRequest,
+    INBOX_FLAG_WRITE_MAX_UIDS, InboxFetchReply, InboxFetchRequest, MarkSeenReply, MarkSeenRequest,
 };
 use fauna_protocol::{
     Frame, PushEvent, RpcError, decode_frame, decode_strict as decode, encode_canonical,
@@ -525,6 +525,105 @@ async fn flags_changed_wakes_the_actor_on_a_mail_client_write_to_inbox_only() {
         drain_flags_changed(&mut rx).is_empty(),
         "a Junk write is not an INBOX change"
     );
+}
+
+// ── request bounds ──────────────
+
+#[tokio::test]
+async fn mark_seen_over_the_cap_is_refused_before_any_db_work() {
+    let (router, state) = router_and_state().await;
+    let uid = alice_with_inbox(&router, &state, 1).await[0];
+    let settled = row(&state, &ALICE, "INBOX", uid).await;
+
+    let err = mark_seen(
+        &router,
+        &state,
+        ALICE,
+        vec![uid; INBOX_FLAG_WRITE_MAX_UIDS + 1],
+    )
+    .await
+    .expect_err("an over-cap list is refused");
+    assert_eq!(err.code, "fauna.email.invalid_params");
+    assert_eq!(
+        row(&state, &ALICE, "INBOX", uid).await,
+        settled,
+        "refused before any write"
+    );
+
+    // Exactly at the cap is served.
+    let at = vec![uid; INBOX_FLAG_WRITE_MAX_UIDS];
+    assert_eq!(
+        mark_seen(&router, &state, ALICE, at).await.unwrap().updated,
+        1
+    );
+}
+
+#[tokio::test]
+async fn mark_seen_repeating_one_unseen_uid_counts_and_writes_it_once() {
+    let (router, state) = router_and_state().await;
+    let uid = alice_with_inbox(&router, &state, 1).await[0];
+    let (_, before_modseq) = row(&state, &ALICE, "INBOX", uid).await;
+
+    let reply = mark_seen(&router, &state, ALICE, vec![uid, uid, uid])
+        .await
+        .expect("ok");
+    assert_eq!(
+        reply.updated, 1,
+        "one row gained \\Seen, however often named"
+    );
+    let (_, after_modseq) = row(&state, &ALICE, "INBOX", uid).await;
+    assert_eq!(
+        after_modseq,
+        before_modseq + 1,
+        "one UPDATE: the row's modseq bumped once"
+    );
+}
+
+#[tokio::test]
+async fn apply_spam_disposition_over_the_cap_is_refused_in_either_list() {
+    let (router, state) = router_and_state().await;
+    let uid = alice_with_inbox(&router, &state, 1).await[0];
+    let over = vec![uid; INBOX_FLAG_WRITE_MAX_UIDS + 1];
+    for (scored_uids, junk_uids) in [(over.clone(), vec![]), (vec![uid], over.clone())] {
+        let err = dispatch(
+            &router,
+            state.clone(),
+            ALICE,
+            "fauna.email.apply_spam_disposition",
+            payload(&ApplySpamDispositionRequest {
+                scored_uids,
+                junk_uids,
+                extra: Default::default(),
+            }),
+        )
+        .await
+        .expect_err("an over-cap list is refused");
+        assert_eq!(err.code, "fauna.email.invalid_params");
+    }
+    let (flags, _) = row(&state, &ALICE, "INBOX", uid).await;
+    assert!(!flags.contains("$FaunaSpamScored"), "nothing was written");
+}
+
+#[tokio::test]
+async fn apply_spam_disposition_counts_a_repeated_uid_once() {
+    let (router, state) = router_and_state().await;
+    let uid = alice_with_inbox(&router, &state, 1).await[0];
+    let bytes = dispatch(
+        &router,
+        state.clone(),
+        ALICE,
+        "fauna.email.apply_spam_disposition",
+        payload(&ApplySpamDispositionRequest {
+            scored_uids: vec![uid, uid],
+            junk_uids: vec![uid, uid],
+            extra: Default::default(),
+        }),
+    )
+    .await
+    .expect("ok");
+    let reply: ApplySpamDispositionReply = decode(&bytes).expect("decode reply");
+    assert_eq!(reply.watermarked, 1);
+    assert_eq!(reply.moved_to_junk, 1);
 }
 
 // ── allowlist ──────────────────────────────────────────────────────

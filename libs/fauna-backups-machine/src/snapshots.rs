@@ -252,6 +252,13 @@ pub struct SnapshotFileRow {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SnapshotDetail {
     pub snapshot_id: i64,
+    /// The set the snapshot was taken of, as the reply named it — what the
+    /// per-file download addresses the version history by when it licenses
+    /// a plaintext entry (`fauna_client_snapshots::SnapshotSet::from_named`;
+    /// `backup-restore.md` § Security Properties → Integrity).
+    pub folder: String,
+    /// The set's wire hash, hex — `None` when the reply carried none.
+    pub folder_hash: Option<String>,
     pub files: Vec<SnapshotFileRow>,
 }
 

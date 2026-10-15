@@ -16,6 +16,7 @@ import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.viewmodel.EncryptionSettingsVM
 import social.fauna.generated.Ids
+import uniffi.fauna_conversations.keypackagesLow
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -40,8 +41,8 @@ fun EncryptionSettingsScreen(
 
 /**
  * Stateless twin of [EncryptionSettingsScreen] (mirrors [PrivacySettingsContent] /
- * [MutedWordsContent]) \u2014 FFI-free, no Hilt, no VM, so a Robolectric test can drive
- * it directly.
+ * [MutedWordsContent]) \u2014 no Hilt, no VM (its one FFI call is the pure shared
+ * predicate `keypackagesLow`), so a Robolectric test can drive it directly.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -77,6 +78,26 @@ fun EncryptionSettingsContent(
         ) {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
+                    // The warning reads the SAME count the row below states and the
+                    // ONE shared threshold (`keypackagesLow`, never a per-app
+                    // literal). Painted only once the count has been read AND is
+                    // low — an unread page has no basis to claim either way.
+                    if (keyPackageCount != null && keypackagesLow(keyPackageCount.toULong())) {
+                        Column(modifier = Modifier.testTag(Ids.ENCRYPTION_KEYPACKAGE_LOW_WARNING)) {
+                            Text(
+                                stringResource(R.string.settings_encryption_page_low_key_warning_title),
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                            Text(
+                                stringResource(R.string.settings_encryption_page_low_key_warning_body)
+                                    .replace("{count}", keyPackageCount.toString()),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                        Spacer(Modifier.height(12.dp))
+                    }
                     Text(stringResource(R.string.settings_encryption_page_mls_key_packages), style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(12.dp))
 
@@ -88,7 +109,8 @@ fun EncryptionSettingsContent(
                         Text(
                             keyPackageCount?.toString() ?: "\u2014",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag(Ids.ENCRYPTION_KEYPACKAGE_COUNT),
                         )
                     }
 
@@ -106,7 +128,8 @@ fun EncryptionSettingsContent(
                     )
                     Button(
                         onClick = onRefreshKeys,
-                        enabled = refreshGate.enabled
+                        enabled = refreshGate.enabled,
+                        modifier = Modifier.testTag(Ids.ENCRYPTION_KEYPACKAGE_REFRESH_BUTTON),
                     ) {
                         Text(stringResource(R.string.settings_encryption_page_refresh_keys))
                     }

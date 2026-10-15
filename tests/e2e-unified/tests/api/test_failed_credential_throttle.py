@@ -1,4 +1,5 @@
-"""tier_3 E2E: the failed-credential throttle on the bearer WS upgrade.
+"""tier_3 E2E: the failed-credential throttle on the bearer WS upgrade and the
+device handshake.
 
 `bins/fauna-nest/src/failed_credential_throttle.rs`, owner
 `transport-connection.md` § Abuse posture → *The failed-credential throttle*.
@@ -132,3 +133,56 @@ def test_a_valid_bearer_is_never_the_throttles_to_refuse(nest_instance):
         f"a neighbour claiming a different actor from the same address was "
         f"answered {status}; its bucket is its own and holds no refusals yet"
     )
+
+
+# ── fauna.auth.device_handshake over the anonymous WS ────────────────────────
+
+
+def _handshake_refusal_code(nest, actor: dict, device_key) -> str:
+    """One renewal-grant mint; the error code the nest refused it with."""
+    from clients._ws_rpc_core import RpcCallError
+    from helpers.enrollment import device_sign_in
+
+    with pytest.raises(RpcCallError) as refused:
+        device_sign_in(nest["url"], actor["actor_id_bytes"], device_key)
+    return refused.value.code
+
+
+def test_an_unregistered_renewal_key_flood_is_answered_rate_limited(nest_instance):
+    """The handshake arm of the throttle, keyed `(source × claimed renewal
+    key)`: a key with no grant is refused `not_registered` until its bucket
+    has absorbed the budget, then `fauna.protocol.rate_limited` — and a
+    different claimed key from the same address keeps its own budget."""
+    from nacl.signing import SigningKey
+
+    actor = create_actor_and_register(
+        nest_instance["port"],
+        base_url=nest_instance["url"],
+        admin_signing_key=nest_instance["admin"]["signing_key"],
+    )
+    flooded = SigningKey(secrets.token_bytes(32))
+    codes = [
+        _handshake_refusal_code(nest_instance, actor, flooded) for _ in range(ATTEMPTS)
+    ]
+    allowed = {"fauna.auth.not_registered", "fauna.protocol.rate_limited"}
+    assert set(codes) <= allowed, (
+        f"an unregistered renewal key may only be refused {sorted(allowed)}; "
+        f"got {sorted(set(codes) - allowed)}"
+    )
+    assert "fauna.protocol.rate_limited" in codes, (
+        f"{ATTEMPTS} mints with an unregistered renewal key were all answered "
+        "`not_registered` — the handshake has no failed-credential throttle"
+    )
+    first_limited = codes.index("fauna.protocol.rate_limited") + 1
+    assert first_limited > BUDGET, (
+        f"the throttle answered rate_limited on attempt {first_limited}, inside "
+        f"the {BUDGET}-refusal budget"
+    )
+    # Once tripped it stays tripped: the flood does not earn a fresh budget.
+    assert set(codes[first_limited - 1 :]) == {"fauna.protocol.rate_limited"}
+
+    neighbour = SigningKey(secrets.token_bytes(32))
+    assert (
+        _handshake_refusal_code(nest_instance, actor, neighbour)
+        == "fauna.auth.not_registered"
+    ), "a different claimed key from the same address holds its own budget"

@@ -270,6 +270,7 @@
                                AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreProgress}"
                                Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
                     <TextBlock x:Name="RestoreWarningText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreWarning}"
                                Foreground="{ThemeResource SystemFillColorCriticalBrush}"
                                TextWrapping="Wrap" FontSize="12" Visibility="Collapsed" />
                 </StackPanel>
@@ -353,6 +354,12 @@
                  non-virtualizing StackPanel so FlaUI count-all sees every banner;
                  empty (no children) while every destination's last audit passed. -->
             <StackPanel x:Name="DestinationsAuditAlerts" Spacing="4" />
+            <!-- backup-audit-recover-result — present only after a recovery run: the
+                 running line, then the shared driver's result lines (verdict first).
+                 AutomationId only, no static Name, so get_text reads the live text. -->
+            <TextBlock x:Name="AuditRecoverResultText" TextWrapping="Wrap"
+                       Visibility="Collapsed"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupAuditRecoverResult}" />
             <!-- backup-sole-client-destination-warning — standing warning while EVERY
                  configured destination is a client device (backups.md § Third
                  destination kind → Durability + labeling; user-approved 2026-08-02). -->
@@ -507,6 +514,29 @@
                     <Button x:Name="ReclaimConfirmButton"
                             AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupReclaimConfirmButton}"
                             Click="ReclaimConfirm_Click"
+                            Style="{StaticResource AccentButtonStyle}" />
+                </StackPanel>
+            </StackPanel>
+        </ContentDialog>
+
+        <!-- backup-audit-recover-confirm-modal — a PLAIN confirm, no re-type: the
+             recovery copies the backup's records into the nest as new items and
+             deletes nothing on either side; running it again recovers nothing
+             twice (backups.md § Audit-alert surface, the fifth reason). -->
+        <ContentDialog x:Name="AuditRecoverConfirmDialog">
+            <StackPanel x:Name="AuditRecoverConfirmModal" Spacing="12" MinWidth="360"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupAuditRecoverConfirmModal}"
+                        AutomationProperties.Name="backup-audit-recover-confirm-modal">
+                <TextBlock x:Name="AuditRecoverConfirmTitle" TextWrapping="Wrap"
+                           Style="{StaticResource SubtitleTextBlockStyle}" />
+                <TextBlock x:Name="AuditRecoverConfirmBody" TextWrapping="Wrap" />
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button x:Name="AuditRecoverCancelButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupAuditRecoverCancelButton}"
+                            Click="AuditRecoverCancel_Click" />
+                    <Button x:Name="AuditRecoverConfirmButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupAuditRecoverConfirmButton}"
+                            Click="AuditRecoverConfirm_Click"
                             Style="{StaticResource AccentButtonStyle}" />
                 </StackPanel>
             </StackPanel>

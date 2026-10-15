@@ -177,11 +177,11 @@ func (w *fakeWriter) ResolveRecordRefs(_ context.Context, recordCBOR []byte) (ma
 // test planted in `blobRefs` and records the exact bytes it was asked to walk,
 // so a test can prove the fill runs on the COMMITTED bytes (override included)
 // rather than on the caller's draft.
-func (w *fakeWriter) ExtractBlobRefs(recordCBOR []byte) []string {
+func (w *fakeWriter) ExtractBlobRefs(recordCBOR []byte) ([]string, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.blobWalkCalls = append(w.blobWalkCalls, recordCBOR)
-	return w.blobRefs
+	return w.blobRefs, nil
 }
 
 // ResolveBlobRefs fakes the blob-store reverse index: only CIDs the test
@@ -468,6 +468,94 @@ func TestRefusalSubTypesReachTheWire(t *testing.T) {
 				t.Fatal("a refused write still committed to the repo")
 			}
 		})
+	}
+}
+
+// The oracle's live check rides the write funnel's one nest round trip: every
+// write route forwards the caller's session family, so the nest can refuse a
+// revoked session at the very next write (key-material-hierarchy.md § The
+// oracle → The ATProto classes ride the protocol's own door).
+func TestEveryWriteRouteForwardsTheCallersSession(t *testing.T) {
+	f, _ := newWriteFixture(t)
+	_, sess := f.createSession(t, "alice", "3ssn-cuqp-4u7r-farx")
+	f.nest.ingest = func(ws []wsrpc.ExternalWrite) []wsrpc.ExternalWriteResult {
+		out := make([]wsrpc.ExternalWriteResult, len(ws))
+		for i, w := range ws {
+			uri := "at://did:fauna:x/" + w.Collection + "/" + *w.Rkey
+			out[i] = wsrpc.ExternalWriteResult{Rkey: w.Rkey, AtURI: &uri}
+		}
+		return out
+	}
+	listBody := createRecordBody("app.bsky.graph.list", listRecord)
+	for _, tc := range []struct {
+		nsid string
+		body []byte
+	}{
+		{"com.atproto.repo.createRecord", listBody},
+		{"com.atproto.repo.applyWrites", applyWritesBody("",
+			`{"$type":"com.atproto.repo.applyWrites#create","collection":"app.bsky.graph.list","value":`+listRecord+`}`)},
+		{"com.atproto.repo.deleteRecord", []byte(`{"repo":"` + testDIDForAlice +
+			`","collection":"app.bsky.graph.list","rkey":"3gone"}`)},
+	} {
+		f.nest.lastIngestSession = nil
+		resp := f.postBody(t, tc.nsid, sess.AccessJwt, tc.body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status %d", tc.nsid, resp.StatusCode)
+		}
+		if len(f.nest.lastIngestSession) == 0 {
+			t.Errorf("%s forwarded no session — a revoke would not bite until refresh", tc.nsid)
+		}
+	}
+}
+
+// The two whole-batch oracle refusals reach the wire as the caller-level
+// errors they are: a revoked session is the uniform AuthenticationRequired (a
+// client re-authenticates, and learns nothing a bad token would not tell it),
+// a session over its ceiling is RateLimitExceeded — on applyWrites too, with
+// no per-row prefix.
+func TestTheOracleRefusalsReachTheWireAsCallerErrors(t *testing.T) {
+	for _, tc := range []struct {
+		subType    string
+		wantStatus int
+		wantName   string
+	}{
+		{wsrpc.RefusalSessionRevoked, http.StatusUnauthorized, "AuthenticationRequired"},
+		{wsrpc.RefusalRateLimited, http.StatusTooManyRequests, "RateLimitExceeded"},
+	} {
+		for _, nsid := range []string{"com.atproto.repo.createRecord", "com.atproto.repo.applyWrites"} {
+			t.Run(tc.subType+"/"+nsid, func(t *testing.T) {
+				f, w := newWriteFixture(t)
+				_, sess := f.createSession(t, "alice", "3ssn-cuqp-4u7r-farx")
+				f.nest.ingest = refusedWith(tc.subType, "nest says no")
+				body := createRecordBody("app.bsky.graph.list", listRecord)
+				if nsid == "com.atproto.repo.applyWrites" {
+					body = applyWritesBody("",
+						`{"$type":"com.atproto.repo.applyWrites#create","collection":"app.bsky.graph.list","value":`+listRecord+`}`)
+				}
+				resp := f.postBody(t, nsid, sess.AccessJwt, body)
+				if resp.StatusCode != tc.wantStatus {
+					t.Fatalf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
+				}
+				var e struct {
+					Error   string `json:"error"`
+					Message string `json:"message"`
+				}
+				if err := json.NewDecoder(resp.Body).Decode(&e); err != nil {
+					t.Fatal(err)
+				}
+				if e.Error != tc.wantName {
+					t.Fatalf("error name = %q, want %q", e.Error, tc.wantName)
+				}
+				if strings.HasPrefix(e.Message, "write 0") {
+					t.Fatalf("a whole-batch refusal carries a per-row prefix: %q", e.Message)
+				}
+				w.mu.Lock()
+				defer w.mu.Unlock()
+				if len(w.ops) != 0 {
+					t.Fatal("a refused write still committed to the repo")
+				}
+			})
+		}
 	}
 }
 

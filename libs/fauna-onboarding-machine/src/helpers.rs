@@ -24,6 +24,17 @@ pub fn server_type_label(st: ServerTypeInfo) -> String {
     )
 }
 
+/// The i18n key of an update-channel row's description at the running product
+/// version (`UpdateChannel::description_key`) — apps look the string up by this
+/// key rather than choosing per channel themselves
+/// (`behavior/onboarding-provisioning.md` § 5 → *The compat line*).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn update_channel_description_key(
+    channel: fauna_provisioning::cloud_init::UpdateChannel,
+) -> String {
+    channel.description_key().to_string()
+}
+
 /// Minimum RAM (GB) a mail box needs: the clamd signature DB alone holds ~1.5 GB
 /// resident, so a box that runs the content-scan sidecars wants ≥ 2 GB
 /// (`docs/goal/architecture/installers/vps.md` § Minimum VPS Requirements).

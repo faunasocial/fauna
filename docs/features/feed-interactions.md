@@ -48,11 +48,11 @@ Stamped 2026-09-19 at 23b3189e2b.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+3677c3d4 standalone |
-| linux | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| windows | ⚠ partial | 0.1.2-dev+e82b932f.dirty standalone |
-| macos | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| ios | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| web | ✅ full | 0.1.2-dev+3677c3d4 standalone |
+| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| windows | ✅ full | 0.1.2-dev+e82b932f.dirty standalone |
+| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.2-dev+831d48ef live |
 
@@ -72,6 +72,6 @@ Stamped 2026-09-19 at 23b3189e2b.
 | 6 | app | `tests/e2e-unified/tests/test_feed.py::test_a_repost_names_the_reposter_shows_the_original_and_opens_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_feed.py::test_a_count_shows_no_number_until_the_post_has_activity` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_feed_restricted_reference.py::test_words_under_a_restricted_post_are_refused_and_a_bare_repost_or_quote_still_works` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_room_restricted_reply.py::test_a_members_reply_to_a_room_post_opens_for_the_room_and_nobody_else` | tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_room_restricted_reply.py::test_an_outsiders_reply_to_a_room_post_is_refused_until_confirmed_public` | tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_room_restricted_reply.py::test_a_members_reply_to_a_room_post_opens_for_the_room_and_nobody_else` | web (linux): passed, linux (linux): failed, windows (windows): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_room_restricted_reply.py::test_an_outsiders_reply_to_a_room_post_is_refused_until_confirmed_public` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 <!-- features-render:end -->

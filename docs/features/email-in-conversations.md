@@ -78,7 +78,7 @@ Stamped 2026-10-01 at 308c995169.
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_mail_client_send.py::test_client_driven_send_relays_to_external_mx` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_client_send.py::test_client_driven_send_relays_to_external_mx` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_mail_client_send.py::test_client_send_without_committing_chip_still_relays` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_tui_mail_outbound_from.py::test_tui_outbound_from_is_handle_at_handle_domain` | tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_mail_client_receive.py::test_client_driven_receive_renders_decrypted` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
@@ -93,8 +93,8 @@ Stamped 2026-10-01 at 308c995169.
 | 6 | app | `tests/e2e-unified/tests/test_mail_html_roundtrip.py::test_html_mail_markdown_roundtrip` | web (linux): skipped, web (windows): skipped, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): skipped, tui (windows): skipped |
 | 7 | app | `tests/e2e-unified/tests/test_mail_html_roundtrip.py::test_html_mail_remote_image_blocked_until_reveal` | web (linux): skipped, web (windows): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): skipped, tui (windows): skipped |
 | 7 | app | `tests/e2e-unified/tests/test_conversations_remote_image.py::test_remote_image_blocked_until_reveal` | web (linux): passed, windows (windows): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_mail_client_send.py::test_client_send_over_inline_ceiling_refused_with_localized_display_text` | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_mail_client_receive_after_reenable.py::test_mailbox_keeps_receiving_past_a_record_the_reenabled_keys_cannot_open` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_mail_client_send.py::test_client_send_over_inline_ceiling_refused_with_localized_display_text` | web (linux): passed, linux (linux): failed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_mail_client_receive_after_reenable.py::test_mailbox_keeps_receiving_past_a_record_the_reenabled_keys_cannot_open` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_mail_client_send_refusals.py::test_send_at_the_sending_limit_is_refused_with_a_message_saying_so` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_mail_client_receive_after_rotation.py::test_mail_received_before_a_key_rotation_stays_readable_after_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_mail_survives_four_key_rotations.py::test_mail_received_before_four_key_rotations_stays_readable_in_the_app_and_over_imap` | tui (linux): passed |
@@ -102,7 +102,7 @@ Stamped 2026-10-01 at 308c995169.
 | 13 | app | `tests/e2e-unified/tests/test_mail_client_spam_receive.py::test_client_scores_inbound_spam_to_junk` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_mail_junk_absent_from_conversations.py::test_mail_filed_as_junk_on_arrival_never_shows_in_conversations` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_mail_read_state.py::test_a_mail_nobody_opened_is_still_unread_after_a_restart` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_mail_read_state.py::test_a_mail_read_on_one_device_reads_on_the_other_and_stays_read` | linux (linux): passed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_mail_read_state.py::test_a_mail_read_on_one_device_reads_on_the_other_and_stays_read` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 16 | app | (none) | — |
 | 17 | app | (none) | — |
 <!-- features-render:end -->

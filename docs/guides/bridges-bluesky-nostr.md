@@ -66,14 +66,24 @@ nest a session, and from then on **your nest is your Bluesky client**:
   follow on Bluesky, and from any custom feed you subscribe to on the Feed
   page, arrive in your unified feed a few minutes after they are posted, with
   the Bluesky badge. Liking, reposting, replying to or quoting one from inside
-  Fauna acts on Bluesky as your account; a reply or quote is posted to Bluesky
+  Fauna acts on Bluesky as your account. The like and repost buttons light up
+  for posts you have liked or reposted, and tapping a lit one undoes it on
+  Bluesky too. A reply or quote is posted to Bluesky
   whatever your cross-posting setting says — the post you replied to is the
-  invitation. A post shows its author the way Bluesky knows them — their
+  invitation. A reply or quote the bridge cannot send — your account is not
+  linked, say — is refused on the spot with a message naming the page where
+  you can fix it, and nothing is posted. A post shows its author the way Bluesky knows them — their
   display name, or their handle when they have not set one — and the same
   goes for a post that reached you from the fediverse or from Nostr. Two
   things still to come: the author's picture is not shown on their posts
   yet, and the images a Bluesky post carries are not rendered in the feed
   yet.
+- **The whole conversation around a Bluesky post.** Open a Bluesky post and
+  choose **View Thread**: you see the posts it answers, oldest first, then
+  the post itself, marked, then the replies to it — replies from people you
+  do not follow included, so you can read the conversation without leaving
+  Fauna. If the post has been deleted on Bluesky, or a block stands between
+  you and its author, the thread page tells you so instead. Go back to return to the post.
 
 Two honest limits: **following and blocking people stay on Bluesky's side**
 — manage your follows in a Bluesky app; your nest reads the results — and
@@ -310,7 +320,9 @@ You are never asked to approve a name on trust: the bundle's own description is
 there to explain the point of it, not to stand in for the list. What you
 approve is frozen at that moment, too — if the publisher later widens the
 bundle, your existing connection is unaffected, and an app that wants the new
-permissions has to ask you again.
+permissions has to ask you again. Later, the app's row on Settings → Connected
+apps still names the bundle its permissions came from, the way the card showed
+it.
 
 The same sign-in also works for a website that offers **Sign in with Fauna**
 and wants nothing from your Bluesky account at all — only to know it is you.
@@ -328,6 +340,13 @@ private feeds, nothing about what you liked or reposted, and nothing posted to
 a closed audience. An app holding this permission talks to your nest directly
 for as long as you leave it connected; revoking the app on Settings →
 **Connected apps** cuts that link at once.
+
+An app can go one step further and ask to **read your feeds** — the custom
+feeds you built, in your own order, and which posts you liked and reposted. The
+card shows this as its own row too. It still reaches public posts only: a post
+meant for paying subscribers or shared with a closed audience never reaches
+the app, even when it sits in your own feeds. It sees only your own
+feeds, never anyone else's, and no keys of yours are shared with it.
 
 An app can also ask to **keep its own records in your account** — notes, tasks,
 or whatever kinds of data it was built around, each one published under the
@@ -368,7 +387,11 @@ Once connected, the app appears under Settings → **Connected apps** with the
 name it published, what you approved it for, when it connected, and when your nest last
 saw it. If you approved a named bundle of permissions rather than a list, the
 row says which bundle and who published it, so the permissions above it still
-have an explanation months later. That last figure is a genuine "last seen", not a usage log: your nest
+have an explanation months later. An app you allowed to ask your nest for
+short-lived Bluesky service tokens — signed with your account's key, which never
+leaves your nest — also shows how many your nest issued for it in the current
+window and which service the most recent one was for, and when; an app asking
+far more often than you expect is easy to spot, and to disconnect. That last figure is a genuine "last seen", not a usage log: your nest
 notices an app when it renews its access, so a recent time means it is
 definitely still in use, while an older one only means it has not renewed
 lately. Revoking it there
@@ -377,7 +400,10 @@ about fifteen minutes. The kill-switch above it does the same to every app at
 once — including apps that talk to your nest directly rather than through
 Bluesky, which are cut off immediately rather than at their next renewal — and
 is reversible: flip it back and the apps you kept are usable again, with nothing
-to set up afresh.
+to set up afresh. The note under the toggle says as much. While it is off,
+every app it affects stays on the **Connected apps** list marked **Paused**,
+with a reminder of how to turn it back on, so you can still see what you
+have connected and disconnect any of it for good.
 
 Signing out inside the other app ends the connection the same way, from the
 other direction — it disappears from **Connected apps** without you having to
@@ -563,7 +589,9 @@ person you answered as well as to your followers, so it shows up in their
 thread. A quote carries a link back to the post you quoted, which every
 fediverse app can open. If replying is not possible yet (for example, you have
 not turned the Fediverse on), the reply shows an error and nothing is sent —
-turn the Fediverse on from the Bridges page and try again.
+turn the Fediverse on from the Bridges page and try again. Liking and boosting
+a fediverse post works the same way: while the Fediverse is off, the like or
+boost shows that error and nothing is sent.
 
 **Direct messages.** When someone on the fediverse sends you a direct message
 — a post addressed to you alone, not to the public or to their followers — it
@@ -590,4 +618,4 @@ shares only with their followers are not direct messages and are not shown.
 | Nostr: choose whose zap receipts you believe | **Available** — the *Zap signers* section on the Nostr page. Until you designate a signer, no zap counts as paid, which is the deliberate starting point |
 | Fediverse / ActivityPub federation | **Available** — shipped to the production server image 2026-07-16; confirmed against real Mastodon and GoToSocial servers |
 | Fediverse: reply to and quote fediverse posts from Fauna | **Available** — your reply reaches the person you answered and threads under their post |
-| Fediverse: direct messages in Conversations | **Early** — one-to-one messages arrive and your replies are sent; not yet confirmed against a live Mastodon server, and starting a new conversation needs the person's profile address |
+| Fediverse: direct messages in Conversations | **Early** — one-to-one messages arrive and your replies are sent; not yet confirmed against a live Mastodon server; start a new one by typing the person's `@name@server` address |

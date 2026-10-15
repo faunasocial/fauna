@@ -60,6 +60,29 @@ public partial class MutedWordsViewModel : ViewModelBase
         }
     }
 
+    /// <summary>Start re-reading the list on the shared store-change notice —
+    /// call from the page's <c>Page_Loaded</c>, pair with
+    /// <see cref="ViewModelBase.CleanupStoreChange"/> on navigate-away.</summary>
+    public void WatchStore() => WatchStoreChange(_nest, StoreResyncAsync);
+
+    /// <summary>The store-change re-read (<c>account-runtime.md</c> § A runtime's
+    /// own pump is a source of the notice too, part 4): another device's word
+    /// appears on the OPEN page with no re-visit. Level-safe — it neither clears
+    /// <see cref="ViewModelBase.ErrorMessage"/> nor touches the page's add-box
+    /// draft (both are the gestures' own), replaces nothing when the read fails,
+    /// and answers <c>false</c> (paints nothing) when the list is what shows.</summary>
+    internal async Task<bool> StoreResyncAsync()
+    {
+        var gestures = _gestures;
+        var page = await _nest.MutedKeywordsListAsync();
+        // A gesture started since the read began has its own, fresher answer.
+        if (gestures != _gestures) return false;
+        if (Loaded == page.loaded && Words.SequenceEqual(page.keywords.Select(k => k.keyword)))
+            return false;
+        Repopulate(page);
+        return true;
+    }
+
     /// <summary>Add <paramref name="term"/> (trimmed; a blank term is a no-op,
     /// no RPC call) as a DELTA against the stored list, never this page's copy
     /// wholesale: the shared seam re-reads the list inside its
@@ -78,8 +101,13 @@ public partial class MutedWordsViewModel : ViewModelBase
     public async Task<bool> RemoveAsync(string term) =>
         await MutateAsync(() => _nest.MutedKeywordsRemoveAsync(term));
 
+    // Bumped as each gesture starts, so an in-flight store-change re-read that a
+    // gesture overtook is dropped rather than painted over the gesture's answer.
+    private int _gestures;
+
     private async Task<bool> MutateAsync(Func<Task<MutedWordsSnapshot>> gesture)
     {
+        _gestures++;
         ErrorMessage = null;
         try
         {

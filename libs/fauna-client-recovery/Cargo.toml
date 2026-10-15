@@ -45,6 +45,14 @@ fauna-client-alerts = { path = "../fauna-client-alerts" }
 # `fauna-anon-client`'s TOFU pin, neither of which exists on wasm32.
 fauna-client-accounts = { path = "../fauna-client-accounts" }
 fauna-client-profile = { path = "../fauna-client-profile" }
+# The `__mls` replica client the sweep retry reads the PARKED retired leaf
+# through when no local store holds it (`succession-propagation.md`
+# § Propagation → *Own device fleet*, *Where the retired leaf rests on a device
+# with no local MLS store*, rule (2)), and writes the ratcheted leaf back with.
+# Wasm-clean, and both targets want it (native's fall-through, web's only arm).
+# Safe direction: mls-sync reaches `fauna-conversations` (the seam crate) only,
+# never this crate.
+fauna-client-mls-sync = { path = "../fauna-client-mls-sync" }
 # `recovery_chain` — the registration-chain reconcile between two of the
 # identity's nests, re-exported here as `chain_reconcile`. The body rests in
 # `fauna-client-core` because both of its callers (`fauna-client-pair`'s link
